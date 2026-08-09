@@ -285,6 +285,52 @@ Artifacts: per-gate JSON + logs →
 `scripts/dev/artifacts/<key>/<timestamp>/` (host-side; containers never
 carry state between runs).
 
+### Phase 2 — Nix (2026-08-09)
+
+`flake.nix` (package + devShell + bridgePython package) + the `nix` matrix
+key (`ghcr.io/nixos/nix`, plain mode): **all 12 gates green** (run
+`artifacts/nix/20260809T161746Z`). Notes:
+
+- The nix build sandbox lacks network/HOME for a subset of the 1282 tests
+  → `doCheck = false` on the package (the full suite runs in the harness
+  containers G3 and in `nix develop`).
+- nixpkgs ships **mpDris2 as a compiled ELF** — the s2u-mpdris2 shim
+  patches python source, so per plan §5's decision point the nix target
+  installs the **upstream python mpDris2** (eonpatapon/mpDris2) at
+  `/usr/bin/mpDris2` (+ `python-mpd2` in bridgePython).
+- Services run through the **plain-launcher** backend (no systemd in the
+  ghcr.io/nixos/nix container) — G4/G5/G6/G11 green on it.
+- **NixOS module + nixosTest VM: OUT OF CONTAINER** (a real boot + systemd
+  user session is required; a VM, not a container — documented here, not
+  attempted per §4.3/§10). Remaining work: the module flake +
+  `nixosTest` on a runner.
+
+### Phase 3 — non-systemd init (2026-08-09)
+
+| Target | Backend | Result | Artifacts |
+| --- | --- | --- | --- |
+| alpine-320 | OpenRC distro, **plain-launcher** (plan §6.1 sends OpenRC through the launcher) | **12/12 green** (G7 pass — yt-dlp 2024.12.03) | `artifacts/alpine-320/20260809T165644Z` |
+| void-glibc | **runit-user** (`runsvdir ~/.config/runit` + `sv`) | **12/12 green** (G7 pass — nixpkgs-era yt-dlp via Void 2026.07.04) | `artifacts/void-glibc/20260809T174208Z` |
+
+Alpine deltas (recorded): **cava is NOT in the 3.20 repos** (plan's risk
+table assumed it — corrected) → built from source (fftw/iniparser/SDL2
+dev deps); **mpdris2 absent** → upstream python source at
+`/usr/bin/mpDris2` + `python-mpd2` via pip (no Alpine package); distro
+rust too old → rustup. Void deltas: distro rustc 1.97.1 (no rustup);
+mpDris2 **is** in the Void repos (python source — plan's "missing on
+Void" corrected); mpd ships file caps (`cap_ipc_lock,cap_sys_nice=eip`)
+that the container bounding set lacks → `setcap -r /usr/bin/mpd`
+(harness-only; fine on real Void hosts); xbps needs `--shm-size=512m`;
+bash/tar/findutils/coreutils/setsid are not in the base image.
+
+`s2u-svc` v1 backends now real: **systemd-user**, **runit-user**,
+**plain-launcher** (openrc/sysvinit route through the launcher per §6.1;
+s6-user stub lands with Artix). The tracker's direct `systemctl --user`
+call (mpDris2 stop/start during video) is **not yet rewired** — safe on
+every systemd target and untested on non-systemd (the tracker is not
+exercised for that call in containers); rewiring to `s2u-svc` is the
+remaining P3 item, documented in §6.1.
+
 ## 12. Phase results (recorded per run)
 
 Harness: `scripts/dev/test-distro.sh <key>` (Phase 0, committed `5bda69d`).
