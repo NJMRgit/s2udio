@@ -240,8 +240,8 @@ def main():
     r_new = run_case('arch', ['-y'], extra_env={'MOCK_USER_MPD': '1'}, mode='y')
     check('arch -y: output byte-identical', r_old['out'] == r_new['out'],
           f"old {len(r_old['out'])}B new {len(r_new['out'])}B")
-    check('arch -y: pacman backend + installs (mpd ffmpeg cava python-yt-dlp)',
-          'pacman -S --needed mpd ffmpeg cava python-yt-dlp' in r_new['calls'])
+    check('arch -y: pacman backend + installs (mpd ffmpeg cava yt-dlp)',
+          'pacman -S --needed mpd ffmpeg cava yt-dlp' in r_new['calls'])
     check('arch -y: AUR mpdris2-git + mpv-full via yay',
           'yay -S --needed mpdris2-git' in r_new['calls'] and 'yay -S --needed mpv-full' in r_new['calls'])
     check('arch -y: exit 0', r_new['rc'] == 0, f"rc={r_new['rc']}")
@@ -257,7 +257,7 @@ def main():
     # to the pacman backend (run_arch) even though the ID is not arch/cachyos.
     r = run_case('artix', ['-y'], extra_env={'MOCK_USER_MPD': '1'})
     check('artix: routed to pacman backend (ID_LIKE=arch)',
-          'pacman -S --needed mpd ffmpeg cava python-yt-dlp' in r['calls'])
+          'pacman -S --needed mpd ffmpeg cava yt-dlp' in r['calls'])
     check('artix -y: AUR mpdris2-git + mpv-full via yay',
           'yay -S --needed mpdris2-git' in r['calls'] and 'yay -S --needed mpv-full' in r['calls'])
     check('artix -y: arch services path (systemctl --user)',
