@@ -8,6 +8,7 @@ export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/1000}"
 export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
 export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
 HOME_DIR="$HOME"
+SVC_BIN="$(command -v s2u-svc 2>/dev/null || echo "$SVC_BIN")"
 
 # ---------------------------------------------------------------- helpers --
 wait_for() {  # $1 = seconds, rest = command; returns 0 when it succeeds
@@ -71,16 +72,16 @@ gate_g1_install() {
     done
     python3 -c "import dbus" 2>/dev/null || missing+=(python-dbus)
     python3 -c "import gi" 2>/dev/null || missing+=(python-gi)
-    [[ -x "$HOME_DIR/.local/bin/s2u-mpv-tracker" ]] || missing+=(s2u-mpv-tracker)
-    [[ -x "$HOME_DIR/.local/bin/s2udio-mpris" ]]    || missing+=(s2udio-mpris)
-    [[ -x "$HOME_DIR/.local/bin/s2u-mpdris2" ]]     || missing+=(s2u-mpdris2)
-    [[ -x "$HOME_DIR/.local/bin/rmpc-fetch-lyrics" ]] || missing+=(rmpc-fetch-lyrics)
-    [[ -x "$HOME_DIR/.local/bin/s2u-svc" ]]         || missing+=(s2u-svc)
+    for s in s2u-mpv-tracker s2udio-mpris s2u-mpdris2 rmpc-fetch-lyrics s2u-svc; do
+        command -v "$s" >/dev/null 2>&1 || missing+=("$s")
+    done
     [[ -f "$HOME_DIR/.config/mpv/scripts/mpvSockets.lua" ]] || missing+=(mpvSockets.lua)
     [[ -f "$HOME_DIR/.config/s2udio/config.ron" ]]  || missing+=(config.ron)
     [[ -f "$HOME_DIR/.config/s2udio/themes/default.ron" ]] || missing+=(theme)
-    [[ -f "$HOME_DIR/.config/systemd/user/mpd.service" ]] || missing+=(user-mpd-unit)
-    [[ -f "$HOME_DIR/.config/systemd/user/mpDris2.service.d/s2udio.conf" ]] || missing+=(mpdris2-dropin)
+    if [[ "$("$SVC_BIN" backend 2>/dev/null)" == "systemd-user" ]]; then
+        [[ -f "$HOME_DIR/.config/systemd/user/mpd.service" ]] || missing+=(user-mpd-unit)
+        [[ -f "$HOME_DIR/.config/systemd/user/mpDris2.service.d/s2udio.conf" ]] || missing+=(mpdris2-dropin)
+    fi
     grep -q "mpd-cava.fifo" "$HOME_DIR/.config/mpd/mpd.conf" || missing+=(fifo-in-mpd.conf)
     if ((${#missing[@]})); then
         write_gate G1 fail "install incomplete — missing: ${missing[*]}"
@@ -91,11 +92,21 @@ gate_g1_install() {
 
 # ---------------------------------------------------------------- G2 -------
 gate_g2_build_version() {
-    [[ -x /s2udio/target/release/s2u ]] || { write_gate G2 fail "target/release/s2u missing"; return 1; }
+    local bin=""
+    if [[ -x /s2udio/target/release/s2u ]]; then
+        bin=/s2udio/target/release/s2u
+    else
+        bin="$(command -v s2udio 2>/dev/null || true)"
+    fi
+    [[ -n "$bin" ]] || { write_gate G2 fail "no s2udio binary found (target/release/s2u or PATH)"; return 1; }
     local ver
-    ver="$("$HOME_DIR/.local/bin/s2udio" version 2>&1 | head -1)"
+    ver="$("$bin" version 2>&1 | head -1)"
     [[ -n "$ver" ]] || { write_gate G2 fail "s2udio version produced no output"; return 1; }
-    write_gate G2 pass "cargo build --release -> s2udio version: $ver"
+    if [[ "$bin" == /s2udio/target/release/s2u ]]; then
+        write_gate G2 pass "cargo build --release -> s2udio version: $ver"
+    else
+        write_gate G2 pass "installed binary ($bin) -> s2udio version: $ver"
+    fi
 }
 
 # ---------------------------------------------------------------- G3 -------
@@ -116,8 +127,8 @@ gate_g3_unit_tests() {
 # ---------------------------------------------------------------- G4 -------
 gate_g4_mpd_up() {
     local state
-    state="$(systemctl --user is-active mpd.service 2>/dev/null || true)"
-    [[ "$state" == "active" ]] || { write_gate G4 fail "mpd.service state=$state (want active)"; return 1; }
+    state="$("$SVC_BIN" is-active mpd 2>/dev/null || true)"
+    [[ "$state" == "active" ]] || { write_gate G4 fail "mpd state=$state via s2u-svc (want active)"; return 1; }
     local proto
     proto="$(mpd_raw status 2>/dev/null)"
     case "$proto" in
@@ -180,8 +191,9 @@ gate_g8_mpv_headless() {
     done
     [[ -n "$sock" ]] || { write_gate G8 fail "mpvSockets.lua socket never appeared ($(cat /tmp/mpv-g8.log 2>/dev/null | head -3 | tr '\n' ' '))"; return 1; }
     # tracker caretaker writes the MPRIS state file (and spawns s2udio-mpris)
+    local tracker_bin; tracker_bin="$(command -v s2u-mpv-tracker 2>/dev/null || echo "$HOME_DIR/.local/bin/s2u-mpv-tracker")"
     S2U_FORCE_CARETAKER=1 S2U_CACHE_DIR="$HOME/.cache/s2udio" \
-        setsid "$HOME_DIR/.local/bin/s2u-mpv-tracker" >/tmp/tracker-g8.log 2>&1 &
+        setsid "$tracker_bin" >/tmp/tracker-g8.log 2>&1 &
     local state=""
     for _ in $(seq 1 20); do
         state="$(mpv_state socket)"
@@ -257,24 +269,30 @@ gate_g9_cava() {
         || { write_gate G9 fail "fifo not configured in mpd.conf"; return 1; }
     [[ -p /tmp/mpd-cava.fifo ]] || { write_gate G9 fail "fifo /tmp/mpd-cava.fifo does not exist (MPD not writing?)"; return 1; }
     # run cava exactly like the app does (raw stdout protocol, fifo input);
-    # timeout rc=124 means it ran the full window -> alive.
-    TERM=xterm-256color timeout 4 cava -p "$HOME_DIR/.config/cava/config" \
-        > /tmp/cava-g9.out 2>&1
-    local rc=$?
+    # background + kill -9 (a blocked fifo read can swallow SIGTERM/timeout).
+    TERM=xterm-256color cava -p "$HOME_DIR/.config/cava/config" \
+        > /tmp/cava-g9.out 2>&1 &
+    local cpid=$!
+    sleep 4
+    local alive=0
+    kill -0 "$cpid" 2>/dev/null && alive=1
+    kill -9 "$cpid" 2>/dev/null || true
+    wait "$cpid" 2>/dev/null || true
     local bytes; bytes="$(wc -c < /tmp/cava-g9.out 2>/dev/null || echo 0)"
-    if [[ $rc -eq 124 && "$bytes" -gt 0 ]]; then
+    if [[ $alive -eq 1 && "$bytes" -gt 0 ]]; then
         write_gate G9 pass "cava ran headless on the MPD fifo for 4s (raw output, $bytes bytes)"
-    elif [[ $rc -eq 124 ]]; then
+    elif [[ $alive -eq 1 ]]; then
         write_gate G9 soft "cava ran 4s but produced no output (fifo silent?) — log: $(head -c 200 /tmp/cava-g9.out)"
     else
-        write_gate G9 soft "cava exited rc=$rc — log: $(head -c 300 /tmp/cava-g9.out)"
+        write_gate G9 soft "cava exited early — log: $(head -c 300 /tmp/cava-g9.out)"
     fi
 }
 
 # ---------------------------------------------------------------- G10 ------
 gate_g10_tui_smoke() {
     tmux kill-server >/dev/null 2>&1 || true
-    tmux new-session -d -s s2u-tui "TERM=xterm-256color $HOME_DIR/.local/bin/s2udio" >/dev/null 2>&1
+    local s2u_bin; s2u_bin="$(command -v s2udio 2>/dev/null || echo "$HOME_DIR/.local/bin/s2udio")"
+    tmux new-session -d -s s2u-tui "TERM=xterm-256color $s2u_bin" >/dev/null 2>&1
     local pane=""
     for _ in $(seq 1 15); do
         sleep 1
@@ -296,23 +314,35 @@ gate_g10_tui_smoke() {
 # ---------------------------------------------------------------- G11 ------
 gate_g11_s2u_svc() {
     local backend
-    backend="$("$HOME_DIR/.local/bin/s2u-svc" backend 2>/dev/null || echo unknown)"
-    "$HOME_DIR/.local/bin/s2u-svc" stop s2u-svc-g11.service >/dev/null 2>&1 || true
-    sleep 1
-    if "$HOME_DIR/.local/bin/s2u-svc" is-active s2u-svc-g11.service >/dev/null 2>&1; then
-        write_gate G11 fail "is-active returned active right after stop"
-        return 1
+    backend="$("$SVC_BIN" backend 2>/dev/null || echo unknown)"
+    local svc="s2u-svc-g11.service"
+    if [[ "$backend" == "launcher" ]]; then
+        # no service manager: round-trip the real mpd via the launcher backend
+        svc="mpd"
+    else
+        "$SVC_BIN" stop "$svc" >/dev/null 2>&1 || true
     fi
-    "$HOME_DIR/.local/bin/s2u-svc" start s2u-svc-g11.service >/dev/null 2>&1 || {
+    sleep 1
+    if "$SVC_BIN" is-active "$svc" >/dev/null 2>&1; then
+        if [[ "$backend" == "launcher" ]]; then
+            "$SVC_BIN" stop "$svc" >/dev/null 2>&1 || true
+            sleep 1
+        else
+            write_gate G11 fail "is-active returned active right after stop"
+            return 1
+        fi
+    fi
+    "$SVC_BIN" start "$svc" >/dev/null 2>&1 || {
         write_gate G11 fail "s2u-svc start failed"; return 1; }
     sleep 1
-    "$HOME_DIR/.local/bin/s2u-svc" is-active s2u-svc-g11.service >/dev/null 2>&1 || {
+    "$SVC_BIN" is-active "$svc" >/dev/null 2>&1 || {
         write_gate G11 fail "s2u-svc is-active not active after start"; return 1; }
-    "$HOME_DIR/.local/bin/s2u-svc" restart s2u-svc-g11.service >/dev/null 2>&1 || {
+    "$SVC_BIN" restart "$svc" >/dev/null 2>&1 || {
         write_gate G11 fail "s2u-svc restart failed"; return 1; }
     sleep 1
-    "$HOME_DIR/.local/bin/s2u-svc" is-active s2u-svc-g11.service >/dev/null 2>&1 || {
+    "$SVC_BIN" is-active "$svc" >/dev/null 2>&1 || {
         write_gate G11 fail "s2u-svc is-active not active after restart"; return 1; }
-    "$HOME_DIR/.local/bin/s2u-svc" stop s2u-svc-g11.service >/dev/null 2>&1
-    write_gate G11 pass "s2u-svc start/stop/restart/is-active round-tripped on backend=$backend"
+    # leave the service running (mpd is needed by nothing after G11, but a
+    # stopped launcher mpd would leave stale pidfiles on some targets)
+    write_gate G11 pass "s2u-svc start/stop/restart/is-active round-tripped on backend=$backend (svc=$svc)"
 }

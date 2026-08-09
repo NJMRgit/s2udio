@@ -4,6 +4,11 @@
 # provision/deploy/gate scripts (they find this file inside the copied repo).
 set -uo pipefail
 
+# In-container stages: put profile (nix) and ~/.local/bin + cargo on PATH.
+# Harmless on the host driver (sourced with no such dirs).
+[[ -d /root/.nix-profile/bin ]] && export PATH="/root/.nix-profile/bin:$PATH"
+export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+
 info()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 ok()    { printf '\033[1;32m  ok\033[0m %s\n' "$*"; }
 warn()  { printf '\033[1;33m  !! %s\033[0m\n' "$*"; }
@@ -48,23 +53,46 @@ start_user_session() {
     mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
     export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
     if [[ ! -S "$XDG_RUNTIME_DIR/bus" ]]; then
-        dbus-daemon --session --address="$DBUS_SESSION_BUS_ADDRESS" --fork >/dev/null 2>&1 || true
+        if ! dbus-daemon --session --address="$DBUS_SESSION_BUS_ADDRESS" --fork >/dev/null 2>&1; then
+            # no /etc/dbus-1 on minimal images (nix): use the store's
+            # session.conf, else a minimal allow-all session config
+            local dconf
+            dconf="$(find /nix/store -maxdepth 6 -path '*dbus*/share/dbus-1/session.conf' 2>/dev/null | head -1)"
+            if [[ -z "$dconf" ]]; then
+                dconf="/tmp/dbus-session-minimal.conf"
+                cat > "$dconf" <<'EOF'
+<busconfig>
+  <type>session</type>
+  <policy context="default">
+    <allow send_destination="*" eavesdrop="true"/>
+    <allow eavesdrop="true"/>
+    <allow own="*"/>
+  </policy>
+</busconfig>
+EOF
+            fi
+            dbus-daemon --address="$DBUS_SESSION_BUS_ADDRESS" --config-file="$dconf" --fork >/dev/null 2>&1 || true
+        fi
         sleep 1
     fi
-    if ! systemctl --user is-system-running >/dev/null 2>&1; then
-        # systemd --user (the binary is not on PATH on every distro)
-        local sd_user
-        for sd_user in /usr/lib/systemd/systemd /lib/systemd/systemd; do
-            if [[ -x "$sd_user" ]]; then break; fi
-        done
+    # systemd --user (the binary is not on PATH on every distro); launcher
+    # targets (nix, Alpine, Void) have no systemd at all — dbus alone suffices
+    local sd_user=""
+    for sd_user in /usr/lib/systemd/systemd /lib/systemd/systemd; do
+        [[ -x "$sd_user" ]] && break || sd_user=""
+    done
+    if [[ -n "$sd_user" ]] && ! systemctl --user is-system-running >/dev/null 2>&1; then
         nohup "$sd_user" --user >/dev/null 2>&1 &
         for _ in $(seq 1 30); do
             systemctl --user is-system-running >/dev/null 2>&1 && break
             sleep 0.5
         done
     fi
-    systemctl --user is-system-running >/dev/null 2>&1 \
-        || warn "systemd --user did not reach 'running' (continuing anyway)"
+    if systemctl --user is-system-running >/dev/null 2>&1; then
+        :
+    elif [[ -n "$sd_user" ]]; then
+        warn "systemd --user did not reach 'running' (continuing anyway)"
+    fi
 }
 
 # Keep ~/.local/bin on PATH (the tracker spawns `s2udio-mpris` from PATH).
