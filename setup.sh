@@ -396,6 +396,13 @@ services_step_launcher() {
 # through s2u-svc's runit-user backend (plan §12 / Phase 3).
 services_step_runit() {
     info "8/9  MPD + mpDris2 user services (s2u-svc runit-user)"
+    # step 7's fifo restart started mpd through the launcher backend (the
+    # runit dirs do not exist yet) — stop that instance BEFORE the runit
+    # dirs appear, or the runit-supervised mpd cannot bind port 6600. On a
+    # re-run the dirs already exist and s2u-svc stops via sv instead; both
+    # paths leave a clean slate for runsvdir to take over.
+    "$BIN_DIR/s2u-svc" stop mpd 2>/dev/null || true
+    "$BIN_DIR/s2u-svc" stop mpDris2 2>/dev/null || true
     mkdir -p "$HOME/.config/runit/mpd" "$HOME/.config/runit/mpDris2"
     cat > "$HOME/.config/runit/mpd/run" <<EOF
 #!/bin/sh
@@ -771,7 +778,11 @@ run_xbps() {
     resolve_elevation
     info "Detected distro: ${DISTRO_ID:-?}${DISTRO_ID_LIKE:+ (ID_LIKE=$DISTRO_ID_LIKE)} -> xbps backend (Void)"
     info "1/9  System packages (mpd mpv yt-dlp cava ffmpeg mpDris2 python3-dbus python3-gobject + toolchain)"
-    XBPS_PKGS=(mpd mpv yt-dlp cava ffmpeg mpDris2 python3 python3-dbus python3-gobject python3-mutagen python3-mpd2 base-devel cargo rust git curl util-linux procps-ng ncurses-term)
+    # runit-user backend prerequisites: sv + runsvdir. No-op on real Void
+    # hosts (runit is the init system, already installed); without it the
+    # service step silently degrades to the launcher backend (seen in the
+    # first setup-void-glibc run) instead of supervising via runsvdir/sv.
+    XBPS_PKGS=(mpd mpv yt-dlp cava ffmpeg mpDris2 python3 python3-dbus python3-gobject python3-mutagen python3-mpd2 base-devel cargo rust git curl util-linux procps-ng ncurses-term runit)
     MISSING=()
     for p in "${XBPS_PKGS[@]}"; do
         xbps-query "$p" >/dev/null 2>&1 || MISSING+=("$p")
