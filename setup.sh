@@ -138,7 +138,7 @@ install_support_scripts() {
     [[ -f scripts/mpvSockets.lua ]] && { install -Dm644 scripts/mpvSockets.lua "$MPV_SCRIPTS/mpvSockets.lua"; ok "mpvSockets.lua -> $MPV_SCRIPTS"; } || warn "scripts/mpvSockets.lua missing in this checkout"
 }
 
-install_s2u_svc() { # non-Arch backends only (the Arch path never installed it)
+install_s2u_svc() { # every backend installs it (the tracker's mpDris2 stop/start routes through s2u-svc)
     [[ -f scripts/s2u-svc ]] && { install -Dm755 scripts/s2u-svc "$BIN_DIR/s2u-svc"; ok "s2u-svc -> $BIN_DIR/s2u-svc"; } || warn "scripts/s2u-svc missing in this checkout"
 }
 
@@ -583,6 +583,7 @@ run_arch() {
 
     # ---------------------------------------------------------------------------
     install_support_scripts
+    install_s2u_svc
 
     # ---------------------------------------------------------------------------
     seed_config_theme
