@@ -180,7 +180,7 @@ def fresh_home(key, mode):
     (home / '.config' / 'mpd' / 'mpd.conf').write_text('music_directory "~/Music"\nport "6600"\n')
     return home
 
-def run_case(key, args=(), extra_env=None, drop=(), old=False, mode=None):
+def run_case(key, args=(), extra_env=None, drop=(), old=False, mode=None, extra_shims=None):
     # -y vs non-interactive runs MUST use separate homes, or fresh_home()
     # deletes the pidfile of a still-running launcher mpd (orphan leak)
     if mode is None:
@@ -194,6 +194,10 @@ def run_case(key, args=(), extra_env=None, drop=(), old=False, mode=None):
     for p in BIN.iterdir():
         if p.name not in drop:
             (bindir / p.name).symlink_to(p)
+    for name, body in (extra_shims or {}).items():
+        sp = bindir / name
+        sp.write_text('#!/usr/bin/env bash\n' + body)
+        sp.chmod(sp.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     env = dict(os.environ)
     env.update({'HOME': str(home), 'PATH': str(bindir) + ':' + str(CU),
                 'MOCK_CALLS': str(calls), 'S2UDIO_OS_RELEASE': str(OSREL / key)})
@@ -279,6 +283,29 @@ def main():
     check('alpine -y: services via s2u-svc launcher', 'mpd active (launcher)' in r['out'])
     r = run_case('alpine', extra_env={'MOCK_NO_SYSTEMD': '1'}, drop=('cava',))
     check('alpine no-y: no installs', 'apk add' not in r['calls'] and 'git clone' not in r['calls'] and 'curl ' not in r['calls'])
+
+    print('== privilege-elevation helper (review follow-up, alpine) ==')
+    # root + no sudo/doas -> no prefix, installs run directly
+    r = run_case('alpine', ['-y'], extra_env={'MOCK_NO_SYSTEMD': '1'}, drop=('sudo', 'cava'),
+                 mode='priv-root', extra_shims={'id': 'echo 0'})
+    check('root+no-sudo: no elevation prefix (direct install)', APK in r['calls']
+          and 'sudo apk add' not in r['calls'] and 'doas apk add' not in r['calls'])
+    check('root+no-sudo: exit 0', r['rc'] == 0, f"rc={r['rc']}")
+    # non-root + sudo -> sudo prefix (explicit, complements the matrix default)
+    r = run_case('alpine', ['-y'], extra_env={'MOCK_NO_SYSTEMD': '1'}, drop=('cava',),
+                 mode='priv-sudo')
+    check('non-root+sudo: sudo prefix used', 'sudo apk add --no-cache' in r['calls'])
+    # non-root + doas -> doas prefix
+    r = run_case('alpine', ['-y'], extra_env={'MOCK_NO_SYSTEMD': '1'}, drop=('sudo', 'cava'),
+                 mode='priv-doas', extra_shims={'doas': LOG + '\nexec "$@"'})
+    check('non-root+doas: doas prefix used', 'doas apk add --no-cache' in r['calls']
+          and 'sudo apk add' not in r['calls'])
+    # non-root + neither -> clear die, NO silent partial install
+    r = run_case('alpine', ['-y'], extra_env={'MOCK_NO_SYSTEMD': '1'}, drop=('sudo', 'cava'),
+                 mode='priv-neither')
+    check('non-root+neither: dies with clear message', r['rc'] != 0
+          and 'no privilege-elevation tool found' in r['out'] and 'cannot install packages' in r['out'])
+    check('non-root+neither: no partial install', 'apk add' not in r['calls'])
 
     print('== void (xbps) ==')
     r = run_case('void', ['-y'], extra_env={'MOCK_RUSTC_VERSION': '1.97.1', 'MOCK_NO_SYSTEMD': '1'})

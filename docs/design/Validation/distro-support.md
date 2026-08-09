@@ -416,6 +416,34 @@ fedora-41 / debian-12 / alpine-320 all green (G0 + S1–S8/S9 + G12; zero
 `s2u-distro-*` leftovers). The master-repo `setup.sh` sync is a separate
 host decision (NOT done here).
 
+### Phase 4 review follow-up (2026-08-09) — privilege elevation + stale comment
+
+Host review of the Phase 4 dispatcher commit produced two fixes:
+
+1. **Privilege-elevation hardening (non-Arch backends)**: every elevation
+   call in the dnf5/apt/apk/xbps/nix runners now goes through a shared
+   `resolve_elevation()` helper (sets `ELEVATE_CMD`): `EUID==0` -> no
+   prefix (direct root commands); else `sudo`; else `doas` (Alpine's
+   default); else warn + die with a clear message (no silent partial
+   install). An *array* is used so the root case expands to zero words (a
+   quoted empty string would become an empty command). The Arch path keeps
+   its literal `sudo` calls — byte-identity with the baseline is
+   unchanged. Mock cases added: root+no-sudo (no prefix), non-root+sudo,
+   non-root+doas, non-root+neither (dies cleanly). Real Alpine container
+   run with the harness sudo shim omitted (`--no-sudo`): apk backend works
+   root-direct (cava source build, upstream mpDris2, launcher services all
+   green).
+
+2. **Stale comment inside run_arch**: the mpDris2 drop-in comment's
+   pre-round-19 path `~/.cache/rmpc/mpris-art` -> `~/.cache/s2udio/
+   mpris-art` (two occurrences of the same comment line). Because this is
+   inside run_arch, the frozen baseline fixture
+   (`scripts/dev/fixtures/setup.sh.arch-baseline`) was regenerated: it is
+   master's pre-dispatcher setup.sh (49c23b8) with EXACTLY this one
+   comment line changed (documented in the fixture header); the mock's
+   byte-identity assertion (both -y and non-interactive) stays green
+   against the refreshed fixture.
+
 ## 8. Phased roadmap
 
 - **Phase 0 — harness skeleton + proof of life.** `test-distro.sh` with

@@ -8,7 +8,7 @@
 # deltas). Same ephemerality discipline as test-distro.sh (--rm, EXIT trap,
 # start-of-run sweep, end-of-run G12 assertion).
 #
-# Usage: scripts/dev/test-setup-distro.sh fedora-41
+# Usage: scripts/dev/test-setup-distro.sh <key> [--no-sudo] [--no-cache-vol] [--artifacts DIR]
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -22,9 +22,11 @@ shift
 
 NO_CACHE_VOL=0
 ART_DIR_OVERRIDE=""
+NO_SUDO_SHIM=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --no-cache-vol) NO_CACHE_VOL=1; shift ;;
+        --no-sudo) NO_SUDO_SHIM=1; shift ;;
         --artifacts) ART_DIR_OVERRIDE="$2"; shift 2 ;;
         *) die "unknown argument: $1" ;;
     esac
@@ -101,12 +103,18 @@ podman exec "$CID" mkdir -p /s2udio
 tar --exclude=.git --exclude=target --exclude=scripts/dev/artifacts     -C "$REPO_ROOT" -cf - . | podman exec -i "$CID" tar -C /s2udio -xf -
 
 # ---- 4. sudo shim (containers run as root; setup.sh uses sudo) ----
-podman exec -i "$CID" bash -c 'cat > /usr/local/bin/sudo' <<'SHIMEOF'
+# --no-sudo: omit the shim so the root+no-elevation path of resolve_elevation()
+# is exercised for real (ELEVATE_CMD empty -> direct root commands)
+if [[ $NO_SUDO_SHIM -eq 0 ]]; then
+    podman exec -i "$CID" bash -c 'cat > /usr/local/bin/sudo' <<'SHIMEOF'
 #!/bin/sh
 exec "$@"
 SHIMEOF
-podman exec "$CID" chmod +x /usr/local/bin/sudo
-ok "sudo shim installed"
+    podman exec "$CID" chmod +x /usr/local/bin/sudo
+    ok "sudo shim installed"
+else
+    ok "sudo shim OMITTED (--no-sudo): exercising root+no-elevation path"
+fi
 
 # ---- 4b. alpine: drop the provision-built cava + mpDris2 so setup.sh must
 # build cava from source and fetch upstream mpDris2 (the real deltas) ----
