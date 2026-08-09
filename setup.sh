@@ -854,7 +854,11 @@ run_nix() {
     # the flake package builds the binary (build.rs/vergen handled inside the
     # nix sandbox) — no local cargo build needed
     info "2/9  Build the s2udio binary"
-    if command -v nix >/dev/null 2>&1 && nix profile list 2>/dev/null | grep -q s2udio; then
+    # grep -q would exit at the first match and SIGPIPE nix (nix exits 1 on a
+    # closed stdout) -> the pipefail pipeline fails even when s2udio IS in the
+    # profile. Read the full list so nix exits cleanly; match on the full
+    # output (grep without -q, stdout to /dev/null).
+    if command -v nix >/dev/null 2>&1 && nix profile list 2>/dev/null | grep s2udio >/dev/null; then
         ok "binary comes from the flake package (~/.nix-profile/bin/s2udio)"
     else
         warn "s2udio not in the nix profile yet - re-run with -y or install manually"
