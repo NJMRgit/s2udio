@@ -106,6 +106,9 @@ tar --exclude=.git --exclude=target --exclude=scripts/dev/artifacts     -C "$REP
 # --no-sudo: omit the shim so the root+no-elevation path of resolve_elevation()
 # is exercised for real (ELEVATE_CMD empty -> direct root commands)
 if [[ $NO_SUDO_SHIM -eq 0 ]]; then
+    # /usr/local/bin is absent on minimal images (ghcr.io/nixos/nix has no
+    # /usr/local at all) — create it so the shim write succeeds everywhere
+    podman exec "$CID" bash -c 'mkdir -p /usr/local/bin'
     podman exec -i "$CID" bash -c 'cat > /usr/local/bin/sudo' <<'SHIMEOF'
 #!/bin/sh
 exec "$@"
@@ -143,7 +146,12 @@ run_check() { # $1 = gate name, $2 = command (runs with the user session up:
     fi
 }
 export PATH_SAVE="$PATH"
-run_check S1 'test -x /root/.local/bin/s2udio && /root/.local/bin/s2udio version >/dev/null'
+case "$KEY" in
+    nix)  # the flake package lands in the nix profile (plan §6.3), not ~/.local/bin
+        run_check S1 'test -x /root/.nix-profile/bin/s2udio && /root/.nix-profile/bin/s2udio version >/dev/null' ;;
+    *)
+        run_check S1 'test -x /root/.local/bin/s2udio && /root/.local/bin/s2udio version >/dev/null' ;;
+esac
 run_check S2 'test -x /root/.local/bin/rmpc-fetch-lyrics && test -x /root/.local/bin/s2u-mpv-tracker && test -x /root/.local/bin/s2u-mpdris2 && test -x /root/.local/bin/s2u-svc && test -f /root/.config/mpv/scripts/mpvSockets.lua'
 run_check S3 'grep -q "mpd-cava.fifo" /root/.config/mpd/mpd.conf'
 run_check S4 'command -v mpv >/dev/null && command -v yt-dlp >/dev/null && command -v cava >/dev/null && command -v mpd >/dev/null'
@@ -156,8 +164,8 @@ case "$KEY" in
         run_check S9 'systemctl --user is-active mpd.service >/dev/null 2>&1' ;;
     fedora-41)
         run_check S8 'rpm -q rpmfusion-free-release >/dev/null' ;;
-    alpine-320)
-        run_check S8 'head -1 /usr/bin/mpDris2 2>/dev/null | grep -q python' ;;  # upstream python source
+    alpine-320|nix)
+        run_check S8 'head -1 /usr/bin/mpDris2 2>/dev/null | grep -q python' ;;  # upstream python source (plan §5/§12.6)
     void-glibc)
         run_check S8 'test -x /root/.config/runit/mpd/run && test -x /root/.config/runit/mpDris2/run' ;;
 esac
