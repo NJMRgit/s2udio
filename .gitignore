@@ -1,0 +1,7 @@
+/target
+**/__pycache__/
+**.ron
+!assets/**.ron
+
+# runtime cache accidentally created as "~" in the repo root
+/~

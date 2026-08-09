@@ -1,0 +1,1005 @@
+#!/usr/bin/env python3
+"""s2u-mpdris — expose s2udio's mpv session as an MPRIS2 media player.
+
+s2udio plays video (Jellyfin / YouTube / local files) through mpv and
+mirrors the session to `~/.cache/rmpc/mpv-mpris.json` (title, artist,
+poster path, position, duration, mpv IPC socket, serialized playlist) on
+its ~500 ms poll — and the `s2u-mpv-tracker` daemon keeps that file fresh
+when s2udio closes while a video plays. The poster itself is written to
+`~/.cache/rmpc/mpris-mpv-art`.
+
+This daemon is the MPRIS side of that bridge: it registers
+`org.mpris.MediaPlayer2.s2u-mpv` on the session D-Bus, serves the mpv
+state as MPRIS2 properties (title, artist, thumbnail, position, duration),
+and forwards transport controls (Play/Pause/PlayPause/Stop/Next/Previous/
+Seek/SetPosition/OpenUri/Quit, Volume) to the playing mpv through its IPC
+socket. It requires no MPRIS daemon (no mpDris2, no mpv-mpris) and
+modifies nothing — it is just another media player on the bus.
+
+It exits when the state file goes stale or is deleted (s2udio/tracker do
+that when the session ends), or when it cannot hold the bus name. Detached
+spawning is done by s2udio (same as the tracker); a pid file keeps it
+single-instance.
+
+Python stdlib only: the D-Bus session bus is spoken at the wire level
+(EXTERNAL auth, method calls, signals) — no dbus-python / gi / dbus-next.
+
+Env overrides (also used by tests):
+  S2U_CACHE_DIR       - cache dir for mpv-mpris.json / mpris-mpv-art /
+                        the pid file instead of ~/.cache/rmpc
+  S2U_MPRIS_BUS       - session bus address (default $DBUS_SESSION_BUS_ADDRESS)
+  S2U_MPRIS_NAME      - D-Bus name to own (default
+                        org.mpris.MediaPlayer2.s2u-mpv)
+  S2U_MPRIS_POLL_S    - state poll interval in seconds (default 0.5;
+                        tests use 0.1)
+  S2U_MPRIS_STALE_S   - state file freshness limit (default 15; the
+                        s2udio poll writes every ~0.5 s, the tracker 1 s)
+  S2U_MPRIS_PIDFILE   - pid file path override
+"""
+import json
+import os
+import select
+import socket
+import struct
+import sys
+import time
+import urllib.parse
+
+# Round 19: s2udio-only cache files default to ~/.cache/s2udio (legacy
+# ~/.cache/rmpc honored for migration).
+def _s2u_cache(file):
+    env = os.environ.get("S2U_CACHE_DIR")
+    if env:
+        return os.path.join(env, file)
+    new = os.path.expanduser("~/.cache/s2udio/" + file)
+    legacy = os.path.expanduser("~/.cache/rmpc/" + file)
+    return legacy if os.path.exists(legacy) and not os.path.exists(new) else new
+
+CACHE = os.environ.get("S2U_CACHE_DIR") or os.path.expanduser("~/.cache/s2udio")
+STATE = _s2u_cache("mpv-mpris.json")
+POSTER = _s2u_cache("mpris-mpv-art")
+PID_FILE = os.environ.get("S2U_MPRIS_PIDFILE") or os.path.join(CACHE, "mpris.pid")
+DEFAULT_NAME = "org.mpris.MediaPlayer2.s2u-mpv"
+
+POLL_S = float(os.environ.get("S2U_MPRIS_POLL_S") or 0.5)
+STALE_S = float(os.environ.get("S2U_MPRIS_STALE_S") or 15.0)
+# Consecutive stale polls before giving up (the state is deleted on
+# session end, but a dead-but-undeleted file also means mpv is gone).
+STALE_GRACE = 3
+
+# Bus name / object path / track id of the current entry.
+NAME = os.environ.get("S2U_MPRIS_NAME") or DEFAULT_NAME
+OBJ_PATH = "/org/mpris/MediaPlayer2"
+TRACK_ID = OBJ_PATH + "/track/current"
+
+IFACE = "org.mpris.MediaPlayer2"
+IFACE_PLAYER = IFACE + ".Player"
+IFACE_PROPS = "org.freedesktop.DBus.Properties"
+IFACE_INTRO = "org.freedesktop.DBus.Introspectable"
+IFACE_PEER = "org.freedesktop.DBus.Peer"
+DBUS_IFACE = "org.freedesktop.DBus"
+
+
+# ---------------------------------------------------------------- wire --
+
+# D-Bus wire marshalling, per the D-Bus specification. Layout rules used:
+#   - a message header is `yyyyuua(yv)` (byte order, type, flags, version,
+#     body length, serial, then a header-field array);
+#   - a variant `v` is the contained-type signature written at the current
+#     offset (a variant is 1-aligned), then padding to the contained
+#     type's alignment, then the contained value;
+#   - an array `aT` is u32 byte length, then padding to T's alignment,
+#     then T elements (each padded to its own alignment; `n` excludes the
+#     padding after the length and after the last element);
+#   - structs and dict entries `(…)` / `{…}` are always 8-aligned.
+# This daemon only needs: y b n q u i x t d s o g v a{sv} as a(yv).
+METHOD_CALL, METHOD_RETURN, ERROR, SIGNAL = 1, 2, 3, 4
+FIELD_PATH, FIELD_INTERFACE, FIELD_MEMBER, FIELD_ERROR_NAME = 1, 2, 3, 4
+FIELD_REPLY_SERIAL, FIELD_DESTINATION, FIELD_SENDER, FIELD_SIGNATURE = 5, 6, 7, 8
+FIELD_UNIX_FDS = 9
+
+_ALIGN = {"y": 1, "b": 4, "n": 2, "q": 2, "i": 4, "u": 4,
+          "x": 8, "t": 8, "d": 8, "s": 4, "o": 4, "g": 1, "v": 1}
+
+
+def _aligned(off, n):
+    return (off + n - 1) & ~(n - 1)
+
+
+def _align_of(sig):
+    """Alignment of one complete type signature."""
+    t = sig[0]
+    if t == "a":
+        # The array VALUE starts with a uint32 length (align 4); the
+        # elements are then padded to their own alignment AFTER it.
+        return 4
+    if t in "({":
+        return 8
+    return _ALIGN.get(t, 1)
+
+
+def _pad(buf, n):
+    buf.extend(b"\0" * ((-len(buf)) % n))
+
+
+def complete_len(sig):
+    """Chars of the first single complete type in `sig` (multi-type
+    signatures like `su` or `ssv` are a sequence of complete types)."""
+    if not sig:
+        return 0
+    t = sig[0]
+    if t == "a":
+        return 1 + complete_len(sig[1:])
+    if t in "({":
+        depth = 0
+        for i, ch in enumerate(sig):
+            if ch == t:
+                depth += 1
+            elif ch == (")" if t == "(" else "}"):
+                depth -= 1
+                if depth == 0:
+                    return i + 1
+        raise ValueError("unbalanced container in %r" % sig)
+    return 1
+
+
+def unmarshal_all(sig, data):
+    """Unmarshal a full signature (possibly several complete types) from
+    `data`; returns the list of values."""
+    out = []
+    off = 0
+    while sig:
+        n = complete_len(sig)
+        part = sig[:n]
+        off = _aligned(off, _align_of(part))
+        value, off = unmarshal(part, data, off)
+        out.append(value)
+        sig = sig[n:]
+    return out
+
+
+def _marshal_one(sig, value, buf):
+    """Marshal a single value of one complete type `sig` into `buf`.
+    The caller is responsible for alignment padding before the value;
+    this appends no trailing padding."""
+    t = sig[0]
+    if t == "y":
+        buf.append(value & 0xFF)
+    elif t == "b":
+        buf.extend((1 if value else 0).to_bytes(4, "little"))
+    elif t in "ni":
+        buf.extend(int(value).to_bytes(4, "little", signed=True))
+    elif t in "qu":
+        buf.extend(int(value).to_bytes(4, "little"))
+    elif t in "xt":
+        buf.extend(int(value).to_bytes(8, "little", signed=(t == "x")))
+    elif t == "d":
+        buf.extend(struct.pack("<d", float(value)))
+    elif t in "so":
+        data = str(value).encode("utf-8")
+        buf.extend(len(data).to_bytes(4, "little"))  # length excludes the NUL
+        buf.extend(data)
+        buf.append(0)
+    elif t == "g":
+        # D-Bus 'g': 1-byte length, chars, NUL (NOT a uint32 like s/o).
+        sig = str(value).encode("ascii")
+        buf.append(len(sig))
+        buf.extend(sig)
+        buf.append(0)
+    elif t == "v":
+        vsig, vval = value  # (signature, value)
+        buf.append(len(vsig.encode("ascii")))
+        buf.extend(vsig.encode("ascii") + b"\0")
+        _pad(buf, _align_of(vsig))
+        _marshal_one(vsig, vval, buf)
+    elif t == "a":
+        inner = sig[1:]
+        payload = bytearray()
+        if inner.startswith("{"):
+            # Dict: entries are 8-aligned structs of (key, variant).
+            ksig = inner[1]
+            for key, v in value.items():
+                _pad(payload, 8)
+                _marshal_one(ksig, key, payload)
+                vsig, vval = v
+                payload.append(len(vsig.encode("ascii")))
+                payload.extend(vsig.encode("ascii") + b"\0")
+                _pad(payload, _align_of(vsig))
+                _marshal_one(vsig, vval, payload)
+        else:
+            for item in value:
+                _pad(payload, _align_of(inner))
+                _marshal_one(inner, item, payload)
+        # The spec: an array is a UINT32 length, then padding to the
+        # element's alignment (NOT counted in n), then the elements. The
+        # padding must be computed against the message position, not a
+        # zero-based payload buffer, so it is emitted into `buf` directly
+        # and `n` covers only the payload bytes.
+        buf.extend(len(payload).to_bytes(4, "little"))
+        _pad(buf, _align_of(inner))
+        buf.extend(payload)
+    elif t == "(":
+        inner = sig[1:-1]
+        for i, ch in enumerate(inner):
+            _pad(buf, _align_of(inner[i:]))
+            _marshal_one(inner[i:], value[i], buf)
+    else:
+        raise ValueError("unsupported signature: %r" % sig)
+
+
+def marshal(sig, values):
+    """Marshal top-level `values` against `sig`; the result is 8-padded
+    (the padding of a full message or of a top-level body). The signature
+    is walked by complete type (`a{sv}`, `(…)` span several chars), so a
+    container value counts as one argument."""
+    buf = bytearray()
+    for value in values:
+        n = complete_len(sig)
+        part = sig[:n]
+        _pad(buf, _align_of(part))
+        _marshal_one(part, value, buf)
+        sig = sig[n:]
+    # No trailing padding: body_len must equal exactly what the signature
+    # consumes (dbus-daemon rejects trailing bytes after the body).
+    return bytes(buf)
+
+
+def unmarshal(sig, data, off):
+    """Unmarshal one value of one complete type `sig` at `off` (the caller
+    aligns); returns (value, new_offset)."""
+    t = sig[0]
+    if t == "y":
+        return data[off], off + 1
+    if t == "b":
+        return bool(int.from_bytes(data[off:off + 4], "little")), off + 4
+    if t in "ni":
+        return int.from_bytes(data[off:off + 4], "little", signed=True), off + 4
+    if t in "qu":
+        return int.from_bytes(data[off:off + 4], "little"), off + 4
+    if t in "xt":
+        return (int.from_bytes(data[off:off + 8], "little", signed=(t == "x")),
+                off + 8)
+    if t == "d":
+        return struct.unpack("<d", data[off:off + 8])[0], off + 8
+    if t in "so":
+        n = int.from_bytes(data[off:off + 4], "little")
+        return data[off + 4:off + 4 + n].decode("utf-8", "replace"), \
+            off + 4 + n + 1
+    if t == "g":
+        n = data[off]
+        return data[off + 1:off + 1 + n].decode("ascii"), off + n + 2
+    if t == "v":
+        vsig, off = unmarshal("g", data, off)
+        off = _aligned(off, _align_of(vsig))
+        value, off = unmarshal(vsig, data, off)
+        return (vsig, value), off
+    if t == "a":
+        inner = sig[1:]
+        n = int.from_bytes(data[off:off + 4], "little")
+        end = off + 4 + n
+        off += 4
+        if inner.startswith("{"):
+            off = _aligned(off, 8)
+            ksig = inner[1]
+            out = {}
+            while off < end:
+                # Each dict entry is an 8-aligned struct of (key, variant).
+                off = _aligned(off, 8)
+                key, off = unmarshal(ksig, data, off)
+                vsig, off = unmarshal("g", data, off)
+                off = _aligned(off, _align_of(vsig))
+                value, off = unmarshal(vsig, data, off)
+                out[key] = (vsig, value)
+            return out, off
+        off = _aligned(off, _align_of(inner))
+        out = []
+        while off < end:
+            # Each array element is padded to its own alignment.
+            off = _aligned(off, _align_of(inner))
+            item, off = unmarshal(inner, data, off)
+            out.append(item)
+        return out, off
+    if t == "(":
+        inner = sig[1:-1]
+        out = []
+        for i, ch in enumerate(inner):
+            off = _aligned(off, _align_of(inner[i:]))
+            item, off = unmarshal(inner[i:], data, off)
+            out.append(item)
+        return out, off
+    raise ValueError("unsupported signature: %r" % sig)
+
+
+def build_message(msg_type, serial, fields, body_sig, body):
+    """`fields` is a list of (field_id, (vsig, vval)) header fields."""
+    field_payload = bytearray()
+    for fid, (vsig, vval) in fields:
+        _pad(field_payload, 8)
+        field_payload.append(fid)
+        field_payload.append(len(vsig.encode("ascii")))
+        field_payload.extend(vsig.encode("ascii") + b"\0")
+        _pad(field_payload, _align_of(vsig))
+        _marshal_one(vsig, vval, field_payload)
+    header = bytearray(b"l" + bytes([msg_type, 0, 1]))
+    body_bytes = marshal(body_sig, body) if body_sig else b""
+    header.extend(len(body_bytes).to_bytes(4, "little"))
+    header.extend(serial.to_bytes(4, "little"))
+    # Fixed part (12) + the field-array length uint32 (4) = 16, then pad
+    # to 8, then the fields. The length goes IMMEDIATELY after the serial.
+    header.extend(len(field_payload).to_bytes(4, "little"))
+    _pad(header, 8)
+    header.extend(field_payload)
+    # The header (fixed part + field array) must be a multiple of 8 so the
+    # body starts on an 8-byte boundary.
+    _pad(header, 8)
+    return bytes(header) + body_bytes
+
+
+class Bus:
+    """Session bus connection with EXTERNAL auth."""
+
+    def __init__(self, address):
+        self.sock = self._connect(address)
+        self._buf = b""
+        self._serial = 0
+        # Messages read while awaiting a synchronous reply (e.g. a client
+        # method call that raced our RequestName) are parked here and
+        # drained by `recv`, so they are never lost.
+        self._deferred = []
+        self._auth()
+        # The spec requires every client to call Hello() before any other
+        # message; dbus-daemon answers RequestName with AccessDenied
+        # ("Hello() was not yet called") otherwise. The reply carries our
+        # unique name (e.g. :1.42) — keep it for callers.
+        self.unique_name = None
+        reply = self.call(DBUS_IFACE, "/org/freedesktop/DBus", DBUS_IFACE,
+                          "Hello")
+        if reply:
+            self.unique_name = reply[0]
+
+    @staticmethod
+    def _connect(address):
+        for part in address.split(";"):
+            if part.startswith("unix:path="):
+                s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                s.connect(part[len("unix:path="):])
+                return s
+            if part.startswith("unix:abstract="):
+                s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                s.connect("\0" + part[len("unix:abstract="):])
+                return s
+        raise ValueError("no unix transport in bus address: %r" % address)
+
+    @staticmethod
+    def _uid_hex():
+        # D-Bus EXTERNAL auth: the uid is sent as the hex encoding of its
+        # ASCII decimal form (1000 -> b"31303030"), per the D-Bus spec.
+        import binascii
+        try:
+            return binascii.hexlify(str(os.getuid()).encode("ascii"))
+        except AttributeError:
+            return b"30"
+
+    def _auth(self):
+        self.sock.settimeout(0.25)
+        try:
+            # Consume an optional NUL greeting from the daemon; most daemons
+            # simply wait for our AUTH, so keep the probe short.
+            self.sock.recv(1)
+        except OSError:
+            pass
+        self.sock.settimeout(5)
+        # AUTH commands are NUL-prefixed; EXTERNAL carries the uid in hex.
+        self.sock.sendall(b"\0AUTH EXTERNAL " + self._uid_hex() + b"\r\n")
+        data = self.sock.recv(1024)
+        # A daemon greeting NUL may arrive after our short probe timed out;
+        # it always precedes the OK line, so strip it before checking.
+        data = data.lstrip(b"\0")
+        if not data.startswith(b"OK"):
+            raise ValueError("D-Bus auth failed: %r" % data[:64])
+        self.sock.sendall(b"BEGIN\r\n")
+        self.sock.settimeout(None)
+
+    def next_serial(self):
+        self._serial += 1
+        return self._serial
+
+    def send(self, msg_type, fields, body_sig="", body=()):
+        data = build_message(msg_type, self.next_serial(), fields,
+                             body_sig, body)
+        self.sock.sendall(data)
+
+    def call(self, destination, path, iface, member, body_sig="", body=(),
+             reply_sig=None):
+        """Synchronous method call; returns the unmarshalled reply body
+        (or None for an empty reply)."""
+        fields = [(FIELD_PATH, ("o", path)),
+                  (FIELD_INTERFACE, ("s", iface)),
+                  (FIELD_MEMBER, ("s", member)),
+                  (FIELD_DESTINATION, ("s", destination))]
+        if body_sig:
+            fields.append((FIELD_SIGNATURE, ("g", body_sig)))
+        serial = self.next_serial()
+        data = build_message(METHOD_CALL, serial, fields, body_sig, body)
+        self.sock.sendall(data)
+        return self._await_reply(serial, reply_sig or body_sig)
+
+    def _await_reply(self, serial, body_sig):
+        """Wait for the reply to the method call with `serial`. Messages
+        read in the same chunk as the reply (signals, or a method call
+        that raced this synchronous call — e.g. a client Get arriving
+        while we still wait on RequestName) are parked in `_deferred` so
+        the main loop sees them, even ones parsed after the reply."""
+        while True:
+            messages = self.recv(5)
+            result = _UNSET = object()
+            for msg in messages:
+                kind, _flags, _serial, fields, sig, values = msg
+                if fields.get(FIELD_REPLY_SERIAL) == serial:
+                    if kind == METHOD_RETURN:
+                        result = (values[0] if values is not None
+                                  and len(values) == 1 else values)
+                    elif kind == ERROR:
+                        raise RuntimeError(fields.get(FIELD_ERROR_NAME,
+                                                      "D-Bus error"))
+                else:
+                    self._deferred.append(msg)
+            if result is not _UNSET:
+                return result
+
+    def recv(self, timeout):
+        """Collect parsed messages up to `timeout`; [] when idle.
+        Deferred messages (read while awaiting a reply) are drained
+        first, in order."""
+        messages = []
+        if self._deferred:
+            messages = self._deferred
+            self._deferred = []
+        while True:
+            # A partially buffered message means we are mid-frame: skip the
+            # select gate (it only watches the socket, so it would idle even
+            # though _buf holds data) and block on recv for the rest.
+            if not self._buf:
+                ready, _, _ = select.select([self.sock], [], [], timeout)
+                if not ready:
+                    break
+            try:
+                chunk = self.sock.recv(65536)
+            except OSError:
+                chunk = b""
+            if not chunk:
+                raise OSError("bus closed")
+            self._buf += chunk
+            while True:
+                try:
+                    msg = self._try_parse()
+                except (ValueError, IndexError):
+                    # Malformed/incomplete: drop the connection.
+                    raise OSError("malformed message on the bus")
+                if msg is None:
+                    break
+                messages.append(msg)
+            # Return parsed messages immediately; do not wait for the next
+            # select to go idle (a 5s synchronous call otherwise).
+            if messages:
+                break
+        return messages
+
+    def _read_message(self, timeout):
+        msgs = self.recv(timeout)
+        return msgs[0] if msgs else None
+
+    def _try_parse(self):
+        buf = self._buf
+        if len(buf) < 12:
+            return None
+        if buf[0:1] not in (b"l", b"B"):
+            raise ValueError("bad endian")
+        body_len = int.from_bytes(buf[4:8], "little")
+        serial = int.from_bytes(buf[8:12], "little")
+        fields, off = self._parse_header(buf, 12)
+        body_start = _aligned(off, 8)
+        if len(buf) < body_start + body_len:
+            return None
+        body = buf[body_start:body_start + body_len]
+        self._buf = buf[body_start + body_len:]
+        body_sig = fields.get(FIELD_SIGNATURE) or ""
+        values = None
+        if body_sig and body:
+            values = unmarshal_all(body_sig, body)
+        return (buf[1], buf[2], serial, fields, body_sig, values)
+
+    @staticmethod
+    def _parse_header(buf, off):
+        """The header-field array `a(yv)`; each entry is a field-code byte
+        followed by a variant (signature at the current offset). The array
+        length (uint32) sits right at `off` (12), then padding to 8, then
+        the fields."""
+        n = int.from_bytes(buf[off:off + 4], "little")
+        off = _aligned(off + 4, 8)
+        end = off + n
+        fields = {}
+        while off < end:
+            # Each header field is a struct (BYTE, VARIANT): 8-aligned.
+            off = _aligned(off, 8)
+            fid = buf[off]
+            off += 1
+            vsig, off = unmarshal("g", buf, off)
+            off = _aligned(off, _align_of(vsig))
+            value, off = unmarshal(vsig, buf, off)
+            fields[fid] = value
+        return fields, off
+
+
+# ------------------------------------------------------------------- MPRIS
+
+def read_state():
+    """The mpv-mpris.json dict, or None when the file is missing/unparsable
+    or too stale (s2udio's poll writes every ~0.5 s while a video plays; the
+    caretaker tracker keeps it fresh after s2udio closes)."""
+    try:
+        mtime = os.path.getmtime(STATE)
+    except OSError:
+        return None
+    if time.time() - mtime > STALE_S:
+        return None
+    try:
+        with open(STATE) as f:
+            st = json.load(f)
+    except (OSError, ValueError):
+        return None
+    st["_mtime"] = mtime
+    return st
+
+
+def poster_url(st):
+    """Cache-busted file:// URL of the poster. MPRIS clients cache art by
+    URL, so a stable path would show the previous image forever — append
+    `?t=<mtime_ns>` (the same trick the patched mpDris2 used)."""
+    art = st.get("art") or ""
+    if not art or not os.path.exists(art):
+        return ""
+    try:
+        stamp = int(os.path.getmtime(art) * 1e9)
+    except OSError:
+        return ""
+    return "file://" + urllib.parse.quote(art) + "?t=%d" % stamp
+
+
+def current_url(st):
+    pos = st.get("playlist_pos")
+    playlist = st.get("playlist") or []
+    if isinstance(pos, int) and 0 <= pos < len(playlist):
+        entry = playlist[pos]
+        if isinstance(entry, dict) and entry.get("url"):
+            return entry["url"]
+    return ""
+
+
+class MprisServer:
+    def __init__(self, bus, log):
+        self.bus = bus
+        self.log = log
+        self.state = None
+        self.stale_ticks = 0
+        self.status = "Stopped"
+        self.meta_key = None
+        self.volume = 0.0
+        self.position = 0
+        self.length = 0
+        self._req_serial = 0
+
+    # ---- properties ------------------------------------------------------
+
+    def metadata(self):
+        st = self.state or {}
+        art = poster_url(st)
+        md = {
+            "mpris:trackid": ("o", TRACK_ID),
+            "xesam:title": ("s", st.get("title") or ""),
+            "xesam:artist": ("as", [st.get("artist")] if st.get("artist")
+                             else []),
+        }
+        if art:
+            md["mpris:artUrl"] = ("s", art)
+        length = st.get("duration") or 0
+        if length and length > 0:
+            md["mpris:length"] = ("x", int(length * 1_000_000))
+        url = current_url(st)
+        if url:
+            md["xesam:url"] = ("s", url)
+        return md
+
+    def props(self):
+        """The merged org.mpris.MediaPlayer2 + Player properties (a{sv})."""
+        stopped = self.status == "Stopped"
+        can = not stopped
+        return {
+            # org.mpris.MediaPlayer2
+            "CanQuit": ("b", True),
+            "CanRaise": ("b", True),
+            "CanSetFullscreen": ("b", False),
+            "Fullscreen": ("b", False),
+            "HasTrackList": ("b", False),
+            "Identity": ("s", "s2udio (mpv)"),
+            "SupportedUriSchemes": ("as", ["http", "https", "file"]),
+            "SupportedMimeTypes": ("as", []),
+            # org.mpris.MediaPlayer2.Player
+            "PlaybackStatus": ("s", self.status),
+            "LoopStatus": ("s", "None"),
+            "Rate": ("d", 1.0),
+            "Shuffle": ("b", False),
+            "Metadata": ("a{sv}", self.metadata()),
+            "Volume": ("d", self.volume),
+            "Position": ("x", self.position),
+            "MinimumRate": ("d", 1.0),
+            "MaximumRate": ("d", 1.0),
+            "CanGoNext": ("b", can),
+            "CanGoPrevious": ("b", can),
+            "CanPlay": ("b", can),
+            "CanPause": ("b", can),
+            "CanSeek": ("b", can),
+            "CanControl": ("b", True),
+        }
+
+    # ---- mpv forwarding ---------------------------------------------------
+
+    def mpv_socket(self):
+        st = self.state or {}
+        sock = st.get("socket") or ""
+        return sock if sock and os.path.exists(sock) else None
+
+    def mpv_send(self, command):
+        """Fire-and-forget an mpv IPC command; True when it went out."""
+        sock = self.mpv_socket()
+        if not sock:
+            return False
+        try:
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            s.settimeout(2)
+            s.connect(sock)
+            s.sendall((json.dumps({"command": command}) + "\n").encode())
+            s.close()
+            return True
+        except OSError:
+            return False
+
+    def _seek_signal(self, seconds):
+        self.position = int(seconds * 1_000_000)
+        self.bus.send(SIGNAL,
+                      [(FIELD_PATH, ("o", OBJ_PATH)),
+                       (FIELD_INTERFACE, ("s", IFACE_PLAYER)),
+                       (FIELD_MEMBER, ("s", "Seeked")),
+                       (FIELD_SIGNATURE, ("g", "x"))],
+                      "x", [self.position])
+
+    # ---- method dispatch ----------------------------------------------------
+
+    def handle(self, fields, body_sig, values):
+        path = fields.get(FIELD_PATH, "")
+        iface = fields.get(FIELD_INTERFACE, "")
+        member = fields.get(FIELD_MEMBER, "")
+        sender = fields.get(FIELD_SENDER, "")
+
+        def reply(body_sig="", body=()):
+            out_fields = [(FIELD_PATH, ("o", path)),
+                          (FIELD_REPLY_SERIAL, ("u", self._req_serial)),
+                          (FIELD_DESTINATION, ("s", sender))]
+            if body_sig:
+                out_fields.append((FIELD_SIGNATURE, ("g", body_sig)))
+            self.bus.send(METHOD_RETURN, out_fields, body_sig, body)
+
+        def error(name, text):
+            self.bus.send(ERROR,
+                          [(FIELD_PATH, ("o", path)),
+                           (FIELD_ERROR_NAME, ("s", name)),
+                           (FIELD_REPLY_SERIAL, ("u", self._req_serial)),
+                           (FIELD_DESTINATION, ("s", sender)),
+                           (FIELD_SIGNATURE, ("g", "s"))],
+                          "s", [text])
+
+        args = list(values) if values is not None else []
+
+        if iface == IFACE_PEER:
+            if member == "Ping":
+                return reply()
+            if member == "GetMachineId":
+                try:
+                    with open("/etc/machine-id") as f:
+                        machine = f.read().strip()
+                except OSError:
+                    machine = "00000000000000000000000000000000"
+                return reply("s", [machine])
+            return error("org.freedesktop.DBus.Error.UnknownMethod", member)
+        if iface == IFACE_INTRO and member == "Introspect":
+            return reply("s", [INTROSPECT_XML])
+
+        if iface == IFACE_PROPS:
+            if member == "Get" and len(args) == 2:
+                _iface, name = args
+                props = self.props()
+                if name not in props:
+                    return error(
+                        "org.freedesktop.DBus.Error.UnknownProperty", name)
+                vsig, vval = props[name]
+                return reply("v", [(vsig, vval)])
+            if member == "GetAll" and len(args) == 1:
+                return reply("a{sv}", [self.props()])
+            if member == "Set" and len(args) == 3:
+                _iface, name, (vsig, vval) = args
+                if name == "Volume" and vsig == "d":
+                    vol = max(0.0, min(1.0, vval))
+                    self.mpv_send(["set_property", "volume", vol * 100])
+                    self.volume = vol
+                    self.emit_changed({"Volume": ("d", vol)}, [])
+                    return reply()
+                return error("org.freedesktop.DBus.Error.PropertyReadOnly",
+                             name)
+            return error("org.freedesktop.DBus.Error.UnknownMethod", member)
+
+        if iface == IFACE:
+            if member == "Quit":
+                self.mpv_send(["quit"])
+                return reply()
+            if member == "Raise":
+                return reply()
+            return error("org.freedesktop.DBus.Error.UnknownMethod", member)
+
+        if iface == IFACE_PLAYER:
+            if member == "Play":
+                self.mpv_send(["set_property", "pause", False])
+                return reply()
+            if member == "Pause":
+                self.mpv_send(["set_property", "pause", True])
+                return reply()
+            if member == "PlayPause":
+                self.mpv_send(["cycle", "pause"])
+                return reply()
+            if member == "Stop":
+                self.mpv_send(["stop"])
+                return reply()
+            if member == "Next":
+                self.mpv_send(["playlist-next"])
+                return reply()
+            if member == "Previous":
+                self.mpv_send(["playlist-previous"])
+                return reply()
+            if member == "Seek" and len(args) == 1 \
+                    and isinstance(args[0], int):
+                delta_s = args[0] / 1_000_000.0
+                self.mpv_send(["seek", delta_s, "relative"])
+                st = self.state or {}
+                self._seek_signal((st.get("position") or 0) + delta_s)
+                return reply()
+            if member == "SetPosition" and len(args) == 2:
+                trackid, pos = args
+                if trackid != TRACK_ID:
+                    return error("org.freedesktop.DBus.Error.InvalidArgs",
+                                 "wrong track id")
+                self.mpv_send(["seek", pos / 1_000_000.0, "absolute"])
+                self._seek_signal(pos / 1_000_000.0)
+                return reply()
+            if member == "OpenUri" and len(args) == 1:
+                self.mpv_send(["loadfile", args[0], "replace"])
+                return reply()
+            return error("org.freedesktop.DBus.Error.UnknownMethod", member)
+
+        return error("org.freedesktop.DBus.Error.UnknownMethod",
+                     "%s.%s" % (iface, member))
+
+    def emit_changed(self, changed, invalidated):
+        self.bus.send(SIGNAL,
+                      [(FIELD_PATH, ("o", OBJ_PATH)),
+                       (FIELD_INTERFACE, ("s", IFACE_PROPS)),
+                       (FIELD_MEMBER, ("s", "PropertiesChanged")),
+                       (FIELD_SIGNATURE, ("g", "sa{sv}as"))],
+                      "sa{sv}as", [IFACE, changed, invalidated])
+
+    # ---- tick ---------------------------------------------------------------
+
+    def tick(self):
+        """Read the state file, update MPRIS; False means exit."""
+        st = read_state()
+        if st is None:
+            self.stale_ticks += 1
+            if self.stale_ticks >= STALE_GRACE:
+                self.log("state stale/deleted; exiting")
+                return False
+            new_status = "Stopped"
+            self.state = None
+        else:
+            self.stale_ticks = 0
+            self.state = st
+            new_status = "Playing" if st.get("playing") else "Paused"
+
+        self.position = int((st or {}).get("position", 0) * 1_000_000)
+        length = (st or {}).get("duration") or 0
+        self.length = int(length * 1_000_000) if length else 0
+        volume = (st or {}).get("volume")
+        if isinstance(volume, (int, float)):
+            new_volume = max(0.0, min(1.0, volume / 100.0))
+        else:
+            new_volume = self.volume
+
+        meta_key = (new_status,
+                    (st or {}).get("title", ""),
+                    (st or {}).get("artist", ""),
+                    poster_url(st or {}),
+                    current_url(st or {}),
+                    self.length)
+        changed = {}
+        if new_status != self.status:
+            changed["PlaybackStatus"] = ("s", new_status)
+        if meta_key != self.meta_key:
+            changed["Metadata"] = ("a{sv}", self.metadata())
+        if new_volume != self.volume:
+            changed["Volume"] = ("d", new_volume)
+        if changed:
+            self.emit_changed(changed, [])
+        self.status = new_status
+        self.meta_key = meta_key
+        self.volume = new_volume
+        return True
+
+
+INTROSPECT_XML = """<!DOCTYPE node PUBLIC "-//freedesktop//DTD D-BUS Object Introspection 1.0//EN"
+"http://www.freedesktop.org/standards/dbus/1.0/introspect.dtd">
+<node>
+  <interface name="org.freedesktop.DBus.Properties">
+    <method name="Get"><arg name="interface" type="s" direction="in"/><arg name="name" type="s" direction="in"/><arg name="value" type="v" direction="out"/></method>
+    <method name="GetAll"><arg name="interface" type="s" direction="in"/><arg name="properties" type="a{sv}" direction="out"/></method>
+    <method name="Set"><arg name="interface" type="s" direction="in"/><arg name="name" type="s" direction="in"/><arg name="value" type="v" direction="in"/></method>
+    <signal name="PropertiesChanged"><arg name="interface" type="s"/><arg name="changed" type="a{sv}"/><arg name="invalidated" type="as"/></signal>
+  </interface>
+  <interface name="org.freedesktop.DBus.Introspectable">
+    <method name="Introspect"><arg name="data" type="s" direction="out"/></method>
+  </interface>
+  <interface name="org.freedesktop.DBus.Peer">
+    <method name="Ping"/>
+    <method name="GetMachineId"><arg name="machine_uuid" type="s" direction="out"/></method>
+  </interface>
+  <interface name="org.mpris.MediaPlayer2">
+    <property name="CanQuit" type="b" access="read"/>
+    <property name="CanRaise" type="b" access="read"/>
+    <property name="CanSetFullscreen" type="b" access="read"/>
+    <property name="Fullscreen" type="b" access="read"/>
+    <property name="HasTrackList" type="b" access="read"/>
+    <property name="Identity" type="s" access="read"/>
+    <property name="SupportedUriSchemes" type="as" access="read"/>
+    <property name="SupportedMimeTypes" type="as" access="read"/>
+    <method name="Quit"/>
+    <method name="Raise"/>
+  </interface>
+  <interface name="org.mpris.MediaPlayer2.Player">
+    <property name="PlaybackStatus" type="s" access="read"/>
+    <property name="LoopStatus" type="s" access="readwrite"/>
+    <property name="Rate" type="d" access="read"/>
+    <property name="Shuffle" type="b" access="read"/>
+    <property name="Metadata" type="a{sv}" access="read"/>
+    <property name="Volume" type="d" access="readwrite"/>
+    <property name="Position" type="x" access="read"/>
+    <property name="MinimumRate" type="d" access="read"/>
+    <property name="MaximumRate" type="d" access="read"/>
+    <property name="CanGoNext" type="b" access="read"/>
+    <property name="CanGoPrevious" type="b" access="read"/>
+    <property name="CanPlay" type="b" access="read"/>
+    <property name="CanPause" type="b" access="read"/>
+    <property name="CanSeek" type="b" access="read"/>
+    <property name="CanControl" type="b" access="read"/>
+    <method name="Play"/>
+    <method name="Pause"/>
+    <method name="PlayPause"/>
+    <method name="Stop"/>
+    <method name="Next"/>
+    <method name="Previous"/>
+    <method name="Seek"><arg name="Offset" type="x" direction="in"/></method>
+    <method name="SetPosition"><arg name="TrackId" type="o" direction="in"/><arg name="Position" type="x" direction="in"/></method>
+    <method name="OpenUri"><arg name="Uri" type="s" direction="in"/></method>
+    <signal name="Seeked"><arg name="Position" type="x"/></signal>
+  </interface>
+</node>
+"""
+
+
+# ------------------------------------------------------------------- main --
+
+def claim_pid():
+    """One daemon per session; exit silently when another is alive."""
+    try:
+        os.makedirs(CACHE, exist_ok=True)
+        if os.path.exists(PID_FILE):
+            try:
+                with open(PID_FILE) as f:
+                    old = int(f.read().strip())
+                with open(f"/proc/{old}/cmdline", "rb") as f:
+                    cmdline = f.read().decode("utf-8", "replace")
+                if "s2u-mpdris" in cmdline:
+                    return False
+            except Exception:
+                pass
+        with open(PID_FILE, "w") as f:
+            f.write(str(os.getpid()))
+        return True
+    except OSError:
+        return True
+
+
+def release_pid():
+    try:
+        with open(PID_FILE) as f:
+            if f.read().strip() == str(os.getpid()):
+                os.remove(PID_FILE)
+    except OSError:
+        pass
+
+
+class Logger:
+    def __init__(self):
+        self.path = os.path.join(CACHE, "mpris.log")
+
+    def __call__(self, message):
+        try:
+            with open(self.path, "a") as f:
+                f.write("%s %s\n" % (time.strftime("%Y-%m-%dT%H:%M:%S"),
+                                     message))
+        except OSError:
+            pass
+
+
+def main():
+    if not claim_pid():
+        return
+    log = Logger()
+    try:
+        address = os.environ.get("S2U_MPRIS_BUS") or os.environ.get(
+            "DBUS_SESSION_BUS_ADDRESS")
+        if not address:
+            log("no D-Bus session bus (DBUS_SESSION_BUS_ADDRESS unset); "
+                "exiting")
+            return
+        bus = Bus(address)
+        # Own the name. 1 = acquired, 4 = already owner.
+        for attempt in range(3):
+            try:
+                result = bus.call(DBUS_IFACE, "/org/freedesktop/DBus",
+                                  DBUS_IFACE, "RequestName", "su",
+                                  [NAME, 0], reply_sig="u")
+            except Exception as err:
+                log("RequestName failed: %r" % (err,))
+                result = 0
+            if result == 1 or result == 4:
+                break
+            log("bus name %s taken (reply %r); retrying" % (NAME, result))
+            time.sleep(1)
+        else:
+            log("could not acquire %s; exiting" % NAME)
+            return
+
+        server = MprisServer(bus, log)
+        log("serving %s (%s)" % (NAME, OBJ_PATH))
+        while True:
+            if not server.tick():
+                break
+            try:
+                for msg in bus.recv(min(POLL_S, 0.5)):
+                    kind, _flags, serial, fields, body_sig, values = msg
+                    if kind != METHOD_CALL:
+                        continue
+                    dest = fields.get(FIELD_DESTINATION)
+                    if dest and dest != NAME:
+                        continue
+                    server._req_serial = serial
+                    try:
+                        server.handle(fields, body_sig, values)
+                    except Exception as err:
+                        log("method %s failed: %r"
+                            % (fields.get(FIELD_MEMBER), err))
+            except OSError as err:
+                log("bus error: %r" % (err,))
+                break
+    finally:
+        release_pid()
+
+
+if __name__ == "__main__":
+    main()

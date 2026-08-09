@@ -1,0 +1,27 @@
+# s2u-yt — managed yt-dlp config (installed into ~/.local/share/s2u-yt/conf/config).
+#
+# This file is applied AFTER your ~/.config/yt-dlp/config via --config-locations,
+# so anything you already have (cookies, js runtimes, ...) keeps working and this
+# file wins on any conflict.
+#
+# Client strategy — android_vr first, web_safari fallback:
+#
+# * android_vr (anonymous): the only client on this bot-checked IP whose
+#   googlevideo URLs are not rejected (verified live: HTTP 200/206). It serves
+#   DASH video up to 2160p (vs web_safari's 1080p HLS ceiling) and single-file
+#   audio (opus/m4a) that MPD can range-seek — fixing stream seekability too.
+#   yt-dlp only runs it when the session has NO cookies (SUPPORTS_COOKIES is
+#   false), so the wrapper strips the user config's cookie options for the
+#   first attempt and retries with them if it fails.
+#
+# * web_safari (authenticated fallback): the previously verified-good path
+#   (HLS up to 1080p). When the anonymous pass fails (or a video needs the
+#   session), the wrapper retries with your cookies — yt-dlp then auto-skips
+#   android_vr (cookies present) and uses web_safari.
+#
+# PO tokens: android_vr's GVS policy requires them; the bgutil provider mints
+# them (systemd --user unit s2u-yt-bgutil.service). If bgutil is down the
+# anonymous pass degrades to low-quality formats — keep it running (status.sh
+# checks it). If YouTube ever extends the SABR experiment to android_vr, the
+# web_safari fallback keeps playback working at 1080p.
+--extractor-args "youtube:player_client=android_vr,web_safari"
