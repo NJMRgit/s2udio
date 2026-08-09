@@ -444,6 +444,79 @@ Host review of the Phase 4 dispatcher commit produced two fixes:
    byte-identity assertion (both -y and non-interactive) stays green
    against the refreshed fixture.
 
+### Per-distro deltas (numbered — what the code's §12.x cites)
+
+The dispatcher and the follow-up plan reference these as "plan §12.x"; the
+numbers below are the per-distro delta list that predates the recorded
+Phase-results restructure of this section (kept so `setup.sh` comments and
+`docs/design/Validation/distro-support-followups.md` resolve):
+
+- **§12.1 — Fedora / RPM Fusion free**: official Fedora repos dropped the
+  `mpd` server; the dnf5 backend enables RPM Fusion free (mpd, full ffmpeg,
+  full mpv) — the Fedora analogue of Arch's AUR usage.
+- **§12.2 — Debian/Ubuntu/Devuan / system-mpd handling**: Debian and
+  Ubuntu (Devuan follows via ID_LIKE, mock-validated) ship `mpd` as an
+  auto-started **system** service (port 6600). setup.sh stops+disables
+  the system unit and runs a **user-level** instance (`~/.config/mpd/
+  mpd.conf` + user `mpd.service`, created when absent; cava fifo appended).
+- **§12.3 — rustup**: distro rustc is too old for edition-2024 (MSRV 1.88)
+  on Fedora 41 (~1.80), Debian 12 (1.63), Ubuntu 24.04 (1.75) and Alpine;
+  non-Arch backends auto-install a current toolchain via rustup (minimal
+  profile, confirm-gated). Void ships rustc 1.97.1 (≥ 1.88) and skips it.
+- **§12.4 — mpv-full stays Arch-only**: the video pipeline is tuned for
+  Arch's `mpv-full` (AUR, recommended on Arch); every other backend installs
+  plain `mpv` + the informational note.
+- **§12.5 — Alpine / cava from source**: cava is absent from the Alpine 3.20
+  repos; the apk backend clones and builds it (autogen/configure/make,
+  `/usr/local/bin/cava`).
+- **§12.6 — upstream python mpDris2**: mpDris2 has no Alpine package, and
+  nixpkgs ships a compiled ELF the s2u-mpdris2 shim cannot patch → the
+  apk/nix backends fetch the upstream python source to the shim's fixed
+  `/usr/bin/mpDris2` (python-mpd2 via pip on Alpine).
+- **§12.7 — stale yt-dlp (Debian/Ubuntu)**: Debian 12 ships yt-dlp
+  2023.03.04, Ubuntu 24.04 2024.04.09 — both fail the `android_vr` probe
+  ("No video formats found"). The apt backend prints the pip hint
+  (`pip install -U --break-system-packages yt-dlp`) when the installed
+  version is older than 2025.01.01.
+- **§12.8 — Void / mpd setcap**: Void's `mpd` ships file caps
+  (`cap_ipc_lock,cap_sys_nice=eip`) that restricted environments (containers)
+  cannot grant → `execve` EPERM. The xbps backend strips them
+  (`setcap -r /usr/bin/mpd`); harmless on real Void hosts.
+
+### Loose-end coverage follow-ups (T1–T8, 2026-08-09)
+
+Plan: `docs/design/Validation/distro-support-followups.md`. Sequential
+dispatch, one subagent per task, committed on `working` (nothing pushed).
+All real-container runs use the ephemeral harness pattern
+(`scripts/dev/test-setup-distro.sh <key>`, G12 discipline — zero
+`s2u-distro-*` leftovers; unrelated containers untouched). Artifacts under
+`scripts/dev/artifacts/setup-*/<ts>/` (host-side, gitignored). The mock
+matrix (`scripts/dev/test-setup-mock.py`) ended at **62/62** (was 50/50 at
+dispatch; +artix/devuan routing, +elevation cases, +yt-dlp name, +runit pkg,
++arch `--noconfirm`).
+
+| # | Task | Result | Commit |
+| --- | --- | --- | --- |
+| T1 | Real Void (xbps) run of setup.sh | G0+S1–S8+G12 green on `setup-void-glibc/20260809T214604Z`; first run was a FALSE GREEN (runit pkg absent → s2u-svc silently fell back to launcher; runsvdir never supervised) — fixed: `runit` added to XBPS_PKGS + `services_step_runit` stops the step-7 launcher instances before runsvdir takes over | `002f10b` |
+| T2 | Real Nix container run | G0+S1–S8+G12 green on `setup-nix/20260809T220901Z`; three run_nix-path fixes: nix image has no /etc/os-release (bake ID=nixos), sudo-shim mkdir, `nix profile list \| grep -q` SIGPIPE false-negative (read full list instead) | `72e466c` |
+| T3 | Real Ubuntu 24.04 (apt) run | G0+S1–S9+G12 green on `setup-ubuntu-2404/20260809T222041Z` (S8 system mpd stopped, S9 user mpd active); no code change | — |
+| T4 | artix + devuan detection in the mock matrix | `ID_LIKE=arch → pacman`, `ID_LIKE=debian → apt` fixtures + assertions; matrix 51/51 → 62/62 | `8aa9c4f` |
+| T5 | Full G1–G11 gate loop through setup.sh (fedora-41) | driver gains a gate-prep step (harness test tooling, ffmpeg test media in the configured music_directory, cava config, s2u-svc G11 unit) + runs `run-gates.sh`; G1 accepts a packaged user mpd unit (Fedora ships one). Final run `setup-fedora-41/20260809T225236Z`: **G1–G11 all pass via the setup.sh path** (G7 hard), G12 clean | `75a5b24` |
+| T6a | Fix stale `python-yt-dlp` package name in run_arch | `extra/yt-dlp` on modern Arch/CachyOS (`python-yt-dlp` is not in the repos → `setup.sh -y` aborted "target not found"); fixture regenerated with documented delta #2; mock 62/62 | `dc96a4d` |
+| T6b | Real Arch container run (no AUR helper) | `setup-arch/20260809T231731Z` G0+S1–S9+G12 green: detection → real `pacman -S` (fixed yt-dlp name), cargo build, systemd-user services, fifo. Two real bugs fixed: `-y` needs `--noconfirm` (pacman refuses closed stdin) + `install_mpv_full` swallowed the pacman failure (false "ok mpv-full installed"). AUR branch (mpdris2-git, mpv-full) deferred to the mock — no AUR helper in the container | `b2e8a11` |
+| T7 | Tracker rewiring `s2u-mpv-tracker` → s2u-svc | the tracker's mpDris2 stop/start during video now goes through s2u-svc (last direct `systemctl --user` in the tracker); behavior identical on systemd (systemd-user backend issues the same command). Tests: tracker 6/6, mpdris2-shim 1/1 | `e338004` |
+| T7b | Install s2u-svc on the Arch path | run_arch now calls `install_s2u_svc` (T7 made the tracker depend on it; a fresh Arch install would otherwise silently no-op the video/MPD mutual exclusion); fixture delta #4; mock 62/62 | `33596b2` |
+| T8 | README install-matrix + doc consolidation | this section + the README "Install" matrix + session log + plan file statuses | (T8, this commit) |
+
+Known cosmetic limitation (from T1, documented, not fixed): the summary step
+prints `mpd: inactive / mpDris2: inactive` on non-systemd backends (apk/xbps/
+nix) even when both services are up — `SUMMARY_MPD_ACTIVE` /
+`SUMMARY_MPDRIS2_ACTIVE` default to `systemctl --user …`, which only exists on
+systemd targets. Fixing the default would change run_arch's output and the
+frozen byte-identity fixture, so it stays documented only
+(`s2u-svc is-active mpd` is the portable check; gates S5/S6 assert the real
+state).
+
 ## 8. Phased roadmap
 
 - **Phase 0 — harness skeleton + proof of life.** `test-distro.sh` with
@@ -501,6 +574,10 @@ Host review of the Phase 4 dispatcher commit produced two fixes:
   - Arch/CachyOS/Artix path output byte-identical (hermetic mock matrix: `scripts/dev/test-setup-mock.py`)
   - real in-container validation: fedora-41 (dnf5), debian-12 (apt), alpine-320 (apk) all green
     (`scripts/dev/test-setup-distro.sh <key>`)
+  - loose-end coverage follow-ups T1–T8 (plan `distro-support-followups.md`): Void (xbps,
+    runit-user), nix (profile install), Ubuntu 24.04, artix/devuan detection, full G1–G11 gate
+    loop via setup.sh (fedora-41), Arch install path (`yt-dlp` name fix + real container run),
+    tracker rewiring to s2u-svc — all green, mock matrix 62/62, committed on `working` (T1–T7b)
 - [ ] `flake.nix` + NixOS module + `nixosTest`
-- [ ] README install-matrix section
-- [ ] This plan updated with per-target results and timestamps
+- [x] README install-matrix section (T8, committed on `working`)
+- [x] This plan updated with per-target results and timestamps (T8)
