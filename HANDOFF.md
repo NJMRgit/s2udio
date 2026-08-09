@@ -331,16 +331,17 @@ the user's decisions win. Locked in across sessions (details in the docs):
 - The live instance runs in the user's terminal — coordinate restarts
   with the user (terminal injection is flaky).
 
-## Branch policy (2026-08-09 restructure)
+## Repo layout (2026-08-09 restructure)
 
-GitHub was reset (both branches = fresh single-commit roots, no history).
-**`working` carries the FULL tree** (docs + agent files + everything);
-**`master` is the clean buildable subset** — every push to master omits
-`docs/`, all agent `.md` files (`FEEDBACK-*.md`, `HANDOFF.md`,
-`notes.md`), `.github/`, `.vscode/`, `.typos.toml`, `tests/` and anything
-not required to build/run the TUI. `assets/example_config.ron` +
-`assets/default.jpg` are compiled in — never delete. Old history is
-preserved at the local `pre-restructure` tag (working).
+The full dev tree lives in its OWN PRIVATE repo:
+**`NJMRgit/s2udio-working`** (branch `working` — this repo, everything
+incl. docs + agent files). **`NJMRgit/s2udio`** holds only **`master`** —
+the clean buildable subset: every push to master omits `docs/`, all agent
+`.md` files (`FEEDBACK-*.md`, `HANDOFF.md`, `notes.md`), `.github/`,
+`.vscode/`, `.typos.toml`, `tests/` and anything not required to
+build/run the TUI. `assets/example_config.ron` + `assets/default.jpg` are
+compiled in — never delete. Old history is preserved at the local
+`pre-restructure` tag.
 
 ## Pending
 
