@@ -1,0 +1,385 @@
+#!/usr/bin/env python3
+"""MPRIS bridge for s2udio's mpv session (Jellyfin video playback).
+
+s2udio writes ~/.cache/s2udio/mpv-mpris.json every ~500 ms while mpv plays;
+this daemon exposes it as org.mpris.MediaPlayer2.s2udio so desktop media
+controls show the episode/movie title + poster and can pause/seek the video
+(controls are routed to mpv's IPC socket, whose path is in the state file).
+
+Exits when the state file disappears or goes stale (s2udio died).
+"""
+import json
+import os
+import socket
+import sys
+import time
+
+import dbus
+import dbus.service
+from dbus.mainloop.glib import DBusGMainLoop
+from gi.repository import GLib
+
+# Round 19: s2udio cache default moved to ~/.cache/s2udio (legacy
+# ~/.cache/rmpc honored for migration via S2U_CACHE_DIR).
+STATE = os.path.expanduser(os.environ.get("S2U_CACHE_DIR", "~/.cache/s2udio") + "/mpv-mpris.json")
+INTERFACE = "org.mpris.MediaPlayer2"
+# The bus name stays the player's discovery name (org.mpris.MediaPlayer2.*);
+# the INTERFACE constant is the standard root interface of the MPRIS spec.
+BUS_NAME = "org.mpris.MediaPlayer2.s2udio"
+PLAYER = "org.mpris.MediaPlayer2.Player"
+
+_last_sig = None  # (title, artist, art, playing) fingerprint of the last emission
+_last_position = None
+
+
+def read_state():
+    try:
+        with open(STATE) as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def mpv_command(command):
+    st = read_state() or {}
+    path = st.get("socket") or ""
+    if not path:
+        return
+    try:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(1)
+        s.connect(path)
+        s.sendall((json.dumps({"command": command}) + "\n").encode())
+        s.close()
+    except Exception:
+        pass
+
+
+DBusGMainLoop(set_as_default=True)
+bus = dbus.SessionBus()
+
+
+def _art_url(path):
+    """file:// URL for the mpv poster, cache-busted by mtime.
+
+    The poster is rewritten in place on every entry change; MPRIS clients
+    (KDE media controls) cache album art by URL, so a stable path would
+    keep showing the previous video's thumbnail (e.g. a Jellyfin episode
+    after a YouTube video). The mtime query makes the URL change whenever
+    the file changes, forcing media controls to re-fetch it.
+    """
+    try:
+        mtime = os.stat(path).st_mtime_ns
+    except OSError:
+        mtime = 0
+    return "file://%s?t=%d" % (path, mtime)
+
+
+class S2udioMpris(dbus.service.Object):
+    def __init__(self):
+        # The MPRIS spec mandates the root object at /org/mpris/MediaPlayer2
+        # for every player (clients introspect that path, e.g. KDE's media
+        # controller). The bus name org.mpris.MediaPlayer2.s2udio already
+        # disambiguates us from mpDris2's org.mpris.MediaPlayer2.mpd.
+        super().__init__(bus, "/org/mpris/MediaPlayer2")
+
+    # ---- helpers ---------------------------------------------------------
+    def _meta(self):
+        st = read_state() or {}
+        title = st.get("title") or "s2udio"
+        artist = st.get("artist") or ""
+        art = st.get("art") or ""
+        duration = dbus.Int64(int((st.get("duration") or 0) * 1_000_000))
+        meta = dbus.Dictionary(
+            {
+                "mpris:trackid": dbus.ObjectPath("/org/mpris/MediaPlayer2/s2udio/Track/0"),
+                "mpris:length": duration,
+                "xesam:title": title,
+            },
+            signature="sv",
+        )
+        if artist:
+            meta["xesam:artist"] = [artist]
+        if art:
+            meta["mpris:artUrl"] = _art_url(art)
+        return meta
+
+    def _status(self):
+        st = read_state() or {}
+        return "Playing" if st.get("playing", False) else "Paused"
+
+    def _position(self):
+        st = read_state() or {}
+        return dbus.Int64(int((st.get("position") or 0) * 1_000_000))
+
+    # ---- org.mpris.MediaPlayer2 ------------------------------------------
+    @dbus.service.method(INTERFACE, in_signature="", out_signature="s")
+    def Identity(self):
+        return "s2udio (mpv)"
+
+    @dbus.service.method(INTERFACE, in_signature="", out_signature="s")
+    def DesktopEntry(self):
+        return "s2udio"
+
+    @dbus.service.method(INTERFACE, in_signature="", out_signature="b")
+    def CanQuit(self):
+        return False
+
+    @dbus.service.method(INTERFACE, in_signature="", out_signature="b")
+    def CanRaise(self):
+        return False
+
+    @dbus.service.method(INTERFACE, in_signature="", out_signature="b")
+    def CanSetFullscreen(self):
+        return False
+
+    @dbus.service.method(INTERFACE, in_signature="", out_signature="b")
+    def HasTrackList(self):
+        return False
+
+    @dbus.service.method(INTERFACE, in_signature="", out_signature="b")
+    def Fullscreen(self):
+        return False
+
+    @dbus.service.method(INTERFACE, in_signature="", out_signature="")
+    def Quit(self):
+        pass
+
+    @dbus.service.method(INTERFACE, in_signature="", out_signature="")
+    def Raise(self):
+        pass
+
+    # ---- org.mpris.MediaPlayer2.Player -----------------------------------
+    @dbus.service.method(PLAYER, in_signature="", out_signature="s")
+    def PlaybackStatus(self):
+        return self._status()
+
+    @dbus.service.method(PLAYER, in_signature="", out_signature="a{sv}")
+    def Metadata(self):
+        return self._meta()
+
+    @dbus.service.method(PLAYER, in_signature="", out_signature="x")
+    def Position(self):
+        return self._position()
+
+    @dbus.service.method(PLAYER, in_signature="", out_signature="b")
+    def CanPlay(self):
+        return True
+
+    @dbus.service.method(PLAYER, in_signature="", out_signature="b")
+    def CanPause(self):
+        return True
+
+    @dbus.service.method(PLAYER, in_signature="", out_signature="b")
+    def CanSeek(self):
+        return True
+
+    @dbus.service.method(PLAYER, in_signature="", out_signature="b")
+    def CanGoNext(self):
+        return False
+
+    @dbus.service.method(PLAYER, in_signature="", out_signature="b")
+    def CanGoPrevious(self):
+        return False
+
+    @dbus.service.method(PLAYER, in_signature="", out_signature="")
+    def PlayPause(self):
+        mpv_command(["cycle", "pause"])
+
+    @dbus.service.method(PLAYER, in_signature="", out_signature="")
+    def Play(self):
+        mpv_command(["set_property", "pause", False])
+
+    @dbus.service.method(PLAYER, in_signature="", out_signature="")
+    def Pause(self):
+        mpv_command(["set_property", "pause", True])
+
+    @dbus.service.method(PLAYER, in_signature="", out_signature="")
+    def Stop(self):
+        mpv_command(["set_property", "pause", True])
+
+    @dbus.service.method(PLAYER, in_signature="", out_signature="")
+    def Next(self):
+        pass
+
+    @dbus.service.method(PLAYER, in_signature="", out_signature="")
+    def Previous(self):
+        pass
+
+    @dbus.service.method(PLAYER, in_signature="", out_signature="d")
+    def Volume(self):
+        st = read_state() or {}
+        try:
+            v = max(0.0, min(1.0, float(st.get("volume") or 0) / 100.0))
+        except (TypeError, ValueError):
+            v = 0.0
+        return dbus.Double(v)
+
+    @dbus.service.method(PLAYER, in_signature="x", out_signature="")
+    def Seek(self, offset_us):
+        st = read_state() or {}
+        pos = st.get("position") or 0
+        mpv_command(["seek", pos + offset_us / 1_000_000, "absolute"])
+
+    @dbus.service.method(PLAYER, in_signature="ox", out_signature="")
+    def SetPosition(self, _track, pos_us):
+        mpv_command(["seek", pos_us / 1_000_000, "absolute"])
+
+    @dbus.service.method(PLAYER, in_signature="s", out_signature="")
+    def OpenUri(self, _uri):
+        pass
+
+    # ---- org.freedesktop.DBus.Properties ---------------------------------
+    @dbus.service.method(dbus.PROPERTIES_IFACE, in_signature="ss", out_signature="v")
+    def Get(self, iface, name):
+        # Every MPRIS property a client can ask for must be served here:
+        # KDE's media controls read properties via org.freedesktop.DBus
+        # .Properties.Get, and a missing key returns None -> dbus-python
+        # replies with a TypeError the client cannot parse (the timeline
+        # entry then shows no info at all). Position + Volume in
+        # particular are NOT plain class methods clients reach directly.
+        if iface == INTERFACE:
+            return {
+                "Identity": "s2udio (mpv)",
+                "DesktopEntry": "s2udio",
+                "CanQuit": False,
+                "CanRaise": False,
+                "CanSetFullscreen": False,
+                "HasTrackList": False,
+                "Fullscreen": False,
+                "SupportedUriSchemes": dbus.Array([], signature="s"),
+                "SupportedMimeTypes": dbus.Array([], signature="s"),
+            }.get(name)
+        if iface == PLAYER:
+            return {
+                "PlaybackStatus": self.PlaybackStatus(),
+                "Metadata": self.Metadata(),
+                "Position": self._position(),
+                "Volume": self.Volume(),
+                "CanPlay": True,
+                "CanPause": True,
+                "CanSeek": True,
+                "CanControl": True,
+                "CanGoNext": False,
+                "CanGoPrevious": False,
+                "Rate": 1.0,
+                "MinimumRate": 1.0,
+                "MaximumRate": 1.0,
+                "Shuffle": False,
+                "LoopStatus": "None",
+            }.get(name)
+        return None
+
+    @dbus.service.method(dbus.PROPERTIES_IFACE, in_signature="s", out_signature="a{sv}")
+    def GetAll(self, iface):
+        if iface == INTERFACE:
+            return {
+                "Identity": "s2udio (mpv)",
+                "DesktopEntry": "s2udio",
+                "CanQuit": False,
+                "CanRaise": False,
+                "CanSetFullscreen": False,
+                "HasTrackList": False,
+                "Fullscreen": False,
+                "SupportedUriSchemes": dbus.Array([], signature="s"),
+                "SupportedMimeTypes": dbus.Array([], signature="s"),
+            }
+        if iface == PLAYER:
+            return dbus.Dictionary(
+                {
+                    "PlaybackStatus": self.PlaybackStatus(),
+                    "Metadata": self.Metadata(),
+                    "Position": self._position(),
+                    "Volume": self.Volume(),
+                    "CanPlay": True,
+                    "CanPause": True,
+                    "CanSeek": True,
+                    "CanControl": True,
+                    "CanGoNext": False,
+                    "CanGoPrevious": False,
+                    "Rate": 1.0,
+                    "MinimumRate": 1.0,
+                    "MaximumRate": 1.0,
+                    "Shuffle": False,
+                    "LoopStatus": "None",
+                },
+                signature="sv",
+            )
+        return dbus.Dictionary({}, signature="sv")
+
+    @dbus.service.method(dbus.PROPERTIES_IFACE, in_signature="ssv", out_signature="")
+    def Set(self, iface, name, value):
+        # Volume slider from the media controls: route to mpv (0..1 -> 0..100).
+        if iface == PLAYER and name == "Volume":
+            try:
+                mpv_command(["set_property", "volume",
+                             str(int(round(float(value) * 100)))])
+            except (TypeError, ValueError):
+                pass
+
+    @dbus.service.signal(dbus.PROPERTIES_IFACE, signature="sa{sv}as")
+    def PropertiesChanged(self, iface, changed, invalidated):
+        pass
+
+    @dbus.service.signal(PLAYER, signature="x")
+    def Seeked(self, position_us):
+        pass
+
+
+_missed = 0
+
+
+def on_tick(obj):
+    """Emit MPRIS change signals and exit when s2udio is gone."""
+    global _last_sig, _last_position, _missed
+    try:
+        age = time.time() - os.path.getmtime(STATE)
+    except OSError:
+        # State file gone: s2udio's mpv session ended (or the app died).
+        # Tolerate a few ticks so a slow start (socket not up yet) does
+        # not kill the bridge right after it spawns.
+        _missed += 1
+        if _missed >= 3:
+            sys.exit(0)
+        return True
+    if age > 10:
+        _missed += 1
+        if _missed >= 3:
+            sys.exit(0)
+        return True
+    _missed = 0
+
+    st = read_state() or {}
+    sig = (
+        st.get("title"),
+        st.get("artist"),
+        st.get("art"),
+        st.get("playing"),
+    )
+    if sig != _last_sig:
+        _last_sig = sig
+        changed = dbus.Dictionary(
+            {
+                "Metadata": dbus.Dictionary(obj.Metadata(), signature="sv"),
+                "PlaybackStatus": obj.PlaybackStatus(),
+            },
+            signature="sv",
+        )
+        obj.PropertiesChanged(PLAYER, changed, [])
+    position = int((st.get("position") or 0) * 1_000_000)
+    if _last_position is not None and abs(position - _last_position) > 2_000_000:
+        obj.Seeked(dbus.Int64(position))
+    _last_position = position
+    return True
+
+
+obj = S2udioMpris()
+# Take the well-known name so media controls can find us (the reference
+# must be kept alive, or the name is released). Exit when the name is
+# already taken (another instance is running).
+try:
+    _bus_name = dbus.service.BusName(BUS_NAME, bus, do_not_queue=True)
+except dbus.exceptions.DBusException:
+    sys.exit(1)
+GLib.timeout_add(1000, on_tick, obj)
+GLib.MainLoop().run()

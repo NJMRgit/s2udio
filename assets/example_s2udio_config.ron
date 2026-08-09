@@ -1,0 +1,45 @@
+// RETIRED (round 23) — kept for the one-time migration only.
+//
+// Since round 23 the single full config lives at
+// ~/.config/s2udio/config.ron and NOTHING is read from ~/.config/rmpc
+// anymore. This file documents the round-19 overlay format that the
+// migration merges into the full config when it finds one.
+(
+    // Internet radio tab.
+    // radio: (
+    //     playlist: "radio",
+    //     location: None,
+    //     max_favourites: 10,
+    // ),
+
+    // Jellyfin: the jellytui config file (when the settings-panel
+    // credentials sidecar is absent, this is where the server comes from).
+    // jellyfin: (
+    //     config_file: "~/.config/jellytui/config.toml",
+    // ),
+
+    // Video playback preference: ask / mpv / mpd.
+    // video: (
+    //     playback: ask,
+    // ),
+
+    // mpv audio/subtitle preference chains (settings panel overrides land
+    // in state.ron).
+    // mpv: (
+    //     audio_lang: custom:en,
+    //     subtitles: hidden,
+    // ),
+
+    // Torrent streaming (rqbit engine).
+    // torrent: (
+    //     enabled: true,
+    //     port: 3030,
+    //     min_download_speed_kbps: 500,
+    //     warmup_secs: 5,
+    //     max_wait_secs: 15,
+    //     no_peers_timeout_secs: 30,
+    //     cache_dir: "~/.cache/rmpc/torrents",
+    //     auto_pick_file: true,
+    //     keep_after_play: false,
+    // ),
+)
