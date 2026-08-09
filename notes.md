@@ -1,25 +1,26 @@
 # Notes for the container agent — round 23 CLOSED (host)
 
-## BRANCH POLICY (2026-08-09 restructure — READ BEFORE PUSHING)
+## REPO LAYOUT (2026-08-09 restructure — READ BEFORE PUSHING)
 
-The GitHub repo was reset: both branches are fresh single-commit roots
-(no history).
+The dev tree now lives in its OWN PRIVATE repo — there is no `working`
+branch on the public/distribution repo anymore.
 
-- **`working` = the FULL tree** — everything: `docs/`, `HANDOFF.md`,
-  `notes.md`, the newest `FEEDBACK-*.md`, `.github/`, host test suites,
-  editor/lint configs. Push the complete tree here on every round.
-- **`master` = the clean buildable subset** (distribution): ONLY what a
-  user needs to build and run the TUI. Omit on every push to master:
-  `docs/`, all agent `.md` files (`FEEDBACK-*.md`, `HANDOFF.md`,
-  `notes.md`), `.github/`, `.vscode/`, `.typos.toml`, `tests/`, and
-  anything else not required to build+run.
-- Keep in master: `Cargo.toml`/`Cargo.lock`/`build.rs`/`rustfmt.toml`,
-  `LICENSE`, `README.md`, `.gitignore`, `src/`, `assets/`, `scripts/`,
-  `setup.sh`, `s2u-mpdris/`, `s2u-yt/`.
+- **`NJMRgit/s2udio`** — distribution repo, **`master` branch only** =
+  the clean buildable subset: ONLY what a user needs to build and run
+  the TUI. Omit on every push to master: `docs/`, all agent `.md`
+  files (`FEEDBACK-*.md`, `HANDOFF.md`, `notes.md`), `.github/`,
+  `.vscode/`, `.typos.toml`, `tests/`, anything not required to
+  build+run. Keep: `Cargo.toml`/`Cargo.lock`/`build.rs`/
+  `rustfmt.toml`, `LICENSE`, `README.md`, `.gitignore`, `src/`,
+  `assets/`, `scripts/`, `setup.sh`, `s2u-mpdris/`, `s2u-yt/`.
+- **`NJMRgit/s2udio-working`** — PRIVATE dev repo, branch `working` =
+  the FULL tree (this repo): docs/, HANDOFF/notes/FEEDBACK, .github/,
+  host test suites, editor/lint configs — everything. Push the complete
+  tree here on every round.
 - `assets/example_config.ron` and `assets/default.jpg` are compiled into
   the binary (`include_str!`/`include_bytes!`) — never delete them.
 - The pre-restructure history is preserved locally at the
-  `pre-restructure` tag (working).
+  `pre-restructure` tag.
 
 Date: 2026-08-09 · Branch: `working`
 
