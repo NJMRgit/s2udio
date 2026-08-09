@@ -231,7 +231,7 @@ def main():
     DNF5 = 'dnf5 install -y mpd mpdris2 cava yt-dlp mpv ffmpeg python3-dbus python3-gobject python3-mutagen gcc make git curl'
     APT = 'apt-get install -y --no-install-recommends mpd mpdris2 cava yt-dlp mpv ffmpeg python3-dbus python3-gi python3-mutagen build-essential git curl'
     APK = 'apk add --no-cache mpd mpv yt-dlp ffmpeg python3 py3-dbus py3-gobject3 py3-mutagen py3-pip build-base git curl fftw-dev iniparser-dev ncurses-dev sdl2-dev autoconf automake libtool ncurses-terminfo-base'
-    XBPS = 'xbps-install -Sy mpd mpv yt-dlp cava ffmpeg mpDris2 python3 python3-dbus python3-gobject python3-mutagen python3-mpd2 base-devel cargo rust git curl util-linux procps-ng ncurses-term'
+    XBPS = 'xbps-install -Sy mpd mpv yt-dlp cava ffmpeg mpDris2 python3 python3-dbus python3-gobject python3-mutagen python3-mpd2 base-devel cargo rust git curl util-linux procps-ng ncurses-term runit'
 
     print('== arch -y (byte-identity old vs new) ==')
     r_old = run_case('arch', ['-y'], extra_env={'MOCK_USER_MPD': '1'}, old=True, mode='y')
@@ -314,6 +314,7 @@ def main():
     check('void -y: mpd setcap -r (§12.8)', 'setcap -r /usr/bin/mpd' in r['calls'])
     check('void -y: no rustup (rustc 1.97.1)', 'rustup' not in r['calls'])
     check('void -y: services via s2u-svc runit', 'sv start' in r['calls'] and 'mpd active (runit-user)' in r['out'])
+    check('void -y: runit pkg (runit-user backend sv+runsvdir prerequisites)', 'runit' in r['calls'])
     r = run_case('void', extra_env={'MOCK_RUSTC_VERSION': '1.97.1', 'MOCK_NO_SYSTEMD': '1'})
     check('void no-y: no installs/setcap', 'xbps-install' not in r['calls'] and 'setcap' not in r['calls'])
 
