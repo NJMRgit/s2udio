@@ -6,7 +6,8 @@
 # builds: no custom cava, no patched mpDris2, no yt-dlp-ejs.
 #
 #   * system packages            mpd, ffmpeg, cava, python-yt-dlp
-#   * AUR packages               mpv-full, mpdris2-git (via yay/paru)
+#   * AUR packages               mpdris2-git (via yay/paru)
+#   * mpv                        mpv-full (recommended) or standard mpv
 #   * builds + installs binary   -> ~/.local/bin/s2udio
 #   * support scripts            lyrics fetcher, mpv tracker daemon (which
 #                                starts the bundled s2udio-mpris bridge),
@@ -43,7 +44,7 @@ CFG_DIR="$HOME/.config/s2udio"
 MPD_CONF="${MPD_CONF:-$HOME/.config/mpd/mpd.conf}"
 MPV_SCRIPTS="$HOME/.config/mpv/scripts"
 
-# yay (or paru) drives the AUR installs (mpv-full, mpdris2-git).
+# yay (or paru) drives the AUR installs (mpdris2-git; mpv-full when chosen).
 AUR_HELPER=""
 for h in yay paru; do
     if command -v "$h" >/dev/null 2>&1; then AUR_HELPER="$h"; break; fi
@@ -67,13 +68,10 @@ else
     ok "all system packages present"
 fi
 
-# mpv-full (AUR; also in the CachyOS repos): the full-featured mpv the video
-# pipeline wants (mpvSockets, Jellyfin playback, thumbnails). Replaces the
-# plain mpv package.
 # mpdris2-git (AUR; also in the CachyOS repos): the official MPRIS bridge
 # for MPD, run through the s2u-mpdris2 shim (steps 4/8) so stream
 # thumbnails still reach the media controls. No patched copy is installed.
-AUR_PKGS=(mpv-full mpdris2-git)
+AUR_PKGS=(mpdris2-git)
 MISSING_AUR=()
 for p in "${AUR_PKGS[@]}"; do
     pacman -Q "$p" >/dev/null 2>&1 || MISSING_AUR+=("$p")
@@ -91,6 +89,59 @@ if ((${#MISSING_AUR[@]})); then
     fi
 else
     ok "AUR packages present (${AUR_PKGS[*]})"
+fi
+
+# mpv: mpv-full (recommended) or standard mpv. The video pipeline
+# (mpvSockets, Jellyfin playback, thumbnails) is tuned for the
+# full-featured build; plain mpv works for standard playback. mpv-full
+# replaces the standard mpv package (same binary name) - the two are
+# mutually exclusive.
+info "1b/9  mpv (mpv-full recommended, standard mpv supported)"
+install_mpv_full() {
+    if [[ -n "$AUR_HELPER" ]]; then
+        "$AUR_HELPER" -S --needed mpv-full
+    else
+        sudo pacman -S --needed mpv-full || warn "mpv-full not in your distro repos - install yay/paru (AUR) or choose standard mpv"
+    fi
+}
+if pacman -Q mpv-full >/dev/null 2>&1; then
+    ok "mpv-full present (full-featured build)"
+elif pacman -Q mpv >/dev/null 2>&1; then
+    # Standard mpv found - recommend the full-featured build
+    if confirm "Standard mpv is installed. Install mpv-full instead? (recommended: full-featured build for the video pipeline; replaces standard mpv)"; then
+        if install_mpv_full; then
+            ok "mpv-full installed (replaced standard mpv)"
+        else
+            warn "mpv-full install failed - keeping standard mpv"
+        fi
+    else
+        ok "keeping standard mpv (supported)"
+    fi
+elif [[ $ASSUME_YES -eq 1 ]]; then
+    # Neither installed, -y given: default to the recommended build
+    if install_mpv_full; then
+        ok "mpv-full installed (recommended default)"
+    else
+        warn "mpv install failed - install mpv-full (recommended) or standard mpv (sudo pacman -S mpv) manually"
+    fi
+elif [[ -t 0 ]]; then
+    # Neither installed, interactive: let the user choose
+    read -r -p "mpv not installed - install mpv-full (1, recommended) or standard mpv (2)? [1/2] " mpv_choice
+    if [[ "${mpv_choice:-1}" == "2" ]]; then
+        if sudo pacman -S --needed mpv; then
+            ok "standard mpv installed"
+        else
+            warn "standard mpv install failed"
+        fi
+    else
+        if install_mpv_full; then
+            ok "mpv-full installed (recommended)"
+        else
+            warn "mpv install failed - install mpv-full (recommended) or standard mpv (sudo pacman -S mpv) manually"
+        fi
+    fi
+else
+    warn "mpv not installed - re-run interactively or with -y (installs mpv-full, recommended)"
 fi
 
 # ---------------------------------------------------------------------------
@@ -219,9 +270,18 @@ else
 fi
 printf '  scripts: %s\n' "$BIN_DIR"
 printf '  config : %s/config.ron (embedded defaults active if absent)\n' "$CFG_DIR"
-printf '  lyrics: %s/lyrics (s2udio's own .lrc library; the user's MPD\n' "$CFG_DIR"
-printf '           library .lrc files are read first and never overwritten)\n' 
-printf '  mpv    : %s\n' "$(command -v mpv >/dev/null && echo present || echo MISSING)"
+printf "  lyrics: %s/lyrics (s2udio's own .lrc library; the user's MPD\n" "$CFG_DIR"
+printf '           library .lrc files are read first and never overwritten)\n'
+
+if command -v mpv >/dev/null 2>&1; then
+    if pacman -Q mpv-full >/dev/null 2>&1; then
+        printf '  mpv    : present (mpv-full)\n'
+    else
+        printf '  mpv    : present (standard)\n'
+    fi
+else
+    printf '  mpv    : MISSING\n'
+fi
 printf '  yt-dlp : %s (%s)\n' "$(command -v yt-dlp >/dev/null && echo present || echo MISSING)" "$(yt-dlp --version 2>/dev/null || echo '?')"
 printf '  cava   : %s\n' "$(command -v cava >/dev/null && echo present || echo MISSING)"
 printf '  mpd    : %s\n' "$(systemctl --user is-active mpd.service 2>/dev/null || echo inactive)"
