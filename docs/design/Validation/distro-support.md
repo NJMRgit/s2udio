@@ -389,6 +389,33 @@ per-gate JSON + gates.jsonl) live in `scripts/dev/artifacts/<key>/<ts>/`
    gate-tested (G11). runit/s6/openrc/sysvinit backends are stubbed and
    land with Phase 3 (Alpine → Void → Artix).
 
+### Phase 4 (part 1) — setup.sh dispatcher (2026-08-09)
+
+`setup.sh` refactored into a distro dispatcher (plan §6.2): detects via
+`/etc/os-release` ID/ID_LIKE and routes to pacman (Arch/CachyOS/Artix —
+byte-for-byte identical output), dnf5 (Fedora, RPM Fusion free per §12.1),
+apt (Debian/Ubuntu/Devuan — system mpd stopped+disabled, user-level instance
+per §12.2, stale-yt-dlp pip hint per §12.7), apk (Alpine — cava from source
+per §12.5, upstream python mpDris2 per §12.6), xbps (Void — mpd `setcap -r`
+per §12.8) and nix (nix profile install, flake.nix). Shared step functions
+(support scripts, config/theme seed, MPD fifo) stay shared; mpv-full stays
+Arch-only (other backends install plain mpv + informational note); service
+enable/start goes through `scripts/s2u-svc` (never raw `systemctl` outside
+the Arch path). Non-Arch backends auto-install rustup when the distro rustc
+is older than the 1.88 MSRV (Void's 1.97.1 skips it), create a user-level
+`~/.config/mpd/mpd.conf` when absent (confirm-gated), and fall back to a
+condition-free `mpDris2.service` user unit when the packaged Debian/Ubuntu
+unit's `ConditionUser=!@system` blocks a root run.
+
+Validation: `bash -n` clean; hermetic mocked matrix
+(`scripts/dev/test-setup-mock.py`, fake package managers + fake os-release)
+44/44 — backend detection, package names, Arch byte-identity (both -y and
+non-interactive no -y), no installs without -y non-interactively, unknown
+distro dies. Real in-container runs (`scripts/dev/test-setup-distro.sh`):
+fedora-41 / debian-12 / alpine-320 all green (G0 + S1–S8/S9 + G12; zero
+`s2u-distro-*` leftovers). The master-repo `setup.sh` sync is a separate
+host decision (NOT done here).
+
 ## 8. Phased roadmap
 
 - **Phase 0 — harness skeleton + proof of life.** `test-distro.sh` with
@@ -441,7 +468,11 @@ per-gate JSON + gates.jsonl) live in `scripts/dev/artifacts/<key>/<ts>/`
 - [ ] `scripts/dev/test-distro.sh` (+ `scripts/dev/containers/<key>/` per-target
       Dockerfiles/flake and the gate runner)
 - [ ] `scripts/s2u-svc` (init abstraction) + tracker/setup rewiring
-- [ ] `setup.sh` distro dispatcher + package-name maps
+- [x] `setup.sh` distro dispatcher + package-name maps (Phase 4, committed on `working`)
+  - per-backend package maps (§12) + shared step functions (scripts install, config/theme seed, MPD fifo)
+  - Arch/CachyOS/Artix path output byte-identical (hermetic mock matrix: `scripts/dev/test-setup-mock.py`)
+  - real in-container validation: fedora-41 (dnf5), debian-12 (apt), alpine-320 (apk) all green
+    (`scripts/dev/test-setup-distro.sh <key>`)
 - [ ] `flake.nix` + NixOS module + `nixosTest`
 - [ ] README install-matrix section
 - [ ] This plan updated with per-target results and timestamps
