@@ -115,7 +115,13 @@ gate_g1_install() {
     [[ -f "$HOME_DIR/.config/s2udio/config.ron" ]]  || missing+=(config.ron)
     [[ -f "$HOME_DIR/.config/s2udio/themes/default.ron" ]] || missing+=(theme)
     if [[ "$("$SVC_BIN" backend 2>/dev/null)" == "systemd-user" ]]; then
-        [[ -f "$HOME_DIR/.config/systemd/user/mpd.service" ]] || missing+=(user-mpd-unit)
+        # user-level mpd.service: setup.sh writes ~/.config/systemd/user/mpd.service
+        # only when the distro ships none — a packaged user unit (Fedora mpd
+        # ships /usr/lib/systemd/user/mpd.service) satisfies the same contract
+        if [[ ! -f "$HOME_DIR/.config/systemd/user/mpd.service" ]] \
+           && ! systemctl --user list-unit-files 2>/dev/null | grep -q '^mpd.service'; then
+            missing+=(user-mpd-unit)
+        fi
         [[ -f "$HOME_DIR/.config/systemd/user/mpDris2.service.d/s2udio.conf" ]] || missing+=(mpdris2-dropin)
     fi
     grep -q "mpd-cava.fifo" "$HOME_DIR/.config/mpd/mpd.conf" || missing+=(fifo-in-mpd.conf)
