@@ -110,7 +110,9 @@ fi
 SYSTEMD_ARGS=()
 [[ "$INIT_MODE" == "systemd" ]] && SYSTEMD_ARGS=(--systemd=always)
 info "creating container s2u-distro-$KEY (${INIT_MODE})"
-CID="$(podman run --rm -d --name "s2u-distro-$KEY" "${SYSTEMD_ARGS[@]}" "${VOL_ARGS[@]}" \
+# --shm-size=512m: Void's xbps needs more than the default 63M /dev/shm
+# ("Failed to initialize libxbps: No buffer space available")
+CID="$(podman run --rm -d --name "s2u-distro-$KEY" --shm-size=512m "${SYSTEMD_ARGS[@]}" "${VOL_ARGS[@]}" \
         "localhost/s2u-distro-$KEY:latest" $INIT)"
 info "container $CID"
 
@@ -142,11 +144,16 @@ ok "provision done"
 
 # ---- 5. build + unit tests -------------------------------------------------
 info "build: cargo build --release"
-podman exec "$CID" bash -lc 'cd /s2udio && export PATH="$HOME/.cargo/bin:$PATH" && cargo build --release 2>&1 | tail -5'
+if ! podman exec "$CID" bash -lc 'cd /s2udio && export PATH="$HOME/.cargo/bin:$PATH" && cargo build --release 2>&1 | tail -6'; then
+    die "cargo build --release failed (see run.log)"
+fi
+podman exec "$CID" test -x /s2udio/target/release/s2u || die "cargo build claimed success but target/release/s2u is missing"
 ok "build done"
 
 info "unit tests: cargo test --release"
-podman exec "$CID" bash -lc 'cd /s2udio && export PATH="$HOME/.cargo/bin:$PATH" && cargo test --release 2>&1 | tail -8'
+if ! podman exec "$CID" bash -lc 'cd /s2udio && export PATH="$HOME/.cargo/bin:$PATH" && cargo test --release 2>&1 | tail -8'; then
+    die "cargo test --release failed (see run.log)"
+fi
 ok "tests done"
 
 # ---- 6. deploy (scripts, config/theme, services through s2u-svc) ----------

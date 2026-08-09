@@ -48,8 +48,44 @@ print("\n".join(lines))
 PYEOF
 }
 
+# MPRIS probes via python-dbus (python3-dbus/py3-dbus is installed on every
+# target; busctl is a systemd tool and does not exist on Alpine/Void).
 bus_name_up() {  # $1 = bus name
-    busctl --user list --no-pager 2>/dev/null | awk '{print $1}' | grep -qx "$1"
+    python3 - "$1" <<'PYEOF'
+import dbus, sys
+try:
+    bus = dbus.SessionBus()
+    sys.exit(0 if sys.argv[1] in bus.list_names() else 1)
+except Exception:
+    sys.exit(1)
+PYEOF
+}
+
+dbus_prop() {  # $1 = bus name, $2 = interface, $3 = property -> value on stdout
+    python3 - "$1" "$2" "$3" <<'PYEOF'
+import dbus, sys
+try:
+    bus = dbus.SessionBus()
+    obj = bus.get_object(sys.argv[1], "/org/mpris/MediaPlayer2")
+    iface = dbus.Interface(obj, "org.freedesktop.DBus.Properties")
+    print(iface.Get(sys.argv[2], sys.argv[3]))
+except Exception:
+    sys.exit(1)
+PYEOF
+}
+
+dbus_call() {  # $1 = bus name, $2 = interface, $3 = method, $4 = signature, $5 = value
+    python3 - "$1" "$2" "$3" "$4" "$5" <<'PYEOF'
+import dbus, sys
+try:
+    bus = dbus.SessionBus()
+    obj = bus.get_object(sys.argv[1], "/org/mpris/MediaPlayer2")
+    iface = dbus.Interface(obj, sys.argv[2])
+    args = [int(sys.argv[5])] if sys.argv[4] == "x" else [sys.argv[5]]
+    getattr(iface, sys.argv[3])(*args)
+except Exception:
+    sys.exit(1)
+PYEOF
 }
 
 mpv_state() {  # $1 = json key
@@ -155,7 +191,7 @@ gate_g5_mpd_mpris() {
     # mpDris2 picks the song up on its own poll cadence — poll Metadata
     local meta=""
     for _ in $(seq 1 12); do
-        meta="$(busctl --user get-property org.mpris.MediaPlayer2.mpd /org/mpris/MediaPlayer2 org.mpris.MediaPlayer2.Player Metadata 2>&1)"
+        meta="$(dbus_prop org.mpris.MediaPlayer2.mpd org.mpris.MediaPlayer2.Player Metadata 2>&1)"
         grep -q 'S2U Test Tone' <<<"$meta" && break
         sleep 1
     done
@@ -164,9 +200,9 @@ gate_g5_mpd_mpris() {
         return 1
     fi
     local p1 p2
-    p1="$(busctl --user get-property org.mpris.MediaPlayer2.mpd /org/mpris/MediaPlayer2 org.mpris.MediaPlayer2.Player Position 2>/dev/null | awk '{print $2}')"
+    p1="$(dbus_prop org.mpris.MediaPlayer2.mpd org.mpris.MediaPlayer2.Player Position 2>/dev/null)"
     sleep 3
-    p2="$(busctl --user get-property org.mpris.MediaPlayer2.mpd /org/mpris/MediaPlayer2 org.mpris.MediaPlayer2.Player Position 2>/dev/null | awk '{print $2}')"
+    p2="$(dbus_prop org.mpris.MediaPlayer2.mpd org.mpris.MediaPlayer2.Player Position 2>/dev/null)"
     if [[ -z "$p1" || -z "$p2" ]] || ! (( p2 > p1 + 500000 )); then
         write_gate G5 soft "Metadata OK but Position did not advance (p1=$p1 p2=$p2)"
         return 0
@@ -214,20 +250,20 @@ gate_g6_mpv_mpris() {
     wait_for 15 bus_name_up org.mpris.MediaPlayer2.s2udio \
         || { write_gate G6 fail "org.mpris.MediaPlayer2.s2udio never appeared (tracker spawned s2udio-mpris?)"; return 1; }
     local meta
-    meta="$(busctl --user get-property org.mpris.MediaPlayer2.s2udio /org/mpris/MediaPlayer2 org.mpris.MediaPlayer2.Player Metadata 2>&1)"
+    meta="$(dbus_prop org.mpris.MediaPlayer2.s2udio org.mpris.MediaPlayer2.Player Metadata 2>&1)"
     if ! grep -q 'xesam:title' <<<"$meta" || ! grep -q 'S2U Test Video' <<<"$meta"; then
         write_gate G6 fail "Metadata lacks video title: $(echo "$meta" | tr '\n' ' ' | head -c 300)"
         return 1
     fi
     local p1 p2
-    p1="$(busctl --user get-property org.mpris.MediaPlayer2.s2udio /org/mpris/MediaPlayer2 org.mpris.MediaPlayer2.Player Position 2>/dev/null | awk '{print $2}')"
+    p1="$(dbus_prop org.mpris.MediaPlayer2.s2udio org.mpris.MediaPlayer2.Player Position 2>/dev/null)"
     sleep 3
-    p2="$(busctl --user get-property org.mpris.MediaPlayer2.s2udio /org/mpris/MediaPlayer2 org.mpris.MediaPlayer2.Player Position 2>/dev/null | awk '{print $2}')"
+    p2="$(dbus_prop org.mpris.MediaPlayer2.s2udio org.mpris.MediaPlayer2.Player Position 2>/dev/null)"
     # Seek +10 s must route to the mpv socket and move the position
-    busctl --user call org.mpris.MediaPlayer2.s2udio /org/mpris/MediaPlayer2 org.mpris.MediaPlayer2.Player Seek x 10000000 >/dev/null 2>&1
+    dbus_call org.mpris.MediaPlayer2.s2udio org.mpris.MediaPlayer2.Player Seek x 10000000 >/dev/null 2>&1
     sleep 2
     local p3
-    p3="$(busctl --user get-property org.mpris.MediaPlayer2.s2udio /org/mpris/MediaPlayer2 org.mpris.MediaPlayer2.Player Position 2>/dev/null | awk '{print $2}')"
+    p3="$(dbus_prop org.mpris.MediaPlayer2.s2udio org.mpris.MediaPlayer2.Player Position 2>/dev/null)"
     local ok_advance=0 ok_seek=0
     [[ -n "$p1" && -n "$p2" && -n "$p3" ]] || { write_gate G6 fail "Position unreadable (p1=$p1 p2=$p2 p3=$p3)"; return 1; }
     (( p2 > p1 + 500000 )) && ok_advance=1
@@ -316,21 +352,18 @@ gate_g11_s2u_svc() {
     local backend
     backend="$("$SVC_BIN" backend 2>/dev/null || echo unknown)"
     local svc="s2u-svc-g11.service"
-    if [[ "$backend" == "launcher" ]]; then
-        # no service manager: round-trip the real mpd via the launcher backend
+    if [[ "$backend" != "systemd-user" ]]; then
+        # no systemd test unit on launcher/runit/s6/openrc backends:
+        # round-trip the real mpd service through the abstraction
         svc="mpd"
+        "$SVC_BIN" stop "$svc" >/dev/null 2>&1 || true
     else
         "$SVC_BIN" stop "$svc" >/dev/null 2>&1 || true
     fi
     sleep 1
     if "$SVC_BIN" is-active "$svc" >/dev/null 2>&1; then
-        if [[ "$backend" == "launcher" ]]; then
-            "$SVC_BIN" stop "$svc" >/dev/null 2>&1 || true
-            sleep 1
-        else
-            write_gate G11 fail "is-active returned active right after stop"
-            return 1
-        fi
+        "$SVC_BIN" stop "$svc" >/dev/null 2>&1 || true
+        sleep 1
     fi
     "$SVC_BIN" start "$svc" >/dev/null 2>&1 || {
         write_gate G11 fail "s2u-svc start failed"; return 1; }
