@@ -136,6 +136,17 @@ if [[ "$KEY" == "alpine-320" ]]; then
     ok "alpine: provision-built cava + mpDris2 removed (forcing source build + upstream fetch)"
 fi
 
+# ---- 4c. arch: seed the minimal user mpd.conf run_arch expects ----
+# run_arch appends the fifo to an EXISTING ~/.config/mpd/mpd.conf and warns
+# ("no MPD config at ...") when there is none — a fresh Arch host has no user
+# config; same assumption the mock's arch fixture homes make (the no-config
+# warn path stays covered by the mock). Music dir seeded so mpd's first start
+# has a library root.
+if [[ "$KEY" == "arch" ]]; then
+    podman exec "$CID" bash -c 'mkdir -p /root/.config/mpd /root/.cache/mpd/playlists /root/Music && printf "%s\n" "music_directory \"/root/Music\"" "bind_to_address \"127.0.0.1\"" "port \"6600\"" "db_file \"/root/.cache/mpd/database\"" "state_file \"/root/.cache/mpd/state\"" "sticker_file \"/root/.cache/mpd/sticker.sql\"" "playlist_directory \"/root/.cache/mpd/playlists\"" "follow_outside_symlinks \"yes\"" "follow_inside_symlinks \"yes\"" "auto_update \"yes\"" > /root/.config/mpd/mpd.conf'
+    ok "arch: seeded minimal user mpd.conf (run_arch fifo-append target; mock-matching assumption)"
+fi
+
 # ---- 5+6. user session + run setup.sh -y (same exec: the session env must
 # reach setup.sh so s2u-svc detects the systemd-user backend; harness pattern
 # from test-distro.sh deploy.sh) ----
@@ -162,12 +173,32 @@ case "$KEY" in
     *)
         run_check S1 'test -x /root/.local/bin/s2udio && /root/.local/bin/s2udio version >/dev/null' ;;
 esac
-run_check S2 'test -x /root/.local/bin/rmpc-fetch-lyrics && test -x /root/.local/bin/s2u-mpv-tracker && test -x /root/.local/bin/s2u-mpdris2 && test -x /root/.local/bin/s2u-svc && test -f /root/.config/mpv/scripts/mpvSockets.lua'
-run_check S3 'grep -q "mpd-cava.fifo" /root/.config/mpd/mpd.conf'
-run_check S4 'command -v mpv >/dev/null && command -v yt-dlp >/dev/null && command -v cava >/dev/null && command -v mpd >/dev/null'
-run_check S5 '/root/.local/bin/s2u-svc is-active mpd'
-run_check S6 '/root/.local/bin/s2u-svc is-active mpDris2'
-run_check S7 'test -f /root/.config/s2udio/config.ron && test -f /root/.config/s2udio/themes/default.ron'
+# S2..S7: per-key variants — every target shares the common checks except
+# arch (plan distro-support-followups.md T6b): run_arch never installed
+# s2u-svc (it drives systemctl --user directly) and mpdris2-git + mpv-full
+# are AUR-only, so S4 covers the pacman-installed system packages
+# (mpd/yt-dlp/cava — mpv EXPECTED absent: mpv-full is AUR-only and the AUR
+# branch stays mock/AUR-covered), S5 checks the user mpd.service directly,
+# and S6 asserts the mpDris2 drop-in was written for the (deferred) AUR
+# package while no mpdris2 unit exists yet.
+case "$KEY" in
+    arch)
+        run_check S2 'test -x /root/.local/bin/rmpc-fetch-lyrics && test -x /root/.local/bin/s2u-mpv-tracker && test -x /root/.local/bin/s2u-mpdris2 && test -f /root/.config/mpv/scripts/mpvSockets.lua'
+        run_check S3 'grep -q "mpd-cava.fifo" /root/.config/mpd/mpd.conf'
+        run_check S4 'command -v yt-dlp >/dev/null && command -v cava >/dev/null && command -v mpd >/dev/null'
+        run_check S5 'systemctl --user is-active mpd.service'
+        run_check S6 'test -f /root/.config/systemd/user/mpDris2.service.d/s2udio.conf && grep -q "s2u-mpdris2" /root/.config/systemd/user/mpDris2.service.d/s2udio.conf && ! systemctl --user list-unit-files | grep -qi mpdris2'
+        run_check S7 'test -f /root/.config/s2udio/config.ron && test -f /root/.config/s2udio/themes/default.ron'
+        ;;
+    *)
+        run_check S2 'test -x /root/.local/bin/rmpc-fetch-lyrics && test -x /root/.local/bin/s2u-mpv-tracker && test -x /root/.local/bin/s2u-mpdris2 && test -x /root/.local/bin/s2u-svc && test -f /root/.config/mpv/scripts/mpvSockets.lua'
+        run_check S3 'grep -q "mpd-cava.fifo" /root/.config/mpd/mpd.conf'
+        run_check S4 'command -v mpv >/dev/null && command -v yt-dlp >/dev/null && command -v cava >/dev/null && command -v mpd >/dev/null'
+        run_check S5 '/root/.local/bin/s2u-svc is-active mpd'
+        run_check S6 '/root/.local/bin/s2u-svc is-active mpDris2'
+        run_check S7 'test -f /root/.config/s2udio/config.ron && test -f /root/.config/s2udio/themes/default.ron'
+        ;;
+esac
 case "$KEY" in
     debian-12|ubuntu-2404)
         run_check S8 '! systemctl is-active mpd.service >/dev/null 2>&1'   # system mpd stopped
@@ -178,8 +209,36 @@ case "$KEY" in
         run_check S8 'head -1 /usr/bin/mpDris2 2>/dev/null | grep -q python' ;;  # upstream python source (plan §5/§12.6)
     void-glibc)
         run_check S8 'test -x /root/.config/runit/mpd/run && test -x /root/.config/runit/mpDris2/run' ;;
+    arch)
+        run_check S9 'test -p /tmp/mpd-cava.fifo'   # running user mpd created the cava fifo
+        # S8 (host-side): the run log must show the REAL pacman install with
+        # the fixed yt-dlp name (T6a, dc96a4d) + the no-AUR-helper warn
+        # paths, and mpv must be absent (mpv-full AUR-only, deferred).
+        if grep -q 'installed: mpd ffmpeg cava yt-dlp' "$RUN_LOG" \
+           && grep -q 'no AUR helper (yay/paru) found - install manually: mpdris2-git' "$RUN_LOG" \
+           && grep -q 'mpv-full not in your distro repos' "$RUN_LOG" \
+           && grep -q 'mpDris2.service not found - install mpdris2-git and enable it' "$RUN_LOG" \
+           && ! podman exec "$CID" test -x /usr/bin/mpv 2>/dev/null; then
+            write_gate S8 pass "run log: pacman install (mpd ffmpeg cava yt-dlp) + no-AUR-helper warns (mpdris2-git, mpv-full); mpv absent (AUR deferred)"
+        else
+            write_gate S8 fail "run log missing pacman install / no-AUR-helper warn paths, or mpv unexpectedly present (see run.log)"
+        fi
+        ;;
 esac
 
+# ---- 7b/7c. FULL feature gate loop G1..G11 — skipped for targets whose
+# gate loop needs packages setup.sh cannot install. arch (T6b): G1 requires
+# s2u-svc + mpDris2 + mpv, G4/G5 the mpDris2 MPRIS bridge, G8/G10 mpv —
+# all AUR-only on stock Arch (mpdris2-git, mpv-full) with no AUR helper in
+# the container; the AUR branch is explicitly deferred to the hermetic mock
+# (scripts/dev/test-setup-mock.py). The arch end-state (detection + real
+# pacman install + build + scripts + systemd-user services + fifo) is
+# asserted by the S1..S9 checks above.
+RUN_FEATURE_GATES=1
+case "$KEY" in
+    arch) RUN_FEATURE_GATES=0 ;;
+esac
+if [[ $RUN_FEATURE_GATES -eq 1 ]]; then
 # ---- 7b. gate-prep: fixtures the G1..G11 gates need, mirroring the harness
 # deploy path (deploy-common.sh media/cava glue — NOT its unit/drop-in
 # parts, which setup.sh owns). Two deltas vs the deploy path, both because
@@ -300,6 +359,9 @@ if [[ ${#GATE_FILTER[@]} -gt 0 ]]; then
 fi
 info "feature gates: ${GATE_FILTER[*]:-G1..G11} via run-gates.sh"
 podman exec "$CID" bash /s2udio/scripts/dev/gates/run-gates.sh "$KEY" "${GATE_ARGS[@]}"
+else
+    info "feature gates skipped for $KEY (AUR-only deps deferred to the mock — plan distro-support-followups.md T6b)"
+fi
 
 # ---- 8. debug dump (service states + journal; helps diagnose S5/S6) ----
 podman exec "$CID" bash -lc 'source /s2udio/scripts/dev/lib.sh; start_user_session >/dev/null 2>&1;     echo "== systemctl --user status mpd mpDris2 =="; systemctl --user status mpd.service --no-pager -l 2>&1 | head -12;     echo; systemctl --user status mpDris2.service --no-pager -l 2>&1 | head -12;     echo "== journal (mpDris2) =="; journalctl --user -u mpDris2.service --no-pager -n 15 2>&1 | tail -15;     echo "== journal (mpd) =="; journalctl --user -u mpd.service --no-pager -n 6 2>&1 | tail -6' > "$ART_DIR/service-debug.txt" 2>&1 || true
