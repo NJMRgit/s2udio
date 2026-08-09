@@ -467,8 +467,8 @@ run_arch() {
         if command -v "$h" >/dev/null 2>&1; then AUR_HELPER="$h"; break; fi
     done
     # ---------------------------------------------------------------------------
-    info "1/9  System packages (mpd ffmpeg cava python-yt-dlp)"
-    PACMAN_PKGS=(mpd ffmpeg cava python-yt-dlp)
+    info "1/9  System packages (mpd ffmpeg cava yt-dlp)"
+    PACMAN_PKGS=(mpd ffmpeg cava yt-dlp)
     MISSING=()
     for p in "${PACMAN_PKGS[@]}"; do
         pacman -Q "$p" >/dev/null 2>&1 || MISSING+=("$p")
@@ -564,7 +564,7 @@ run_arch() {
     build_binary "install rustup/rust first (sudo pacman -S rust)"
 
     # ---------------------------------------------------------------------------
-    ytdlp_step "keep yt-dlp current (pacman -Syu) and consider a logged-in browser profile in" "" "install python-yt-dlp (sudo pacman -S python-yt-dlp)"
+    ytdlp_step "keep yt-dlp current (pacman -Syu) and consider a logged-in browser profile in" "" "install yt-dlp (sudo pacman -S yt-dlp)"
 
     # ---------------------------------------------------------------------------
     install_support_scripts

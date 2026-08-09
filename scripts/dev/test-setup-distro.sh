@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# test-setup-distro.sh <matrix-key> [--no-cache-vol] [--artifacts DIR]
+# test-setup-distro.sh <matrix-key> [--no-cache-vol] [--artifacts DIR] [--gate Gx]
 #
 # Real in-container validation of the NEW setup.sh distro dispatcher (plan
 # docs/design/Validation/distro-support.md §6.2): run `setup.sh -y` inside the
@@ -8,7 +8,15 @@
 # deltas). Same ephemerality discipline as test-distro.sh (--rm, EXIT trap,
 # start-of-run sweep, end-of-run G12 assertion).
 #
-# Usage: scripts/dev/test-setup-distro.sh <key> [--no-sudo] [--no-cache-vol] [--artifacts DIR]
+# T5 (distro-support follow-ups): after the end-state checks the driver runs a
+# gate-prep step (harness test tooling + ffmpeg test media in the configured
+# music_directory with ~/media symlinked to it + cava config + the s2u-svc G11
+# round-trip unit, deploy-common.sh media/cava glue — NOT its unit/drop-in
+# parts, which setup.sh owns) and then the FULL feature gate loop G1..G11 via
+# scripts/dev/gates/run-gates.sh inside the setup.sh-provisioned container
+# (plan distro-support-followups.md T5).
+#
+# Usage: scripts/dev/test-setup-distro.sh <key> [--no-sudo] [--no-cache-vol] [--artifacts DIR] [--gate Gx ...]
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -23,10 +31,12 @@ shift
 NO_CACHE_VOL=0
 ART_DIR_OVERRIDE=""
 NO_SUDO_SHIM=0
+GATE_FILTER=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --no-cache-vol) NO_CACHE_VOL=1; shift ;;
         --no-sudo) NO_SUDO_SHIM=1; shift ;;
+        --gate) GATE_FILTER+=("$2"); shift 2 ;;
         --artifacts) ART_DIR_OVERRIDE="$2"; shift 2 ;;
         *) die "unknown argument: $1" ;;
     esac
@@ -170,16 +180,145 @@ case "$KEY" in
         run_check S8 'test -x /root/.config/runit/mpd/run && test -x /root/.config/runit/mpDris2/run' ;;
 esac
 
+# ---- 7b. gate-prep: fixtures the G1..G11 gates need, mirroring the harness
+# deploy path (deploy-common.sh media/cava glue — NOT its unit/drop-in
+# parts, which setup.sh owns). Two deltas vs the deploy path, both because
+# THIS container was provisioned by setup.sh:
+#   * harness-only test tooling (tmux for G10, procps-ng for pgrep/pkill in
+#     G4/G6/G8/G10, ncurses-term for the xterm-256color TERM) is installed
+#     here — they are NOT s2udio runtime deps, so setup.sh does not install
+#     them (the old harness provision.sh did);
+#   * the test media goes into the music_directory setup.sh configured
+#     (~/Music by default) and ~/media is a symlink to it (G8 hardcodes
+#     /root/media/test.mp4). MPD is NOT restarted — restarting it drops the
+#     mpDris2 bridge (official mpDris2 exits on MPD disconnect and systemd
+#     sees a clean exit, so Restart=on-failure does not bring it back).
+info "gate-prep: harness tooling + test media + cava config + G11 unit"
+if podman exec "$CID" bash -lc '
+set -euo pipefail
+source /s2udio/scripts/dev/lib.sh
+start_user_session >/dev/null 2>&1
+# harness-only test tooling (not s2udio runtime deps)
+if ! command -v tmux >/dev/null 2>&1 || ! command -v pgrep >/dev/null 2>&1; then
+    # shellcheck disable=SC1091
+    . /etc/os-release
+    case "${ID:-} ${ID_LIKE:-}" in
+        *fedora*)  dnf5 install -y --nogpgcheck tmux ncurses-term procps-ng >/dev/null ;;
+        *debian*|*ubuntu*) apt-get update -qq >/dev/null 2>&1 || true; apt-get install -y --no-install-recommends tmux procps ncurses-term >/dev/null ;;
+        *alpine*)  apk add --no-cache tmux procps ncurses-terminfo-base >/dev/null ;;
+        *void*)    xbps-install -y tmux procps-ng ncurses-term >/dev/null ;;
+        *nixos*)   nix profile install nixpkgs#tmux nixpkgs#procps nixpkgs#ncurses >/dev/null ;;
+    esac
+fi
+# test media inside the music_directory setup.sh configured (G5 adds
+# test.mp3 relative to it); ~/media -> that dir for G8s hardcoded path
+MUSIC_DIR="$(sed -n "s/^music_directory \"\(.*\)\"/\1/p" "$HOME/.config/mpd/mpd.conf" 2>/dev/null | head -1)"
+MUSIC_DIR="${MUSIC_DIR:-$HOME/Music}"
+mkdir -p "$MUSIC_DIR" "$HOME/.config/cava" "$HOME/.config/systemd/user"
+if [[ ! -f "$MUSIC_DIR/test.mp3" ]]; then
+    ffmpeg -hide_banner -loglevel error -y -f lavfi -i "sine=frequency=440:duration=30" \
+        -c:a libmp3lame -metadata title="S2U Test Tone" -metadata artist="S2U Harness" \
+        "$MUSIC_DIR/test.mp3" || \
+    ffmpeg -hide_banner -loglevel error -y -f lavfi -i "sine=frequency=440:duration=30" \
+        -c:a mp2 -metadata title="S2U Test Tone" -metadata artist="S2U Harness" \
+        "$MUSIC_DIR/test.mp3"
+fi
+if [[ ! -f "$MUSIC_DIR/test.mp4" ]]; then
+    ffmpeg -hide_banner -loglevel error -y \
+        -f lavfi -i "testsrc=duration=30:size=320x240:rate=15" \
+        -f lavfi -i "sine=frequency=440:duration=30" \
+        -c:v libx264 -pix_fmt yuv420p -c:a aac -shortest \
+        -metadata title="S2U Test Video" -metadata artist="S2U Harness" \
+        "$MUSIC_DIR/test.mp4" || \
+    ffmpeg -hide_banner -loglevel error -y \
+        -f lavfi -i "testsrc=duration=30:size=320x240:rate=15" \
+        -f lavfi -i "sine=frequency=440:duration=30" \
+        -c:v mpeg4 -c:a mp2 -shortest \
+        -metadata title="S2U Test Video" -metadata artist="S2U Harness" \
+        "$MUSIC_DIR/test.mp4"
+fi
+[[ -e "$HOME/media" ]] || ln -s "$MUSIC_DIR" "$HOME/media"
+cat > "$HOME/.config/cava/config" <<EOF
+[general]
+bars = 24
+[input]
+method = fifo
+source = /tmp/mpd-cava.fifo
+sample_rate = 44100
+sample_bits = 16
+channels = 2
+[output]
+method = raw
+EOF
+# G11 round-trips s2u-svc on a dedicated unit for systemd-user targets
+# (setup.sh does not create it; deploy-common.sh does)
+cat > "$HOME/.config/systemd/user/s2u-svc-g11.service" <<EOF
+[Unit]
+Description=s2u-svc round-trip test unit
+[Service]
+ExecStart=/bin/sleep 300
+[Install]
+WantedBy=default.target
+EOF
+systemctl --user daemon-reload >/dev/null 2>&1 || true
+# NO mpd restart (see above): trigger a database scan so G5 add test.mp3
+# resolves, then confirm the cava fifo is still there
+python3 - <<PYEOF
+import socket, time
+for _ in range(30):
+    try:
+        socket.create_connection(("127.0.0.1", 6600), timeout=2).close()
+        break
+    except OSError:
+        time.sleep(1)
+else:
+    raise SystemExit("mpd not reachable")
+s = socket.create_connection(("127.0.0.1", 6600), timeout=5)
+f = s.makefile("rwb")
+while True:
+    line = f.readline()
+    if not line or line.startswith(b"OK"):
+        break
+f.write(b"update\n"); f.flush()
+s.close()
+time.sleep(3)
+PYEOF
+for _ in $(seq 1 30); do [[ -p /tmp/mpd-cava.fifo ]] && break; sleep 0.5; done
+ls -la "$MUSIC_DIR" "$HOME/media"
+'; then
+    ok "gate-prep done (tooling + media + cava config + G11 unit)"
+else
+    die "gate-prep FAILED (see run.log)"
+fi
+
+# ---- 7c. FULL feature gate loop G1..G11 in the setup.sh-provisioned
+# container (run-gates.sh writes per-gate JSON + gates.jsonl into
+# /s2udio/artifacts, collected at step 9) ----
+GATE_ARGS=()
+if [[ ${#GATE_FILTER[@]} -gt 0 ]]; then
+    for g in "${GATE_FILTER[@]}"; do GATE_ARGS+=(--gate "$g"); done
+fi
+info "feature gates: ${GATE_FILTER[*]:-G1..G11} via run-gates.sh"
+podman exec "$CID" bash /s2udio/scripts/dev/gates/run-gates.sh "$KEY" "${GATE_ARGS[@]}"
+
 # ---- 8. debug dump (service states + journal; helps diagnose S5/S6) ----
 podman exec "$CID" bash -lc 'source /s2udio/scripts/dev/lib.sh; start_user_session >/dev/null 2>&1;     echo "== systemctl --user status mpd mpDris2 =="; systemctl --user status mpd.service --no-pager -l 2>&1 | head -12;     echo; systemctl --user status mpDris2.service --no-pager -l 2>&1 | head -12;     echo "== journal (mpDris2) =="; journalctl --user -u mpDris2.service --no-pager -n 15 2>&1 | tail -15;     echo "== journal (mpd) =="; journalctl --user -u mpd.service --no-pager -n 6 2>&1 | tail -6' > "$ART_DIR/service-debug.txt" 2>&1 || true
 
 # ---- 9. artifacts + teardown ----
-podman cp "$CID:/s2udio/artifacts/." "$ART_DIR/" >/dev/null 2>&1 || true
+cp "$ART_DIR/gates.jsonl" "$ART_DIR/gates-driver.jsonl" 2>/dev/null || true   # G0 + S1..S9 pre-collection snapshot
+podman cp "$CID:/s2udio/artifacts/." "$ART_DIR/" >/dev/null 2>&1 || true     # in-container G1..G11 (run-gates.sh)
+if [[ -s "$ART_DIR/gates-driver.jsonl" && -s "$ART_DIR/gates.jsonl" ]]; then
+    # the in-container gates.jsonl (G1..G11) overwrote the driver file during
+    # collection — merge the driver-side lines (G0 + S1..S9) back in
+    awk -F'\t' 'NR==FNR{have[$1]=1; next} !($1 in have){print}' \
+        "$ART_DIR/gates.jsonl" "$ART_DIR/gates-driver.jsonl" >> "$ART_DIR/gates.jsonl"
+fi
+rm -f "$ART_DIR/gates-driver.jsonl"
 info "teardown"
 podman rm -f "$CID" >/dev/null 2>&1 || true
 CID=""
 info "summary:"
 if [[ -f "$ART_DIR/gates.jsonl" ]]; then
-    awk -F'\t' '{printf "  %-4s %-5s %s\n", $1, $2, $4}' "$ART_DIR/gates.jsonl"
+    sort -V -k1,1 "$ART_DIR/gates.jsonl" | awk -F'\t' '{printf "  %-4s %-5s %s\n", $1, $2, $4}'
 fi
 info "setup-$KEY validation complete — artifacts in $ART_DIR (G12 asserted by the EXIT trap)"
