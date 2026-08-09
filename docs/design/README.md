@@ -54,7 +54,8 @@ docs/design/
 │   ├── search-tab.md             ← Search
 │   └── settings.md               ← Settings panel
 ├── Validation/                   ← validation plans (run per subsystem round)
-│   └── mpris-validation.md       ← MPRIS & art: timeline/art/track-info across every source
+│   ├── mpris-validation.md       ← MPRIS & art: timeline/art/track-info across every source
+│   └── distro-support.md         ← distro support: podman test harness, target matrix, gates, roadmap
 └── Sessions/                     ← session work logs (one file per session)
     └── 2026-08-05.md             ← the session log (create/maintain per HANDOFF)
 ```

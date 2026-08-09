@@ -1,0 +1,181 @@
+#!/usr/bin/env bash
+# s2u-svc <start|stop|restart|enable|is-active|backend> <svc> [--user]
+#
+# Service-manager abstraction for s2udio (plan docs/design/Validation/
+# distro-support.md §6.1). Setup, the tracker and docs call this instead of
+# hardcoding `systemctl --user`. Backends:
+#
+#   systemd-user   systemctl --user works        -> systemctl --user …
+#   runit-user     runsvdir + ~/.config/runit    -> sv start/stop/restart/status
+#   s6-user        s6-svscan + ~/.config/s6      -> s6-svc -u/-d/-r
+#   openrc         /sbin/openrc-run              -> rc-service … (root-level)
+#   sysvinit       /etc/init.d/<svc>             -> service … start|stop
+#   launcher       anything else                 -> plain user processes
+#                                                  (mpd / s2u-mpdris2 shim),
+#                                                  pidfiles under
+#                                                  ~/.cache/s2udio/svc/
+#
+# v1 (Phase 1): systemd-user + plain-launcher are implemented and tested
+# (gate G11). runit-user / s6-user / openrc / sysvinit backends land with
+# the Phase 3 non-systemd workstream.
+#
+# `svc` may be given with or without the .service/.run suffix (mpd,
+# mpDris2.service, …). Exit status mirrors systemctl: 0 = active/ok.
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+detect_backend() {
+    # systemd-user: the user manager answers
+    if systemctl --user is-system-running >/dev/null 2>&1; then
+        echo systemd-user; return
+    fi
+    # runit-user: per-user runsvdir under ~/.config/runit
+    if command -v runsvdir >/dev/null 2>&1 \
+       && [[ -d "$HOME/.config/runit" || -d "$HOME/service" ]]; then
+        echo runit-user; return
+    fi
+    # s6-user: per-user s6-svscan under ~/.config/s6
+    if command -v s6-svscan >/dev/null 2>&1 \
+       && [[ -d "$HOME/.config/s6" ]]; then
+        echo s6-user; return
+    fi
+    # openrc
+    if command -v rc-service >/dev/null 2>&1 && [[ -e /sbin/openrc-run || -e /usr/sbin/openrc-run ]]; then
+        echo openrc; return
+    fi
+    # sysvinit
+    if [[ -d /etc/init.d ]]; then
+        echo sysvinit; return
+    fi
+    echo launcher
+}
+
+CMD="${1:-}"
+[[ -n "$CMD" ]] || {
+    echo "usage: s2u-svc <start|stop|restart|enable|is-active|backend> <svc> [--user]" >&2
+    exit 64
+}
+if [[ "$CMD" == "backend" ]]; then
+    detect_backend
+    exit 0
+fi
+
+SVC_RAW="${2:-}"
+[[ -n "$SVC_RAW" ]] || {
+    echo "usage: s2u-svc <start|stop|restart|enable|is-active|backend> <svc> [--user]" >&2
+    exit 64
+}
+shift 2
+USER_FLAG=0
+[[ "${1:-}" == "--user" ]] && { USER_FLAG=1; shift; }
+
+# normalize: mpDris2 -> mpDris2.service, mpd -> mpd.service, ...
+case "$SVC_RAW" in
+    *.service|*.run) SVC="$SVC_RAW" ;;
+    *) SVC="$SVC_RAW.service" ;;
+esac
+# systemd unit names are case-sensitive: mpDris2.service keeps its capital D
+BASE="${SVC%.service}"
+
+BACKEND="$(detect_backend)"
+
+# ---------------------------------------------------------------------------
+# plain-launcher backend: mpd + the s2u-mpdris2 shim as user processes,
+# pidfiles under ~/.cache/s2udio/svc/ (plan §6.1).
+LAUNCH_DIR="$HOME/.cache/s2udio/svc"
+launcher_pidfile() { printf '%s' "$LAUNCH_DIR/$BASE.pid"; }
+
+launcher_start() {
+    mkdir -p "$LAUNCH_DIR"
+    local pidfile; pidfile="$(launcher_pidfile)"
+    if [[ -f "$pidfile" ]] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then
+        echo "s2u-svc: $SVC already running (pid $(cat "$pidfile"))"; return 0
+    fi
+    case "$BASE" in
+        mpd)
+            setsid /usr/bin/mpd --no-daemon "${MPD_CONF:-$HOME/.config/mpd/mpd.conf}" \
+                >"$LAUNCH_DIR/mpd.log" 2>&1 &
+            echo $! > "$pidfile" ;;
+        mpDris2)
+            setsid "$HOME/.local/bin/s2u-mpdris2" --use-journal \
+                >"$LAUNCH_DIR/mpDris2.log" 2>&1 &
+            echo $! > "$pidfile" ;;
+        *)
+            echo "s2u-svc: launcher backend has no start recipe for $SVC" >&2; return 1 ;;
+    esac
+    echo "s2u-svc: started $BASE (launcher)"
+}
+
+launcher_stop() {
+    local pidfile; pidfile="$(launcher_pidfile)"
+    if [[ -f "$pidfile" ]]; then
+        local pid; pid="$(cat "$pidfile")"
+        kill "$pid" 2>/dev/null || true
+        for _ in $(seq 1 20); do kill -0 "$pid" 2>/dev/null || break; sleep 0.2; done
+        kill -9 "$pid" 2>/dev/null || true
+        rm -f "$pidfile"
+        echo "s2u-svc: stopped $BASE (launcher)"
+    else
+        echo "s2u-svc: $BASE not running (launcher)"
+    fi
+}
+
+launcher_is_active() {
+    local pidfile; pidfile="$(launcher_pidfile)"
+    [[ -f "$pidfile" ]] && kill -0 "$(cat "$pidfile")" 2>/dev/null
+}
+
+# ---------------------------------------------------------------------------
+case "$BACKEND" in
+    systemd-user)
+        case "$CMD" in
+            is-active) systemctl --user is-active "$SVC" ;;
+            *) systemctl --user "$CMD" "$SVC" ;;
+        esac
+        ;;
+    runit-user)
+        case "$CMD" in
+            start)  sv start "$BASE" ;;
+            stop)   sv stop "$BASE" ;;
+            restart) sv restart "$BASE" ;;
+            enable) echo "s2u-svc: runit-user enable = add service dir under ~/.config/runit (P3)" ;;
+            is-active) sv status "$BASE" >/dev/null 2>&1 ;;
+        esac
+        ;;
+    s6-user)
+        case "$CMD" in
+            start)  s6-svc -u "$BASE" ;;
+            stop)   s6-svc -d "$BASE" ;;
+            restart) s6-svc -r "$BASE" ;;
+            enable) echo "s2u-svc: s6-user enable = add service dir under ~/.config/s6 (P3)" ;;
+            is-active) s6-svstat "$BASE" >/dev/null 2>&1 ;;
+        esac
+        ;;
+    openrc)
+        case "$CMD" in
+            start) rc-service "$BASE" start ;;
+            stop)  rc-service "$BASE" stop ;;
+            restart) rc-service "$BASE" restart ;;
+            enable) rc-update add "$BASE" default ;;
+            is-active) rc-service "$BASE" status >/dev/null 2>&1 ;;
+        esac
+        ;;
+    sysvinit)
+        case "$CMD" in
+            start) service "$BASE" start ;;
+            stop)  service "$BASE" stop ;;
+            restart) service "$BASE" restart ;;
+            enable) update-rc.d "$BASE" defaults ;;
+            is-active) service "$BASE" status >/dev/null 2>&1 ;;
+        esac
+        ;;
+    launcher)
+        case "$CMD" in
+            start) launcher_start ;;
+            stop)  launcher_stop ;;
+            restart) launcher_stop; launcher_start ;;
+            enable) echo "s2u-svc: launcher backend — no enable needed (start at session init)" ;;
+            is-active) launcher_is_active ;;
+        esac
+        ;;
+esac
