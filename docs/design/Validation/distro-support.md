@@ -285,6 +285,52 @@ Artifacts: per-gate JSON + logs →
 `scripts/dev/artifacts/<key>/<timestamp>/` (host-side; containers never
 carry state between runs).
 
+### Phase 2 — Nix (2026-08-09)
+
+`flake.nix` (package + devShell + bridgePython package) + the `nix` matrix
+key (`ghcr.io/nixos/nix`, plain mode): **all 12 gates green** (run
+`artifacts/nix/20260809T161746Z`). Notes:
+
+- The nix build sandbox lacks network/HOME for a subset of the 1282 tests
+  → `doCheck = false` on the package (the full suite runs in the harness
+  containers G3 and in `nix develop`).
+- nixpkgs ships **mpDris2 as a compiled ELF** — the s2u-mpdris2 shim
+  patches python source, so per plan §5's decision point the nix target
+  installs the **upstream python mpDris2** (eonpatapon/mpDris2) at
+  `/usr/bin/mpDris2` (+ `python-mpd2` in bridgePython).
+- Services run through the **plain-launcher** backend (no systemd in the
+  ghcr.io/nixos/nix container) — G4/G5/G6/G11 green on it.
+- **NixOS module + nixosTest VM: OUT OF CONTAINER** (a real boot + systemd
+  user session is required; a VM, not a container — documented here, not
+  attempted per §4.3/§10). Remaining work: the module flake +
+  `nixosTest` on a runner.
+
+### Phase 3 — non-systemd init (2026-08-09)
+
+| Target | Backend | Result | Artifacts |
+| --- | --- | --- | --- |
+| alpine-320 | OpenRC distro, **plain-launcher** (plan §6.1 sends OpenRC through the launcher) | **12/12 green** (G7 pass — yt-dlp 2024.12.03) | `artifacts/alpine-320/20260809T165644Z` |
+| void-glibc | **runit-user** (`runsvdir ~/.config/runit` + `sv`) | **12/12 green** (G7 pass — nixpkgs-era yt-dlp via Void 2026.07.04) | `artifacts/void-glibc/20260809T174208Z` |
+
+Alpine deltas (recorded): **cava is NOT in the 3.20 repos** (plan's risk
+table assumed it — corrected) → built from source (fftw/iniparser/SDL2
+dev deps); **mpdris2 absent** → upstream python source at
+`/usr/bin/mpDris2` + `python-mpd2` via pip (no Alpine package); distro
+rust too old → rustup. Void deltas: distro rustc 1.97.1 (no rustup);
+mpDris2 **is** in the Void repos (python source — plan's "missing on
+Void" corrected); mpd ships file caps (`cap_ipc_lock,cap_sys_nice=eip`)
+that the container bounding set lacks → `setcap -r /usr/bin/mpd`
+(harness-only; fine on real Void hosts); xbps needs `--shm-size=512m`;
+bash/tar/findutils/coreutils/setsid are not in the base image.
+
+`s2u-svc` v1 backends now real: **systemd-user**, **runit-user**,
+**plain-launcher** (openrc/sysvinit route through the launcher per §6.1;
+s6-user stub lands with Artix). The tracker's direct `systemctl --user`
+call (mpDris2 stop/start during video) is **not yet rewired** — safe on
+every systemd target and untested on non-systemd (the tracker is not
+exercised for that call in containers); rewiring to `s2u-svc` is the
+remaining P3 item, documented in §6.1.
+
 ## 12. Phase results (recorded per run)
 
 Harness: `scripts/dev/test-distro.sh <key>` (Phase 0, committed `5bda69d`).
@@ -343,6 +389,33 @@ per-gate JSON + gates.jsonl) live in `scripts/dev/artifacts/<key>/<ts>/`
    gate-tested (G11). runit/s6/openrc/sysvinit backends are stubbed and
    land with Phase 3 (Alpine → Void → Artix).
 
+### Phase 4 (part 1) — setup.sh dispatcher (2026-08-09)
+
+`setup.sh` refactored into a distro dispatcher (plan §6.2): detects via
+`/etc/os-release` ID/ID_LIKE and routes to pacman (Arch/CachyOS/Artix —
+byte-for-byte identical output), dnf5 (Fedora, RPM Fusion free per §12.1),
+apt (Debian/Ubuntu/Devuan — system mpd stopped+disabled, user-level instance
+per §12.2, stale-yt-dlp pip hint per §12.7), apk (Alpine — cava from source
+per §12.5, upstream python mpDris2 per §12.6), xbps (Void — mpd `setcap -r`
+per §12.8) and nix (nix profile install, flake.nix). Shared step functions
+(support scripts, config/theme seed, MPD fifo) stay shared; mpv-full stays
+Arch-only (other backends install plain mpv + informational note); service
+enable/start goes through `scripts/s2u-svc` (never raw `systemctl` outside
+the Arch path). Non-Arch backends auto-install rustup when the distro rustc
+is older than the 1.88 MSRV (Void's 1.97.1 skips it), create a user-level
+`~/.config/mpd/mpd.conf` when absent (confirm-gated), and fall back to a
+condition-free `mpDris2.service` user unit when the packaged Debian/Ubuntu
+unit's `ConditionUser=!@system` blocks a root run.
+
+Validation: `bash -n` clean; hermetic mocked matrix
+(`scripts/dev/test-setup-mock.py`, fake package managers + fake os-release)
+44/44 — backend detection, package names, Arch byte-identity (both -y and
+non-interactive no -y), no installs without -y non-interactively, unknown
+distro dies. Real in-container runs (`scripts/dev/test-setup-distro.sh`):
+fedora-41 / debian-12 / alpine-320 all green (G0 + S1–S8/S9 + G12; zero
+`s2u-distro-*` leftovers). The master-repo `setup.sh` sync is a separate
+host decision (NOT done here).
+
 ## 8. Phased roadmap
 
 - **Phase 0 — harness skeleton + proof of life.** `test-distro.sh` with
@@ -395,7 +468,11 @@ per-gate JSON + gates.jsonl) live in `scripts/dev/artifacts/<key>/<ts>/`
 - [ ] `scripts/dev/test-distro.sh` (+ `scripts/dev/containers/<key>/` per-target
       Dockerfiles/flake and the gate runner)
 - [ ] `scripts/s2u-svc` (init abstraction) + tracker/setup rewiring
-- [ ] `setup.sh` distro dispatcher + package-name maps
+- [x] `setup.sh` distro dispatcher + package-name maps (Phase 4, committed on `working`)
+  - per-backend package maps (§12) + shared step functions (scripts install, config/theme seed, MPD fifo)
+  - Arch/CachyOS/Artix path output byte-identical (hermetic mock matrix: `scripts/dev/test-setup-mock.py`)
+  - real in-container validation: fedora-41 (dnf5), debian-12 (apt), alpine-320 (apk) all green
+    (`scripts/dev/test-setup-distro.sh <key>`)
 - [ ] `flake.nix` + NixOS module + `nixosTest`
 - [ ] README install-matrix section
 - [ ] This plan updated with per-target results and timestamps
