@@ -55,6 +55,28 @@ confirm() { # $1 = question; returns 0 if yes
     [[ "${ans,,}" == "y" || "${ans,,}" == "yes" ]]
 }
 
+# Privilege-elevation helper (NON-Arch backends only, review follow-up): root
+# needs no elevation; otherwise prefer sudo, then doas (Alpine's default).
+# With neither, die with a clear message — no silent partial install.
+# An array is used so the empty (root) case expands to ZERO words (a quoted
+# empty string would become an empty command). run_arch keeps its own literal
+# `sudo` calls (Arch ships sudo; byte-identity with the pre-dispatcher
+# baseline is a hard requirement).
+ELEVATE_CMD=()
+resolve_elevation() {
+    if [[ ${#ELEVATE_CMD[@]} -gt 0 ]]; then return 0; fi
+    if [[ "$(id -u)" == "0" ]]; then
+        ELEVATE_CMD=()
+    elif command -v sudo >/dev/null 2>&1; then
+        ELEVATE_CMD=(sudo)
+    elif command -v doas >/dev/null 2>&1; then
+        ELEVATE_CMD=(doas)
+    else
+        warn "no privilege-elevation tool found (sudo/doas) and not running as root"
+        die "cannot install packages - re-run as root or install sudo/doas"
+    fi
+}
+
 BIN_DIR="$HOME/.local/bin"
 CFG_DIR="$HOME/.config/s2udio"
 MPD_CONF="${MPD_CONF:-$HOME/.config/mpd/mpd.conf}"
@@ -408,9 +430,9 @@ install_upstream_mpdris2() { # $1 = reason text
         ok "mpDris2 already at /usr/bin/mpDris2"
         return 0
     fi
-    if confirm "Install upstream python mpDris2 at /usr/bin/mpDris2? ($1) (needs sudo + network)"; then
+    if confirm "Install upstream python mpDris2 at /usr/bin/mpDris2? ($1) (needs root + network)"; then
         if curl -fsSL --max-time 60             https://raw.githubusercontent.com/eonpatapon/mpDris2/master/src/mpDris2.in.py             -o /tmp/mpDris2.in.py; then
-            if sudo mkdir -p /usr/bin                && sed -e 's/@version@/0.9.1/g' -e 's/@gitversion@/0.9.1/g' -e 's|@datadir@|/usr/share|g'                     /tmp/mpDris2.in.py | sudo tee /usr/bin/mpDris2 >/dev/null                && sudo chmod +x /usr/bin/mpDris2; then
+            if "${ELEVATE_CMD[@]}" mkdir -p /usr/bin                && sed -e 's/@version@/0.9.1/g' -e 's/@gitversion@/0.9.1/g' -e 's|@datadir@|/usr/share|g'                     /tmp/mpDris2.in.py | "${ELEVATE_CMD[@]}" tee /usr/bin/mpDris2 >/dev/null                && "${ELEVATE_CMD[@]}" chmod +x /usr/bin/mpDris2; then
                 rm -f /tmp/mpDris2.in.py
                 ok "upstream mpDris2 source -> /usr/bin/mpDris2"
             else
@@ -560,7 +582,7 @@ run_arch() {
     fi
     # mpDris2 runs through the s2u-mpdris2 shim: the official binary,
     # extended at runtime to serve the stream thumbnail s2udio writes to
-    # ~/.cache/rmpc/mpris-art (the official find_cover returns None for
+    # ~/.cache/s2udio/mpris-art (the official find_cover returns None for
     # http(s) URLs). A drop-in swaps ExecStart; the stale patched copy from
     # older setups is removed.
     DROPIN_DIR="$HOME/.config/systemd/user/mpDris2.service.d"
@@ -568,7 +590,7 @@ run_arch() {
     mkdir -p "$DROPIN_DIR"
     cat > "$DROPIN_DIR/s2udio.conf" <<EOF
 # s2udio: run the official mpDris2 through the s2u-mpdris2 shim, which
-# serves the stream thumbnail (~/.cache/rmpc/mpris-art) as MPRIS art for
+# serves the stream thumbnail (~/.cache/s2udio/mpris-art) as MPRIS art for
 # non-file streams. The shim falls back to unpatched when the installed
 # mpDris2 changes layout.
 [Service]
@@ -595,13 +617,14 @@ EOF
 
 # ---------------------------------------------------------------------------
 run_dnf5() {
+    resolve_elevation
     info "Detected distro: ${DISTRO_ID:-?}${DISTRO_ID_LIKE:+ (ID_LIKE=$DISTRO_ID_LIKE)} -> dnf5 backend (Fedora; RPM Fusion free provides mpd/ffmpeg/mpv, plan §12.1)"
     info "1/9  System packages (mpd mpdris2 cava yt-dlp mpv ffmpeg python3-dbus python3-gobject python3-mutagen + toolchain)"
     # Fedora's official repos dropped the `mpd` server — RPM Fusion free is
     # the Fedora analogue of Arch's AUR usage for mpdris2-git (plan §12.1).
     if ! rpm -q rpmfusion-free-release >/dev/null 2>&1; then
-        if confirm "Enable RPM Fusion free (provides mpd/full ffmpeg/full mpv on Fedora)? (needs sudo)"; then
-            if sudo dnf5 install -y "https://download1.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm"; then
+        if confirm "Enable RPM Fusion free (provides mpd/full ffmpeg/full mpv on Fedora)? (needs root)"; then
+            if "${ELEVATE_CMD[@]}" dnf5 install -y "https://download1.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm"; then
                 ok "RPM Fusion free enabled"
             else
                 warn "RPM Fusion enable failed - mpd/ffmpeg/mpv may be unavailable"
@@ -618,8 +641,8 @@ run_dnf5() {
         rpm -q "$p" >/dev/null 2>&1 || MISSING+=("$p")
     done
     if ((${#MISSING[@]})); then
-        if confirm "Install system packages (${MISSING[*]})? (needs sudo)"; then
-            sudo dnf5 install -y "${MISSING[@]}"
+        if confirm "Install system packages (${MISSING[*]})? (needs root)"; then
+            "${ELEVATE_CMD[@]}" dnf5 install -y "${MISSING[@]}"
             ok "installed: ${MISSING[*]}"
         else
             warn "missing packages: ${MISSING[*]}"
@@ -646,6 +669,7 @@ run_dnf5() {
 
 # ---------------------------------------------------------------------------
 run_apt() {
+    resolve_elevation
     info "Detected distro: ${DISTRO_ID:-?}${DISTRO_ID_LIKE:+ (ID_LIKE=$DISTRO_ID_LIKE)} -> apt backend (Debian/Ubuntu/Devuan)"
     info "1/9  System packages (mpd mpdris2 cava yt-dlp mpv ffmpeg python3-dbus python3-gi python3-mutagen + toolchain)"
     APT_PKGS=(mpd mpdris2 cava yt-dlp mpv ffmpeg python3-dbus python3-gi python3-mutagen build-essential git curl)
@@ -654,9 +678,9 @@ run_apt() {
         dpkg-query -W "$p" >/dev/null 2>&1 || MISSING+=("$p")
     done
     if ((${#MISSING[@]})); then
-        if confirm "Install system packages (${MISSING[*]})? (needs sudo)"; then
-            sudo apt-get update -qq
-            sudo apt-get install -y --no-install-recommends "${MISSING[@]}"
+        if confirm "Install system packages (${MISSING[*]})? (needs root)"; then
+            "${ELEVATE_CMD[@]}" apt-get update -qq
+            "${ELEVATE_CMD[@]}" apt-get install -y --no-install-recommends "${MISSING[@]}"
             ok "installed: ${MISSING[*]}"
         else
             warn "missing packages: ${MISSING[*]}"
@@ -685,6 +709,7 @@ run_apt() {
 
 # ---------------------------------------------------------------------------
 run_apk() {
+    resolve_elevation
     info "Detected distro: ${DISTRO_ID:-?}${DISTRO_ID_LIKE:+ (ID_LIKE=$DISTRO_ID_LIKE)} -> apk backend (Alpine)"
     info "1/9  System packages (mpd mpv yt-dlp ffmpeg python3 py3-dbus py3-gobject3 + toolchain; cava from source)"
     APK_PKGS=(mpd mpv yt-dlp ffmpeg python3 py3-dbus py3-gobject3 py3-mutagen py3-pip build-base git curl fftw-dev iniparser-dev ncurses-dev sdl2-dev autoconf automake libtool ncurses-terminfo-base)
@@ -693,8 +718,8 @@ run_apk() {
         apk info -e "$p" >/dev/null 2>&1 || MISSING+=("$p")
     done
     if ((${#MISSING[@]})); then
-        if confirm "Install system packages (${MISSING[*]})? (needs sudo)"; then
-            sudo apk add --no-cache "${MISSING[@]}"
+        if confirm "Install system packages (${MISSING[*]})? (needs root)"; then
+            "${ELEVATE_CMD[@]}" apk add --no-cache "${MISSING[@]}"
             ok "installed: ${MISSING[*]}"
         else
             warn "missing packages: ${MISSING[*]}"
@@ -705,8 +730,8 @@ run_apk() {
     # cava is NOT in the Alpine 3.20 repos (plan §5 corrected in-container) ->
     # built from source (validated in the alpine-320 harness target).
     if ! command -v cava >/dev/null 2>&1; then
-        if confirm "Build cava from source (not in the Alpine repos; needs sudo + network)?"; then
-            if git clone -q --depth 1 https://github.com/karlstav/cava /tmp/cava-src                && (cd /tmp/cava-src && ./autogen.sh >/dev/null && ./configure >/dev/null && make -j"$(nproc)" >/dev/null)                && sudo install -Dm755 /tmp/cava-src/cava /usr/local/bin/cava 2>/dev/null; then
+        if confirm "Build cava from source (not in the Alpine repos; needs root + network)?"; then
+            if git clone -q --depth 1 https://github.com/karlstav/cava /tmp/cava-src                && (cd /tmp/cava-src && ./autogen.sh >/dev/null && ./configure >/dev/null && make -j"$(nproc)" >/dev/null)                && "${ELEVATE_CMD[@]}" install -Dm755 /tmp/cava-src/cava /usr/local/bin/cava 2>/dev/null; then
                 rm -rf /tmp/cava-src
                 ok "cava built from source: $(cava --version 2>&1 | head -1)"
             else
@@ -720,8 +745,8 @@ run_apk() {
     # the shim's fixed /usr/bin/mpDris2 + python-mpd2 via pip.
     install_upstream_mpdris2 "no Alpine mpdris2 package"
     if [[ ! -s /usr/bin/mpDris2 ]] && command -v python3 >/dev/null 2>&1; then
-        if confirm "Install python-mpd2 via pip (mpDris2 dependency; needs sudo)?"; then
-            sudo python3 -m pip install --break-system-packages python-mpd2                 && ok "python-mpd2 installed (pip)" || warn "python-mpd2 install failed (pip)"
+        if confirm "Install python-mpd2 via pip (mpDris2 dependency; needs root)?"; then
+            "${ELEVATE_CMD[@]}" python3 -m pip install --break-system-packages python-mpd2                 && ok "python-mpd2 installed (pip)" || warn "python-mpd2 install failed (pip)"
         fi
     fi
 
@@ -743,6 +768,7 @@ run_apk() {
 
 # ---------------------------------------------------------------------------
 run_xbps() {
+    resolve_elevation
     info "Detected distro: ${DISTRO_ID:-?}${DISTRO_ID_LIKE:+ (ID_LIKE=$DISTRO_ID_LIKE)} -> xbps backend (Void)"
     info "1/9  System packages (mpd mpv yt-dlp cava ffmpeg mpDris2 python3-dbus python3-gobject + toolchain)"
     XBPS_PKGS=(mpd mpv yt-dlp cava ffmpeg mpDris2 python3 python3-dbus python3-gobject python3-mutagen python3-mpd2 base-devel cargo rust git curl util-linux procps-ng ncurses-term)
@@ -751,8 +777,8 @@ run_xbps() {
         xbps-query "$p" >/dev/null 2>&1 || MISSING+=("$p")
     done
     if ((${#MISSING[@]})); then
-        if confirm "Install system packages (${MISSING[*]})? (needs sudo)"; then
-            sudo xbps-install -Sy "${MISSING[@]}"
+        if confirm "Install system packages (${MISSING[*]})? (needs root)"; then
+            "${ELEVATE_CMD[@]}" xbps-install -Sy "${MISSING[@]}"
             ok "installed: ${MISSING[*]}"
         else
             warn "missing packages: ${MISSING[*]}"
@@ -765,7 +791,7 @@ run_xbps() {
     # Stripping them is harmless on real Void hosts.
     if command -v setcap >/dev/null 2>&1; then
         if confirm "Strip mpd file capabilities (setcap -r /usr/bin/mpd; needed in restricted environments)?"; then
-            sudo setcap -r /usr/bin/mpd 2>/dev/null || true
+            "${ELEVATE_CMD[@]}" setcap -r /usr/bin/mpd 2>/dev/null || true
             ok "mpd file caps stripped (setcap -r /usr/bin/mpd)"
         fi
     fi
@@ -789,6 +815,7 @@ run_xbps() {
 
 # ---------------------------------------------------------------------------
 run_nix() {
+    resolve_elevation
     info "Detected distro: ${DISTRO_ID:-?}${DISTRO_ID_LIKE:+ (ID_LIKE=$DISTRO_ID_LIKE)} -> nix backend (nix profile install, flake.nix)"
     ensure_nix_flakes() {
         if ! grep -q 'experimental-features' "$HOME/.config/nix/nix.conf" 2>/dev/null; then

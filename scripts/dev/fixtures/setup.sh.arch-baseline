@@ -1,3 +1,11 @@
+# ARCH BASELINE — frozen byte-identity baseline for scripts/dev/test-setup-mock.py.
+# This is the pre-dispatcher setup.sh (49c23b8, Arch/CachyOS-only installer) with
+# EXACTLY ONE delta vs master: the mpDris2 drop-in comment's stale round-19 path
+# "~/.cache/rmpc/mpris-art" -> "~/.cache/s2udio/mpris-art" (two occurrences of the
+# same comment line), applied to run_arch during the Phase 4 review follow-up.
+# The mock runs this file as the "old" script and requires the dispatcher's
+# run_arch output to be byte-identical to it.
+
 #!/usr/bin/env bash
 # setup.sh — full setup for the s2udio TUI (Arch/CachyOS, systemd user session)
 #
@@ -232,7 +240,7 @@ else
 fi
 # mpDris2 runs through the s2u-mpdris2 shim: the official binary,
 # extended at runtime to serve the stream thumbnail s2udio writes to
-# ~/.cache/rmpc/mpris-art (the official find_cover returns None for
+# ~/.cache/s2udio/mpris-art (the official find_cover returns None for
 # http(s) URLs). A drop-in swaps ExecStart; the stale patched copy from
 # older setups is removed.
 DROPIN_DIR="$HOME/.config/systemd/user/mpDris2.service.d"
@@ -240,7 +248,7 @@ rm -rf "$DROPIN_DIR"   # clear stale drop-ins from older setups (mpris-art.conf,
 mkdir -p "$DROPIN_DIR"
 cat > "$DROPIN_DIR/s2udio.conf" <<EOF
 # s2udio: run the official mpDris2 through the s2u-mpdris2 shim, which
-# serves the stream thumbnail (~/.cache/rmpc/mpris-art) as MPRIS art for
+# serves the stream thumbnail (~/.cache/s2udio/mpris-art) as MPRIS art for
 # non-file streams. The shim falls back to unpatched when the installed
 # mpDris2 changes layout.
 [Service]
