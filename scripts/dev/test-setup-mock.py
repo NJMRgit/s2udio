@@ -162,8 +162,10 @@ case "$1" in -m) exit 0 ;; --version) echo "Python 3.12 (mock)"; exit 0 ;; *) ex
 
     os_release = {
         'arch': 'NAME="Arch Linux"\nID=arch\nPRETTY_NAME="Arch Linux"\n',
+        'artix': 'NAME="Artix Linux"\nID=artix\nID_LIKE=arch\n',
         'fedora': 'NAME="Fedora Linux"\nVERSION="41"\nID=fedora\nID_LIKE="fedora"\n',
         'debian': 'NAME="Debian GNU/Linux"\nVERSION="12 (bookworm)"\nID=debian\n',
+        'devuan': 'NAME="Devuan GNU/Linux"\nVERSION="5 (daedalus)"\nID=devuan\nID_LIKE=debian\n',
         'ubuntu': 'NAME="Ubuntu"\nVERSION="24.04 LTS"\nID=ubuntu\nID_LIKE=debian\n',
         'alpine': 'NAME="Alpine Linux"\nID=alpine\nVERSION_ID=3.20.3\n',
         'void': 'NAME="void"\nID="void"\n',
@@ -250,6 +252,20 @@ def main():
     check('arch no-y: output byte-identical', r_old['out'] == r_new['out'])
     check('arch no-y: no installs', 'pacman -S ' not in r_new['calls'] and 'yay -S ' not in r_new['calls'])
 
+    print('== artix (ID_LIKE=arch -> pacman) ==')
+    # Artix's os-release carries ID=artix + ID_LIKE=arch: detection must route
+    # to the pacman backend (run_arch) even though the ID is not arch/cachyos.
+    r = run_case('artix', ['-y'], extra_env={'MOCK_USER_MPD': '1'})
+    check('artix: routed to pacman backend (ID_LIKE=arch)',
+          'pacman -S --needed mpd ffmpeg cava python-yt-dlp' in r['calls'])
+    check('artix -y: AUR mpdris2-git + mpv-full via yay',
+          'yay -S --needed mpdris2-git' in r['calls'] and 'yay -S --needed mpv-full' in r['calls'])
+    check('artix -y: arch services path (systemctl --user)',
+          'systemctl --user enable --now mpd.service' in r['calls'] or 'systemctl --user is-enabled mpd.service' in r['calls'])
+    check('artix -y: exit 0', r['rc'] == 0, f"rc={r['rc']}")
+    r = run_case('artix', extra_env={'MOCK_USER_MPD': '1'})
+    check('artix no-y: no installs', 'pacman -S ' not in r['calls'] and 'yay -S ' not in r['calls'])
+
     print('== fedora (dnf5) ==')
     r = run_case('fedora', ['-y'], extra_env={'MOCK_RUSTC_VERSION': '1.80.0', 'MOCK_SYSTEM_MPD': '0'})
     check('fedora: detected dnf5 backend', '-> dnf5 backend' in r['out'])
@@ -274,6 +290,19 @@ def main():
         check(f'{label} -y: stale yt-dlp pip hint (§12.7)', 'pip install -U --break-system-packages yt-dlp' in r['out'])
         r = run_case(key, extra_env={'MOCK_SYSTEM_MPD': '1'})
         check(f'{label} no-y: no installs', 'apt-get install' not in r['calls'] and 'apt-get update' not in r['calls'])
+
+    print('== devuan (ID_LIKE=debian -> apt) ==')
+    # Devuan's os-release carries ID=devuan + ID_LIKE=debian: detection must
+    # route to the apt backend even though the ID is not debian/ubuntu.
+    r = run_case('devuan', ['-y'], extra_env={'MOCK_RUSTC_VERSION': '1.63.0', 'MOCK_SYSTEM_MPD': '1', 'MOCK_YTDLP_VERSION': '2024.04.09'})
+    check('devuan: detected apt backend (ID_LIKE=debian)', '-> apt backend' in r['out'])
+    check('devuan -y: correct package names', APT in r['calls'])
+    check('devuan -y: system mpd stopped+disabled',
+          'systemctl stop mpd.service' in r['calls'] and 'systemctl disable mpd.service' in r['calls'])
+    check('devuan -y: services via s2u-svc', 'systemctl --user enable mpd.service' in r['calls'])
+    check('devuan -y: stale yt-dlp pip hint (§12.7)', 'pip install -U --break-system-packages yt-dlp' in r['out'])
+    r = run_case('devuan', extra_env={'MOCK_SYSTEM_MPD': '1'})
+    check('devuan no-y: no installs', 'apt-get install' not in r['calls'] and 'apt-get update' not in r['calls'])
 
     print('== alpine (apk) ==')
     r = run_case('alpine', ['-y'], extra_env={'MOCK_NO_SYSTEMD': '1'}, drop=('cava',))
