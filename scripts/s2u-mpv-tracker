@@ -582,7 +582,12 @@ def mpdris2(action):
     including "Paused" while a video plays in mpv — so desktop media
     controls would show a stale audio entry next to the video one. The
     tracker stops mpDris2.service at session start and restarts it when
-    mpv exits (audio MPRIS returns for the resumed MPD playback).
+    mpv exits (audio MPRIS returns for the resumed MPD playback). The
+    service is driven through scripts/s2u-svc (the init abstraction from
+    plan §6.1) instead of a hardcoded systemctl invocation: on systemd
+    targets its systemd-user backend issues the identical systemctl
+    command, and on non-systemd targets it maps to the runit/s6/openrc/
+    sysvinit/launcher backends.
 
     Skipped when S2U_MPV_SOCKET is set: tests drive the tracker with a
     fake socket and must not touch the real service.
@@ -590,7 +595,7 @@ def mpdris2(action):
     if os.environ.get("S2U_MPV_SOCKET"):
         return
     try:
-        subprocess.run(["systemctl", "--user", action, "mpDris2.service"],
+        subprocess.run(["s2u-svc", action, "mpDris2.service"],
                        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                        stderr=subprocess.DEVNULL, timeout=15)
     except Exception:
@@ -677,7 +682,7 @@ def main():
             # is paused with no MPD playback) hide the paused-MPD entry;
             # when MPD plays and the video is paused (audio wins), show the
             # MPD entry again. Runs every tick so play/pause flips are
-            # followed; systemctl only on a change.
+            # followed; s2u-svc only on a change.
             want_mpdris2 = bool(st["paused"]) and mpd_state() == "play"
             if want_mpdris2 != mpdris2_want:
                 mpdris2("start" if want_mpdris2 else "stop")
