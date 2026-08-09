@@ -243,10 +243,11 @@ gate_g7_ytdlp_soft() {
         [[ "$id" == "jNQXAC9IVRw" ]] && break
         sleep 3
     done
+    local yver; yver="$(yt-dlp --version 2>/dev/null || echo '?')"
     if [[ "$id" == "jNQXAC9IVRw" ]]; then
-        write_gate G7 pass "yt-dlp $(yt-dlp --version 2>/dev/null) resolved https://www.youtube.com/watch?v=jNQXAC9IVRw (android_vr) -> $id"
+        write_gate G7 pass "yt-dlp $yver resolved https://www.youtube.com/watch?v=jNQXAC9IVRw (android_vr) -> $id"
     else
-        write_gate G7 soft "yt-dlp could not resolve the test URL (network/bot check?) — got: '${id:-<empty>}'"
+        write_gate G7 soft "yt-dlp $yver could not resolve the test URL via android_vr (distro yt-dlp too old on Debian/Ubuntu? current pip yt-dlp resolves) — got: '${id:-<empty>}'"
     fi
 }
 
