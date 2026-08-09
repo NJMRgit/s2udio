@@ -33,9 +33,9 @@ detect_backend() {
         running|degraded|starting|maintenance|stopping)
             echo systemd-user; return ;;
     esac
-    # runit-user: per-user runsvdir under ~/.config/runit
-    if command -v runsvdir >/dev/null 2>&1 \
-       && [[ -d "$HOME/.config/runit" || -d "$HOME/service" ]]; then
+    # runit-user: per-user runsvdir under ~/.config/runit with live sv sockets
+    if command -v sv >/dev/null 2>&1 && [[ -d "$HOME/.config/runit" ]] \
+       && ls "$HOME/.config/runit/" | grep -q . 2>/dev/null; then
         echo runit-user; return
     fi
     # s6-user: per-user s6-svscan under ~/.config/s6
@@ -143,12 +143,19 @@ case "$BACKEND" in
         esac
         ;;
     runit-user)
+        # per-user runsvdir under ~/.config/runit — sv(1) needs the full
+        # service path for a non-default directory. `enable` is a no-op
+        # (the service dirs are static).
+        rdir="$HOME/.config/runit"
+        svc_path="$rdir/$BASE"
         case "$CMD" in
-            start)  sv start "$BASE" ;;
-            stop)   sv stop "$BASE" ;;
-            restart) sv restart "$BASE" ;;
-            enable) echo "s2u-svc: runit-user enable = add service dir under ~/.config/runit (P3)" ;;
-            is-active) sv status "$BASE" >/dev/null 2>&1 ;;
+            start)   sv start "$svc_path" ;;
+            stop)    sv stop "$svc_path" ;;
+            restart) sv restart "$svc_path" ;;
+            enable)  echo "s2u-svc: runit-user enable = no-op (service dirs under ~/.config/runit)" ;;
+            is-active)
+                if sv status "$svc_path" >/dev/null 2>&1; then echo active; exit 0; fi
+                echo inactive; exit 1 ;;
         esac
         ;;
     s6-user)

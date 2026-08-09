@@ -29,6 +29,9 @@ if ! command -v cargo >/dev/null 2>&1; then
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
 fi
 export PATH="$HOME/.cargo/bin:$PATH"
+# the cargo cache volume can persist the ~/.cargo shims from an earlier run
+# while the toolchain (~/.rustup) is container-local — ensure a default
+rustup default stable >/dev/null 2>&1 || rustup toolchain install stable --profile minimal >/dev/null 2>&1 || true
 rustc --version && cargo --version
 
 # ---- make the copied tree a git repo (vergen_gitcl bakes git info at build
