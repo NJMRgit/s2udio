@@ -285,6 +285,64 @@ Artifacts: per-gate JSON + logs →
 `scripts/dev/artifacts/<key>/<timestamp>/` (host-side; containers never
 carry state between runs).
 
+## 12. Phase results (recorded per run)
+
+Harness: `scripts/dev/test-distro.sh <key>` (Phase 0, committed `5bda69d`).
+Every run is ephemeral — G12 (no `s2u-distro-*` container remains) is
+asserted by the EXIT trap on success AND failure. Artifacts (run.log +
+per-gate JSON + gates.jsonl) live in `scripts/dev/artifacts/<key>/<ts>/`
+(not committed; host-side only).
+
+### Phase 0 — harness proof of life (2026-08-09)
+
+- First full `fedora-41` run: **all 12 gates green** (G1–G11 in-container,
+  G0/G12 host-side). Run: `artifacts/fedora-41/20260809T151104Z`.
+
+### Phase 1 — Fedora 41 / Debian 12 / Ubuntu 24.04 (2026-08-09)
+
+| Target | G0 | G1 | G2 | G3 | G4 | G5 | G6 | G7* | G8 | G9 | G10 | G11 | G12 | Artifacts |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| fedora-41 | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | `artifacts/fedora-41/20260809T151104Z` |
+| debian-12 | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | soft | ✓ | ✓ | ✓ | ✓ | ✓ | `artifacts/debian-12/20260809T151514Z` |
+| ubuntu-2404 | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | soft | ✓ | ✓ | ✓ | ✓ | ✓ | `artifacts/ubuntu-2404/20260809T151753Z` |
+
+\* G7 (yt-dlp resolution) is a **soft** gate by design (§7). Findings:
+
+- **yt-dlp version gap (Debian/Ubuntu)**: Debian 12 ships yt-dlp
+  2023.03.04, Ubuntu 24.04 ships 2024.04.09 — both fail the `android_vr`
+  client probe ("No video formats found"), while Fedora 41's 2025.06.30
+  resolves. A current pip yt-dlp (2026.07.04) resolves the same URL from
+  the same Debian container → egress is fine, the distro pin is stale.
+  **Recommendation**: on Debian/Ubuntu, the installer (or README) should
+  suggest `pip install -U --break-system-packages yt-dlp` (or note that
+  resolution needs a current yt-dlp — consistent with the existing
+  "keep yt-dlp current" guidance in setup.sh).
+
+### Phase 1 decisions (recorded per plan §5/§6)
+
+1. **Fedora mpd**: the official Fedora repos dropped the `mpd` server —
+   the init image enables **RPM Fusion free** (`mpd`, full `ffmpeg`, full
+   `mpv`), the Fedora analogue of Arch's AUR usage for mpdris2-git.
+2. **MPD system-vs-user (Debian/Ubuntu, plan §6.2)**: verified in the
+   container — both ship `mpd` as an auto-started **system** service
+   (`/lib/systemd/system/mpd.service`, mpd user, port 6600). Decision:
+   **(a) user-level instance** — the deploy stops+disables the system
+   unit and runs s2udio's user-level `mpd.service`
+   (`~/.config/mpd/mpd.conf` + fifo). Confirmed working in-container
+   (gates G4/G5 green). Ubuntu's mpd package behaves identically.
+3. **Rust toolchain**: distro rustc is too old for edition-2024
+   everywhere (Fedora 41 ~1.80, Debian 12 1.63, Ubuntu 24.04 1.75;
+   Cargo.toml MSRV 1.88) → rustup minimal profile (stable 1.97.1 in
+   the runs above). This is a per-distro delta the dispatcher must keep.
+4. **mpv-full stays Arch-only** (plan §5): all three targets install
+   plain `mpv`; the deploy prints the informational note.
+5. **mpDris2**: `mpdris2` exists on all three (Debian/Ubuntu/Fedora);
+   Fedora's package ships **no** systemd user unit, so the deploy
+   provides one (drop-in applies everywhere).
+6. **s2u-svc v1**: systemd-user + plain-launcher backends implemented and
+   gate-tested (G11). runit/s6/openrc/sysvinit backends are stubbed and
+   land with Phase 3 (Alpine → Void → Artix).
+
 ## 8. Phased roadmap
 
 - **Phase 0 — harness skeleton + proof of life.** `test-distro.sh` with

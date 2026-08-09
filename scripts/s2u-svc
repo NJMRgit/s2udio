@@ -25,10 +25,14 @@ set -euo pipefail
 
 # ---------------------------------------------------------------------------
 detect_backend() {
-    # systemd-user: the user manager answers
-    if systemctl --user is-system-running >/dev/null 2>&1; then
-        echo systemd-user; return
-    fi
+    # systemd-user: a REAL user manager answers. Containers without logind
+    # make systemctl print "offline" with rc=0 — that must not count.
+    local st
+    st="$(systemctl --user is-system-running 2>/dev/null || true)"
+    case "$st" in
+        running|degraded|starting|maintenance|stopping)
+            echo systemd-user; return ;;
+    esac
     # runit-user: per-user runsvdir under ~/.config/runit
     if command -v runsvdir >/dev/null 2>&1 \
        && [[ -d "$HOME/.config/runit" || -d "$HOME/service" ]]; then
@@ -93,11 +97,13 @@ launcher_start() {
     fi
     case "$BASE" in
         mpd)
-            setsid /usr/bin/mpd --no-daemon "${MPD_CONF:-$HOME/.config/mpd/mpd.conf}" \
+            local mpd_bin; mpd_bin="$(command -v mpd 2>/dev/null || echo /usr/bin/mpd)"
+            setsid "$mpd_bin" --no-daemon "${MPD_CONF:-$HOME/.config/mpd/mpd.conf}" \
                 >"$LAUNCH_DIR/mpd.log" 2>&1 &
             echo $! > "$pidfile" ;;
         mpDris2)
-            setsid "$HOME/.local/bin/s2u-mpdris2" --use-journal \
+            local shim_bin; shim_bin="$(command -v s2u-mpdris2 2>/dev/null || echo "$HOME/.local/bin/s2u-mpdris2")"
+            setsid "$shim_bin" --use-journal \
                 >"$LAUNCH_DIR/mpDris2.log" 2>&1 &
             echo $! > "$pidfile" ;;
         *)
@@ -122,7 +128,10 @@ launcher_stop() {
 
 launcher_is_active() {
     local pidfile; pidfile="$(launcher_pidfile)"
-    [[ -f "$pidfile" ]] && kill -0 "$(cat "$pidfile")" 2>/dev/null
+    if [[ -f "$pidfile" ]] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then
+        echo active; return 0
+    fi
+    echo inactive; return 1
 }
 
 # ---------------------------------------------------------------------------
