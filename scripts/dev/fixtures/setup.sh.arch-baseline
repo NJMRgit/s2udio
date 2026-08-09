@@ -1,6 +1,6 @@
 # ARCH BASELINE — frozen byte-identity baseline for scripts/dev/test-setup-mock.py.
 # This is the pre-dispatcher setup.sh (49c23b8, Arch/CachyOS-only installer) with
-# TWO deltas vs master, applied to run_arch:
+# THREE deltas vs master, applied to run_arch:
 #   delta #1 (Phase 4 review follow-up): the mpDris2 drop-in comment's stale
 #     round-19 path "~/.cache/rmpc/mpris-art" -> "~/.cache/s2udio/mpris-art"
 #     (two occurrences of the same comment line).
@@ -14,6 +14,12 @@
 #     NO output delta, so it is intentionally NOT applied to this fixture —
 #     the byte-identity check compares output, and the mock's arch call
 #     assertions keep matching (--noconfirm is appended after the targets).
+#   delta #4 (distro-support follow-up T7b): run_arch also installs s2u-svc
+#     (the tracker's mpDris2 stop/start during video routes through s2u-svc
+#     since T7 — without it a fresh Arch/CachyOS install would silently
+#     no-op on the tracker's stop/start). One extra install line at the end
+#     of the step-4 support-scripts block (mirrors install_s2u_svc, which
+#     the non-Arch runners already call).
 # The mock runs this file as the "old" script and requires the dispatcher's
 # run_arch output to be byte-identical to it.
 
@@ -194,6 +200,7 @@ info "4/9  Support scripts"
 [[ -f scripts/s2u-mpdris2 ]] && { install -Dm755 scripts/s2u-mpdris2 "$BIN_DIR/s2u-mpdris2"; ok "mpDris2 stream-art shim -> $BIN_DIR/s2u-mpdris2"; } || warn "scripts/s2u-mpdris2 missing in this checkout"
 mkdir -p "$MPV_SCRIPTS"
 [[ -f scripts/mpvSockets.lua ]] && { install -Dm644 scripts/mpvSockets.lua "$MPV_SCRIPTS/mpvSockets.lua"; ok "mpvSockets.lua -> $MPV_SCRIPTS"; } || warn "scripts/mpvSockets.lua missing in this checkout"
+[[ -f scripts/s2u-svc ]] && { install -Dm755 scripts/s2u-svc "$BIN_DIR/s2u-svc"; ok "s2u-svc -> $BIN_DIR/s2u-svc"; } || warn "scripts/s2u-svc missing in this checkout"
 
 # ---------------------------------------------------------------------------
 info "5/9  Seed config + theme (only if absent; embedded defaults otherwise)"
