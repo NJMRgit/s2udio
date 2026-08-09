@@ -8,6 +8,12 @@
 #     -> yt-dlp (extra/yt-dlp on modern Arch/CachyOS; python-yt-dlp is not in
 #     the repos, so `setup.sh -y` would abort at step 1 with "target not
 #     found"): step-1 header + step-1 PACMAN_PKGS entry + step-3 missing hint.
+#   delta #3 (distro-support follow-up T6b): run_arch passes --noconfirm to
+#     its pacman -S calls when -y is given (non-interactive installs would
+#     abort at pacman's own prompt otherwise). Command-args-only: produces
+#     NO output delta, so it is intentionally NOT applied to this fixture —
+#     the byte-identity check compares output, and the mock's arch call
+#     assertions keep matching (--noconfirm is appended after the targets).
 # The mock runs this file as the "old" script and requires the dispatcher's
 # run_arch output to be byte-identical to it.
 

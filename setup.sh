@@ -466,6 +466,13 @@ run_arch() {
     for h in yay paru; do
         if command -v "$h" >/dev/null 2>&1; then AUR_HELPER="$h"; break; fi
     done
+    # -y means "accept without asking" (header contract): pacman must not
+    # prompt again. Without --noconfirm a non-interactive `setup.sh -y`
+    # aborts at the first install (pacman refuses a closed stdin; found by
+    # the T6b real-Arch container run). Appended AFTER the targets so the
+    # mock's call assertions and the pre-dispatcher byte-identity hold.
+    PACMAN_NOCONFIRM=()
+    [[ $ASSUME_YES -eq 1 ]] && PACMAN_NOCONFIRM=(--noconfirm)
     # ---------------------------------------------------------------------------
     info "1/9  System packages (mpd ffmpeg cava yt-dlp)"
     PACMAN_PKGS=(mpd ffmpeg cava yt-dlp)
@@ -475,7 +482,7 @@ run_arch() {
     done
     if ((${#MISSING[@]})); then
         if confirm "Install system packages (${MISSING[*]})? (needs sudo)"; then
-            sudo pacman -S --needed "${MISSING[@]}"
+            sudo pacman -S --needed "${MISSING[@]}" "${PACMAN_NOCONFIRM[@]}"
             ok "installed: ${MISSING[*]}"
         else
             warn "missing packages: ${MISSING[*]}"
@@ -518,7 +525,15 @@ run_arch() {
         if [[ -n "$AUR_HELPER" ]]; then
             "$AUR_HELPER" -S --needed mpv-full
         else
-            sudo pacman -S --needed mpv-full || warn "mpv-full not in your distro repos - install yay/paru (AUR) or choose standard mpv"
+            # return the pacman failure, not the warn's success: without this
+            # the -y no-AUR-helper path would print "ok mpv-full installed"
+            # after pacman failed ("target not found" — mpv-full is AUR-only
+            # on stock Arch; found by the T6b real-Arch container run)
+            if sudo pacman -S --needed mpv-full "${PACMAN_NOCONFIRM[@]}"; then
+                return 0
+            fi
+            warn "mpv-full not in your distro repos - install yay/paru (AUR) or choose standard mpv"
+            return 1
         fi
     }
     if pacman -Q mpv-full >/dev/null 2>&1; then
@@ -545,7 +560,7 @@ run_arch() {
         # Neither installed, interactive: let the user choose
         read -r -p "mpv not installed - install mpv-full (1, recommended) or standard mpv (2)? [1/2] " mpv_choice
         if [[ "${mpv_choice:-1}" == "2" ]]; then
-            if sudo pacman -S --needed mpv; then
+            if sudo pacman -S --needed mpv "${PACMAN_NOCONFIRM[@]}"; then
                 ok "standard mpv installed"
             else
                 warn "standard mpv install failed"
