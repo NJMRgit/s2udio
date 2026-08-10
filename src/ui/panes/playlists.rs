@@ -33,6 +33,7 @@ use crate::{
         UiEvent,
         browser::{BrowserPane, MoveDirection},
         dir_or_song::DirOrSong,
+        song_list::SongListCore,
         dirstack::{Dir, DirStack, DirStackItem},
         input::InputResultEvent,
         modals::{
@@ -549,7 +550,7 @@ impl PlaylistsPane {
         } else {
             root.next(ctx.config.scrolloff, ctx.config.wrap_navigation);
         }
-        self.fetch_data_internal(ctx)?;
+        SongListCore::fetch_data_internal(self, ctx)?;
         ctx.render()?;
         Ok(())
     }
@@ -587,7 +588,7 @@ impl PlaylistsPane {
         // Inside a playlist: play the highlighted song (replace the queue
         // with it and start playback), like `d`/`→`/Enter on a file in the
         // MPD pane.
-        self.open(true, ctx)?;
+        SongListCore::open(self, true, ctx)?;
         ctx.render()?;
         Ok(())
     }
@@ -595,7 +596,7 @@ impl PlaylistsPane {
     /// Back out one level to the playlist list (no-op at the root).
     fn back_out(&mut self, ctx: &Ctx) -> Result<()> {
         self.stack_mut().leave();
-        self.fetch_data_internal(ctx)?;
+        SongListCore::fetch_data_internal(self, ctx)?;
         ctx.render()?;
         Ok(())
     }
@@ -906,7 +907,7 @@ impl PlaylistsPane {
 
     fn open_selected_playlist(&mut self, ctx: &Ctx) -> Result<()> {
         self.stack_mut().enter();
-        self.fetch_data_internal(ctx)?;
+        SongListCore::fetch_data_internal(self, ctx)?;
         ctx.render()?;
         Ok(())
     }
@@ -1104,10 +1105,10 @@ impl Pane for PlaylistsPane {
                         let dir = self.stack.root_mut();
                         dir.select_idx(idx, ctx.config.scrolloff);
                         let is_double = matches!(event.kind, MouseEventKind::DoubleClick);
-                        self.fetch_data_internal(ctx)?;
+                        SongListCore::fetch_data_internal(self, ctx)?;
                         if is_double {
                             self.stack_mut().enter();
-                            self.fetch_data_internal(ctx)?;
+                            SongListCore::fetch_data_internal(self, ctx)?;
                         }
                         ctx.render()?;
                     }
@@ -1119,7 +1120,7 @@ impl Pane for PlaylistsPane {
                     } else {
                         dir.scroll_down(ctx.config.scroll_amount, ctx.config.scrolloff);
                     }
-                    self.fetch_data_internal(ctx)?;
+                    SongListCore::fetch_data_internal(self, ctx)?;
                     ctx.render()?;
                 }
                 _ => {}
@@ -1178,8 +1179,8 @@ impl Pane for PlaylistsPane {
                     if let Some(idx) = self.stack.current().state.get_at_rendered_row(row) {
                         let dir = self.stack.current_mut();
                         dir.select_idx(idx, ctx.config.scrolloff);
-                        self.open(true, ctx)?;
-                        self.fetch_data_internal(ctx)?;
+                        SongListCore::open(self, true, ctx)?;
+                        SongListCore::fetch_data_internal(self, ctx)?;
                     }
                 }
                 MouseEventKind::LeftClick => {
@@ -1265,7 +1266,7 @@ impl Pane for PlaylistsPane {
     }
 
     fn handle_insert_mode(&mut self, kind: InputResultEvent, ctx: &mut Ctx) -> Result<()> {
-        BrowserPane::handle_insert_mode(self, kind, ctx)?;
+        SongListCore::handle_insert_mode(self, kind, ctx)?;
         Ok(())
     }
 
@@ -1354,7 +1355,7 @@ impl Pane for PlaylistsPane {
                 };
 
                 self.stack_mut().insert(path, data);
-                self.fetch_data_internal(ctx)?;
+                SongListCore::fetch_data_internal(self, ctx)?;
                 ctx.render()?;
             }
             (INIT, MpdQueryResult::DirOrSong { data, path: _ }) => {
@@ -1502,17 +1503,41 @@ impl Pane for PlaylistsPane {
     }
 }
 
-impl BrowserPane<DirOrSong> for PlaylistsPane {
-    fn stack(&self) -> &DirStack<DirOrSong, ListState> {
-        &self.stack
+impl SongListCore<DirOrSong, ListState> for PlaylistsPane {
+    fn list(&self) -> &Dir<DirOrSong, ListState> {
+        self.stack().current()
     }
 
-    fn stack_mut(&mut self) -> &mut DirStack<DirOrSong, ListState> {
-        &mut self.stack
+    fn list_mut(&mut self) -> &mut Dir<DirOrSong, ListState> {
+        self.stack_mut().current_mut()
     }
 
-    fn browser_areas(&self) -> EnumMap<BrowserArea, Rect> {
-        self.browser.areas
+    fn scrollbar_area(&self) -> Option<Rect> {
+        BrowserPane::scrollbar_area(self)
+    }
+
+    fn list_area(&self) -> Option<Rect> {
+        BrowserPane::list_area(self)
+    }
+
+    fn open(&mut self, autoplay: bool, ctx: &Ctx) -> Result<()> {
+        BrowserPane::open(self, autoplay, ctx)
+    }
+
+    fn leave(&mut self, ctx: &Ctx) -> Result<()> {
+        BrowserPane::leave(self, ctx)
+    }
+
+    fn fetch_data_internal(&mut self, ctx: &Ctx) -> Result<()> {
+        BrowserPane::fetch_data_internal(self, ctx)
+    }
+
+    fn enqueue<'a>(&self, items: impl Iterator<Item = &'a DirOrSong>) -> (Vec<Enqueue>, Option<usize>) {
+        BrowserPane::enqueue(self, items)
+    }
+
+    fn initial_playlist_name(&self, all: bool) -> Option<String> {
+        BrowserPane::initial_playlist_name(self, all)
     }
 
     fn list_songs_in_item(
@@ -1712,5 +1737,19 @@ impl BrowserPane<DirOrSong> for PlaylistsPane {
         ctx.render()?;
 
         Ok(())
+    }
+}
+
+impl BrowserPane<DirOrSong> for PlaylistsPane {
+    fn stack(&self) -> &DirStack<DirOrSong, ListState> {
+        &self.stack
+    }
+
+    fn stack_mut(&mut self) -> &mut DirStack<DirOrSong, ListState> {
+        &mut self.stack
+    }
+
+    fn browser_areas(&self) -> EnumMap<BrowserArea, Rect> {
+        self.browser.areas
     }
 }

@@ -68,6 +68,7 @@ pub mod input;
 pub mod modals;
 pub mod panes;
 pub mod seekbar;
+pub mod song_list;
 pub mod tab_screen;
 pub mod widgets;
 
