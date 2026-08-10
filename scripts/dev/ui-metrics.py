@@ -31,6 +31,23 @@ import argparse, difflib, json, os, re, subprocess, sys
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# Methods of the shared SongListCore / BrowserPane traits: same-named
+# pairs of these are the intended thin adapters / shared call sites, not
+# duplication (Phase 1+ consolidation). Excluded from the > 0.5 guardrail
+# report; --pairs still shows them.
+THIN_ADAPTERS = {
+    "list", "list_mut", "open", "leave", "enqueue", "fetch_data",
+    "stack", "stack_mut", "browser_areas",
+    "fetch_data_internal", "initial_playlist_name", "scrollbar_area",
+    "list_area", "list_songs_in_item", "song_format", "show_info",
+    "delete", "can_rename", "rename", "move_selected", "items",
+    "delete_items", "enqueue_items", "handle_common_action",
+    "handle_claimed_common_action", "handle_global_action",
+    "handle_insert_mode", "handle_scrollbar_interaction",
+    "handle_list_mouse_action", "handle_mouse_action",
+    "handle_stack_mouse_action", "open_context_menu",
+}
+
 PANE_FILES = [
     "src/ui/browser.rs",
     "src/ui/panes/mod.rs",
@@ -145,7 +162,8 @@ def main():
     ui_rows = [(p, n) for p, n in rows if p.startswith("src/ui/")]
     ui_total = sum(n for _, n in ui_rows)
     pairs = pane_similarity(args.ref)
-    over = [(r, n, a, b, la, lb) for r, n, a, b, la, lb in pairs if r > 0.5]
+    over_all = [(r, n, a, b, la, lb) for r, n, a, b, la, lb in pairs if r > 0.5]
+    over = [p for p in over_all if p[1] not in THIN_ADAPTERS]
 
     if args.json:
         print(json.dumps({
@@ -158,6 +176,8 @@ def main():
                                  for r, n, a, b, la, lb in pairs],
             "over_0_5": [{"ratio": round(r, 4), "fn": n, "a": a, "b": b}
                          for r, n, a, b, _, _ in over],
+            "over_0_5_incl_thin": len(over_all),
+            "over_0_5_excl_thin": len(over),
         }, indent=2))
         return
 
@@ -170,7 +190,8 @@ def main():
             flag = "  <-- OVER 0.5" if r > 0.5 else ""
             print(f"  {r:.2f}  {n:24s} {a} <-> {b}  ({la}/{lb} lines){flag}")
     else:
-        print(f"\nSame-named function pairs with ratio > 0.5 ({len(over)}):")
+        print(f"\nSame-named function pairs with ratio > 0.5 ({len(over)} "
+              f"excluding {len(over_all) - len(over)} thin-adapter pairs):")
         for r, n, a, b, la, lb in over:
             print(f"  {r:.2f}  {n:24s} {a} <-> {b}  ({la}/{lb} lines)")
 

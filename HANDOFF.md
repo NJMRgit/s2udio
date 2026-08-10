@@ -350,6 +350,35 @@ build/run the TUI. `assets/example_config.ron` + `assets/default.jpg` are
 compiled in — never delete. Old history is preserved at the local
 `pre-restructure` tag.
 
+## UI reuse rewrite (branch `rewrite` — in progress)
+
+The **UI reuse rewrite** (`docs/design/Rewrite/ui-reuse-rewrite.md`, branch
+`rewrite` of `NJMRgit/s2udio-working`) consolidates `src/ui` around master
+modules + args. Working on `rewrite` only; the distribution repo `master`
+is untouched. **Rust toolchain is now available in the container** (rustup
+1.97.1 installed 2026-08-10, `~/.cargo/bin`, `cargo test --release` runs
+in-container — see the `RUSTUP_HOME`/`CARGO_HOME` env note below) — the
+agent can self-validate; the host still does live checks.
+
+Status (2026-08-10):
+- **Phase 0 ✅** (`d0d3a56`): baseline LOC + similarity metrics
+  (`scripts/dev/ui-metrics.py` — token-sequence difflib ratio over
+  comment-stripped fn bodies; thin-adapter names excluded from the
+  guardrail), 1312/1312 tests green, outline §2.4 baseline table.
+- **Phase 1 ✅** (`cd103ac` + `cd10c75` + `113d7e7`): `SongListCore<T, S>`
+  shared list core extracted (`src/ui/song_list.rs`); `BrowserPane` is a
+  thin dir-stack adapter (1041 → 232 LOC); queue Audio + search results
+  adopt the core and delegate all non-specific `CommonAction` arms
+  (queue −208, search −236 LOC; src/ui net −179). 1312/1312 green.
+- **Next: Phase 2** — `TreeBrowserCore<T>` unifying directories/jellyfin/
+  radio (the heavy clone pairs: `render_tree`/`render_items`/
+  `render_tips`/`move_*`/`populate_items`). Phase 1 hook pattern applies:
+  pane `SongListCore` impls delegate stack-specific hooks to the adapter
+  trait's defaults.
+
+Toolchain env (container): `export PATH="$HOME/.cargo/bin:$PATH"`
+`export RUSTUP_HOME="$HOME/.rustup" CARGO_HOME="$HOME/.cargo"`.
+
 ## Pending
 
 - **Round 25 (2026-08-10 user live-check) — host-implemented fixes:
