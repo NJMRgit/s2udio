@@ -48,6 +48,10 @@ query, results filtering, multi-select, context menus, enqueue/play.
 - **Filter-row hover** (round 25): the filter/spinner/button rows are
   clickable fields and render with the hover highlight when the pointer
   is over them (the button/list-row treatment; keyboard input clears it).
+- **Adaptive filter labels** (round 26): the label column pads to the
+  aligned-colon width when the pane has room and ellipsizes (`…`) on
+  narrow terminals, so the value column always keeps ≥ 10 cells (the
+  settings-panel convention).
 - **Multi-select** (round 24): the results list supports the shared
   selection interactions — ctrl+click toggles a row's mark, alt+click
   range-marks from the anchor, a plain click on another row drops the

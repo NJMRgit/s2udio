@@ -1570,6 +1570,21 @@ mod tests {
         buf[(area.x, area.y + row)].style().bg
     }
 
+    /// Render the pane at a given size and return the buffer.
+    fn render_buf(
+        pane: &mut SearchPane,
+        ctx: &crate::ctx::Ctx,
+        w: u16,
+        h: u16,
+    ) -> ratatui::buffer::Buffer {
+        let backend = ratatui::backend::TestBackend::new(w, h);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| pane.render(frame, Rect::new(0, 0, w, h), ctx).unwrap())
+            .unwrap();
+        terminal.backend().buffer().clone()
+    }
+
     fn rendered_pane(ctx: &mut crate::ctx::Ctx) -> SearchPane {
         let mut pane = SearchPane::new(ctx);
         let backend = ratatui::backend::TestBackend::new(100, 40);
@@ -1866,6 +1881,32 @@ mod tests {
             input_bg(&mut pane, &ctx, inputs_area, 1),
             hovered,
             "no pointer, no hover"
+        );
+    }
+
+    #[test]
+    fn narrow_pane_keeps_the_filter_values_visible() {
+        let mut ctx = make_ctx();
+        let mut pane = rendered_pane(&mut ctx);
+        let buf = render_buf(&mut pane, &ctx, 80, 40);
+        let inner = pane.column_areas[BrowserArea::Previous];
+
+        // The first filter row's label ends with a colon; the cells after
+        // it are the value column. On an 80-column terminal the pane must
+        // keep that column wide enough to read a query, instead of cutting
+        // it to zero (the round-26 regression).
+        let mut colon = None;
+        for x in inner.x..inner.x.saturating_add(inner.width) {
+            if buf[(x, inner.y)].symbol() == ":" {
+                colon = Some(x);
+                break;
+            }
+        }
+        let colon = colon.expect("the first filter row renders its label colon");
+        let value_width = (inner.x + inner.width).saturating_sub(colon + 1);
+        assert!(
+            value_width >= 10,
+            "the filter value column stays usable on a narrow pane (got {value_width} cells)"
         );
     }
 }
