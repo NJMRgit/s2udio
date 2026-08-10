@@ -24,6 +24,8 @@ branch on the public/distribution repo anymore.
 
 Date: 2026-08-10 · Branch: `working`
 
+## RELEASED to main (2026-08-10) — rounds 23-27 on NJMRgit/s2udio master (`a5cd24d`)
+
 ## ROUND 24 — IMPLEMENTED in the container (2026-08-10), HOST-VALIDATED (1304/1304) + live-checked
 
 **User feedback (2026-08-10) →
