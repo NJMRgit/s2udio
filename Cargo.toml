@@ -9,9 +9,12 @@ repository = "https://github.com/mierak/rmpc"
 readme = "README.md"
 rust-version = "1.88.0"
 
-# The app is "s2udio", launched as `s2u`; the package name stays "rmpc"
+# The app is "s2udio", launched as `s2udio`. The package name stays "rmpc"
 # (upstream heritage) but all on-disk configs live in ~/.config/s2udio
-# (round 23) and caches in ~/.cache/s2udio.
+# (round 23) and caches in ~/.cache/s2udio. The cargo artifact is built
+# under the short name `s2u`; every install path (setup.sh, container
+# deploys, nix flake) installs it as the user-facing `s2udio`
+# (~/.local/bin/s2udio) — `s2u` never appears on the user's PATH.
 [[bin]]
 name = "s2u"
 path = "src/main.rs"
