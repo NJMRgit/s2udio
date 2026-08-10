@@ -18,7 +18,7 @@ use crate::{
             CommonAction,
             DirectoriesActions,
             GlobalAction,
-            actions::{AddKind, AutoplayKind, DeleteKind, Position, RateKind, SaveKind},
+            actions::{AddKind, AutoplayKind, DeleteKind, Position, SaveKind},
         },
         tabs::PaneType,
     },
@@ -40,14 +40,13 @@ use crate::{
     ui::{
         UiEvent,
         dirstack::Dir,
+        song_list::SongListCore,
         input::InputResultEvent,
         modals::{
             input_modal::InputModal,
             menu::{
                 add_to_playlist_or_show_modal,
-                create_add_modal,
                 create_delete_modal,
-                create_rating_modal,
                 create_save_modal,
                 delete_from_playlist_or_show_confirmation,
                 modal::MenuModal,
@@ -603,38 +602,10 @@ impl SearchPane {
 
         if let Some(action) = event.claim_common() {
             match action.to_owned() {
-                CommonAction::Down => {
-                    self.songs_dir.next(ctx.config.scrolloff, ctx.config.wrap_navigation);
-
-                    ctx.render()?;
-                }
-                CommonAction::Up => {
-                    self.songs_dir.prev(ctx.config.scrolloff, ctx.config.wrap_navigation);
-
-                    ctx.render()?;
-                }
-                CommonAction::MoveDown => {}
-                CommonAction::MoveUp => {}
-                CommonAction::DownHalf => {
-                    self.songs_dir.next_half_viewport(ctx.config.scrolloff);
-
-                    ctx.render()?;
-                }
-                CommonAction::UpHalf => {
-                    self.songs_dir.prev_half_viewport(ctx.config.scrolloff);
-
-                    ctx.render()?;
-                }
-                CommonAction::PageDown => {
-                    self.songs_dir.next_viewport(ctx.config.scrolloff);
-
-                    ctx.render()?;
-                }
-                CommonAction::PageUp => {
-                    self.songs_dir.prev_viewport(ctx.config.scrolloff);
-
-                    ctx.render()?;
-                }
+                // The results list reuses the shared SongListCore arms
+                // (navigation, marks, filtering, rate / save /
+                // delete-from-playlist, add-options); only these actions
+                // keep pane-specific semantics:
                 CommonAction::Right => {
                     let items = self.songs_dir.selected().map_or_else(Vec::new, |item| {
                         vec![Enqueue::File { path: item.file.clone() }]
@@ -651,241 +622,17 @@ impl SearchPane {
 
                     ctx.render()?;
                 }
-                CommonAction::Top => {
-                    self.songs_dir.first();
-
-                    ctx.render()?;
-                }
-                CommonAction::Bottom => {
-                    self.songs_dir.last();
-
-                    ctx.render()?;
-                }
-                CommonAction::EnterSearch => {
-                    self.songs_dir.set_filter_active(true);
-                    ctx.input.insert_mode(self.songs_dir.filter_buffer_id);
-                    ctx.input.clear_buffer(self.songs_dir.filter_buffer_id);
-
-                    ctx.render()?;
-                }
-                CommonAction::NextResult => {
-                    self.songs_dir
-                        .jump_next_matching(ctx.config.theme.browser_song_format.0.as_slice(), ctx);
-
-                    ctx.render()?;
-                }
-                CommonAction::PreviousResult => {
-                    self.songs_dir.jump_previous_matching(
-                        ctx.config.theme.browser_song_format.0.as_slice(),
-                        ctx,
-                    );
-
-                    ctx.render()?;
-                }
-                CommonAction::Select => {
-                    self.songs_dir.toggle_mark_selected();
-                    self.songs_dir.next(ctx.config.scrolloff, ctx.config.wrap_navigation);
-
-                    ctx.render()?;
-                }
-                CommonAction::SelectDown | CommonAction::SelectUp => {
-                    let dir = if matches!(action, CommonAction::SelectDown) { 1 } else { -1 };
-                    let start = self.songs_dir.state.get_selected().unwrap_or(0);
-                    if self.songs_dir.state.mark_anchor().is_none() || self.songs_dir.state.marked.is_empty() {
-                        self.songs_dir.state.set_mark_anchor(start);
-                    }
-                    let anchor = self.songs_dir.state.mark_anchor().unwrap_or(start);
-                    // Move first so the newly reached row is included in the
-                    // range and backing up deselects the row being left.
-                    if dir > 0 {
-                        self.songs_dir.next(ctx.config.scrolloff, ctx.config.wrap_navigation);
-                    } else {
-                        self.songs_dir.prev(ctx.config.scrolloff, ctx.config.wrap_navigation);
-                    }
-                    let sel = self.songs_dir.state.get_selected().unwrap_or(start);
-                    // Replace the previous shift range.
-                    if let Some((lo, hi)) = self.songs_dir.state.take_range_mark() {
-                        for i in lo..=hi {
-                            self.songs_dir.state.marked.remove(&i);
-                        }
-                    }
-                    let (lo, hi) = (anchor.min(sel), anchor.max(sel));
-                    if lo < hi {
-                        self.songs_dir.state.mark_range(lo, hi);
-                        self.songs_dir.state.set_range_mark(lo, hi);
-                    }
-
-                    ctx.render()?;
-                }
-                CommonAction::InvertSelection => {
-                    self.songs_dir.invert_marked();
-
-                    ctx.render()?;
-                }
-                CommonAction::Close if !self.songs_dir.marked().is_empty() => {
-                    self.songs_dir.marked_mut().clear();
-                    self.songs_dir.state.clear_mark_anchor();
-                    // Esc is bound to both Close and ShowSettings: clearing a
-                    // selection consumes the keypress, so the settings panel
-                    // only opens on a second Esc (when nothing is selected).
-                    event.consume();
-                    ctx.render()?;
-                }
-                CommonAction::Rename => {}
-                CommonAction::Close => {}
+                CommonAction::Delete => {}
                 // Enter opens the options menu (the right-click menu), like
                 // the other list panes; playing happens via the menu's Play
                 // item or `d`/`→`/double-click.
                 CommonAction::Confirm => {
                     self.open_result_phase_context_menu(ctx);
                 }
-                CommonAction::FocusInput => {}
-                CommonAction::AddOptions { kind: AddKind::Action(opts) } => {
-                    let (hovered_song_idx, enqueue) = self.enqueue(opts.all);
-
-                    if !enqueue.is_empty() {
-                        let current_song_idx = ctx.find_current_song_in_queue().map(|(i, _)| i);
-
-                        Client::resolve_and_enqueue(
-                            ctx,
-                            enqueue,
-                            opts.position,
-                            opts.autoplay,
-                            current_song_idx,
-                            hovered_song_idx,
-                        );
-                    }
-                }
-                CommonAction::AddOptions { kind: AddKind::Modal(opts) } => {
-                    let opts = opts
-                        .iter()
-                        .map(|(label, opts)| {
-                            let (hovered_song_idx, enqueue) = self.enqueue(opts.all);
-
-                            (label.to_owned(), *opts, (enqueue, hovered_song_idx))
-                        })
-                        .collect_vec();
-
-                    modal!(ctx, create_add_modal(opts, ctx));
-                }
-                CommonAction::Delete => {}
-                CommonAction::PaneDown => {}
-                CommonAction::PaneUp => {}
-                CommonAction::PaneRight => {}
-                CommonAction::PaneLeft => {}
-                CommonAction::ShowInfo => {}
                 CommonAction::ContextMenu => {
                     self.open_result_phase_context_menu(ctx);
                 }
-                CommonAction::Rate {
-                    kind: RateKind::Value(value),
-                    current: false,
-                    min_rating: _,
-                    max_rating: _,
-                } => {
-                    let items = self.enqueue(false).1;
-                    ctx.command(move |client| {
-                        client.set_sticker_multiple(RATING_STICKER, value.to_string(), items)?;
-                        Ok(())
-                    });
-                }
-                CommonAction::Rate {
-                    kind: RateKind::Modal { values, custom, like },
-                    current: false,
-                    min_rating,
-                    max_rating,
-                } => {
-                    let items = self.enqueue(false).1;
-                    modal!(
-                        ctx,
-                        create_rating_modal(
-                            items,
-                            values.as_slice(),
-                            min_rating,
-                            max_rating,
-                            custom,
-                            like,
-                            ctx
-                        )
-                    );
-                }
-                CommonAction::Rate { kind: RateKind::Like(), current: false, .. } => {
-                    let items = self.enqueue(false).1;
-                    ctx.command(move |client| {
-                        client.set_sticker_multiple(LIKE_STICKER, "2".to_string(), items)?;
-                        Ok(())
-                    });
-                }
-                CommonAction::Rate { kind: RateKind::Neutral(), current: false, .. } => {
-                    let items = self.enqueue(false).1;
-                    ctx.command(move |client| {
-                        client.set_sticker_multiple(LIKE_STICKER, "1".to_string(), items)?;
-                        Ok(())
-                    });
-                }
-                CommonAction::Rate { kind: RateKind::Dislike(), current: false, .. } => {
-                    let items = self.enqueue(false).1;
-                    ctx.command(move |client| {
-                        client.set_sticker_multiple(LIKE_STICKER, "0".to_string(), items)?;
-                        Ok(())
-                    });
-                }
-                CommonAction::Rate { kind: _, current: true, min_rating: _, max_rating: _ } => {
-                    event.abandon();
-                }
-                CommonAction::Save {
-                    kind: SaveKind::Playlist { name, all, duplicates_strategy },
-                } => {
-                    let song_paths: Vec<String> =
-                        self.items(all).map(|(_, song)| song.file.clone()).collect();
-                    if song_paths.is_empty() {
-                        status_warn!("No songs selected to save");
-                        return Ok(());
-                    }
-
-                    add_to_playlist_or_show_modal(name, song_paths, duplicates_strategy, ctx);
-                }
-                CommonAction::Save { kind: SaveKind::Modal { all, duplicates_strategy } } => {
-                    let song_paths: Vec<_> =
-                        self.items(all).map(|(_, song)| song.file.clone()).collect();
-                    if song_paths.is_empty() {
-                        status_warn!("No songs selected to save");
-                        return Ok(());
-                    }
-
-                    let modal = create_save_modal(song_paths, None, duplicates_strategy, ctx)?;
-                    modal!(ctx, modal);
-                }
-                CommonAction::DeleteFromPlaylist {
-                    kind: DeleteKind::Playlist { name, all, confirmation },
-                } => {
-                    let song_paths: HashSet<String> =
-                        self.items(all).map(|(_, song)| song.file.clone()).collect();
-                    if song_paths.is_empty() {
-                        status_warn!("No songs selected to delete");
-                        return Ok(());
-                    }
-
-                    delete_from_playlist_or_show_confirmation(
-                        name,
-                        &song_paths,
-                        confirmation,
-                        ctx,
-                    )?;
-                }
-                CommonAction::DeleteFromPlaylist {
-                    kind: DeleteKind::Modal { all, confirmation },
-                } => {
-                    let song_paths: HashSet<_> =
-                        self.items(all).map(|(_, song)| song.file.clone()).collect();
-                    if song_paths.is_empty() {
-                        status_warn!("No songs selected to delete");
-                        return Ok(());
-                    }
-
-                    let modal = create_delete_modal(song_paths, confirmation, ctx)?;
-                    modal!(ctx, modal);
-                }
+                other => self.handle_claimed_common_action(other, event, ctx)?,
             }
         }
 
@@ -1095,6 +842,23 @@ impl SearchPane {
         }
 
         Ok(false)
+    }
+}
+
+impl SongListCore<Song, ListState> for SearchPane {
+    fn list(&self) -> &Dir<Song, ListState> {
+        &self.songs_dir
+    }
+
+    fn list_mut(&mut self) -> &mut Dir<Song, ListState> {
+        &mut self.songs_dir
+    }
+
+    fn list_songs_in_item(
+        &self,
+        item: Song,
+    ) -> impl FnOnce(&mut Client<'_>) -> Result<Vec<Song>> + Send + Sync + Clone + 'static {
+        move |_client| Ok(vec![item])
     }
 }
 
