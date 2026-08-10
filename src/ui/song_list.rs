@@ -90,9 +90,11 @@ where
         None
     }
 
-    /// The property format used for filter jump-matching.
-    fn song_format<'a>(&self, ctx: &'a Ctx) -> &'a [Property<SongProperty>] {
-        &ctx.config.theme.browser_song_format.0
+    /// The property format used for filter jump-matching. Owned so
+    /// adopters can return either a config format or a pane-owned one
+    /// (e.g. the queue's column formats).
+    fn song_format(&self, ctx: &Ctx) -> Vec<Property<SongProperty>> {
+        ctx.config.theme.browser_song_format.0.clone()
     }
 
     /// Activate the item under the selection (Enter / Right / double
@@ -193,7 +195,7 @@ where
     // ── shared default behavior ────────────────────────────────────────
 
     fn handle_insert_mode(&mut self, kind: InputResultEvent, ctx: &mut Ctx) -> Result<()> {
-        let song_format = self.song_format(ctx).to_vec();
+        let song_format = self.song_format(ctx);
         match kind {
             InputResultEvent::Push => {
                 self.list_mut().jump_first_matching(&song_format, ctx);
@@ -515,13 +517,13 @@ where
                 ctx.render()?;
             }
             CommonAction::NextResult => {
-                let song_format = self.song_format(ctx).to_vec();
+                let song_format = self.song_format(ctx);
                 self.list_mut().jump_next_matching(&song_format, ctx);
                 self.fetch_data_internal(ctx);
                 ctx.render()?;
             }
             CommonAction::PreviousResult => {
-                let song_format = self.song_format(ctx).to_vec();
+                let song_format = self.song_format(ctx);
                 self.list_mut().jump_previous_matching(&song_format, ctx);
                 self.fetch_data_internal(ctx);
                 ctx.render()?;

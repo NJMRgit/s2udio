@@ -23,7 +23,7 @@ use crate::{
             DirectoriesActions,
             GlobalAction,
             QueueActions,
-            actions::{AddKind, AutoplayKind, DeleteKind, RateKind, SaveKind},
+            actions::{AddKind, AutoplayKind},
         },
         theme::{
             AlbumSeparator,
@@ -31,7 +31,7 @@ use crate::{
         },
     },
     core::command::{create_env, run_external},
-    ctx::{Ctx, LIKE_STICKER, RATING_STICKER},
+    ctx::Ctx,
     mpd::{
         QueuePosition,
         client::Client,
@@ -50,18 +50,14 @@ use crate::{
         UiAppEvent,
         UiEvent,
         dirstack::{Dir, MarkState},
+        song_list::SongListCore,
         input::InputResultEvent,
         modals::{
             confirm_modal::{Action, ConfirmModal},
             info_list_modal::InfoListModal,
             input_modal::InputModal,
             menu::{
-                add_to_playlist_or_show_modal,
                 create_add_modal,
-                create_delete_modal,
-                create_rating_modal,
-                create_save_modal,
-                delete_from_playlist_or_show_confirmation,
                 modal::MenuModal,
             },
             select_modal::SelectModal,
@@ -2011,6 +2007,10 @@ impl Pane for QueuePane {
                 QueueActions::Unused => {}
             }
         } else if let Some(action) = event.claim_common().map(|v| v.to_owned()) {
+            // Audio mode: the queue list reuses the shared SongListCore
+            // arms (navigation, half/page/top/bottom, filter + jump-
+            // matching, range-select, invert, esc-deselect, rate, save,
+            // delete-from-playlist). Queue-specific semantics stay here:
             match action {
                 CommonAction::Select => {
                     // Space: play/pause the currently highlighted track.
@@ -2026,20 +2026,6 @@ impl Pane for QueuePane {
                         });
                     }
                     return Ok(());
-                }
-                CommonAction::Up => {
-                    if !self.queue.is_empty() {
-                        self.queue.prev(ctx.config.scrolloff, ctx.config.wrap_navigation);
-                    }
-
-                    ctx.render()?;
-                }
-                CommonAction::Down => {
-                    if !self.queue.is_empty() {
-                        self.queue.next(ctx.config.scrolloff, ctx.config.wrap_navigation);
-                    }
-
-                    ctx.render()?;
                 }
                 CommonAction::MoveUp if !self.queue.marked().is_empty() => {
                     if self.queue.is_empty() {
@@ -2157,108 +2143,29 @@ impl Pane for QueuePane {
                     self.queue.items.swap(idx, new_idx);
                     ctx.render()?;
                 }
-                CommonAction::DownHalf => {
-                    if !self.queue.is_empty() {
-                        self.queue.next_half_viewport(ctx.config.scrolloff);
-                    }
-
-                    ctx.render()?;
-                }
-                CommonAction::UpHalf => {
-                    if !self.queue.is_empty() {
-                        self.queue.prev_half_viewport(ctx.config.scrolloff);
-                    }
-
-                    ctx.render()?;
-                }
-                CommonAction::PageDown => {
-                    if !self.queue.is_empty() {
-                        self.queue.next_viewport(ctx.config.scrolloff);
-                    }
-
-                    ctx.render()?;
-                }
-                CommonAction::PageUp => {
-                    if !self.queue.is_empty() {
-                        self.queue.prev_viewport(ctx.config.scrolloff);
-                    }
-
-                    ctx.render()?;
-                }
-                CommonAction::Bottom => {
-                    if !self.queue.is_empty() {
-                        self.queue.last();
-                    }
-
-                    ctx.render()?;
-                }
-                CommonAction::Top => {
-                    if !self.queue.is_empty() {
-                        self.queue.first();
-                    }
-
-                    ctx.render()?;
-                }
-                CommonAction::Right => {}
-                CommonAction::Left => {}
-                CommonAction::EnterSearch => {
-                    ctx.input.insert_mode(self.queue.filter_buffer_id);
-                    ctx.input.clear_buffer(self.queue.filter_buffer_id);
-                    self.queue.set_filter_active(true);
-
-                    ctx.render()?;
-                }
-                CommonAction::NextResult => {
-                    self.queue.jump_next_matching(self.column_formats.as_slice(), ctx);
-
-                    ctx.render()?;
-                }
-                CommonAction::PreviousResult => {
-                    self.queue.jump_previous_matching(self.column_formats.as_slice(), ctx);
-
-                    ctx.render()?;
-                }
-                CommonAction::SelectDown | CommonAction::SelectUp => {
-                    let dir = if matches!(action, CommonAction::SelectDown) { 1 } else { -1 };
-                    let start = self.queue.state.get_selected().unwrap_or(0);
-                    if self.queue.state.mark_anchor().is_none() || self.queue.state.marked.is_empty() {
-                        self.queue.state.set_mark_anchor(start);
-                    }
-                    let anchor = self.queue.state.mark_anchor().unwrap_or(start);
-                    // Move first so the newly reached row is included in the
-                    // range and backing up deselects the row being left.
-                    if dir > 0 {
-                        self.queue.next(ctx.config.scrolloff, ctx.config.wrap_navigation);
-                    } else {
-                        self.queue.prev(ctx.config.scrolloff, ctx.config.wrap_navigation);
-                    }
-                    let sel = self.queue.state.get_selected().unwrap_or(start);
-                    // Replace the previous shift range.
-                    if let Some((lo, hi)) = self.queue.state.take_range_mark() {
-                        for i in lo..=hi {
-                            self.queue.state.marked.remove(&i);
+                CommonAction::Delete => {
+                    // `Del` removes the highlighted song (or every marked
+                    // song), like the `x` key — same as the context menu's
+                    // Remove.
+                    if !self.queue.marked().is_empty() {
+                        for range in self.queue.marked().ranges().rev() {
+                            ctx.command(move |client| {
+                                client.delete_from_queue(range.into())?;
+                                Ok(())
+                            });
                         }
+                        self.queue.marked_mut().clear();
+                        self.queue.state.clear_mark_anchor();
+                        status_info!("Marked songs removed from queue");
+                    } else if let Some(selected_song) = self.queue.selected() {
+                        let id = selected_song.id;
+                        ctx.command(move |client| {
+                            client.delete_id(id)?;
+                            Ok(())
+                        });
+                    } else {
+                        status_error!("No song selected");
                     }
-                    let (lo, hi) = (anchor.min(sel), anchor.max(sel));
-                    if lo < hi {
-                        self.queue.state.mark_range(lo, hi);
-                        self.queue.state.set_range_mark(lo, hi);
-                    }
-
-                    ctx.render()?;
-                }
-                CommonAction::InvertSelection => {
-                    self.queue.invert_marked();
-
-                    ctx.render()?;
-                }
-                CommonAction::Close if !self.queue.marked().is_empty() => {
-                    self.queue.marked_mut().clear();
-                    self.queue.state.clear_mark_anchor();
-                    // Esc is bound to both Close and ShowSettings: clearing a
-                    // selection consumes the keypress, so the settings panel
-                    // only opens on a second Esc (when nothing is selected).
-                    event.consume();
                     ctx.render()?;
                 }
                 CommonAction::AddOptions { kind: AddKind::Action(options) } => {
@@ -2303,154 +2210,16 @@ impl Pane for QueuePane {
                         status_error!("No song selected");
                     }
                 }
-                CommonAction::Delete => {
-                    // `Del` removes the highlighted song (or every marked
-                    // song), like the `x` key — same as the context menu's
-                    // Remove.
-                    if !self.queue.marked().is_empty() {
-                        for range in self.queue.marked().ranges().rev() {
-                            ctx.command(move |client| {
-                                client.delete_from_queue(range.into())?;
-                                Ok(())
-                            });
-                        }
-                        self.queue.marked_mut().clear();
-                        self.queue.state.clear_mark_anchor();
-                        status_info!("Marked songs removed from queue");
-                    } else if let Some(selected_song) = self.queue.selected() {
-                        let id = selected_song.id;
-                        ctx.command(move |client| {
-                            client.delete_id(id)?;
-                            Ok(())
-                        });
-                    } else {
-                        status_error!("No song selected");
-                    }
-                    ctx.render()?;
-                }
-                CommonAction::Rename => {}
-                CommonAction::Close => {}
-                CommonAction::FocusInput => {}
                 CommonAction::Confirm => {
                     // Enter opens the context menu (like right-click);
                     // `d`/`→` still play the highlighted track.
                     self.open_context_menu(ctx);
                 }
-                CommonAction::PaneDown => {}
-                CommonAction::PaneUp => {}
-                CommonAction::PaneRight => {}
-                CommonAction::PaneLeft => {}
                 CommonAction::ContextMenu => {
                     self.open_context_menu(ctx);
                 }
-                CommonAction::Rate {
-                    kind: RateKind::Value(value),
-                    current: false,
-                    min_rating: _,
-                    max_rating: _,
-                } => {
-                    let items = self.enqueue_items(false).0;
-                    ctx.command(move |client| {
-                        client.set_sticker_multiple(RATING_STICKER, value.to_string(), items)?;
-                        Ok(())
-                    });
-                }
-                CommonAction::Rate {
-                    kind: RateKind::Modal { values, custom, like },
-                    current: false,
-                    min_rating,
-                    max_rating,
-                } => {
-                    let items = self.enqueue_items(false).0;
-                    modal!(
-                        ctx,
-                        create_rating_modal(
-                            items,
-                            values.as_slice(),
-                            min_rating,
-                            max_rating,
-                            custom,
-                            like,
-                            ctx
-                        )
-                    );
-                }
-                CommonAction::Rate { kind: RateKind::Like(), current: false, .. } => {
-                    let items = self.enqueue_items(false).0;
-                    ctx.command(move |client| {
-                        client.set_sticker_multiple(LIKE_STICKER, "2".to_string(), items)?;
-                        Ok(())
-                    });
-                }
-                CommonAction::Rate { kind: RateKind::Neutral(), current: false, .. } => {
-                    let items = self.enqueue_items(false).0;
-                    ctx.command(move |client| {
-                        client.set_sticker_multiple(LIKE_STICKER, "1".to_string(), items)?;
-                        Ok(())
-                    });
-                }
-                CommonAction::Rate { kind: RateKind::Dislike(), current: false, .. } => {
-                    let items = self.enqueue_items(false).0;
-                    ctx.command(move |client| {
-                        client.set_sticker_multiple(LIKE_STICKER, "0".to_string(), items)?;
-                        Ok(())
-                    });
-                }
-                CommonAction::Rate { kind: _, current: true, min_rating: _, max_rating: _ } => {
-                    event.abandon();
-                }
-                CommonAction::Save {
-                    kind: SaveKind::Playlist { name, all, duplicates_strategy },
-                } => {
-                    let song_paths: Vec<String> =
-                        self.items(all).map(|(_, song)| song.file.clone()).collect();
-                    if song_paths.is_empty() {
-                        status_warn!("No songs selected to save");
-                        return Ok(());
-                    }
-
-                    add_to_playlist_or_show_modal(name, song_paths, duplicates_strategy, ctx);
-                }
-                CommonAction::Save { kind: SaveKind::Modal { all, duplicates_strategy } } => {
-                    let song_paths: Vec<String> =
-                        self.items(all).map(|(_, song)| song.file.clone()).collect();
-                    if song_paths.is_empty() {
-                        status_warn!("No songs selected to save");
-                        return Ok(());
-                    }
-                    let modal = create_save_modal(song_paths, None, duplicates_strategy, ctx)?;
-                    modal!(ctx, modal);
-                }
-                CommonAction::DeleteFromPlaylist {
-                    kind: DeleteKind::Playlist { name, all, confirmation },
-                } => {
-                    let song_paths: HashSet<String> =
-                        self.items(all).map(|(_, song)| song.file.clone()).collect();
-                    if song_paths.is_empty() {
-                        status_warn!("No songs selected to delete");
-                        return Ok(());
-                    }
-
-                    delete_from_playlist_or_show_confirmation(
-                        name,
-                        &song_paths,
-                        confirmation,
-                        ctx,
-                    )?;
-                }
-                CommonAction::DeleteFromPlaylist {
-                    kind: DeleteKind::Modal { all, confirmation },
-                } => {
-                    let song_paths: HashSet<String> =
-                        self.items(all).map(|(_, song)| song.file.clone()).collect();
-                    if song_paths.is_empty() {
-                        status_warn!("No songs selected to delete");
-                        return Ok(());
-                    }
-
-                    let modal = create_delete_modal(song_paths, confirmation, ctx)?;
-                    modal!(ctx, modal);
-                }
+                CommonAction::Right | CommonAction::Left => {}
+                other => self.handle_claimed_common_action(other, event, ctx)?,
             }
         } else if let Some(action) = event.claim_global() {
             match action {
@@ -2485,6 +2254,29 @@ impl Pane for QueuePane {
         }
 
         Ok(())
+    }
+}
+
+impl SongListCore<Song, TableState> for QueuePane {
+    fn list(&self) -> &Dir<Song, TableState> {
+        &self.queue
+    }
+
+    fn list_mut(&mut self) -> &mut Dir<Song, TableState> {
+        &mut self.queue
+    }
+
+    fn list_songs_in_item(
+        &self,
+        item: Song,
+    ) -> impl FnOnce(&mut Client<'_>) -> Result<Vec<Song>> + Send + Sync + Clone + 'static {
+        move |_client| Ok(vec![item])
+    }
+
+    /// The queue filter jump-matching uses the queue's own column formats
+    /// (not the generic browser song format).
+    fn song_format(&self, _ctx: &Ctx) -> Vec<Property<SongProperty>> {
+        self.column_formats.clone()
     }
 }
 
