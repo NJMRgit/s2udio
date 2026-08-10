@@ -1387,6 +1387,16 @@ impl Pane for DirectoriesPane {
                 // the Playlists pane; `d`/`→` keep open/play below.
                 CommonAction::Confirm => return self.open_context_menu(ctx),
                 CommonAction::ContextMenu => return self.open_context_menu(ctx),
+                CommonAction::Close if !self.marked.is_empty() => {
+                    self.marked.clear();
+                    self.marked.clear_anchor();
+                    // Esc is bound to both Close and ShowSettings: clearing a
+                    // selection consumes the keypress, so the settings panel
+                    // only opens on a second Esc (when nothing is selected).
+                    event.consume();
+                    ctx.render()?;
+                    return Ok(());
+                }
                 _ => event.abandon(),
             }
         }
@@ -1502,7 +1512,10 @@ impl DirectoriesPane {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shared::keys::Actions;
+    use crate::{
+        config::keys::GlobalAction,
+        shared::keys::Actions,
+    };
 
     fn dir(name: &str, full_path: &str) -> DirOrSong {
         DirOrSong::Dir {
@@ -2167,5 +2180,80 @@ mod tests {
             matches!(app_rx.try_recv(), Err(crossbeam::channel::TryRecvError::Empty)),
             "d on a song must not open a modal"
         );
+    }
+
+    #[test]
+    fn esc_with_a_selection_consumes_the_keypress() {
+        let mut ctx = test_ctx();
+        let mut pane = DirectoriesPane::new(&ctx);
+        pane.items = vec![song("a.flac"), song("b.flac"), song("c.flac")];
+        pane.item_list.select(Some(0));
+        let mut ev = action(vec![Actions::Common(CommonAction::SelectDown)]);
+        pane.handle_action(&mut ev, &mut ctx).unwrap();
+        assert_eq!(pane.marked.iter().collect::<Vec<_>>(), vec![0, 1]);
+
+        // Esc carries both Close (menu) and ShowSettings; clearing the
+        // selection must consume the keypress so settings does not open on
+        // the same press.
+        let mut ev = action(vec![
+            Actions::Common(CommonAction::Close),
+            Actions::Global(GlobalAction::ShowSettings),
+        ]);
+        pane.handle_action(&mut ev, &mut ctx).unwrap();
+        assert!(pane.marked.is_empty(), "Esc clears the selection");
+        assert!(ev.is_consumed(), "clearing the selection consumes the keypress");
+    }
+
+    #[test]
+    fn esc_without_a_selection_leaves_settings_enabled() {
+        let mut ctx = test_ctx();
+        let mut pane = DirectoriesPane::new(&ctx);
+        pane.items = vec![song("a.flac"), song("b.flac")];
+        pane.item_list.select(Some(0));
+        let mut ev = action(vec![
+            Actions::Common(CommonAction::Close),
+            Actions::Global(GlobalAction::ShowSettings),
+        ]);
+        pane.handle_action(&mut ev, &mut ctx).unwrap();
+        assert!(pane.marked.is_empty());
+        assert!(!ev.is_consumed(), "no selection: Esc still opens settings");
+    }
+
+    #[test]
+    fn shift_range_reanchors_after_esc_clears_the_selection() {
+        let mut ctx = test_ctx();
+        let mut pane = DirectoriesPane::new(&ctx);
+        pane.items = vec![
+            song("a.flac"),
+            song("b.flac"),
+            song("c.flac"),
+            song("d.flac"),
+            song("e.flac"),
+        ];
+        pane.item_list.select(Some(0));
+
+        // Shift+Down twice marks [0..=2] (anchor 0).
+        for _ in 0..2 {
+            let mut ev = action(vec![Actions::Common(CommonAction::SelectDown)]);
+            pane.handle_action(&mut ev, &mut ctx).unwrap();
+        }
+        assert_eq!(pane.item_list.selected(), Some(2));
+        assert_eq!(pane.marked.iter().collect::<Vec<_>>(), vec![0, 1, 2]);
+
+        // Esc clears the marks - and (with the fix) the anchor too.
+        let mut ev = action(vec![Actions::Common(CommonAction::Close)]);
+        pane.handle_action(&mut ev, &mut ctx).unwrap();
+        assert!(pane.marked.is_empty());
+
+        // Move the cursor back up to row 1, then Shift+Down: the range
+        // must start from the new cursor (1), not reach back to the old
+        // anchor (0).
+        let mut ev = action(vec![Actions::Common(CommonAction::Up)]);
+        pane.handle_action(&mut ev, &mut ctx).unwrap();
+        assert_eq!(pane.item_list.selected(), Some(1));
+        let mut ev = action(vec![Actions::Common(CommonAction::SelectDown)]);
+        pane.handle_action(&mut ev, &mut ctx).unwrap();
+        assert_eq!(pane.item_list.selected(), Some(2));
+        assert_eq!(pane.marked.iter().collect::<Vec<_>>(), vec![1, 2]);
     }
 }

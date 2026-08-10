@@ -43,6 +43,10 @@ pub(super) struct InputGroups {
     separator_style: Style,
     current_item_style: Style,
     highlight_item_style: Style,
+    /// The focused input's style while the filter pane holds the keyboard
+    /// cursor (the Search phase): the hover highlight, so the active pane
+    /// is visible while navigating (Radio/Playlists focus convention).
+    focused_style: Style,
 
     fold_case: bool,
     strip_diacritics: bool,
@@ -66,6 +70,7 @@ impl InputGroups {
         separator_style: Style,
         current_item_style: Style,
         highlight_item_style: Style,
+        focused_style: Style,
         ctx: &Ctx,
     ) -> Self {
         let mut inputs = Vec::new();
@@ -161,6 +166,7 @@ impl InputGroups {
             separator_style,
             current_item_style,
             highlight_item_style,
+            focused_style,
 
             fold_case: initial_fold_case,
             strip_diacritics: initial_strip_diacritics,
@@ -529,7 +535,13 @@ pub(super) struct ButtonInput {
 }
 
 impl InputGroups {
-    pub fn render(&mut self, mut area: Rect, buf: &mut Buffer, ctx: &Ctx) {
+    pub fn render(
+        &mut self,
+        mut area: Rect,
+        buf: &mut Buffer,
+        ctx: &Ctx,
+        pane_focused: bool,
+    ) {
         self.area = area;
         let mut remaining_height = area.height as usize;
         area.height = 1;
@@ -539,6 +551,12 @@ impl InputGroups {
             }
 
             let is_focused = idx == self.focused_idx;
+            // The pane holding the keyboard cursor shows its focused input
+            // with the hover highlight (Radio/Playlists focus convention);
+            // once the results pane takes the cursor it keeps the plain
+            // selection style.
+            let focus_style =
+                if pane_focused { self.focused_style } else { self.current_item_style };
 
             match input {
                 InputType::Textbox(input) => {
@@ -557,8 +575,8 @@ impl InputGroups {
                             .build()
                     } else if is_focused {
                         widget
-                            .label_style(self.current_item_style)
-                            .input_style(self.current_item_style)
+                            .label_style(focus_style)
+                            .input_style(focus_style)
                             .build()
                     } else {
                         widget.label_style(self.text_style).input_style(self.text_style).build()
@@ -582,8 +600,8 @@ impl InputGroups {
                             .build()
                     } else if is_focused {
                         widget
-                            .label_style(self.current_item_style)
-                            .input_style(self.current_item_style)
+                            .label_style(focus_style)
+                            .input_style(focus_style)
                             .build()
                     } else {
                         widget.label_style(self.text_style).input_style(self.text_style).build()
@@ -619,8 +637,8 @@ impl InputGroups {
                         .label(&input.label);
 
                     let inp = if is_focused {
-                        inp.label_style(self.current_item_style)
-                            .input_style(self.current_item_style)
+                        inp.label_style(focus_style)
+                            .input_style(focus_style)
                             .call()
                     } else {
                         inp.label_style(self.text_style).input_style(self.text_style).call()
@@ -632,7 +650,7 @@ impl InputGroups {
                     Button::default()
                         .label(&input.label)
                         .label_alignment(Alignment::Left)
-                        .style(if is_focused { self.current_item_style } else { self.text_style })
+                        .style(if is_focused { focus_style } else { self.text_style })
                         .render(area, buf);
                 }
                 InputType::Separator => {
