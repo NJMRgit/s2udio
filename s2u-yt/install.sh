@@ -160,9 +160,19 @@ if [ -f "\$USER_CONF" ]; then
     ' "\$USER_CONF" > "\$ANON_CONF" 2>/dev/null || :
     # --ignore-config: the default ~/.config/yt-dlp/config must NOT leak its
     # cookies into this anonymous pass (only the sanitized config applies).
-    "$real" --ignore-config --config-locations "\$ANON_CONF" --config-locations "\$CONF" --plugin-dirs "\$PLUGINS" "\$@"
+    # Buffer phase 1's stdout: a FAILED anonymous pass still prints a leading
+    # "null" line before erroring, which corrupts the stdout JSON parsers of
+    # s2udio / mpv / CLI users. Forward the output only on success; on failure
+    # discard it and fall through to the authenticated pass.
+    TMP="$(mktemp "\${TMPDIR:-/tmp}/s2u-yt.XXXXXX")"
+    "$real" --ignore-config --config-locations "\$ANON_CONF" --config-locations "\$CONF" --plugin-dirs "\$PLUGINS" "\$@" >"\$TMP"
     status=\$?
-    [ "\$status" -eq 0 ] && exit 0
+    if [ "\$status" -eq 0 ]; then
+        cat "\$TMP"
+        rm -f "\$TMP"
+        exit 0
+    fi
+    rm -f "\$TMP"
     # Phase 2: authenticated — web_safari (android_vr auto-skipped).
     exec "$real" --ignore-config --config-locations "\$USER_CONF" --config-locations "\$CONF" --plugin-dirs "\$PLUGINS" "\$@"
 else

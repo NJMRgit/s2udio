@@ -107,7 +107,10 @@ impl YtDlp {
         command.arg("--embed-thumbnail");
         command.arg("--embed-metadata");
         command.arg("-f");
-        command.arg("bestaudio");
+        // bestaudio/best (not bare bestaudio): with the authenticated
+        // web_safari client no pure audio-only format exists, so fall back
+        // to the best combined format (-x extracts audio via ffmpeg).
+        command.arg("bestaudio/best");
         command.arg("--convert-thumbnails");
         command.arg("jpg");
         command.arg("--output");
