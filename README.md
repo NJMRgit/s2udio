@@ -1,31 +1,56 @@
 # s2udio
+<div align="right">
+            <a href="https://ko-fi.com/s7oned" target="_blank" style="display: inline-block;">
+                <img
+                    src="https://img.shields.io/badge/Donate-Ko--fi-F16061.svg?style=flat-square&logo=ko-fi" 
+                    align="right"
+                />
+            </a></div>
+
 
 A heavily modified fork of [rmpc](https://github.com/mierak/rmpc) v0.11.0
 
 a fully featured media center TUI built on rmpc that adds support for video via mpv and a bunch of other goodies!
 
+Built with the help of Deepseek v4 Flash, pi, and prime-agent
+
+<img width="2065" height="924" alt="image" src="https://github.com/user-attachments/assets/9da9686c-52f3-4b3c-8ef7-cfffe20a7270" />
+<img width="1400" height="163" alt="image" src="https://github.com/user-attachments/assets/e4fc184f-61f7-4f23-8f32-0e15ba493362" />
+Left: S2udio ootb
+
+Right: RMPC ootb
+
+
 ## Added Features:
 - synchronized lyrics + fetch
 - Jellyfin!
+- Online radio - browse and listen to stations all over the world!
+    * Jellyfin/Radio tabs can be disabled in options
 - Online streams via yt-dlp
     * includes description and chapters for yt
 - TUI maintained playlists (persist if MPV is closed)
 - mpv/mpris helper - wraps mpris data and manages/tracks mpv playback.
     * allows tui to be closed during playback without interruptions
-- Online radio - browse and listen to stations all over the world!
 - copy + paste and drag n' drop support for audio and video files/links/.magnet/torrent
 - play videos as audio
 - download stream/torrent
 - full mouse controls
 - sensible and intuitive key binds
+   
 
 ## Showcase
-### UI overview
-[Screencast_20260809_202446.webm](https://github.com/user-attachments/assets/2ac236b4-a2b5-402a-a5d2-9bcb7deb2882)
+### Jellyfin
+https://github.com/user-attachments/assets/ecb84436-4ce9-45d0-9dbf-a34cc159e31d
 ### Automatic theming (STTM only for now)
 [Screencast_20260809_202700.webm](https://github.com/user-attachments/assets/9ed0e9b8-ecac-4f69-90aa-e39b247a3aa6)
 ### ctrl+click / alt+click / shift + up|down
 [Screencast_20260809_202813.webm](https://github.com/user-attachments/assets/f4e21da4-28a9-4487-9e5f-19bc564d46bd)
+### youtube audio streams with chapters
+https://github.com/user-attachments/assets/6b049334-d996-49bb-8629-c7fdfdea82d5
+### youtube video
+https://github.com/user-attachments/assets/016da10c-c401-4e01-92d5-db684c548f97
+
+
 
 ## Dependencies
 - yt-dlp
