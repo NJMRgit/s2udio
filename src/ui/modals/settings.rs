@@ -332,6 +332,16 @@ impl StagedCava {
     }
 }
 
+/// Values staged before a [-] [+] adjustment session; restored when the
+/// session is cancelled with Esc.
+#[derive(Debug, Clone)]
+struct AdjustSnapshot {
+    cava: StagedCava,
+    /// The live MPD crossfade seconds at session start (the crossfade row
+    /// adjusts MPD live, so cancel restores it).
+    crossfade: u32,
+}
+
 /// A key remap applied while the panel was open. The runtime keybinds are
 /// updated immediately (the table shows the new key); the change is written
 /// to `keybinds.ron` only when the panel is closed with Save.
@@ -728,6 +738,13 @@ pub struct SettingsModal {
     editing_color: Option<AppearanceTarget>,
     /// Hex digits typed so far (no '#').
     edit_buffer: String,
+    /// The stepper row ([-] [+]) whose controls are focused for keyboard
+    /// adjustment: Space/Enter enters, Space/Enter commits, Esc cancels
+    /// (reverting the staged value). The selection is locked while set.
+    adjusting: Option<usize>,
+    /// The staged values when adjust mode started, so Esc can cancel the
+    /// whole adjustment session.
+    adjust_snapshot: Option<AdjustSnapshot>,
     /// First visible content row (the panel is compact, so long sections
     /// scroll).
     scroll: usize,
@@ -785,6 +802,8 @@ impl SettingsModal {
             jellyfin_password: String::new(),
             jellyfin_credentials: None,
             editing_jellyfin_row: None,
+            adjusting: None,
+            adjust_snapshot: None,
             ui_initial,
             ui_pending: ui_initial,
             video_initial,
@@ -1316,6 +1335,55 @@ impl SettingsModal {
             }
         }
         ctx.render().ok();
+    }
+
+    /// The [-] [+] stepper rows whose controls can be focused with
+    /// Space/Enter (a/← and d/→ then adjust, Esc cancels).
+    fn is_stepper_row(&self, idx: usize) -> bool {
+        matches!(
+            self.rows.get(idx),
+            Some(ContentRow::General(
+                GeneralRow::Sensitivity
+                | GeneralRow::Fps
+                | GeneralRow::FreqMin
+                | GeneralRow::FreqMax
+                | GeneralRow::NoiseReduction
+            )) | Some(ContentRow::Mpd(MpdRow::Crossfade))
+        )
+    }
+
+    /// Enter adjust mode on the selected stepper row: focus its controls and
+    /// snapshot the staged values so Esc can cancel the whole session.
+    fn start_adjust(&mut self, ctx: &mut Ctx) -> Result<()> {
+        self.adjust_snapshot = Some(AdjustSnapshot {
+            cava: self.cava_pending.clone(),
+            crossfade: ctx.status.xfade.unwrap_or(0),
+        });
+        self.adjusting = Some(self.selected);
+        ctx.render()?;
+        Ok(())
+    }
+
+    /// Leave adjust mode, keeping the adjusted value (Space/Enter).
+    fn commit_adjust(&mut self, ctx: &mut Ctx) -> Result<()> {
+        self.adjusting = None;
+        self.adjust_snapshot = None;
+        ctx.render()?;
+        Ok(())
+    }
+
+    /// Leave adjust mode, reverting the staged value to the snapshot (Esc).
+    fn cancel_adjust(&mut self, ctx: &mut Ctx) -> Result<()> {
+        let Some(snapshot) = self.adjust_snapshot.take() else { return Ok(()) };
+        self.cava_pending = snapshot.cava;
+        ctx.command(move |client| {
+            client.crossfade(snapshot.crossfade)?;
+            Ok(())
+        });
+        self.adjusting = None;
+        self.refresh_rows(ctx);
+        ctx.render()?;
+        Ok(())
     }
 
     fn activate(&mut self, ctx: &mut Ctx) -> Result<()> {
@@ -1995,12 +2063,19 @@ impl SettingsModal {
         style: Style,
     ) -> (Vec<Span<'static>>, Vec<Span<'static>>, Vec<DeferredButton>, Option<Click>) {
         let vw = value.chars().count();
+        // While the row's controls are focused, underline them so the
+        // value/[-]/[+] visibly light up as the active editing target.
+        let ctl = if self.adjusting == Some(self.selected) {
+            style.add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+        } else {
+            style.add_modifier(Modifier::BOLD)
+        };
         let control = vec![
-            Span::styled(value, style.bold()),
+            Span::styled(value, ctl),
             Span::raw(" "),
-            Span::styled("[-]", style.bold()),
+            Span::styled("[-]", ctl),
             Span::raw(" "),
-            Span::styled("[+]", style.bold()),
+            Span::styled("[+]", ctl),
         ];
         let buttons = vec![
             DeferredButton { offset: vw + 1, label: "[-]", click: Click::Dec },
@@ -2505,6 +2580,8 @@ impl Modal for SettingsModal {
         // ---------- footer ----------
         let footer = if self.capturing {
             " press any key to assign · Esc to cancel "
+        } else if self.adjusting.is_some() {
+            " a/← d/→  adjust · Space/Enter  commit · Esc  cancel "
         } else if self.focus == SettingsFocus::Sidebar {
             " w/s ↑/↓  sidebar · d/→/Enter  open · Esc  close "
         } else {
@@ -2626,6 +2703,33 @@ impl Modal for SettingsModal {
             return Ok(true);
         }
 
+        // Stepper adjust mode: a [-] [+] row's controls are focused.
+        // a/← and d/→ adjust the value, Space/Enter commits (focus back to
+        // the list), Esc cancels the whole adjustment and reverts the
+        // staged value. All other keys are inert while adjusting.
+        if self.adjusting.is_some() {
+            match key.code {
+                KeyCode::Char('a') | KeyCode::Left
+                    if key.modifiers.is_empty() || matches!(key.code, KeyCode::Left) =>
+                {
+                    self.adjust(ctx, -1)?;
+                }
+                KeyCode::Char('d') | KeyCode::Right
+                    if key.modifiers.is_empty() || matches!(key.code, KeyCode::Right) =>
+                {
+                    self.adjust(ctx, 1)?;
+                }
+                KeyCode::Enter | KeyCode::Char(' ') if key.modifiers == KeyModifiers::NONE => {
+                    self.commit_adjust(ctx)?;
+                }
+                KeyCode::Esc => {
+                    self.cancel_adjust(ctx)?;
+                }
+                _ => {}
+            }
+            return Ok(true);
+        }
+
         // Normal mode: the settings panel consumes every key. Navigation
         // mirrors the tab panes — the focused pane owns w/s/↑/↓, d/→/Enter
         // activates, a/← moves focus back to the sidebar.
@@ -2670,7 +2774,15 @@ impl Modal for SettingsModal {
                         self.populate(ctx);
                         self.focus = SettingsFocus::Content;
                     }
-                    SettingsFocus::Content => self.activate(ctx)?,
+                    SettingsFocus::Content => {
+                        // A [-] [+] row focuses its controls instead of
+                        // stepping immediately; a/← and d/→ then adjust.
+                        if self.is_stepper_row(self.selected) {
+                            self.start_adjust(ctx)?;
+                        } else {
+                            self.activate(ctx)?;
+                        }
+                    }
                 }
             }
             KeyCode::Esc => {
@@ -2704,6 +2816,8 @@ impl Modal for SettingsModal {
             if let Some(idx) =
                 self.sidebar_areas.iter().position(|area| area.contains(event.into()))
             {
+                self.adjusting = None;
+                self.adjust_snapshot = None;
                 self.sidebar_selected = idx;
                 self.populate(ctx);
                 self.focus = SettingsFocus::Content;
@@ -2725,8 +2839,12 @@ impl Modal for SettingsModal {
                 {
                     self.selected = *idx;
                 }
-                // Clicking a row hands keyboard focus to the content pane
-                // (tab-pane scheme: the clicked pane owns the keyboard).
+                // Clicking a row ends an active stepper adjustment (the
+                // staged value is kept) and hands keyboard focus to the
+                // content pane (tab-pane scheme: the clicked pane owns the
+                // keyboard).
+                self.adjusting = None;
+                self.adjust_snapshot = None;
                 self.focus = SettingsFocus::Content;
                 return self.do_click(*click, ctx);
             }
@@ -3210,6 +3328,81 @@ mod nav_tests {
         modal.handle_raw_key(key(KeyCode::Char('d')), &mut ctx).unwrap();
         modal.handle_raw_key(key(KeyCode::Char('a')), &mut ctx).unwrap();
         assert_eq!(modal.focus, SettingsFocus::Sidebar);
+    }
+
+    /// Open the general section and move the highlight down until `want` is
+    /// selected (headers are skipped by the navigation).
+    fn select_general_row(modal: &mut SettingsModal, ctx: &mut Ctx, want: &dyn Fn(&ContentRow) -> bool) {
+        modal.handle_raw_key(key(KeyCode::Char('d')), ctx).unwrap();
+        loop {
+            if want(&modal.rows[modal.selected]) {
+                break;
+            }
+            modal.handle_raw_key(key(KeyCode::Down), ctx).unwrap();
+        }
+    }
+
+    #[test]
+    fn space_enter_focuses_stepper_controls_and_a_d_adjust() {
+        let (mut modal, mut ctx) = fixture();
+        select_general_row(&mut modal, &mut ctx, &|r| matches!(r, ContentRow::General(GeneralRow::Fps)));
+        let fps_before = modal.fps();
+
+        // Space focuses the [-] [+] controls without stepping the value.
+        modal.handle_raw_key(key(KeyCode::Char(' ')), &mut ctx).unwrap();
+        assert_eq!(modal.adjusting, Some(modal.selected));
+        assert_eq!(modal.fps(), fps_before, "entering adjust mode must not change the value");
+
+        // d/→ and a/← adjust while focused.
+        modal.handle_raw_key(key(KeyCode::Char('d')), &mut ctx).unwrap();
+        assert_eq!(modal.fps(), fps_before + 5, "d/→ steps up");
+        modal.handle_raw_key(key(KeyCode::Left), &mut ctx).unwrap();
+        assert_eq!(modal.fps(), fps_before, "a/← steps back down");
+
+        // Space/Enter commits: focus returns to the list, value kept.
+        modal.handle_raw_key(key(KeyCode::Enter), &mut ctx).unwrap();
+        assert_eq!(modal.adjusting, None);
+        assert_eq!(modal.fps(), fps_before);
+    }
+
+    #[test]
+    fn esc_cancels_the_stepper_adjustment() {
+        let (mut modal, mut ctx) = fixture();
+        select_general_row(
+            &mut modal,
+            &mut ctx,
+            &|r| matches!(r, ContentRow::General(GeneralRow::Sensitivity)),
+        );
+        let sens_before = modal.sensitivity();
+
+        modal.handle_raw_key(key(KeyCode::Char(' ')), &mut ctx).unwrap();
+        assert_eq!(modal.adjusting, Some(modal.selected));
+        modal.handle_raw_key(key(KeyCode::Char('d')), &mut ctx).unwrap();
+        modal.handle_raw_key(key(KeyCode::Char('d')), &mut ctx).unwrap();
+        assert_eq!(modal.sensitivity(), sens_before + 10);
+
+        // Esc cancels the whole session and reverts the staged value.
+        modal.handle_raw_key(key(KeyCode::Esc), &mut ctx).unwrap();
+        assert_eq!(modal.adjusting, None);
+        assert_eq!(modal.sensitivity(), sens_before, "Esc reverts the adjustment");
+    }
+
+    #[test]
+    fn space_on_a_toggle_row_still_toggles() {
+        let (mut modal, mut ctx) = fixture();
+        select_general_row(
+            &mut modal,
+            &mut ctx,
+            &|r| matches!(r, ContentRow::General(GeneralRow::AlbumArt)),
+        );
+        let before = modal.ui_pending.show_album_art;
+        modal.handle_raw_key(key(KeyCode::Char(' ')), &mut ctx).unwrap();
+        assert_eq!(
+            modal.ui_pending.show_album_art,
+            !before,
+            "non-stepper rows keep toggling"
+        );
+        assert_eq!(modal.adjusting, None, "toggle rows do not enter adjust mode");
     }
 
     #[test]
