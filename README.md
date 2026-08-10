@@ -1,4 +1,4 @@
-# s2udio — rmpc fork
+# s2udio
 
 A heavily modified fork of [rmpc](https://github.com/mierak/rmpc) v0.11.0
 
@@ -18,6 +18,14 @@ a fully featured media center TUI built on rmpc that adds support for video via 
 - download stream/torrent
 - full mouse controls
 - sensible and intuitive key binds
+
+## Showcase
+### UI overview
+[Screencast_20260809_202446.webm](https://github.com/user-attachments/assets/2ac236b4-a2b5-402a-a5d2-9bcb7deb2882)
+### Automatic theming (STTM only for now)
+[Screencast_20260809_202700.webm](https://github.com/user-attachments/assets/9ed0e9b8-ecac-4f69-90aa-e39b247a3aa6)
+### ctrl+click / alt+click / shift + up|down
+[Screencast_20260809_202813.webm](https://github.com/user-attachments/assets/f4e21da4-28a9-4487-9e5f-19bc564d46bd)
 
 ## Dependencies
 - yt-dlp
