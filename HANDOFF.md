@@ -352,8 +352,8 @@ compiled in — never delete. Old history is preserved at the local
 
 ## Pending
 
-- **Round 24 (2026-08-10 user feedback) — IMPLEMENTED in the container
-  (working tree, uncommitted); AWAITING HOST VALIDATION.** (1)
+- **Round 24 (2026-08-10 user feedback) — IMPLEMENTED in the container,
+  HOST-VALIDATED + live-checked (2026-08-10, commit `7e1f151`).** (1)
   Esc-deselect everywhere: queue **video** list (`handle_video_action`
   Close arm) and the **MPD** tab (`directories.rs` Close arm) now clear +
   drop anchor (`MarkState::clear_anchor`) + consume, second Esc opens

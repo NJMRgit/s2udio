@@ -24,7 +24,7 @@ branch on the public/distribution repo anymore.
 
 Date: 2026-08-10 · Branch: `working`
 
-## ROUND 24 — IMPLEMENTED in the container (2026-08-10), needs host validation
+## ROUND 24 — IMPLEMENTED in the container (2026-08-10), HOST-VALIDATED (1304/1304) + live-checked
 
 **User feedback (2026-08-10) →
 [FEEDBACK-2026-08-10-17.md](FEEDBACK-2026-08-10-17.md).** Both items
