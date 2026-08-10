@@ -7,7 +7,8 @@ description: >
   Project outline for the s2udio UI reuse rewrite (branch `rewrite`):
   audit of shared vs bespoke UI code, the master-module-with-args target
   architecture, and the phased consolidation plan.
-status: "draft"
+status: "active"
+phase_status: "0: complete (2026-08-10); 1: in progress"
 updated: "2026-08-10"
 source_files:
   - src/ui/browser.rs
@@ -88,11 +89,17 @@ shared infrastructure.
 Measured pairwise similarity of the *same-named* functions (they were
 copy-pasted once, then drifted):
 
-- `radio::render_regions` vs `jellyfin::render_tree`: **0.82**
-- `radio::render_stations` vs `jellyfin::render_items`: 0.50
-- `directories::render_tree` vs `jellyfin::render_tree`: 0.63
-- `directories::render_tips` vs `jellyfin::render_tips`: **0.86**
-- `directories::move_items` vs `jellyfin::move_items`: 0.71
+- `radio::render_regions` vs `jellyfin::render_tree`: **0.75**
+- `radio::render_stations` vs `jellyfin::render_items`: 0.39
+- `directories::render_tree` vs `jellyfin::render_tree`: 0.43
+- `directories::render_tips` vs `jellyfin::render_tips`: **0.87**
+- `directories::move_items` vs `jellyfin::move_items`: 0.78
+
+> Measured at commit `24bd883` with `scripts/dev/ui-metrics.py` (token-sequence
+> difflib ratio over comment-stripped function bodies — the committed Phase-0
+> metric). The outline's original ad-hoc numbers predate rounds 24–27 and were
+> computed with a slightly different method; the script is the source of truth
+> from Phase 0 on. Full same-named-pair report: 83 pairs > 0.5 at baseline.
 - cloned-line blocks: (jellyfin,radio) **138**, (directories,jellyfin)
   **120**, (directories,radio) 55, plus smaller fragments in
   directories↔search (79), directories↔playlists (61), etc.
@@ -161,6 +168,40 @@ pane (queue audio, search results, radio stations, jellyfin items,
 directories items, picker modals) re-implemented the same mechanics.
 Each new feature then gets bolted onto whichever copy is nearest — which
 is exactly the drift the user wants to end.
+
+### 2.4 Phase-0 LOC baseline (measured 2026-08-10 @ `24bd883`)
+
+Full per-file LOC for `src/ui` is regenerable any time with
+`python3 scripts/dev/ui-metrics.py` (reads the working tree; `--ref <git>` for a
+ref). Key numbers and audited files:
+
+- **`src/ui` total: 56,704 LOC** (82 files) — 59.2% of the 95,811 total `.rs`
+  LOC (includes `build.rs`).
+- Audited pane/browser files:
+
+| File | LOC |
+| --- | --- |
+| `src/ui/browser.rs` | 1041 |
+| `src/ui/panes/mod.rs` | 3100 |
+| `src/ui/panes/queue.rs` | 4686 |
+| `src/ui/panes/directories.rs` | 2259 |
+| `src/ui/panes/jellyfin.rs` | 2845 |
+| `src/ui/panes/radio.rs` | 2356 |
+| `src/ui/panes/search/mod.rs` | 2039 |
+| `src/ui/panes/playlists.rs` | 1716 |
+| `src/ui/panes/tag_browser.rs` | 588 |
+| `src/ui/panes/albums.rs` | 190 |
+| `src/ui/panes/controls.rs` | 1516 |
+| `src/ui/panes/lyrics.rs` | 2543 |
+| **src/ui total** | **56,704** |
+| **tree total .rs** | **95,811** |
+
+Similarity guardrail baseline: **83 same-named function pairs with ratio > 0.5**
+across `src/ui` (full list: `python3 scripts/dev/ui-metrics.py --pairs`). The
+intentional thin adapters (`stack`/`stack_mut`/`browser_areas` on
+Albums/TagBrowser/Playlists) are 1.00 — expected; Phase 2 targets the heavy
+duplicated pairs (`render_tree`, `render_items`, `render_tips`, `move_*`,
+`populate_items`, …) from §2.2.
 
 ## 3. Target architecture — master modules + args
 
@@ -300,12 +341,12 @@ now-playing line templates — one implementation, args for style/content.
 ## 5. Phased plan
 
 Each phase lands on `rewrite` as its own commit(s), keeps
-`cargo test --release` green (current suite: **1307 tests**), and ends
+`cargo test --release` green (current suite: **1312 tests** (baseline at commit `24bd883`)), and ends
 with a behavior-parity live check of the affected tabs.
 
 | Phase | Work | Primary targets | Exit criteria |
 | --- | --- | --- | --- |
-| 0 | Baselines & guardrails | — | Branch from `working`; record LOC table (§2); full test run green; agree the LOC-metrics script. |
+| 0 | Baselines & guardrails | — | ✅ (2026-08-10, commit `24bd883`+): branched from `working` at `12d8c6c`; LOC + similarity baseline recorded (§2.4) via committed `scripts/dev/ui-metrics.py`; `cargo test --release` green **1312/1312** (rustc 1.97.1; host may re-run). |
 | 1 | Extract `SongListCore<T>` from `BrowserPane`; adopt in queue Audio + search results | `ui/browser.rs`, `ui/panes/queue.rs`, `ui/panes/search/mod.rs` | Browser panes unchanged; queue/search behavior identical (tests + live check); **–~300–500 net LOC**; the `CommonAction` arms exist once. |
 | 2 | `TreeBrowserCore<T>` unifies directories / jellyfin / radio | `ui/panes/directories.rs`, `jellyfin.rs`, `radio.rs` | Three panes render identically to today; pairwise similarity of same-named fns ≤ 0.2 (or deleted); **–~3–4k LOC**. |
 | 3 | Modal consolidation onto `ListModal`/`InfoListModal` + section merge | `ui/modals/*` | Each converted modal passes its behavior checks; `menu/select_section` merged; **–~600–900 LOC**. |
@@ -320,7 +361,7 @@ already remove most of the measured duplication.
 
 ## 6. Definition of done (applies per phase)
 
-1. `cargo test --release` green (1307 and growing), no new warnings.
+1. `cargo test --release` green (1312 and growing), no new warnings.
 2. Behavior parity: the tabs/panes/modals touched by the phase pass the
    existing design-doc specs and a live check by the user.
 3. No two panes implement the same-named function with similarity > 0.5

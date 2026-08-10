@@ -1,0 +1,179 @@
+#!/usr/bin/env python3
+"""ui-metrics.py — LOC + same-named-function similarity metrics for s2udio's UI.
+
+Phase-0 guardrail tool for the UI reuse rewrite (docs/design/Rewrite/ui-reuse-rewrite.md).
+
+Metrics
+-------
+1. LOC: physical source lines per .rs file / directory (blanks and comments counted,
+   matching the outline's §2 numbers).
+2. Same-named-function similarity: for every pair of files under src/ui that both
+   define a function with the same name, extract the function bodies (comment-
+   stripped, balanced-brace delimited), tokenize (identifiers / numbers / single
+   punctuation chars), and compute difflib.SequenceMatcher.ratio() on the token
+   sequences. Reports pairs with ratio > 0.5 (the per-phase DoD guardrail).
+
+Note: numbers in the Phase-0 baseline table were measured with this script at
+commit 24bd883 (branch rewrite). Earlier ad-hoc numbers in the outline §2.2 were
+measured on a pre-rounds-24-27 tree with a slightly different method; the script
+is now the single source of truth for the guardrail.
+
+Usage
+-----
+  python3 scripts/dev/ui-metrics.py            # LOC table + similarity pairs > 0.5
+  python3 scripts/dev/ui-metrics.py --json     # machine-readable (baseline diffing)
+  python3 scripts/dev/ui-metrics.py --pairs    # every same-named pair, any ratio
+  python3 scripts/dev/ui-metrics.py --ref HEAD # read files from a git ref instead
+                                               #   of the working tree
+"""
+
+import argparse, difflib, json, os, re, subprocess, sys
+
+REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+PANE_FILES = [
+    "src/ui/browser.rs",
+    "src/ui/panes/mod.rs",
+    "src/ui/panes/queue.rs",
+    "src/ui/panes/directories.rs",
+    "src/ui/panes/jellyfin.rs",
+    "src/ui/panes/radio.rs",
+    "src/ui/panes/search/mod.rs",
+    "src/ui/panes/playlists.rs",
+    "src/ui/panes/tag_browser.rs",
+    "src/ui/panes/albums.rs",
+    "src/ui/panes/controls.rs",
+    "src/ui/panes/lyrics.rs",
+]
+
+
+def read_file(path, ref=None):
+    if ref:
+        out = subprocess.run(["git", "-C", REPO, "show", f"{ref}:{path}"],
+                             capture_output=True, text=True)
+        if out.returncode != 0:
+            return None
+        return out.stdout
+    p = os.path.join(REPO, path)
+    if not os.path.exists(p):
+        return None
+    with open(p, encoding="utf-8") as fh:
+        return fh.read()
+
+
+def strip_comments(src):
+    src = re.sub(r"/\*.*?\*/", "", src, flags=re.S)
+    src = re.sub(r"//[^\n]*", "", src)
+    return src
+
+
+def extract_fns(src):
+    """name -> list of bodies (comment-stripped, balanced-brace delimited)."""
+    src = strip_comments(src)
+    fns = {}
+    for m in re.finditer(r"\bfn\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(", src):
+        name = m.group(1)
+        i = src.find("{", m.start())
+        if i == -1:
+            continue
+        depth, j = 0, i
+        while j < len(src):
+            if src[j] == "{":
+                depth += 1
+            elif src[j] == "}":
+                depth -= 1
+                if depth == 0:
+                    break
+            j += 1
+        fns.setdefault(name, []).append(src[i : j + 1])
+    return fns
+
+
+def tokens(body):
+    return re.findall(r"[A-Za-z_][A-Za-z0-9_]*|[0-9]+|.", body)
+
+
+def similarity(a, b):
+    return difflib.SequenceMatcher(None, tokens(a), tokens(b)).ratio()
+
+
+def loc_table(ref=None):
+    out = subprocess.run(["git", "-C", REPO, "ls-tree", "-r", "--name-only",
+                          ref or "HEAD", "--", "src"], capture_output=True, text=True)
+    rows = []
+    for path in out.stdout.splitlines():
+        if not path.endswith(".rs"):
+            continue
+        src = read_file(path, ref)
+        if src is None:
+            continue
+        rows.append((path, len(src.splitlines())))
+    return rows
+
+
+def pane_similarity(ref=None):
+    fns = {}
+    for path in PANE_FILES:
+        src = read_file(path, ref)
+        if src is None:
+            continue
+        fns[path] = extract_fns(src)
+    pairs = []
+    files = list(fns)
+    for i, fa in enumerate(files):
+        for fb in files[i + 1 :]:
+            for name, bodies_a in fns[fa].items():
+                if name not in fns[fb]:
+                    continue
+                for ba in bodies_a:
+                    for bb in fns[fb][name]:
+                        r = similarity(ba, bb)
+                        pairs.append((r, name, fa, fb, len(ba), len(bb)))
+    pairs.sort(reverse=True)
+    return pairs
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--json", action="store_true")
+    ap.add_argument("--pairs", action="store_true")
+    ap.add_argument("--ref", default=None)
+    args = ap.parse_args()
+
+    rows = loc_table(args.ref)
+    total = sum(n for _, n in rows)
+    ui_rows = [(p, n) for p, n in rows if p.startswith("src/ui/")]
+    ui_total = sum(n for _, n in ui_rows)
+    pairs = pane_similarity(args.ref)
+    over = [(r, n, a, b, la, lb) for r, n, a, b, la, lb in pairs if r > 0.5]
+
+    if args.json:
+        print(json.dumps({
+            "ref": args.ref or "worktree",
+            "total_rs_loc": total,
+            "ui_rs_loc": ui_total,
+            "loc": {p: n for p, n in rows},
+            "same_named_pairs": [{"ratio": round(r, 4), "fn": n, "a": a, "b": b,
+                                  "a_lines": la, "b_lines": lb}
+                                 for r, n, a, b, la, lb in pairs],
+            "over_0_5": [{"ratio": round(r, 4), "fn": n, "a": a, "b": b}
+                         for r, n, a, b, _, _ in over],
+        }, indent=2))
+        return
+
+    print(f"LOC  (ref={args.ref or 'worktree'}):  src/ui {ui_total}  of  total {total} .rs")
+    for p, n in sorted(ui_rows):
+        print(f"  {n:6d}  {p}")
+    if args.pairs:
+        print("\nSame-named function pairs (all):")
+        for r, n, a, b, la, lb in pairs:
+            flag = "  <-- OVER 0.5" if r > 0.5 else ""
+            print(f"  {r:.2f}  {n:24s} {a} <-> {b}  ({la}/{lb} lines){flag}")
+    else:
+        print(f"\nSame-named function pairs with ratio > 0.5 ({len(over)}):")
+        for r, n, a, b, la, lb in over:
+            print(f"  {r:.2f}  {n:24s} {a} <-> {b}  ({la}/{lb} lines)")
+
+
+if __name__ == "__main__":
+    main()
