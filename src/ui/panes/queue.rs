@@ -177,7 +177,9 @@ impl QueuePane {
     /// Remove deleted the items.
     pub(crate) fn clear_marked(&mut self) {
         self.queue.marked_mut().clear();
+        self.queue.state.clear_mark_anchor();
         self.video_marked.clear();
+        self.video_marked.clear_anchor();
     }
 
     /// The queue the pane shows. Radio stations and Jellyfin audio streams
@@ -1057,6 +1059,7 @@ impl QueuePane {
         let len = ctx.video_playlist.borrow().len();
         self.video_items_len = len;
         self.video_marked.clear();
+        self.video_marked.clear_anchor();
         if let Some(sel) = self.video_state.selected() {
             let removed_below = indices.iter().filter(|&&i| i < sel).count();
             let new_sel = sel.saturating_sub(removed_below);
@@ -1922,6 +1925,7 @@ impl Pane for QueuePane {
                         });
                     }
                     self.queue.marked_mut().clear();
+                    self.queue.state.clear_mark_anchor();
                     status_info!("Marked songs removed from queue");
                     ctx.render()?;
                 }
@@ -2311,6 +2315,7 @@ impl Pane for QueuePane {
                             });
                         }
                         self.queue.marked_mut().clear();
+                        self.queue.state.clear_mark_anchor();
                         status_info!("Marked songs removed from queue");
                     } else if let Some(selected_song) = self.queue.selected() {
                         let id = selected_song.id;
@@ -4395,6 +4400,68 @@ mod video_mark_tests {
         )
         .unwrap();
         assert_eq!(pane.video_marked.iter().collect::<Vec<_>>(), vec![1, 2]);
+    }
+
+    #[test]
+    fn alt_click_reanchors_after_the_marks_are_cleared() {
+        let (mut ctx, _tx) = queue_ctx();
+        ctx.video_playlist.borrow_mut().extend(entries(6));
+        let mut pane = video_pane(&mut ctx);
+        let table = render(&mut pane, &ctx);
+
+        // Mark rows 1..=4 via plain-click anchor + alt+click.
+        for (row, modifiers) in [(1u16, KeyModifiers::NONE), (4, KeyModifiers::ALT)] {
+            pane.handle_mouse_event(
+                MouseEvent {
+                    x: table.x + 1,
+                    y: table.y + row,
+                    kind: MouseEventKind::LeftClick,
+                    modifiers,
+                },
+                &ctx,
+            )
+            .unwrap();
+        }
+        assert_eq!(pane.video_marked.iter().collect::<Vec<_>>(), vec![1, 2, 3, 4]);
+
+        // Esc drops the marks AND the anchor: the next alt+click starts a
+        // fresh anchor at the clicked row (nothing is range-marked yet),
+        // and the following one ranges from it - never back to the stale
+        // anchor (1).
+        pane.video_marked.clear();
+        pane.video_marked.clear_anchor();
+        pane.video_state.select(Some(5));
+        pane.handle_mouse_event(
+            MouseEvent {
+                x: table.x + 1,
+                y: table.y + 5,
+                kind: MouseEventKind::LeftClick,
+                modifiers: KeyModifiers::ALT,
+            },
+            &ctx,
+        )
+        .unwrap();
+        assert!(
+            pane.video_marked.is_empty(),
+            "the first alt+click after Esc sets the fresh anchor only"
+        );
+
+        // A second alt+click ranges from the fresh anchor.
+        pane.handle_mouse_event(
+            MouseEvent {
+                x: table.x + 1,
+                y: table.y + 2,
+                kind: MouseEventKind::LeftClick,
+                modifiers: KeyModifiers::ALT,
+            },
+            &ctx,
+        )
+        .unwrap();
+        assert_eq!(
+            pane.video_marked.iter().collect::<Vec<_>>(),
+            vec![2, 3, 4, 5],
+            "the range spans the fresh anchor, not the stale one"
+        );
     }
 
     #[test]

@@ -557,6 +557,14 @@ impl InputGroups {
             // selection style.
             let focus_style =
                 if pane_focused { self.focused_style } else { self.current_item_style };
+            // The row under the mouse is a clickable field, so it gets the
+            // hover highlight too (the buttons/list-row treatment; it wins
+            // over the keyboard selection like the other hoverable rows,
+            // and any keyboard input clears it).
+            let mouse_hovered = ctx.mouse_pos().is_some_and(|pos| {
+                pos.y == area.y && pos.x >= area.x && pos.x < area.x.saturating_add(area.width)
+            });
+            let hover_style = self.focused_style;
 
             match input {
                 InputType::Textbox(input) => {
@@ -572,6 +580,11 @@ impl InputGroups {
                         widget
                             .label_style(self.highlight_item_style)
                             .input_style(self.text_style)
+                            .build()
+                    } else if mouse_hovered {
+                        widget
+                            .label_style(hover_style)
+                            .input_style(hover_style)
                             .build()
                     } else if is_focused {
                         widget
@@ -597,6 +610,11 @@ impl InputGroups {
                         widget
                             .label_style(self.highlight_item_style)
                             .input_style(self.text_style)
+                            .build()
+                    } else if mouse_hovered {
+                        widget
+                            .label_style(hover_style)
+                            .input_style(hover_style)
                             .build()
                     } else if is_focused {
                         widget
@@ -636,7 +654,11 @@ impl InputGroups {
                         .borderless(true)
                         .label(&input.label);
 
-                    let inp = if is_focused {
+                    let inp = if mouse_hovered {
+                        inp.label_style(hover_style)
+                            .input_style(hover_style)
+                            .call()
+                    } else if is_focused {
                         inp.label_style(focus_style)
                             .input_style(focus_style)
                             .call()
@@ -650,7 +672,13 @@ impl InputGroups {
                     Button::default()
                         .label(&input.label)
                         .label_alignment(Alignment::Left)
-                        .style(if is_focused { focus_style } else { self.text_style })
+                        .style(if mouse_hovered {
+                            hover_style
+                        } else if is_focused {
+                            focus_style
+                        } else {
+                            self.text_style
+                        })
                         .render(area, buf);
                 }
                 InputType::Separator => {
