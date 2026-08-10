@@ -39,6 +39,15 @@ query, results filtering, multi-select, context menus, enqueue/play.
 - Standard list navigation (`w`/`s`/`↑`/`↓`, `PageUp`/`PageDown`,
   `Enter`/`d`/`→`/double-click activate, `Del` delete, Esc/right-click
   back out).
+- **Keyboard pane switching** (round 25): `d`/`→` move from the filter
+  pane into the results list (BrowseResults); `a`/`←` return to the
+  filters. In the results, `d`/`→` enqueue the highlighted result.
+  (`w`/`s` keep moving the filter highlight / result selection; the keys
+  resolve through the `directories` keybind context, so the config's
+  existing `d`/`a`/`→`/`←` bindings apply.)
+- **Filter-row hover** (round 25): the filter/spinner/button rows are
+  clickable fields and render with the hover highlight when the pointer
+  is over them (the button/list-row treatment; keyboard input clears it).
 - **Multi-select** (round 24): the results list supports the shared
   selection interactions — ctrl+click toggles a row's mark, alt+click
   range-marks from the anchor, a plain click on another row drops the

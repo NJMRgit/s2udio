@@ -117,7 +117,9 @@ tags: [keyboard, mouse, keybinds, interaction]
     lightens (the `hover_style` blend) — the terminal's own URL hover
     underline is disabled instead (`url_style none` in kitty.conf).
   - **List rows** (queue Audio/Video/Chapters, MPD tree + items, Playlists,
-    Radio regions + stations, Jellyfin tree + items, Search results) render
+    Radio regions + stations, Jellyfin tree + items, Search results) and
+    the **Search tab's filter inputs/spinner/button rows** (clickable
+    fields) render
     with the selection highlight effect **slightly brighter** — accent ×
     0.58 vs the selection's 0.50 — but **dimmer than multi-selected
     (marked) rows** (0.65). Marked rows keep their marked highlight on
