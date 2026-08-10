@@ -422,6 +422,12 @@ impl<T: ScrollingState> DirState<T> {
         self.mark_anchor
     }
 
+    /// Drop the anchor (the selection was cleared): the next shift/alt
+    /// range-select starts fresh from the cursor.
+    pub fn clear_mark_anchor(&mut self) {
+        self.mark_anchor = None;
+    }
+
     /// The range last marked by shift+arrow selection (if any).
     pub fn take_range_mark(&mut self) -> Option<(usize, usize)> {
         self.range_mark.take()

@@ -603,7 +603,7 @@ impl SearchPane {
                 CommonAction::SelectDown | CommonAction::SelectUp => {
                     let dir = if matches!(action, CommonAction::SelectDown) { 1 } else { -1 };
                     let start = self.songs_dir.state.get_selected().unwrap_or(0);
-                    if self.songs_dir.state.mark_anchor().is_none() {
+                    if self.songs_dir.state.mark_anchor().is_none() || self.songs_dir.state.marked.is_empty() {
                         self.songs_dir.state.set_mark_anchor(start);
                     }
                     let anchor = self.songs_dir.state.mark_anchor().unwrap_or(start);
@@ -636,6 +636,11 @@ impl SearchPane {
                 }
                 CommonAction::Close if !self.songs_dir.marked().is_empty() => {
                     self.songs_dir.marked_mut().clear();
+                    self.songs_dir.state.clear_mark_anchor();
+                    // Esc is bound to both Close and ShowSettings: clearing a
+                    // selection consumes the keypress, so the settings panel
+                    // only opens on a second Esc (when nothing is selected).
+                    event.consume();
                     ctx.render()?;
                 }
                 CommonAction::Rename => {}

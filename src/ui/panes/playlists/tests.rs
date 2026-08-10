@@ -1061,7 +1061,7 @@ mod multi_select {
 
     use super::*;
     use crate::{
-        config::keys::CommonAction,
+        config::keys::{CommonAction, GlobalAction},
         shared::{
             keys::{ActionEvent, Actions},
             mouse_event::{MouseEvent, MouseEventKind},
@@ -1163,6 +1163,64 @@ mod multi_select {
         act(&mut pane, &mut ctx, vec![Actions::Common(CommonAction::SelectUp)]);
         assert_eq!(pane.stack.current().state.get_selected(), Some(1));
         assert_eq!(marks(&pane), vec![0, 1]);
+    }
+
+    #[test]
+    fn shift_range_reanchors_after_esc_clears_the_selection() {
+        let mut ctx = make_ctx();
+        let mut pane = pane_in_playlist(&ctx);
+
+        // Shift+Down three times marks [0..=3] (anchor 0).
+        for _ in 0..3 {
+            act(&mut pane, &mut ctx, vec![Actions::Common(CommonAction::SelectDown)]);
+        }
+        assert_eq!(pane.stack.current().state.get_selected(), Some(3));
+        assert_eq!(marks(&pane), vec![0, 1, 2, 3]);
+
+        // Esc clears the marks — and (with the fix) the anchor too.
+        act(&mut pane, &mut ctx, vec![Actions::Common(CommonAction::Close)]);
+        assert!(marks(&pane).is_empty());
+
+        // Move the cursor back up to row 2, then Shift+Down: the range
+        // must start from the new cursor (2), not reach back to the old
+        // anchor (0).
+        act(&mut pane, &mut ctx, vec![Actions::Common(CommonAction::Up)]);
+        assert_eq!(pane.stack.current().state.get_selected(), Some(2));
+        act(&mut pane, &mut ctx, vec![Actions::Common(CommonAction::SelectDown)]);
+        assert_eq!(pane.stack.current().state.get_selected(), Some(3));
+        assert_eq!(marks(&pane), vec![2, 3]);
+    }
+
+    #[test]
+    fn esc_with_a_selection_consumes_the_keypress() {
+        let mut ctx = make_ctx();
+        let mut pane = pane_in_playlist(&ctx);
+        act(&mut pane, &mut ctx, vec![Actions::Common(CommonAction::SelectDown)]);
+        assert_eq!(marks(&pane), vec![0, 1]);
+
+        // Esc carries both Close (menu) and ShowSettings; clearing the
+        // selection must consume the keypress so settings does not open
+        // on the same press.
+        let mut ev = ActionEvent::from(Arc::new(vec![
+            Actions::Common(CommonAction::Close),
+            Actions::Global(GlobalAction::ShowSettings),
+        ]));
+        pane.handle_action(&mut ev, &mut ctx).unwrap();
+        assert!(marks(&pane).is_empty(), "Esc clears the selection");
+        assert!(ev.is_consumed(), "clearing the selection consumes the keypress");
+    }
+
+    #[test]
+    fn esc_without_a_selection_leaves_settings_enabled() {
+        let mut ctx = make_ctx();
+        let mut pane = pane_in_playlist(&ctx);
+        let mut ev = ActionEvent::from(Arc::new(vec![
+            Actions::Common(CommonAction::Close),
+            Actions::Global(GlobalAction::ShowSettings),
+        ]));
+        pane.handle_action(&mut ev, &mut ctx).unwrap();
+        assert!(marks(&pane).is_empty());
+        assert!(!ev.is_consumed(), "no selection: Esc still opens settings");
     }
 
     #[test]

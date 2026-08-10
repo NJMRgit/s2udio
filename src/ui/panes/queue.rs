@@ -2217,7 +2217,7 @@ impl Pane for QueuePane {
                 CommonAction::SelectDown | CommonAction::SelectUp => {
                     let dir = if matches!(action, CommonAction::SelectDown) { 1 } else { -1 };
                     let start = self.queue.state.get_selected().unwrap_or(0);
-                    if self.queue.state.mark_anchor().is_none() {
+                    if self.queue.state.mark_anchor().is_none() || self.queue.state.marked.is_empty() {
                         self.queue.state.set_mark_anchor(start);
                     }
                     let anchor = self.queue.state.mark_anchor().unwrap_or(start);
@@ -2250,6 +2250,11 @@ impl Pane for QueuePane {
                 }
                 CommonAction::Close if !self.queue.marked().is_empty() => {
                     self.queue.marked_mut().clear();
+                    self.queue.state.clear_mark_anchor();
+                    // Esc is bound to both Close and ShowSettings: clearing a
+                    // selection consumes the keypress, so the settings panel
+                    // only opens on a second Esc (when nothing is selected).
+                    event.consume();
                     ctx.render()?;
                 }
                 CommonAction::AddOptions { kind: AddKind::Action(options) } => {
@@ -2620,7 +2625,7 @@ impl QueuePane {
                     // replaces the previous range.
                     let dir = if matches!(action, CommonAction::SelectDown) { 1 } else { -1 };
                     let start = self.video_state.selected().unwrap_or(0);
-                    if self.video_marked.anchor().is_none() {
+                    if self.video_marked.anchor().is_none() || self.video_marked.is_empty() {
                         self.video_marked.set_anchor(start);
                     }
                     self.video_move(dir, ctx)?;
@@ -4265,6 +4270,35 @@ mod video_mark_tests {
         pane.handle_action(&mut ev, &mut ctx).unwrap();
         assert_eq!(pane.video_marked.iter().collect::<Vec<_>>(), vec![2, 3]);
         assert_eq!(pane.video_state.selected(), Some(3));
+    }
+
+    #[test]
+    fn shift_reanchors_after_the_video_marks_are_cleared() {
+        let (mut ctx, _tx) = queue_ctx();
+        ctx.video_playlist.borrow_mut().extend(entries(8));
+        let mut pane = video_pane(&mut ctx);
+
+        // Move the cursor to row 2, then Shift+Down marks [2..=3] (anchor 2).
+        for _ in 0..3 {
+            let mut ev = action(vec![Actions::Common(CommonAction::Down)]);
+            pane.handle_action(&mut ev, &mut ctx).unwrap();
+        }
+        let mut ev = action(vec![Actions::Common(CommonAction::SelectDown)]);
+        pane.handle_action(&mut ev, &mut ctx).unwrap();
+        assert_eq!(pane.video_marked.iter().collect::<Vec<_>>(), vec![2, 3]);
+
+        // Selection cleared, cursor moved to row 6: the next Shift+Down
+        // starts a fresh range at the cursor instead of the old anchor.
+        pane.video_marked.clear();
+        for _ in 0..3 {
+            let mut ev = action(vec![Actions::Common(CommonAction::Down)]);
+            pane.handle_action(&mut ev, &mut ctx).unwrap();
+        }
+        assert_eq!(pane.video_state.selected(), Some(6));
+        let mut ev = action(vec![Actions::Common(CommonAction::SelectDown)]);
+        pane.handle_action(&mut ev, &mut ctx).unwrap();
+        assert_eq!(pane.video_state.selected(), Some(7));
+        assert_eq!(pane.video_marked.iter().collect::<Vec<_>>(), vec![6, 7]);
     }
 
     #[test]
