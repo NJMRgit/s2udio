@@ -352,6 +352,10 @@ compiled in — never delete. Old history is preserved at the local
 
 ## Pending
 
+- **Round 25 (2026-08-10 user live-check) — host-implemented fixes:
+  search tab `a`/`d`/`←`/`→` filter↔results navigation, search filter
+  hover, video-queue anchor hardening on removal paths (commit pending).
+  Validated 1307/1307.**
 - **Round 24 (2026-08-10 user feedback) — IMPLEMENTED in the container,
   HOST-VALIDATED + live-checked (2026-08-10, commit `7e1f151`).** (1)
   Esc-deselect everywhere: queue **video** list (`handle_video_action`

@@ -16,6 +16,7 @@ use crate::{
     config::{
         keys::{
             CommonAction,
+            DirectoriesActions,
             GlobalAction,
             actions::{AddKind, AutoplayKind, DeleteKind, Position, RateKind, SaveKind},
         },
@@ -358,7 +359,29 @@ impl SearchPane {
             } else {
                 event.abandon();
             }
-        } else if let Some(action) = event.claim_common() {
+        }
+
+        // The directories keybind context carries `d`/`a`/`←`/`→`: `d`/`→`
+        // move from the filter pane into the results list, `a`/`←` keep
+        // the focus in the filters (no-op here). `w`/`s` keep their
+        // navigation meaning through the common context below (the
+        // FolderUp/FolderDown actions fall through via abandon).
+        if let Some(action) = event.claim_directories() {
+            match action {
+                DirectoriesActions::FolderExpand | DirectoriesActions::PlayFile => {
+                    if !self.songs_dir.items.is_empty() {
+                        self.phase = Phase::BrowseResults;
+
+                        ctx.render()?;
+                    }
+                    return Ok(());
+                }
+                DirectoriesActions::FolderCollapse => return Ok(()),
+                _ => event.abandon(),
+            }
+        }
+
+        if let Some(action) = event.claim_common() {
             match action.to_owned() {
                 CommonAction::Down => {
                     if config.wrap_navigation {
@@ -543,7 +566,36 @@ impl SearchPane {
                     event.abandon();
                 }
             }
-        } else if let Some(action) = event.claim_common() {
+        }
+
+        // The directories keybind context carries `d`/`a`/`←`/`→` in the
+        // results list too: `d`/`→` enqueue the highlighted result (same
+        // as the Right arrow), `a`/`←` return to the filter pane.
+        if let Some(action) = event.claim_directories() {
+            match action {
+                DirectoriesActions::FolderExpand | DirectoriesActions::PlayFile => {
+                    let items = self.songs_dir.selected().map_or_else(Vec::new, |item| {
+                        vec![Enqueue::File { path: item.file.clone() }]
+                    });
+                    if !items.is_empty() {
+                        ctx.command(move |client| {
+                            client.enqueue_multiple(items, None, None, false)?;
+                            Ok(())
+                        });
+                    }
+                    return Ok(());
+                }
+                DirectoriesActions::FolderCollapse => {
+                    self.phase = Phase::Search;
+
+                    ctx.render()?;
+                    return Ok(());
+                }
+                _ => event.abandon(),
+            }
+        }
+
+        if let Some(action) = event.claim_common() {
             match action.to_owned() {
                 CommonAction::Down => {
                     self.songs_dir.next(ctx.config.scrolloff, ctx.config.wrap_navigation);
@@ -1723,6 +1775,97 @@ mod tests {
             input_bg(&mut pane, &ctx, inputs_area, focused_row),
             current,
             "the filter input keeps the plain selection"
+        );
+    }
+
+    #[test]
+    fn keyboard_d_and_arrows_switch_between_filters_and_results() {
+        use std::sync::Arc;
+
+        use crate::shared::keys::{ActionEvent, Actions};
+
+        let mut ctx = make_ctx();
+        let mut pane = rendered_pane(&mut ctx);
+        pane.songs_dir = Dir::new(songs());
+        assert!(matches!(pane.phase, Phase::Search));
+
+        // `d` (the directories FolderExpand key) enters the results.
+        let mut ev = ActionEvent::from(Arc::new(vec![Actions::Directories(
+            crate::config::keys::DirectoriesActions::FolderExpand,
+        )]));
+        pane.handle_action(&mut ev, &mut ctx).unwrap();
+        assert!(matches!(pane.phase, Phase::BrowseResults), "d enters the results");
+
+        // `a` (FolderCollapse) returns to the filters.
+        let mut ev = ActionEvent::from(Arc::new(vec![Actions::Directories(
+            crate::config::keys::DirectoriesActions::FolderCollapse,
+        )]));
+        pane.handle_action(&mut ev, &mut ctx).unwrap();
+        assert!(matches!(pane.phase, Phase::Search), "a returns to the filters");
+
+        // `→` (PlayFile) enters again; `←` (FolderCollapse) leaves again.
+        let mut ev = ActionEvent::from(Arc::new(vec![Actions::Directories(
+            crate::config::keys::DirectoriesActions::PlayFile,
+        )]));
+        pane.handle_action(&mut ev, &mut ctx).unwrap();
+        assert!(matches!(pane.phase, Phase::BrowseResults), "→ enters the results");
+        let mut ev = ActionEvent::from(Arc::new(vec![Actions::Directories(
+            crate::config::keys::DirectoriesActions::FolderCollapse,
+        )]));
+        pane.handle_action(&mut ev, &mut ctx).unwrap();
+        assert!(matches!(pane.phase, Phase::Search), "← returns to the filters");
+
+        // With no results, `d` stays in the filters.
+        pane.songs_dir = Dir::default();
+        let mut ev = ActionEvent::from(Arc::new(vec![Actions::Directories(
+            crate::config::keys::DirectoriesActions::FolderExpand,
+        )]));
+        pane.handle_action(&mut ev, &mut ctx).unwrap();
+        assert!(matches!(pane.phase, Phase::Search), "d with no results stays put");
+    }
+
+    #[test]
+    fn filter_row_under_the_mouse_gets_the_hover_highlight() {
+        let mut ctx = make_ctx();
+        let mut pane = rendered_pane(&mut ctx);
+        let hovered = ctx.config.theme.hovered_item_style.bg;
+        let inputs_area = pane.inputs.area;
+
+        // Hover the second filter row: it gets the hover highlight.
+        ctx.set_mouse_pos(Some(ratatui::layout::Position {
+            x: inputs_area.x + 1,
+            y: inputs_area.y + 1,
+        }));
+        assert_eq!(
+            input_bg(&mut pane, &ctx, inputs_area, 1),
+            hovered,
+            "the hovered filter row uses the hover highlight"
+        );
+
+        // The hover wins over the keyboard selection on the focused row.
+        assert_eq!(
+            input_bg(&mut pane, &ctx, inputs_area, 0),
+            hovered,
+            "hover wins over the keyboard selection"
+        );
+
+        // A row that is not under the mouse stays plain.
+        ctx.set_mouse_pos(Some(ratatui::layout::Position {
+            x: inputs_area.x + 1,
+            y: inputs_area.y + 3,
+        }));
+        assert_ne!(
+            input_bg(&mut pane, &ctx, inputs_area, 1),
+            hovered,
+            "a non-hovered row keeps its plain style"
+        );
+
+        // No mouse position: nothing is hovered.
+        ctx.set_mouse_pos(None);
+        assert_ne!(
+            input_bg(&mut pane, &ctx, inputs_area, 1),
+            hovered,
+            "no pointer, no hover"
         );
     }
 }
