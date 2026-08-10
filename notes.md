@@ -22,6 +22,33 @@ branch on the public/distribution repo anymore.
 - The pre-restructure history is preserved locally at the
   `pre-restructure` tag.
 
+Date: 2026-08-10 · Branch: `working`
+
+## ROUND 24 — FILED for isodev (do not implement yet — wait for the
+feedback pull; this is just the filing record)
+
+**User feedback (2026-08-10) →
+[FEEDBACK-2026-08-10-17.md](FEEDBACK-2026-08-10-17.md).** Two items:
+
+1. **Esc-deselect everywhere**: the `6056818` Esc-clear + consume
+   behavior only covers the queue audio list, playlists (browser.rs) and
+   search. The queue **video** list (`handle_video_action` has no Close
+   arm) and the **MPD** tab (`directories.rs` has no Close arm at all)
+   both support multi-select but Esc does not deselect there. Add the
+   same `Close if !marked.is_empty() → clear + drop anchor + consume`
+   handling; second Esc opens settings.
+2. **Search tab parity**: full multi-item selection (ctrl+click toggle,
+   alt+click range, plain-click clear/re-anchor — the queue/MPD mouse
+   semantics), marked-row rendering (`marked_item_style`), hover
+   highlight on the row under the mouse (shared `hovered_item` helper,
+   interaction.md ordering), and dual-pane keyboard navigation (active
+   pane shows the hover highlight without the mouse, Radio/Playlists
+   focus convention).
+
+**Nothing to implement yet** — isodev picks this up on the next pull of
+`working`.
+
+---
 Date: 2026-08-09 · Branch: `working`
 
 ## ROUND 23 — DONE HOST-SIDE, do not re-implement

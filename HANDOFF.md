@@ -118,10 +118,12 @@ the user's decisions win. Locked in across sessions (details in the docs):
 
 ## Current state (verified)
 
-- **Branch**: `working` (tracks `origin/working`), at the **round-23
-  commit** (host implementation, 2026-08-09) — **1282/1282** (round-22
-  baseline 1280 + lyrics-lookup and config-migration tests), 3 warnings
-  baseline. **Round 23 (2026-08-09, user feedback)**: ALL configs move
+- **Branch**: `working` (tracks `origin/working`), at `5e58c29` —
+  **1293/1293** (current baseline). **Round 24 (2026-08-10, FILED for
+  isodev)**: Esc-deselect everywhere multi-select exists (queue video
+  list + MPD tab missing it) + search tab full selection/hover/dual-pane
+  parity. See [FEEDBACK-2026-08-10-17.md](FEEDBACK-2026-08-10-17.md).
+  **Round 23 (2026-08-09, user feedback)**: ALL configs move
   to `~/.config/s2udio/` (base `config.ron` + sidecars + `themes/`;
   nothing in `~/.config/rmpc`) — one-time migration merges the legacy
   base + round-19 overlay and renames the legacy base aside; the lyrics
@@ -345,6 +347,18 @@ compiled in — never delete. Old history is preserved at the local
 
 ## Pending
 
+- **Round 24 (2026-08-10 user feedback) — FILED for isodev, awaiting
+  implementation.** (1) Esc-deselect everywhere: the `6056818`
+  clear+consume behavior is missing on the queue **video** list
+  (`handle_video_action`, no Close arm) and the **MPD** tab
+  (`directories.rs`, no Close arm) — both have multi-select; add the
+  Close-clear + `clear_mark_anchor()` + `event.consume()` handling (second
+  Esc opens settings). (2) Search tab parity: mouse multi-select
+  (ctrl+click toggle / alt+click range / plain-click clear+re-anchor),
+  marked-row `marked_item_style` rendering, hover highlight via the
+  shared `hovered_item` helper, and the dual-pane active-focus
+  convention (hover highlight on the pane holding the cursor).
+  See [FEEDBACK-2026-08-10-17.md](FEEDBACK-2026-08-10-17.md).
 - **Round 23 (2026-08-09 user feedback) — configs fully in
   `~/.config/s2udio` + s2udio-owned lyrics library: IMPLEMENTED
   host-side, VALIDATED (1282/1282), binary installed.** (1) All configs
