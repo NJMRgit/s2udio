@@ -1374,7 +1374,7 @@ impl Pane for DirectoriesPane {
                     // replaces the previous range.
                     let dir = if matches!(action, CommonAction::SelectDown) { 1 } else { -1 };
                     let start = self.item_list.selected().unwrap_or(0);
-                    if self.marked.anchor().is_none() {
+                    if self.marked.anchor().is_none() || self.marked.is_empty() {
                         self.marked.set_anchor(start);
                     }
                     self.move_items(dir, ctx)?;
@@ -1926,6 +1926,27 @@ mod tests {
         pane.handle_action(&mut ev, &mut ctx).unwrap();
         assert_eq!(pane.marked.iter().collect::<Vec<_>>(), vec![0, 1]);
         assert_eq!(pane.item_list.selected(), Some(1));
+    }
+
+    #[test]
+    fn shift_selection_reanchors_after_the_marks_are_cleared() {
+        let mut ctx = test_ctx();
+        let mut pane = pane_with_items(&ctx);
+
+        // Shift+Down from row 0 marks 0..=1 (anchor 0).
+        let mut ev = action(vec![Actions::Common(CommonAction::SelectDown)]);
+        pane.handle_action(&mut ev, &mut ctx).unwrap();
+        assert_eq!(pane.marked.iter().collect::<Vec<_>>(), vec![0, 1]);
+
+        // The selection is cleared (Esc) and the cursor moves away: the
+        // stale anchor must not survive, so the next Shift+Down starts a
+        // fresh range from the new cursor position.
+        pane.marked.clear();
+        pane.item_list.select(Some(3));
+        let mut ev = action(vec![Actions::Common(CommonAction::SelectDown)]);
+        pane.handle_action(&mut ev, &mut ctx).unwrap();
+        assert_eq!(pane.item_list.selected(), Some(4));
+        assert_eq!(pane.marked.iter().collect::<Vec<_>>(), vec![3, 4]);
     }
 
     #[test]

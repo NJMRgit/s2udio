@@ -570,7 +570,7 @@ where
                 let dir = if matches!(action, CommonAction::SelectDown) { 1 } else { -1 };
                 let current = self.stack_mut().current_mut();
                 let start = current.state.get_selected().unwrap_or(0);
-                if current.state.mark_anchor().is_none() {
+                if current.state.mark_anchor().is_none() || current.state.marked.is_empty() {
                     current.state.set_mark_anchor(start);
                 }
                 let anchor = current.state.mark_anchor().unwrap_or(start);
@@ -600,7 +600,13 @@ where
                 ctx.render()?;
             }
             CommonAction::Close if !self.stack().current().marked().is_empty() => {
-                self.stack_mut().current_mut().marked_mut().clear();
+                let current = self.stack_mut().current_mut();
+                current.marked_mut().clear();
+                current.state.clear_mark_anchor();
+                // Esc is bound to both Close and ShowSettings: clearing a
+                // selection consumes the keypress, so the settings panel
+                // only opens on a second Esc (when nothing is selected).
+                event.consume();
                 ctx.render()?;
             }
             CommonAction::Delete => {

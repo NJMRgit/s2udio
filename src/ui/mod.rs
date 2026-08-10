@@ -453,8 +453,11 @@ impl Ui {
         // Esc is bound to both Close (menu) and ShowSettings. When no modal
         // is open the focused pane may have consumed the Close half (e.g.
         // clearing selection marks), which would block the global half, so
-        // fire the settings half explicitly.
+        // fire the settings half explicitly — unless the pane fully
+        // consumed the keypress (first Esc clears the selection; a second
+        // Esc, with nothing selected, opens the settings).
         if self.modals.is_empty()
+            && !key.is_consumed()
             && key
                 .actions
                 .iter()
