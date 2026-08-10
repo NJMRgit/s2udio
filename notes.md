@@ -24,29 +24,35 @@ branch on the public/distribution repo anymore.
 
 Date: 2026-08-10 · Branch: `working`
 
-## ROUND 24 — FILED for isodev (do not implement yet — wait for the
-feedback pull; this is just the filing record)
+## ROUND 24 — IMPLEMENTED in the container (2026-08-10), needs host validation
 
 **User feedback (2026-08-10) →
-[FEEDBACK-2026-08-10-17.md](FEEDBACK-2026-08-10-17.md).** Two items:
+[FEEDBACK-2026-08-10-17.md](FEEDBACK-2026-08-10-17.md).** Both items
+implemented in the container (working tree @ `efeb87e`, uncommitted):
 
-1. **Esc-deselect everywhere**: the `6056818` Esc-clear + consume
-   behavior only covers the queue audio list, playlists (browser.rs) and
-   search. The queue **video** list (`handle_video_action` has no Close
-   arm) and the **MPD** tab (`directories.rs` has no Close arm at all)
-   both support multi-select but Esc does not deselect there. Add the
-   same `Close if !marked.is_empty() → clear + drop anchor + consume`
-   handling; second Esc opens settings.
-2. **Search tab parity**: full multi-item selection (ctrl+click toggle,
-   alt+click range, plain-click clear/re-anchor — the queue/MPD mouse
-   semantics), marked-row rendering (`marked_item_style`), hover
-   highlight on the row under the mouse (shared `hovered_item` helper,
-   interaction.md ordering), and dual-pane keyboard navigation (active
-   pane shows the hover highlight without the mouse, Radio/Playlists
-   focus convention).
+1. **Esc-deselect everywhere**: queue **video** list
+   (`handle_video_action`) and the **MPD** tab (`directories.rs
+   handle_action`) got the audio-queue/browser Close arm —
+   `Close if !marks.is_empty()` → clear + `MarkState::clear_anchor()`
+   (new method, drops anchor + last range) + `event.consume()` + render;
+   second Esc opens settings. +3 queue-video tests, +3 directories tests
+   (esc consumes / esc-without-selection / shift-range re-anchors after
+   Esc).
+2. **Search tab parity** (`search/mod.rs` + `search/inputs.rs`):
+   ctrl+click toggle / alt+click range / plain-click clear+re-anchor on
+   the results list (both phases), marked-row rendering (marked style via
+   `to_list_items`, hover via the shared `hovered_item` helper, hover
+   never overrides marked), hover-on-selected highlight switch, and the
+   dual-pane focus convention — results selection uses the hover
+   highlight in BrowseResults, the focused filter input in the Search
+   phase (`InputGroups` gained `focused_style` + `pane_focused` render
+   param). +5 tests (ctrl/alt/plain click, marked render, hover render,
+   focused-pane).
 
-**Nothing to implement yet** — isodev picks this up on the next pull of
-`working`.
+**Not validated** — no Rust toolchain in the container (tree-sitter
+parse clean on all 5 modified files). Host: `cargo test --release`
+(expected **1304** = 1293 + 11 new; warnings ≤ 3 baseline), then commit,
+install, live check.
 
 ---
 Date: 2026-08-09 · Branch: `working`

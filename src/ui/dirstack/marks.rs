@@ -31,6 +31,14 @@ impl MarkState {
         self.marked.clear();
     }
 
+    /// Drop the anchor and the last range (called when the selection is
+    /// cleared, e.g. Esc): the next shift/alt range-select starts fresh
+    /// from the cursor - a stale anchor must not survive.
+    pub fn clear_anchor(&mut self) {
+        self.anchor = None;
+        self.range = None;
+    }
+
     /// Drop every mark at or beyond `len` (the list shrank).
     pub fn clamp(&mut self, len: usize) {
         if len == 0 {

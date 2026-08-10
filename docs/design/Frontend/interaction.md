@@ -9,7 +9,7 @@ description: >
   back-out, wheel scrolling, modal key consumption and the mouse-over
   (hover) effects.
 status: "current"
-updated: "2026-08-05"
+updated: "2026-08-10"
 source_files:
   - src/core/input.rs
   - src/config/keys/mod.rs
@@ -23,6 +23,7 @@ source_files:
   - src/ui/panes/directories.rs
   - src/ui/panes/playlists.rs
   - src/ui/panes/radio.rs
+  - src/ui/panes/search/mod.rs
   - src/shared/mouse_event.rs
   - src/ui/panes/tabs.rs
   - src/ui/panes/controls.rs
@@ -96,7 +97,11 @@ tags: [keyboard, mouse, keybinds, interaction]
   (Space is consumed raw so it can't leak into the global TogglePause).
 - `Esc` closes modals; with no modal open it opens Settings
   (`Close` + `ShowSettings` dual-bound — the UI checks the raw action list
-  so a pane that consumed Close can't block Settings).
+  so a pane that consumed Close can't block Settings). With a
+  multi-selection active the **first** Esc clears the marks and consumes
+  the keypress (the settings panel only opens on a **second** Esc, when
+  nothing is selected) — everywhere multi-select exists: queue audio and
+  video lists, the MPD right pane, playlists, and search results.
 
 ## Mouse rules
 
@@ -112,18 +117,20 @@ tags: [keyboard, mouse, keybinds, interaction]
     lightens (the `hover_style` blend) — the terminal's own URL hover
     underline is disabled instead (`url_style none` in kitty.conf).
   - **List rows** (queue Audio/Video/Chapters, MPD tree + items, Playlists,
-    Radio regions + stations, Jellyfin tree + items) render with the
-    selection highlight effect **slightly brighter** — accent × 0.58 vs
-    the selection's 0.50 — but **dimmer than multi-selected (marked) rows**
-    (0.65). Marked rows keep their marked highlight on hover.
+    Radio regions + stations, Jellyfin tree + items, Search results) render
+    with the selection highlight effect **slightly brighter** — accent ×
+    0.58 vs the selection's 0.50 — but **dimmer than multi-selected
+    (marked) rows** (0.65). Marked rows keep their marked highlight on
+    hover.
   - Hovering the keyboard-selected row shows the hover highlight (the
     list's highlight style switches to the hover style for that row).
-  - **Radio and Playlists tabs**: the pane that holds the keyboard cursor
-    renders its selection with the hover highlight even without the mouse,
-    so navigation shows which pane is active — the region tree vs the
-    station list (Radio `focus`), the playlists list at the root vs the
-    songs pane inside a playlist (Playlists). The other pane keeps the
-    plain selection highlight.
+  - **Radio, Playlists and Search tabs**: the pane that holds the keyboard
+    cursor renders its selection with the hover highlight even without the
+    mouse, so navigation shows which pane is active — the region tree vs
+    the station list (Radio `focus`), the playlists list at the root vs
+    the songs pane inside a playlist (Playlists), the filter inputs vs the
+    results list (Search phases). The other pane keeps the plain selection
+    highlight.
   - Any **keyboard input clears the hover** (the pointer position is
     dropped): while navigating with keys nothing stays highlighted; the
     effect returns on the next pointer move (or click).
@@ -149,9 +156,9 @@ tags: [keyboard, mouse, keybinds, interaction]
 - **ctrl/alt-click**: multi-select (marked rows render with the lighter
   selection style). A plain click on any other row clears the whole
   multi-selection. Available in the **queue's Audio and Video lists**, the
-  **MPD pane's right pane** and the **Playlists tab's songs pane**;
-  `W`/`S`/`Shift+↑/↓` range-select from the click anchor in the same
-  lists.
+  **MPD pane's right pane**, the **Playlists tab's songs pane** and the
+  **Search tab's results list**; `W`/`S`/`Shift+↑/↓` range-select from the
+  click anchor in the same lists.
 - Two-line list rows map clicks via `row / 2`.
 
 ## Contexts at a glance

@@ -84,6 +84,10 @@ impl SearchPane {
             .separator_style(config.theme.borders_style)
             .current_item_style(config.theme.current_item_style)
             .highlight_item_style(config.theme.highlighted_item_style)
+            // The focused filter input uses the hover highlight while the
+            // filter pane holds the keyboard cursor (Radio/Playlists focus
+            // convention).
+            .focused_style(config.theme.hovered_item_style)
             .stickers_supported(ctx.stickers_supported.into())
             .strip_diacritics_supported(ctx.mpd_version >= Version::new(0, 25, 0))
             .custom_query(config.search.custom_query)
@@ -152,11 +156,10 @@ impl SearchPane {
             }
             b.padding(Padding::new(0, column_right_padding, 0, 0))
         };
-        let current = List::new(
-            self.songs_dir.to_list_items(ctx.config.theme.browser_song_format.0.as_slice(), ctx),
-        )
-        .highlight_style(config.theme.current_item_style)
-        .style(config.as_list_name_style());
+        // The results pane holds the keyboard cursor in the BrowseResults
+        // phase: its selection renders with the hover highlight even
+        // without the mouse (Radio/Playlists focus convention).
+        let results_focused = matches!(self.phase, Phase::BrowseResults);
         let directory = &mut self.songs_dir;
 
         directory.state.set_content_and_viewport_len(directory.items.len(), area.height.into());
@@ -167,6 +170,33 @@ impl SearchPane {
 
         self.column_areas[BrowserArea::Current] = inner_block;
         self.column_areas[BrowserArea::Scrollbar] = area;
+
+        // The row under the mouse gets the hover highlight (slightly
+        // brighter than the keyboard selection, dimmer than marked rows);
+        // marked rows keep their marked highlight on hover. Rows marked via
+        // to_list_items already carry the marked style; the hover style is
+        // applied on top for the single row under the pointer.
+        let hover_idx = crate::ui::panes::hovered_item(
+            ctx.mouse_pos(),
+            inner_block,
+            directory.state.inner.offset(),
+            directory.items.len(),
+            1,
+        );
+        let mut items =
+            directory.to_list_items(ctx.config.theme.browser_song_format.0.as_slice(), ctx);
+        if let Some(hover) = hover_idx
+            && !directory.marked().contains(&hover)
+        {
+            items[hover] = items[hover].clone().style(config.theme.hovered_item_style);
+        }
+        let current = List::new(items)
+            .highlight_style(if hover_idx == directory.state.get_selected() || results_focused {
+                config.theme.hovered_item_style
+            } else {
+                config.theme.current_item_style
+            })
+            .style(config.as_list_name_style());
         frame.render_widget(block, area);
         frame.render_stateful_widget(current, inner_block, directory.state.as_render_state_ref());
         if let Some(scrollbar) = config.as_styled_scrollbar() {
@@ -1029,7 +1059,9 @@ impl Pane for SearchPane {
             .border_style(ctx.config.as_border_style())
             .title(" Search ");
         let inner = block.inner(search_area);
-        self.inputs.render(inner, frame.buffer_mut(), ctx);
+        // The filter pane holds the keyboard cursor in the Search phase:
+        // its focused input renders with the hover highlight then.
+        self.inputs.render(inner, frame.buffer_mut(), ctx, matches!(self.phase, Phase::Search));
         frame.render_widget(block, search_area);
         self.column_areas[BrowserArea::Previous] = inner;
 
@@ -1166,41 +1198,67 @@ impl Pane for SearchPane {
             MouseEventKind::LeftClick
                 if self.column_areas[BrowserArea::Current].contains(event.into()) =>
             {
-                match self.phase {
-                    Phase::Search => {
-                        if ctx.input.is_insert_mode() {
-                            ctx.input.normal_mode();
-                            self.maybe_search_on_change(ctx);
+                // Clicking the results list moves the keyboard cursor
+                // there (from the filter pane) and applies the shared
+                // selection semantics: ctrl+click toggles the row's mark,
+                // alt+click range-marks from the anchor, a plain click
+                // drops the multi-selection, re-anchors and selects the row
+                // (the queue audio list / MPD right pane behavior). In the
+                // Search phase the click also leaves insert mode (the
+                // filter edits stop) and re-runs the search.
+                if matches!(self.phase, Phase::Search) {
+                    if ctx.input.is_insert_mode() {
+                        ctx.input.normal_mode();
+                        self.maybe_search_on_change(ctx);
+                    }
+                    if self.songs_dir.items.is_empty() {
+                        ctx.render()?;
+                        return Ok(());
+                    }
+                    self.phase = Phase::BrowseResults;
+                }
+                let clicked_row = event
+                    .y
+                    .saturating_sub(self.column_areas[BrowserArea::Current].y)
+                    .into();
+                if let Some(idx) = self.songs_dir.state.get_at_rendered_row(clicked_row) {
+                    if event.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) {
+                        self.songs_dir.select_idx(idx, ctx.config.scrolloff);
+                        self.songs_dir.state.toggle_mark(idx);
+                    } else if event.modifiers.contains(crossterm::event::KeyModifiers::ALT) {
+                        if self.songs_dir.state.mark_anchor().is_none() {
+                            self.songs_dir.state.set_mark_anchor(idx);
                         }
-                        // Clicking the results list moves there and selects
-                        // the clicked row.
-                        if !self.songs_dir.items.is_empty() {
-                            self.phase = Phase::BrowseResults;
-                            let clicked_row = event
-                                .y
-                                .saturating_sub(self.column_areas[BrowserArea::Current].y)
-                                .into();
-                            if let Some(idx) =
-                                self.songs_dir.state.get_at_rendered_row(clicked_row)
-                            {
-                                self.songs_dir.select_idx(idx, ctx.config.scrolloff);
+                        // Replace the previous alt/shift range, so
+                        // alt+clicking closer to the anchor deselects the
+                        // entries beyond it.
+                        if let Some((lo, hi)) = self.songs_dir.state.take_range_mark() {
+                            for i in lo..=hi {
+                                self.songs_dir.state.marked.remove(&i);
                             }
                         }
-                        ctx.render()?;
-                    }
-                    Phase::BrowseResults => {
-                        let clicked_row = event
-                            .y
-                            .saturating_sub(self.column_areas[BrowserArea::Current].y)
-                            .into();
-
-                        if let Some(idx) = self.songs_dir.state.get_at_rendered_row(clicked_row) {
-                            self.songs_dir.select_idx(idx, ctx.config.scrolloff);
-
-                            ctx.render()?;
+                        let anchor = self.songs_dir.state.mark_anchor().unwrap_or(idx);
+                        let (lo, hi) = (anchor.min(idx), anchor.max(idx));
+                        if lo < hi {
+                            self.songs_dir.state.mark_range(lo, hi);
+                            self.songs_dir.state.set_range_mark(lo, hi);
                         }
+                        self.songs_dir.select_idx(idx, ctx.config.scrolloff);
+                    } else {
+                        // A plain click on a different row drops the
+                        // multi-selection; clicking the selected row keeps
+                        // it. The click becomes the new anchor.
+                        if !self.songs_dir.marked().is_empty()
+                            && Some(idx) != self.songs_dir.state.get_selected()
+                        {
+                            self.songs_dir.marked_mut().clear();
+                        }
+                        self.songs_dir.select_idx(idx, ctx.config.scrolloff);
+                        self.songs_dir.state.set_mark_anchor(idx);
+                        self.songs_dir.state.clear_range_mark();
                     }
                 }
+                ctx.render()?;
             }
             MouseEventKind::DoubleClick => match self.phase {
                 Phase::Search => {
@@ -1367,6 +1425,7 @@ enum Phase {
 mod tests {
     use std::time::Duration;
 
+    use crossterm::event::KeyModifiers;
     use ratatui::prelude::Rect;
 
     use super::{BrowserArea, Phase, SearchPane};
@@ -1388,16 +1447,75 @@ mod tests {
     }
 
     fn click(pane: &mut SearchPane, x: u16, y: u16, ctx: &mut crate::ctx::Ctx) {
+        click_mod(pane, x, y, crossterm::event::KeyModifiers::NONE, ctx);
+    }
+
+    fn click_mod(
+        pane: &mut SearchPane,
+        x: u16,
+        y: u16,
+        modifiers: KeyModifiers,
+        ctx: &mut crate::ctx::Ctx,
+    ) {
         pane.handle_mouse_event(
-            MouseEvent {
-                x,
-                y,
-                kind: MouseEventKind::LeftClick,
-                modifiers: crossterm::event::KeyModifiers::NONE,
-            },
+            MouseEvent { x, y, kind: MouseEventKind::LeftClick, modifiers },
             ctx,
         )
         .unwrap();
+    }
+
+    /// Click row `row` of the results list (5 columns in, past the border).
+    fn click_row(
+        pane: &mut SearchPane,
+        current: Rect,
+        row: u16,
+        modifiers: KeyModifiers,
+        ctx: &mut crate::ctx::Ctx,
+    ) {
+        click_mod(pane, current.x + 5, current.y + row, modifiers, ctx);
+    }
+
+    fn make_ctx() -> crate::ctx::Ctx {
+        let (app_tx, _app_rx) = crossbeam::channel::unbounded();
+        crate::tests::fixtures::ctx(
+            (app_tx, _app_rx),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+        )
+    }
+
+    fn marks(pane: &SearchPane) -> Vec<usize> {
+        pane.songs_dir.marked().iter().copied().collect()
+    }
+
+    fn row_bg(
+        pane: &mut SearchPane,
+        ctx: &crate::ctx::Ctx,
+        row: u16,
+    ) -> Option<ratatui::style::Color> {
+        let backend = ratatui::backend::TestBackend::new(100, 40);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| pane.render(frame, Rect::new(0, 0, 100, 40), ctx).unwrap())
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let current = pane.column_areas[BrowserArea::Current];
+        buf[(current.x, current.y + row)].style().bg
+    }
+
+    fn input_bg(
+        pane: &mut SearchPane,
+        ctx: &crate::ctx::Ctx,
+        area: Rect,
+        row: u16,
+    ) -> Option<ratatui::style::Color> {
+        let backend = ratatui::backend::TestBackend::new(100, 40);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| pane.render(frame, Rect::new(0, 0, 100, 40), ctx).unwrap())
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        buf[(area.x, area.y + row)].style().bg
     }
 
     fn rendered_pane(ctx: &mut crate::ctx::Ctx) -> SearchPane {
@@ -1481,5 +1599,130 @@ mod tests {
 
         // should be roughly in the middle (around 25-27)
         assert!((20..=30).contains(&target_idx));
+    }
+
+    #[test]
+    fn ctrl_click_toggles_and_plain_click_clears_the_marks() {
+        let mut ctx = make_ctx();
+        let mut pane = rendered_pane(&mut ctx);
+        pane.songs_dir = Dir::new(songs());
+        pane.phase = Phase::BrowseResults;
+        let current = pane.column_areas[BrowserArea::Current];
+
+        // ctrl+click marks rows 0 and 2.
+        click_row(&mut pane, current, 0, KeyModifiers::CONTROL, &mut ctx);
+        click_row(&mut pane, current, 2, KeyModifiers::CONTROL, &mut ctx);
+        assert_eq!(marks(&pane), vec![0, 2]);
+        // ctrl+click on an already-marked row unmarks it.
+        click_row(&mut pane, current, 0, KeyModifiers::CONTROL, &mut ctx);
+        assert_eq!(marks(&pane), vec![2]);
+        // A plain click on a different row clears the whole selection.
+        click_row(&mut pane, current, 3, KeyModifiers::NONE, &mut ctx);
+        assert!(marks(&pane).is_empty(), "plain click clears the marks");
+        assert_eq!(pane.songs_dir.state.get_selected(), Some(3));
+    }
+
+    #[test]
+    fn alt_click_ranges_from_the_anchor() {
+        let mut ctx = make_ctx();
+        let mut pane = rendered_pane(&mut ctx);
+        pane.songs_dir = Dir::new(songs());
+        pane.phase = Phase::BrowseResults;
+        let current = pane.column_areas[BrowserArea::Current];
+
+        // A plain click sets the anchor (row 0).
+        click_row(&mut pane, current, 0, KeyModifiers::NONE, &mut ctx);
+        // alt+click on row 3 range-marks [0..3].
+        click_row(&mut pane, current, 3, KeyModifiers::ALT, &mut ctx);
+        assert_eq!(marks(&pane), vec![0, 1, 2, 3]);
+        // alt+clicking closer to the anchor replaces the range.
+        click_row(&mut pane, current, 1, KeyModifiers::ALT, &mut ctx);
+        assert_eq!(marks(&pane), vec![0, 1]);
+    }
+
+    #[test]
+    fn marked_rows_render_with_the_marked_style() {
+        let mut ctx = make_ctx();
+        let mut pane = rendered_pane(&mut ctx);
+        pane.songs_dir = Dir::new(songs());
+        pane.phase = Phase::BrowseResults;
+        let current = pane.column_areas[BrowserArea::Current];
+
+        // ctrl+click rows 2 and 4: both marked; the cursor lands on row 4.
+        for row in [2u16, 4] {
+            click_row(&mut pane, current, row, KeyModifiers::CONTROL, &mut ctx);
+        }
+        assert_eq!(marks(&pane), vec![2, 4]);
+
+        // The marked row that is not the cursor renders with the lighter
+        // marked highlight; the cursor row keeps the List's accent
+        // highlight (the directories convention).
+        let marked = ctx.config.theme.marked_item_style.bg;
+        assert_eq!(
+            row_bg(&mut pane, &ctx, 2),
+            marked,
+            "the marked row renders with the marked highlight"
+        );
+    }
+
+    #[test]
+    fn row_under_mouse_gets_the_hover_highlight() {
+        let mut ctx = make_ctx();
+        let mut pane = rendered_pane(&mut ctx);
+        pane.songs_dir = Dir::new(songs());
+        pane.phase = Phase::BrowseResults;
+        let current = pane.column_areas[BrowserArea::Current];
+
+        // No mouse: the row background is the plain list text (a Reset bg).
+        assert_eq!(row_bg(&mut pane, &ctx, 2), Some(ratatui::style::Color::Reset));
+
+        // Point the mouse at row 2: the row gets the hover highlight.
+        ctx.set_mouse_pos(Some(ratatui::layout::Position { x: current.x + 1, y: current.y + 2 }));
+        let hovered = ctx.config.theme.hovered_item_style.bg;
+        assert_eq!(row_bg(&mut pane, &ctx, 2), hovered);
+
+        // The other rows stay plain.
+        assert_eq!(row_bg(&mut pane, &ctx, 3), Some(ratatui::style::Color::Reset));
+        ctx.set_mouse_pos(None);
+    }
+
+    #[test]
+    fn focused_pane_selection_uses_the_hover_highlight() {
+        let mut ctx = make_ctx();
+        let mut pane = rendered_pane(&mut ctx);
+        pane.songs_dir = Dir::new(songs());
+        let hovered = ctx.config.theme.hovered_item_style.bg;
+        let current = ctx.config.theme.current_item_style.bg;
+        let inputs_area = pane.inputs.area;
+        let focused_row = pane.inputs.focused_idx() as u16;
+
+        // Search phase: the filter pane holds the cursor - the focused
+        // input uses the hover highlight, the results list keeps the plain
+        // selection.
+        assert_eq!(
+            input_bg(&mut pane, &ctx, inputs_area, focused_row),
+            hovered,
+            "the focused filter input uses the hover highlight"
+        );
+        assert_eq!(
+            row_bg(&mut pane, &ctx, 0),
+            current,
+            "the results list keeps the plain selection in the Search phase"
+        );
+
+        // BrowseResults phase: the results pane holds the cursor - the
+        // results selection uses the hover highlight, the filter input
+        // keeps the plain selection.
+        pane.phase = Phase::BrowseResults;
+        assert_eq!(
+            row_bg(&mut pane, &ctx, 0),
+            hovered,
+            "the results selection uses the hover highlight"
+        );
+        assert_eq!(
+            input_bg(&mut pane, &ctx, inputs_area, focused_row),
+            current,
+            "the filter input keeps the plain selection"
+        );
     }
 }

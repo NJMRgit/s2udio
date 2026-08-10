@@ -2657,6 +2657,15 @@ impl QueuePane {
                         crate::core::mpv::mpv_toggle_pause(&socket);
                     }
                 }
+                CommonAction::Close if !self.video_marked.is_empty() => {
+                    self.video_marked.clear();
+                    self.video_marked.clear_anchor();
+                    // Esc is bound to both Close and ShowSettings: clearing a
+                    // selection consumes the keypress, so the settings panel
+                    // only opens on a second Esc (when nothing is selected).
+                    event.consume();
+                    ctx.render()?;
+                }
                 _ => event.abandon(),
             }
             return Ok(());
@@ -4422,6 +4431,78 @@ mod video_mark_tests {
         // The selection lands on the row that took the removed selection's
         // place (clamped to the list).
         assert_eq!(pane.video_state.selected(), Some(2));
+    }
+
+    #[test]
+    fn esc_with_a_selection_consumes_the_keypress() {
+        let (mut ctx, _tx) = queue_ctx();
+        ctx.video_playlist.borrow_mut().extend(entries(6));
+        let mut pane = video_pane(&mut ctx);
+        pane.video_state.select(Some(2));
+        let mut ev = action(vec![Actions::Common(CommonAction::SelectDown)]);
+        pane.handle_action(&mut ev, &mut ctx).unwrap();
+        assert_eq!(pane.video_marked.iter().collect::<Vec<_>>(), vec![2, 3]);
+
+        // Esc carries both Close (menu) and ShowSettings; clearing the
+        // selection must consume the keypress so settings does not open on
+        // the same press.
+        let mut ev = action(vec![
+            Actions::Common(CommonAction::Close),
+            Actions::Global(GlobalAction::ShowSettings),
+        ]);
+        pane.handle_action(&mut ev, &mut ctx).unwrap();
+        assert!(pane.video_marked.is_empty(), "Esc clears the selection");
+        assert!(ev.is_consumed(), "clearing the selection consumes the keypress");
+    }
+
+    #[test]
+    fn esc_without_a_selection_leaves_settings_enabled() {
+        let (mut ctx, _tx) = queue_ctx();
+        ctx.video_playlist.borrow_mut().extend(entries(6));
+        let mut pane = video_pane(&mut ctx);
+        let mut ev = action(vec![
+            Actions::Common(CommonAction::Close),
+            Actions::Global(GlobalAction::ShowSettings),
+        ]);
+        pane.handle_action(&mut ev, &mut ctx).unwrap();
+        assert!(pane.video_marked.is_empty());
+        assert!(!ev.is_consumed(), "no selection: Esc still opens settings");
+    }
+
+    #[test]
+    fn shift_range_reanchors_after_esc_clears_the_selection() {
+        let (mut ctx, _tx) = queue_ctx();
+        ctx.video_playlist.borrow_mut().extend(entries(8));
+        let mut pane = video_pane(&mut ctx);
+
+        // Move the cursor to row 2, then Shift+Down twice marks [2..=4]
+        // (anchor 2).
+        for _ in 0..3 {
+            let mut ev = action(vec![Actions::Common(CommonAction::Down)]);
+            pane.handle_action(&mut ev, &mut ctx).unwrap();
+        }
+        for _ in 0..2 {
+            let mut ev = action(vec![Actions::Common(CommonAction::SelectDown)]);
+            pane.handle_action(&mut ev, &mut ctx).unwrap();
+        }
+        assert_eq!(pane.video_state.selected(), Some(4));
+        assert_eq!(pane.video_marked.iter().collect::<Vec<_>>(), vec![2, 3, 4]);
+
+        // Esc clears the marks - and (with the fix) the anchor too.
+        let mut ev = action(vec![Actions::Common(CommonAction::Close)]);
+        pane.handle_action(&mut ev, &mut ctx).unwrap();
+        assert!(pane.video_marked.is_empty());
+
+        // Move the cursor back up to row 3, then Shift+Down: the range
+        // must start from the new cursor (3), not reach back to the old
+        // anchor (2).
+        let mut ev = action(vec![Actions::Common(CommonAction::Up)]);
+        pane.handle_action(&mut ev, &mut ctx).unwrap();
+        assert_eq!(pane.video_state.selected(), Some(3));
+        let mut ev = action(vec![Actions::Common(CommonAction::SelectDown)]);
+        pane.handle_action(&mut ev, &mut ctx).unwrap();
+        assert_eq!(pane.video_state.selected(), Some(4));
+        assert_eq!(pane.video_marked.iter().collect::<Vec<_>>(), vec![3, 4]);
     }
 }
 
