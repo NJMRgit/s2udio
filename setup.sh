@@ -155,6 +155,44 @@ seed_config_theme() {
         cp assets/example_theme.ron "$CFG_DIR/themes/default.ron" && ok "theme -> $CFG_DIR/themes/default.ron"
     fi
     mkdir -p "$CFG_DIR/lyrics"  # s2udio's own .lrc library (round 23)
+    migrate_radio_favourites
+}
+
+# ---------------------------------------------------------------------------
+# Radio favourites migration: the favourites used to live as an MPD stored
+# playlist (<playlist>.m3u in MPD's playlist dir), which rmpc's playlist UI
+# showed as a playlist it doesn't understand. They now live in the s2udio
+# config dir (~/.config/s2udio/radio/); move an existing file there during
+# install/update so MPD stops seeing it.
+migrate_radio_favourites() {
+    local dest_dir="$CFG_DIR/radio"
+    # The configured playlist name, if any (default "radio"); best-effort
+    # read of the s2udio config so a custom name is honoured too.
+    local playlist="radio" configured
+    configured="$(sed -n 's/.*playlist: *Some("\([^"]*\)").*/\1/p; s/.*playlist: *"\([^"]*\)".*/\1/p' "$CFG_DIR/config.ron" 2>/dev/null | head -1 || true)"
+    [[ -n "$configured" ]] && playlist="$configured"
+
+    # Candidate old locations: MPD's configured playlist_directory first,
+    # then the standard fallbacks the old app tried.
+    local src="" dir pd
+    pd="$(sed -n 's/^[[:space:]]*playlist_directory[[:space:]]*"\([^"]*\)".*/\1/p' "$MPD_CONF" 2>/dev/null | head -1 || true)"
+    for dir in "$pd" "$HOME/.cache/mpd/playlists" "$HOME/.local/share/mpd/playlists" "$HOME/.config/mpd/playlists" "$HOME/.mpd/playlists" "/var/lib/mpd/playlists"; do
+        [[ -z "$dir" ]] && continue
+        dir="${dir/#\~/$HOME}"
+        if [[ -f "$dir/$playlist.m3u" ]]; then
+            src="$dir/$playlist.m3u"
+            break
+        fi
+    done
+    [[ -n "$src" ]] || return 0
+
+    mkdir -p "$dest_dir"
+    if [[ -f "$dest_dir/$playlist.m3u" ]]; then
+        warn "radio favourites already at $dest_dir/$playlist.m3u - leaving $src in place"
+        return 0
+    fi
+    mv -f "$src" "$dest_dir/$playlist.m3u"
+    ok "radio favourites -> $dest_dir/$playlist.m3u (removed from MPD playlists)"
 }
 
 build_binary() { # $1 = cargo-missing hint

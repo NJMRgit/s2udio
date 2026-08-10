@@ -19,9 +19,7 @@ use crate::{
     },
     ctx::Ctx,
     mpd::{
-        client::Client,
-        commands::{Song, State},
-        errors::{ErrorCode, MpdError},
+        commands::State,
         mpd_client::MpdClient,
     },
     radio::{CountryGroup, DirectoryStation, RadioDirectory},
@@ -51,27 +49,16 @@ const INIT: &str = "radio_init";
 const REINIT: &str = "radio_reinit";
 const PLAY: &str = "radio_play";
 
-/// One entry of the favourite stations list (an MPD stored playlist whose
-/// entries are stream URLs). Names come from the `#EXTINF` lines of the
-/// underlying `.m3u` file, which MPD itself never rewrites without dropping
-/// them, so all list mutations go through direct file writes (MPD hot-reloads
-/// the file).
+/// One entry of the favourite stations list: a local m3u under the s2udio
+/// config dir (`~/.config/s2udio/radio/<playlist>.m3u`) whose entries are
+/// stream URLs. Names come from the `#EXTINF` lines of the file. The
+/// favourites are deliberately NOT an MPD stored playlist — keeping the
+/// file in the MPD playlist dir made rmpc list a playlist it doesn't
+/// understand (setup.sh migrates an existing file during install/update).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RadioStation {
     pub name: String,
     pub url: String,
-}
-
-impl RadioStation {
-    pub(crate) fn from_song(song: &Song) -> Self {
-        let name = song
-            .metadata
-            .get("name")
-            .map(|v| v.last().to_owned())
-            .filter(|name| !name.is_empty())
-            .unwrap_or_else(|| song.file.clone());
-        Self { name, url: song.file.clone() }
-    }
 }
 
 /// Identifies a region in the left tree: Local, a country, a state or a city.
@@ -132,38 +119,52 @@ pub(crate) fn is_stream_url(url: &str) -> bool {
         .any(|scheme| url.starts_with(scheme))
 }
 
-/// Path of the playlist file MPD stores the favourites in. `config` is only
-/// available over a unix socket, so fall back to the standard locations.
-fn playlist_file_path(client: &mut Client<'_>, playlist: &str) -> Result<PathBuf> {
-    let file_name = format!("{playlist}.m3u");
-    if let Some(cfg) = client.config()
-        && !cfg.playlist_directory.is_empty()
-    {
-        let dir = tilde_expand(&cfg.playlist_directory);
-        return Ok(PathBuf::from(dir.into_owned()).join(file_name));
-    }
-    for dir in ["~/.config/mpd/playlists", "~/.mpd/playlists", "/var/lib/mpd/playlists"] {
-        let dir = PathBuf::from(tilde_expand(dir).into_owned());
-        if dir.exists() {
-            return Ok(dir.join(file_name));
-        }
-    }
-    // Last resort: create the default location.
-    Ok(PathBuf::from(tilde_expand("~/.config/mpd/playlists").into_owned()).join(file_name))
+/// Path of the radio favourites file: `~/.config/s2udio/radio/<playlist>.m3u`.
+/// The favourites are NOT an MPD stored playlist anymore — keeping the file
+/// in the MPD playlist dir made rmpc list a playlist it doesn't understand.
+/// setup.sh migrates an existing MPD-side file during install/update.
+fn playlist_file_path(playlist: &str) -> PathBuf {
+    let dir = crate::shared::paths::config_dir()
+        .unwrap_or_else(|| PathBuf::from(tilde_expand("~/.config/s2udio").into_owned()));
+    dir.join("radio").join(format!("{playlist}.m3u"))
 }
 
-/// Fetch the favourites list from MPD. A missing playlist is not an error.
-fn fetch_stations(client: &mut Client<'_>, playlist: &str) -> Result<Vec<RadioStation>> {
-    let songs = match client.list_playlist_info(playlist, None) {
-        Ok(songs) => songs,
-        Err(MpdError::Mpd(failure)) if failure.code == ErrorCode::NoExist => Vec::new(),
+/// Fetch the favourites by reading the m3u under the s2udio config dir. A
+/// missing file is not an error (no favourites yet).
+fn fetch_stations(playlist: &str) -> Result<Vec<RadioStation>> {
+    let content = match std::fs::read_to_string(playlist_file_path(playlist)) {
+        Ok(content) => content,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(err) => return Err(err.into()),
     };
-    Ok(songs
-        .iter()
-        .filter(|song| is_stream_url(&song.file))
-        .map(RadioStation::from_song)
-        .collect())
+    Ok(parse_m3u(&content))
+}
+
+/// Parse an EXTINF m3u (the format the app writes; MPD's own stored
+/// playlists are plain URL-per-line and parse the same). `#EXTINF:-1,name`
+/// lines name the following URL; bare URLs keep the URL as their name.
+fn parse_m3u(content: &str) -> Vec<RadioStation> {
+    let mut stations = Vec::new();
+    let mut pending_name: Option<String> = None;
+    for raw in content.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with("#EXTM3U") {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("#EXTINF:") {
+            pending_name =
+                Some(rest.splitn(2, ',').nth(1).unwrap_or_default().trim().to_string());
+        } else if is_stream_url(line) {
+            let name = pending_name
+                .take()
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| line.to_string());
+            stations.push(RadioStation { name, url: line.to_string() });
+        } else {
+            pending_name = None;
+        }
+    }
+    stations
 }
 
 /// EXTINF m3u serialization: every station keeps its name, which MPD's own
@@ -179,15 +180,9 @@ fn m3u_content(stations: &[RadioStation]) -> String {
     content
 }
 
-/// Rewrite the whole `.m3u` in EXTINF format so every station keeps its name
-/// (MPD's own playlist commands drop `#EXTINF` lines on rewrite). MPD notices
-/// the file change and reloads the playlist.
-fn write_stations_file(
-    client: &mut Client<'_>,
-    playlist: &str,
-    stations: &[RadioStation],
-) -> Result<()> {
-    let path = playlist_file_path(client, playlist)?;
+/// Rewrite the whole `.m3u` in EXTINF format so every station keeps its name.
+fn write_stations_file(playlist: &str, stations: &[RadioStation]) -> Result<()> {
+    let path = playlist_file_path(playlist);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -290,8 +285,8 @@ impl RadioPane {
 
     fn query_favourites(&self, ctx: &Ctx, id: &'static str) {
         let playlist = ctx.config.radio.playlist.clone();
-        ctx.query().id(id).replace_id(id).target(PaneType::Radio).query(move |client| {
-            Ok(MpdQueryResult::Any(Box::new(fetch_stations(client, &playlist)?)))
+        ctx.query().id(id).replace_id(id).target(PaneType::Radio).query(move |_client| {
+            Ok(MpdQueryResult::Any(Box::new(fetch_stations(&playlist)?)))
         });
     }
 
@@ -682,10 +677,10 @@ impl RadioPane {
         mutate: impl FnOnce(&mut Vec<RadioStation>) + Send + 'static,
     ) -> Result<()> {
         let playlist_name = playlist.clone();
-        let result = ctx.query_sync(move |client| {
-            let mut stations = fetch_stations(client, &playlist_name)?;
+        let result = ctx.query_sync(move |_client| {
+            let mut stations = fetch_stations(&playlist_name)?;
             mutate(&mut stations);
-            write_stations_file(client, &playlist_name, &stations)?;
+            write_stations_file(&playlist_name, &stations)?;
             Ok(stations)
         })?;
         status_info!("Favourites updated ({} stations)", result.len());
@@ -695,8 +690,8 @@ impl RadioPane {
             .id(REINIT)
             .replace_id(REINIT)
             .target(PaneType::Radio)
-            .query(move |client| {
-                Ok(MpdQueryResult::Any(Box::new(fetch_stations(client, &playlist)?)))
+            .query(move |_client| {
+                Ok(MpdQueryResult::Any(Box::new(fetch_stations(&playlist)?)))
             });
         ctx.render()?;
         Ok(())
@@ -1681,35 +1676,19 @@ impl Pane for RadioPane {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
     use rstest::rstest;
 
-    use super::{RadioPane, RadioStation, RegionKind, PaneFocus, is_stream_url, m3u_content};
+    use super::{
+        RadioPane, RadioStation, RegionKind, PaneFocus, is_stream_url, m3u_content, parse_m3u,
+    };
     use crate::{
         MpdQueryResult,
         ctx::Ctx,
-        mpd::commands::Song,
         radio::{CountryGroup, DirectoryStation, RadioDirectory, StateGroup},
         shared::events::WorkRequest,
         tests::fixtures::ctx,
         ui::panes::Pane,
     };
-
-    fn song(url: &str, name: Option<&str>) -> Song {
-        let mut metadata = HashMap::new();
-        if let Some(name) = name {
-            metadata.insert("name".to_owned(), name.into());
-        }
-        Song {
-            id: 0,
-            file: url.to_owned(),
-            duration: None,
-            metadata,
-            last_modified: chrono::Utc::now(),
-            added: None,
-        }
-    }
 
     fn station(name: &str, url: &str) -> RadioStation {
         RadioStation { name: name.to_owned(), url: url.to_owned() }
@@ -1772,15 +1751,38 @@ mod tests {
     }
 
     #[rstest]
-    fn from_song_uses_name_metadata() {
-        let s = RadioStation::from_song(&song("http://x.example/stream", Some("My Station")));
-        assert_eq!(s, station("My Station", "http://x.example/stream"));
+    fn parse_m3u_reads_extinf_names_and_bare_urls() {
+        let stations = parse_m3u(
+            "#EXTM3U\n\
+             #EXTINF:-1,SomaFM Groove Salad\n\
+             http://ice1.somafm.com/groovesalad-128-mp3\n\
+             https://stream.radioparadise.com/mp3-128\n",
+        );
+        assert_eq!(
+            stations,
+            vec![
+                station("SomaFM Groove Salad", "http://ice1.somafm.com/groovesalad-128-mp3"),
+                station(
+                    "https://stream.radioparadise.com/mp3-128",
+                    "https://stream.radioparadise.com/mp3-128"
+                ),
+            ]
+        );
     }
 
     #[rstest]
-    fn from_song_falls_back_to_url() {
-        let s = RadioStation::from_song(&song("http://x.example/stream", None));
-        assert_eq!(s, station("http://x.example/stream", "http://x.example/stream"));
+    fn parse_m3u_round_trips_m3u_content() {
+        let stations = vec![
+            station("SomaFM Groove Salad", "http://ice1.somafm.com/groovesalad-128-mp3"),
+            station("Radio Paradise", "https://stream.radioparadise.com/mp3-128"),
+        ];
+        assert_eq!(parse_m3u(&m3u_content(&stations)), stations);
+    }
+
+    #[rstest]
+    fn parse_m3u_missing_or_empty_is_no_stations() {
+        assert_eq!(parse_m3u(""), Vec::<RadioStation>::new());
+        assert_eq!(parse_m3u("#EXTM3U\n"), Vec::<RadioStation>::new());
     }
 
     #[rstest]

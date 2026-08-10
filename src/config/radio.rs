@@ -5,11 +5,12 @@ use super::defaults;
 /// Internet radio configuration.
 ///
 /// The Radio tab shows three kinds of stations:
-/// - **Favourites**: the user's curated stations, stored in a normal MPD
-///   stored playlist (default `radio`). The pane reads the list with
-///   `listplaylistinfo` and rewrites the underlying `.m3u` file directly when
-///   stations are added/renamed/removed, because MPD's own playlist commands
-///   drop the `#EXTINF` names.
+/// - **Favourites**: the user's curated stations, stored in a local m3u
+///   under the s2udio config dir (`~/.config/s2udio/radio/<playlist>.m3u`,
+///   default `radio`). The pane reads and rewrites the file directly in
+///   EXTINF format so every station keeps its name. Deliberately NOT an MPD
+///   stored playlist — rmpc's playlist UI would otherwise show a playlist it
+///   doesn't understand (setup.sh migrates an existing MPD-side file).
 /// - **Local**: the closest stations to the user's location, fetched from the
 ///   radio-browser.info directory. The location comes from the config or is
 ///   geo-IP detected.
