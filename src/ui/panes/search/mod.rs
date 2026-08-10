@@ -562,6 +562,12 @@ impl SearchPane {
                     let selected = self.songs_dir.selected().map(|s| s.file.as_str());
                     run_external(command.clone(), create_env(ctx, selected));
                 }
+                // Space with a multi-selection opens the options menu
+                // instead of toggling playback (a single selection or none
+                // keeps the transport).
+                GlobalAction::TogglePause if self.songs_dir.marked().len() > 1 => {
+                    self.open_result_phase_context_menu(ctx);
+                }
                 _ => {
                     event.abandon();
                 }
@@ -727,24 +733,12 @@ impl SearchPane {
                 }
                 CommonAction::Rename => {}
                 CommonAction::Close => {}
-                CommonAction::Confirm if self.songs_dir.marked().is_empty() => {
-                    let (hovered_song_idx, items) = self.enqueue(true);
-                    let current_song_idx = ctx.find_current_song_in_queue().map(|(i, _)| i);
-
-                    if !items.is_empty() {
-                        Client::resolve_and_enqueue(
-                            ctx,
-                            items,
-                            Position::Replace,
-                            AutoplayKind::Hovered,
-                            current_song_idx,
-                            hovered_song_idx,
-                        );
-                    }
-
-                    ctx.render()?;
+                // Enter opens the options menu (the right-click menu), like
+                // the other list panes; playing happens via the menu's Play
+                // item or `d`/`→`/double-click.
+                CommonAction::Confirm => {
+                    self.open_result_phase_context_menu(ctx);
                 }
-                CommonAction::Confirm => {}
                 CommonAction::FocusInput => {}
                 CommonAction::AddOptions { kind: AddKind::Action(opts) } => {
                     let (hovered_song_idx, enqueue) = self.enqueue(opts.all);
@@ -978,6 +972,27 @@ impl SearchPane {
                 Some(section)
             })
             .list_section(ctx, |mut section| {
+                // Play the marked/selected results (the old Enter behavior;
+                // Enter itself now opens this menu).
+                let play_items = self.enqueue(false);
+                if !play_items.1.is_empty() {
+                    section.add_item("Play", move |ctx| {
+                        let (hovered_song_idx, items) = play_items.clone();
+                        let current_song_idx = ctx.find_current_song_in_queue().map(|(i, _)| i);
+                        if !items.is_empty() {
+                            Client::resolve_and_enqueue(
+                                ctx,
+                                items,
+                                Position::Replace,
+                                AutoplayKind::Hovered,
+                                current_song_idx,
+                                hovered_song_idx,
+                            );
+                        }
+                        Ok(())
+                    });
+                }
+
                 let song_files = self.items(false).map(|(_, item)| item.file.clone()).collect();
                 section.add_item("Create playlist", move |ctx| {
                     modal!(
@@ -1130,7 +1145,7 @@ impl Pane for SearchPane {
             ]),
             Line::from(vec![
                 Span::styled("Enter", base),
-                Span::styled("  search · play selected", dim),
+                Span::styled("  options menu · d/→ play", dim),
             ]),
             Line::from(vec![
                 Span::styled("Shift+↑/↓", base),
@@ -1907,6 +1922,118 @@ mod tests {
         assert!(
             value_width >= 10,
             "the filter value column stays usable on a narrow pane (got {value_width} cells)"
+        );
+    }
+
+    /// A ctx that keeps the app-event receiver, so tests can observe the
+    /// modals the pane opens.
+    fn make_ctx_with_rx() -> (crate::ctx::Ctx, crossbeam::channel::Receiver<crate::shared::events::AppEvent>) {
+        let (app_tx, app_rx) = crossbeam::channel::unbounded();
+        let ctx = crate::tests::fixtures::ctx(
+            (app_tx, app_rx.clone()),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+        );
+        (ctx, app_rx)
+    }
+
+    #[test]
+    fn enter_opens_the_options_menu_in_browse_results() {
+        use std::sync::Arc;
+
+        use crate::config::keys::{CommonAction, GlobalAction};
+        use crate::shared::keys::{ActionEvent, Actions};
+
+        let (mut ctx, app_rx) = make_ctx_with_rx();
+        let mut pane = rendered_pane(&mut ctx);
+        pane.songs_dir = Dir::new(songs());
+        pane.phase = Phase::BrowseResults;
+
+        let mut ev = ActionEvent::from(Arc::new(vec![Actions::Common(CommonAction::Confirm)]));
+        pane.handle_action(&mut ev, &mut ctx).unwrap();
+
+        let got = app_rx.try_recv();
+        assert!(
+            matches!(got, Ok(crate::shared::events::AppEvent::UiEvent(crate::ui::UiAppEvent::Modal(_)))),
+            "Enter in the results opens the options menu (got {got:?})"
+        );
+    }
+
+    #[test]
+    fn space_with_multiple_marks_opens_the_menu_instead_of_pausing() {
+        use std::sync::Arc;
+
+        use crate::config::keys::{CommonAction, GlobalAction};
+        use crate::shared::keys::{ActionEvent, Actions};
+
+        let (mut ctx, app_rx) = make_ctx_with_rx();
+        let mut pane = rendered_pane(&mut ctx);
+        pane.songs_dir = Dir::new(songs());
+        pane.phase = Phase::BrowseResults;
+        pane.songs_dir.state.toggle_mark(0);
+        pane.songs_dir.state.toggle_mark(2);
+        assert_eq!(pane.songs_dir.marked().len(), 2);
+
+        let mut ev = ActionEvent::from(Arc::new(vec![Actions::Global(GlobalAction::TogglePause)]));
+        pane.handle_action(&mut ev, &mut ctx).unwrap();
+
+        let got = app_rx.try_recv();
+        assert!(
+            matches!(got, Ok(crate::shared::events::AppEvent::UiEvent(crate::ui::UiAppEvent::Modal(_)))),
+            "Space with a multi-selection opens the options menu (got {got:?})"
+        );
+    }
+
+    #[test]
+    fn space_with_single_or_no_marks_keeps_playback() {
+        use std::sync::Arc;
+
+        use crate::config::keys::{CommonAction, GlobalAction};
+        use crate::shared::keys::{ActionEvent, Actions};
+
+        let (mut ctx, app_rx) = make_ctx_with_rx();
+        let mut pane = rendered_pane(&mut ctx);
+        pane.songs_dir = Dir::new(songs());
+        pane.phase = Phase::BrowseResults;
+
+        // No marks: Space keeps the transport.
+        let mut ev = ActionEvent::from(Arc::new(vec![Actions::Global(GlobalAction::TogglePause)]));
+        pane.handle_action(&mut ev, &mut ctx).unwrap();
+        assert!(app_rx.try_recv().is_err(), "no marks: Space keeps the transport");
+
+        // A single mark: Space still controls playback.
+        pane.songs_dir.state.toggle_mark(1);
+        let mut ev = ActionEvent::from(Arc::new(vec![Actions::Global(GlobalAction::TogglePause)]));
+        pane.handle_action(&mut ev, &mut ctx).unwrap();
+        assert!(app_rx.try_recv().is_err(), "single mark: Space keeps the transport");
+    }
+
+    #[test]
+    fn expanded_filter_labels_keep_the_margin_and_value_spacing() {
+        let mut ctx = make_ctx();
+        let mut pane = rendered_pane(&mut ctx);
+        // A wide terminal renders the expanded label form (" : ").
+        let buf = render_buf(&mut pane, &ctx, 140, 40);
+        let inner = pane.column_areas[BrowserArea::Previous];
+
+        let mut colon = None;
+        for x in inner.x..inner.x.saturating_add(inner.width) {
+            if buf[(x, inner.y)].symbol() == ":" {
+                colon = Some(x);
+                break;
+            }
+        }
+        let colon = colon.expect("the first filter row renders its label colon");
+        // One space separates the colon from the value.
+        assert_eq!(
+            buf[(colon + 1, inner.y)].symbol(),
+            " ",
+            "the value is separated from the colon by a space"
+        );
+        let value_width = (inner.x + inner.width).saturating_sub(colon + 2);
+        assert!(
+            value_width >= 10,
+            "the value column stays wide on the expanded pane (got {value_width})"
         );
     }
 }
