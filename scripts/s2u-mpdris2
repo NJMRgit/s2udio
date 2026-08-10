@@ -1,0 +1,371 @@
+#!/usr/bin/env python3
+"""Run the official mpDris2 with the s2udio stream-art extension.
+
+The official mpdris2-git package cannot show album art for non-file
+streams: its find_cover() returns None for http(s) URLs. s2udio writes
+the resolved YouTube/Jellyfin thumbnail to ~/.cache/rmpc/mpris-art
+(expected-source guarded), and this shim loads the *installed official*
+/usr/bin/mpDris2, teaches find_cover() to serve that file for stream
+URLs (cache-busted by mtime so KDE media controls re-fetch on stream
+change), then runs the official main body unmodified.
+
+Second extension — seek hardening: MPD cannot seek HLS audio streams
+(they answer "Not seekable"), and the official Seek/SetPosition would
+crash the daemon: seekid() only exists via __getattr__ -> call(), which
+catches CommandError as MPDError and calls reconnect(), releasing the
+D-Bus name and killing mpDris2. The shim installs a real seekid()
+method (shadows __getattr__; direct client call; CommandError is a
+no-op that logs "Seek rejected by MPD (stream not seekable)") and wraps
+the Seek/SetPosition D-Bus methods (carrying their _dbus_* contract
+through dbus-python's _method_lookup()) to no-op on CommandError and on
+stream statuses with no 'time' timeline (KeyError). The seekable-looking
+timeline is kept on purpose — seeks on the MPD path just no-op.
+
+Version-guarded: the find_cover/update_metadata extensions are
+version-guarded (if the installed mpDris2 changes shape, the shim runs
+it unpatched rather than breaking MPRIS); the seekid method is safe to
+install unconditionally because assigning a real method only shadows
+the __getattr__ delegation. This is a compat shim over the official
+package — no patched copy of mpDris2 is shipped or installed.
+
+setup.sh installs this to ~/.local/bin/s2u-mpdris2 and points
+mpDris2.service at it via a drop-in. Any extra argv is passed through to
+the official parser (e.g. --use-journal).
+"""
+import importlib.util
+import json
+import os
+import sys
+
+# mpDris2's allowed_tags coerces mpris:length to dbus.Int64; the
+# injection below must do the same or dbus-python packs the plain int as
+# Int32 and overflows for any duration > ~2147 s. The import is guarded
+# so the shim stays importable (and unit-testable) without python-dbus;
+# the host that runs the real bridge always has it.
+try:
+    import dbus
+except ImportError:
+    dbus = None
+
+# Round 19: s2udio-only cache files default to ~/.cache/s2udio (the
+# pre-round-19 ~/.cache/rmpc location is used when it still holds the
+# files — migration).
+def _s2u_cache(file):
+    env = os.environ.get("S2U_CACHE_DIR")
+    if env:
+        return os.path.join(env, file)
+    new = os.path.expanduser("~/.cache/s2udio/" + file)
+    legacy = os.path.expanduser("~/.cache/rmpc/" + file)
+    return legacy if os.path.exists(legacy) and not os.path.exists(new) else new
+
+ART = _s2u_cache("mpris-art")
+MPDRIS2 = "/usr/bin/mpDris2"
+MARKER = "if __name__ == '__main__':"
+# s2udio's resolved-stream info cache (stream URL + canonical link ->
+# title / channel / duration), written by the app during playback.
+YT_INFO = _s2u_cache("yt-info.json")
+# How long to keep re-probing for the s2udio-written art file after a
+# song change (the download is async and lands after the metadata
+# rebuild), and how often.
+_ART_RETRY_INTERVAL_MS = 1500
+_ART_RETRY_MAX = 6
+
+
+def _yt_info_for(song_url):
+    """The cached resolved info for a stream URL, or None. MPD cannot
+    report a duration (or any tags) for a resolved HLS/audio stream URL,
+    so the MPRIS bridge reads the info s2udio cached when it resolved the
+    link (keyed by the stream URL, with the canonical link as an alias)."""
+    if not song_url or not song_url.startswith(("http://", "https://")):
+        return None
+    try:
+        with open(YT_INFO, encoding="utf-8") as f:
+            cache = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(cache, dict):
+        return None
+    if song_url in cache and isinstance(cache[song_url], dict):
+        return cache[song_url]
+    for entry in cache.values():
+        if (isinstance(entry, dict)
+                and entry.get("original_url") == song_url):
+            return entry
+    return None
+
+
+def _art_url():
+    """file:// URL for the s2udio-written stream art (cache-busted).
+
+    s2udio rewrites the art file in place on every stream change; MPRIS
+    clients (KDE media controls) cache album art by URL, so the mtime
+    query forces a re-fetch whenever the file changes.
+    """
+    try:
+        mtime = os.stat(ART).st_mtime_ns
+    except OSError:
+        return None
+    return "file://%s?t=%d" % (ART, mtime)
+
+
+def _find_official():
+    """The installed official mpDris2 (system package path, else PATH)."""
+    candidates = [MPDRIS2]
+    try:
+        import shutil
+        found = shutil.which("mpDris2")
+        if found and found != MPDRIS2:
+            candidates.append(found)
+    except Exception:
+        pass
+    for path in candidates:
+        if os.path.isfile(path):
+            return path
+    return None
+
+
+def _patch_mpdris2(mod):
+    """Teach the loaded official mpDris2 module the s2udio extensions.
+
+    Returns True when any patch applied (the shim then logs that the
+    stream-art extension is active). All patches are version-guarded and
+    monkey-patched onto the loaded module so a refactored upstream keeps
+    running unpatched rather than breaking MPRIS.
+    """
+    patched = False
+    wrapper = getattr(mod, "MPDWrapper", None)
+    if wrapper is not None and hasattr(wrapper, "find_cover"):
+        _orig = wrapper.find_cover
+
+        def find_cover(self, song_url, _orig=_orig):
+            try:
+                cover = _orig(self, song_url)
+            except Exception:
+                cover = None
+            if cover:
+                return cover
+            # s2udio: serve the stream thumbnail for non-file URLs.
+            if song_url and not song_url.startswith(("file://", "local:track:")):
+                art = _art_url()
+                if art:
+                    return art
+            return None
+
+        wrapper.find_cover = find_cover
+        patched = True
+
+    # Extend update_metadata() with the resolved-stream info: MPD reports
+    # no duration (and usually no tags) for a resolved HLS/audio stream
+    # URL, so the MPRIS bridge injects the title/artist/duration s2udio
+    # cached when it resolved the link. Without it the desktop media
+    # controls show the URL basename and a dead (0-length) timeline.
+    if wrapper is not None and hasattr(wrapper, "update_metadata"):
+        _orig_update = wrapper.update_metadata
+
+        def _schedule_art_retry(self, url):
+            # The s2udio art download is async and lands after the
+            # metadata rebuild, so mpDris2's own find_cover() sees no art
+            # file on the first emit. Re-probe a bounded number of times;
+            # when the file appears, force a Metadata rebuild so the
+            # controls pick up mpris:artUrl without waiting for the next
+            # mixer/options/player idle event.
+            if getattr(self, "_s2u_art_retry_url", None) == url:
+                return
+            pending = getattr(self, "_s2u_art_retry_src", None)
+            if pending is not None:
+                try:
+                    mod.GLib.source_remove(pending)
+                except Exception:
+                    pass
+                self._s2u_art_retry_src = None
+            self._s2u_art_retry_url = url
+            self._s2u_art_retries = 0
+
+            def tick():
+                self._s2u_art_retry_src = None
+                try:
+                    art = _art_url()
+                    if art:
+                        meta = getattr(self, "_metadata", None)
+                        if isinstance(meta, dict):
+                            meta["mpris:artUrl"] = art
+                        svc = getattr(self, "_dbus_service", None)
+                        if svc is not None:
+                            svc.update_property(
+                                "org.mpris.MediaPlayer2.Player", "Metadata")
+                        self._s2u_art_retry_url = None
+                        return False
+                    self._s2u_art_retries = getattr(
+                        self, "_s2u_art_retries", 0) + 1
+                    if self._s2u_art_retries >= _ART_RETRY_MAX:
+                        self._s2u_art_retry_url = None
+                        return False
+                    self._s2u_art_retry_src = mod.GLib.timeout_add(
+                        _ART_RETRY_INTERVAL_MS, tick)
+                except Exception as err:
+                    mod.logger.error("s2u art retry failed: %r" % (err,))
+                    self._s2u_art_retry_url = None
+                return False
+
+            self._s2u_art_retry_src = mod.GLib.timeout_add(
+                _ART_RETRY_INTERVAL_MS, tick)
+
+        def update_metadata(self, *args, **kwargs):
+            _orig_update(self, *args, **kwargs)
+            meta = getattr(self, "_metadata", None)
+            if not isinstance(meta, dict):
+                return
+            url = meta.get("xesam:url", "")
+            info = _yt_info_for(url)
+            if info is None:
+                return
+            # Duration: MPD never reports one for a stream; without
+            # mpris:length the controls cannot seek / step.
+            duration = info.get("duration")
+            if (duration and meta.get("mpris:length") in (None, 0)
+                    and isinstance(duration, (int, float)) and duration > 0):
+                length_us = int(float(duration) * 1000000)
+                meta["mpris:length"] = (
+                    dbus.Int64(length_us) if dbus is not None else length_us)
+            # Title/artist: prefer the cached resolved title over the URL
+            # basename the official code falls back to.
+            title = info.get("title")
+            if title and not meta.get("xesam:title"):
+                meta["xesam:title"] = title
+            channel = info.get("channel")
+            if channel and not meta.get("xesam:artist"):
+                meta["xesam:artist"] = [channel]
+            # Art: s2udio writes the thumbnail asynchronously (expected-
+            # source guarded); once it lands, force a rebuild so the
+            # controls show it immediately instead of on the next idle
+            # event.
+            if (info.get("thumbnail")
+                    and not meta.get("mpris:artUrl")):
+                _schedule_art_retry(self, url)
+
+        wrapper.update_metadata = update_metadata
+        patched = True
+
+    # Harden Seek/SetPosition: MPD answers "Not seekable" for HLS audio
+    # Harden Seek/SetPosition and seekid(): MPD cannot seek HLS audio
+    # streams at all, and the unhandled
+    # CommandError in the official Seek drops the MPD connection, releases
+    # the D-Bus name and kills the daemon. Replace seekid() with a direct
+    # client call (bypassing the __getattr__->call() reconnect trap) that
+    # catches CommandError as a no-op, and no-op the D-Bus methods on
+    # missing timelines (a stream status has no 'time').
+    #
+    # NOTE: the official MPDWrapper has **no** seekid method in its class
+    # body — it exists only via __getattr__ -> call(). So `hasattr(wrapper,
+    # "seekid")` is always False and a guard on it would silently skip the
+    # patch (the seek then still reaches call()/reconnect() and kills the
+    # daemon). Assigning a real seekid method shadows __getattr__ and is
+    # safe even if upstream ever defines its own (ours handles both
+    # outcomes); the class shape cannot change in a way that breaks this.
+    if wrapper is not None:
+        def seekid(self, songid, position):
+            try:
+                was_idle = self.idle_leave()
+            except (mod.socket.error, mod.mpd.MPDError, mod.socket.timeout):
+                was_idle = False
+            try:
+                self.client.seekid(songid, position)
+                return True
+            except mod.mpd.CommandError as err:
+                mod.logger.warning(
+                    "Seek rejected by MPD (stream not seekable): %s" % err)
+                return False
+            except (mod.socket.error, mod.mpd.MPDError,
+                    mod.socket.timeout) as err:
+                mod.logger.debug("seekid: connection error %r" % (err,))
+                self.reconnect()
+                return False
+            finally:
+                if was_idle:
+                    self.idle_enter()
+
+        wrapper.seekid = seekid
+        patched = True
+
+    iface = getattr(mod, "MPRISInterface", None)
+    if iface is not None:
+        for name in ("Seek", "SetPosition"):
+            _orig = getattr(iface, name, None)
+            if _orig is None or not getattr(_orig, "_dbus_is_method", False):
+                # Not a D-Bus method (upstream refactor): leave it alone.
+                continue
+
+            def guarded(self, *args, _name=name, _orig=_orig, **kwargs):
+                try:
+                    return _orig(self, *args, **kwargs)
+                except mod.mpd.CommandError as err:
+                    mod.logger.warning(
+                        "%s: MPD rejected the seek: %s" % (_name, err))
+                    return None
+                except (KeyError, TypeError, ValueError):
+                    # A stream status has no 'time' (HLS / live): there is
+                    # no timeline to seek on; no-op instead of crashing.
+                    mod.logger.debug("%s: no seekable timeline" % _name)
+                    return None
+
+            # dbus-python's _method_lookup() reads the method straight out
+            # of the class __dict__ on every call and uses its _dbus_*
+            # attributes as the D-Bus contract (interface, signatures,
+            # ...). The wrapper must carry that metadata so the bus still
+            # recognizes it as the exported method. (dbus.service.method
+            # returns the plain function with _dbus_* attrs — there is no
+            # `.func` to wrap in this dbus-python version.)
+            guarded.__dict__.update(
+                {k: v for k, v in _orig.__dict__.items()
+                 if k.startswith("_dbus_")})
+            setattr(iface, name, guarded)
+            patched = True
+    return patched
+
+
+def main():
+    path = _find_official()
+    if not path:
+        sys.stderr.write("s2u-mpdris2: official mpDris2 not found\n")
+        return 1
+    try:
+        with open(path, encoding="utf-8") as f:
+            source = f.read()
+    except OSError as err:
+        sys.stderr.write("s2u-mpdris2: cannot read %s: %r\n" % (path, err))
+        return 1
+
+    # Load the module with the __main__ guard skipped (classes defined,
+    # main body deferred). /usr/bin/mpDris2 has no .py suffix, so the
+    # source loader must be named explicitly.
+    import importlib.machinery
+    loader = importlib.machinery.SourceFileLoader("mpdris2_official", path)
+    spec = importlib.util.spec_from_loader("mpdris2_official", loader)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod
+    loader.exec_module(mod)
+
+    # Extend the loaded official module with the s2udio stream-art /
+    # metadata / seek-hardening patches (version-guarded inside).
+    patched = _patch_mpdris2(mod)
+
+    # Run the official main body (the code under `if __name__ == '__main__':`).
+    idx = source.find(MARKER)
+    if idx == -1:
+        sys.stderr.write("s2u-mpdris2: unexpected mpDris2 layout "
+                         "(no __main__ guard); aborting\n")
+        return 1
+    body = source[idx + len(MARKER):]
+    import textwrap
+    body = textwrap.dedent(body)
+    if patched:
+        sys.stderr.write("s2u-mpdris2: stream-art extension active (%s)\n" % path)
+    else:
+        sys.stderr.write("s2u-mpdris2: mpDris2 layout changed; running "
+                         "unpatched (no stream art)\n")
+    exec(compile(body, path, "exec"), mod.__dict__)
+    return 0  # unreachable while the GLib loop runs
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,867 @@
+#!/usr/bin/env python3
+"""Track s2udio's mpv session independently of the app.
+
+s2udio launches mpv for video (Jellyfin / YouTube / local files) and spawns
+this daemon alongside it. While s2udio is running its own poll owns the
+MPRIS state file, the Jellyfin tracking and the MPD<->mpv mutual exclusion;
+this daemon idles. When s2udio closes, the daemon takes over within a
+second:
+
+- keeps ~/.cache/rmpc/mpv-mpris.json fresh and starts the bundled
+  s2udio-mpris daemon, so the video stays on the desktop media controls
+  (title/poster, and control through mpv's IPC socket),
+- for a Jellyfin item (the current mpv URL is a /Videos/<id>/stream URL):
+  fetches the item name/artist + poster (written to mpris-mpv-art),
+  applies the saved resume position once, reports playback progress every
+  ~10s and the stop-with-position when mpv exits, so the server's resume
+  position and web session stay correct,
+- enforces the mutual exclusion between mpv and MPD while s2udio is
+  closed: MPD starting to play pauses a playing video, and a video
+  resuming (e.g. from the desktop media controls) while MPD plays pauses
+  the music — the two never play at the same time,
+- hides the MPD audio MPRIS while a video session is alive: stops the
+  mpDris2.service (mpdris2 MPRIS) on session start and restarts it when
+  mpv exits, so desktop media controls show only the video (s2udio-mpris)
+  during playback instead of the paused MPD audio,
+- on mpv exit: reports the stop (Jellyfin only, when s2udio is not running)
+  and deletes the state file so the MPRIS bridge exits.
+
+s2udio re-reads the state file on startup to reattach to a still-playing
+video (controls, seekbar, album art and MPRIS resume working again).
+
+Exits when mpv exits. Python stdlib only.
+
+Env overrides (also used by tests):
+  S2U_MPV_SOCKET        - use this exact mpv IPC socket path
+  S2U_FORCE_CARETAKER=1 - act as the caretaker even while s2udio runs
+  S2U_JELLYFIN_CONFIG   - Jellyfin credentials file to read instead of
+                          ~/.config/rmpc/jellyfin.ron / jellytui's
+  S2U_CACHE_DIR         - cache dir for the state/poster/pid files instead
+                          of ~/.cache/rmpc
+  S2U_MPD_HOST          - MPD host to watch (else MPD_HOST, else the
+                          address: in ~/.config/rmpc/config.ron, else
+                          127.0.0.1)
+  S2U_MPD_PORT          - MPD port (else MPD_PORT, else the config, else
+                          6600)
+  S2U_MPD_PASSWORD      - MPD password (else MPD_PASSWORD, else the
+                          password: in ~/.config/rmpc/config.ron)
+  S2U_POLL_S            - poll interval in seconds (default 1.0; tests use
+                          0.3)
+"""
+import json
+import os
+import re
+import socket
+import subprocess
+import sys
+import time
+import urllib.request
+
+def _cache_dir():
+    # Round 19: s2udio-only cache files default to ~/.cache/s2udio; the
+    # pre-round-19 ~/.cache/rmpc location is honored when it still holds
+    # the state (migration).
+    env = os.environ.get("S2U_CACHE_DIR")
+    if env:
+        return env
+    new = os.path.expanduser("~/.cache/s2udio")
+    legacy = os.path.expanduser("~/.cache/rmpc")
+    if os.path.exists(os.path.join(new, "mpv-mpris.json")) or os.path.exists(new):
+        return new
+    if os.path.exists(os.path.join(legacy, "mpv-mpris.json")):
+        return legacy
+    return new
+
+CACHE = _cache_dir()
+STATE = os.path.join(CACHE, "mpv-mpris.json")
+POSTER = os.path.join(CACHE, "mpris-mpv-art")
+PID_FILE = os.path.join(CACHE, "mpv-tracker.pid")
+FIXED_SOCKET = "/tmp/s2u-mpv.sock"
+MPV_SOCKETS_DIR = "/tmp/mpvSockets"
+
+POLL_S = float(os.environ.get("S2U_POLL_S") or 1.0)
+PROGRESS_EVERY_S = 10.0
+# Consecutive failed socket reads before assuming mpv exited.
+DEAD_LIMIT = 5
+# The state file is trusted for reattach only while this fresh.
+FRESH_S = 15
+
+_CONFIG_RE = re.compile(r'(server_url|access_token|user_id)\s*[:=]\s*"([^"]*)"')
+_ADDRESS_RE = re.compile(r'address\s*:\s*"([^"]+)"')
+_PROVISIONAL = ("http://", "https://", "www.", "watch?v=", "youtu.be/",
+                "youtube.com/", "soundcloud.com/", "nicovideo.jp/")
+# Stream basenames mpv falls back to for resolved audio URLs (e.g.
+# `index.m3u8`) — never real titles.
+_STREAM_EXTS = ("m3u8", "m3u", "m4a", "mp3", "aac", "opus", "flac",
+                "ogg", "webm")
+
+
+# ---------------------------------------------------------------- helpers --
+
+def s2u_running():
+    """True while s2udio itself is running (its poll owns MPRIS + Jellyfin
+    + the MPD<->mpv mutual exclusion)."""
+    if os.environ.get("S2U_FORCE_CARETAKER") == "1":
+        return False
+    try:
+        # The installed binary runs as `s2udio` (setup.sh renames the
+        # release build); pgrep must match it too or the tracker thinks
+        # s2udio is closed and acts as caretaker while the TUI runs.
+        for name in ("s2u", "rmpc", "s2udio"):
+            r = subprocess.run(["pgrep", "-x", name],
+                               stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL, timeout=3)
+            if r.returncode == 0:
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def mpv_socket():
+    """Newest socket under /tmp/mpvSockets (mpvSockets.lua), else the fixed
+    fallback. Mirrors s2udio's `mpv_socket()`."""
+    override = os.environ.get("S2U_MPV_SOCKET")
+    if override:
+        return override if os.path.exists(override) else None
+    best = None
+    try:
+        for name in os.listdir(MPV_SOCKETS_DIR):
+            p = os.path.join(MPV_SOCKETS_DIR, name)
+            # mpvSockets.lua's per-instance sockets are Unix-domain
+            # sockets; os.path.isfile() is False for them, so match the
+            # Rust side and accept any entry in the dir.
+            if not os.path.exists(p):
+                continue
+            mtime = os.path.getmtime(p)
+            if best is None or mtime > best[1]:
+                best = (p, mtime)
+    except OSError:
+        pass
+    if best:
+        return best[0]
+    return FIXED_SOCKET if os.path.exists(FIXED_SOCKET) else None
+
+
+def mpv_exchange(sock_path, commands):
+    """Send one JSON line per command; return the parsed responses in order.
+    None when mpv cannot be reached at all."""
+    try:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(2)
+        s.connect(sock_path)
+        for command in commands:
+            s.sendall((json.dumps({"command": command}) + "\n").encode())
+        f = s.makefile("rb")
+        responses = []
+        for _ in commands:
+            line = f.readline()
+            if not line:
+                break
+            try:
+                responses.append(json.loads(line))
+            except ValueError:
+                pass
+        f.close()
+        s.close()
+        return responses or None
+    except OSError:
+        return None
+
+
+def read_mpv_state(sock_path):
+    """dict of mpv's playback state, or None when mpv is unreachable."""
+    responses = mpv_exchange(sock_path, [
+        ["get_property", "time-pos"],
+        ["get_property", "pause"],
+        ["get_property", "duration"],
+        ["get_property", "volume"],
+        ["get_property", "playlist-pos"],
+        ["get_property", "playlist-count"],
+        ["get_property", "media-title"],
+        ["get_property", "path"],
+        ["get_property", "playlist"],
+    ])
+    if responses is None:
+        return None
+
+    def value(i, default=None):
+        if i < len(responses) and responses[i].get("error") == "success":
+            return responses[i].get("data", default)
+        return default
+
+    playlist = value(8) or []
+    playlist_pos = value(4)
+    for i, entry in enumerate(playlist):
+        if entry.get("current") or entry.get("playing"):
+            playlist_pos = i
+            break
+    return {
+        "position": float(value(0) or 0),
+        "paused": bool(value(1) or False),
+        "duration": float(value(2) or 0),
+        "volume": int(value(3) or 0),
+        "playlist_pos": playlist_pos,
+        "playlist_count": value(5),
+        "media_title": value(6) or "",
+        "path": value(7) or "",
+        "playlist": playlist,
+    }
+
+
+def mpv_command(sock_path, command):
+    """Fire-and-forget mpv command."""
+    try:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(2)
+        s.connect(sock_path)
+        s.sendall((json.dumps({"command": command}) + "\n").encode())
+        s.close()
+    except OSError:
+        pass
+
+
+def item_id_from_url(url):
+    """Jellyfin item id from a `{base}/Videos/{id}/stream` URL (32 hex)."""
+    try:
+        from urllib.parse import urlparse
+        segments = [s for s in urlparse(url).path.split("/") if s]
+        if (len(segments) >= 2 and segments[0] in ("Audio", "Videos")
+                and len(segments[1]) == 32):
+            return segments[1]
+    except Exception:
+        pass
+    return None
+
+
+def load_yt_info(url):
+    """The cached resolved info for `url` (keyed by the stream URL or the
+    canonical link), or None. Mirrors s2udio's yt-info.json sidecar."""
+    try:
+        with open(os.path.join(CACHE, "yt-info.json"), encoding="utf-8") as f:
+            cache = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if url in cache:
+        return cache[url]
+    for entry in cache.values():
+        if isinstance(entry, dict) and entry.get("original_url") == url:
+            return entry
+    return None
+
+
+def _entry_title(st, url):
+    """The saved playlist entry title for the playing URL, or None."""
+    for e in st.get("playlist") or []:
+        if isinstance(e, dict) and e.get("url") == url and e.get("title"):
+            return e["title"]
+    return None
+
+
+def display_title(url):
+    name = url.rsplit("/", 1)[-1].split("?", 1)[0]
+    return name or url
+
+
+def is_provisional(title):
+    t = title.strip()
+    if (t.startswith(("http://", "https://", "www."))
+            or any(k in t for k in _PROVISIONAL[3:])):
+        return True
+    # A bare stream basename (`index.m3u8`) is not a real title either.
+    if (t and "/" not in t and "\\" not in t and " " not in t
+            and "." in t and t.rsplit(".", 1)[-1] in _STREAM_EXTS):
+        return True
+    return False
+
+
+def _config_candidates():
+    """The s2udio config file(s): round-23 ~/.config/s2udio/config.ron
+    first, then the legacy ~/.config/rmpc/config.ron."""
+    return [
+        os.path.expanduser("~/.config/s2udio/config.ron"),
+        os.path.expanduser("~/.config/rmpc/config.ron"),
+    ]
+
+
+# ------------------------------------------------------------------- MPD --
+
+def mpd_addr():
+    """(host, port) of the MPD server. Test env, then the standard
+    MPD_HOST/MPD_PORT, then the address: in ~/.config/s2udio/config.ron
+    (round 23; legacy ~/.config/rmpc honored), then the MPD default."""
+    host = os.environ.get("S2U_MPD_HOST") or os.environ.get("MPD_HOST")
+    port = os.environ.get("S2U_MPD_PORT") or os.environ.get("MPD_PORT")
+    if host is None or port is None:
+        for cfg in _config_candidates():
+            try:
+                with open(cfg) as f:
+                    content = f.read()
+            except OSError:
+                continue
+            m = _ADDRESS_RE.search(content)
+            if not m:
+                continue
+            addr = m.group(1)
+            if ":" in addr:
+                h, p = addr.rsplit(":", 1)
+                if host is None:
+                    host = h
+                if port is None:
+                    port = p
+            elif host is None:
+                host = addr
+            if host is not None and port is not None:
+                break
+    if host is None:
+        host = "127.0.0.1"
+    if port is None:
+        port = "6600"
+    try:
+        return host, int(port)
+    except ValueError:
+        return host, 6600
+
+
+def mpd_connect():
+    """A socket to MPD (TCP, or a unix socket when the host starts with
+    '/'), or None when unreachable."""
+    host, port = mpd_addr()
+    try:
+        if host.startswith("/"):
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            s.settimeout(2)
+            s.connect(host)
+        else:
+            s = socket.create_connection((host, port), timeout=2)
+        return s
+    except OSError:
+        return None
+
+
+def mpd_password():
+    """MPD password: env override, then the rmpc config's `password:`."""
+    pw = os.environ.get("S2U_MPD_PASSWORD", os.environ.get("MPD_PASSWORD"))
+    if pw:
+        return pw
+    for cfg in _config_candidates():
+        try:
+            with open(cfg) as f:
+                content = f.read()
+        except OSError:
+            continue
+        m = re.search(r'password\s*:\s*"([^"]*)"', content)
+        if m:
+            return m.group(1)
+    return None
+
+
+def mpd_exchange(commands):
+    """Send command lines to MPD; return one list of response lines per
+    command (the MPD greeting and auth response are consumed, not
+    returned). None when MPD cannot be reached at all."""
+    s = mpd_connect()
+    if s is None:
+        return None
+    try:
+        f = s.makefile("rb")
+        pw = mpd_password()
+        if pw:
+            s.sendall(("password " + pw + "\n").encode())
+            while True:
+                line = f.readline()
+                if not line:
+                    break
+                if line == b"OK\n" or line.startswith(b"ACK"):
+                    break
+        responses = []
+        for command in commands:
+            s.sendall((command + "\n").encode())
+            lines = []
+            while True:
+                line = f.readline()
+                if not line:
+                    break
+                if line == b"OK\n" or line.startswith(b"ACK"):
+                    break
+                lines.append(line.decode(errors="replace").strip())
+            responses.append(lines)
+        f.close()
+        s.close()
+        return responses
+    except OSError:
+        try:
+            s.close()
+        except OSError:
+            pass
+        return None
+
+
+def mpd_state():
+    """MPD playback state: 'play'/'pause'/'stop', or None when the server
+    cannot be reached at all."""
+    responses = mpd_exchange(["status"])
+    if not responses or not responses[0]:
+        return None
+    for line in responses[0]:
+        if line.startswith("state: "):
+            return line[len("state: "):]
+    return None
+
+
+def mpd_pause():
+    """Pause MPD playback (fire and forget)."""
+    mpd_exchange(["pause 1"])
+
+
+# -------------------------------------------------------------- Jellyfin --
+
+def load_jellyfin():
+    """(base, token, user_id) from the Settings sidecar
+    (~/.config/rmpc/jellyfin.ron), else jellytui's config.toml."""
+    override = os.environ.get("S2U_JELLYFIN_CONFIG")
+    candidates = ((
+        os.path.expanduser("~/.config/s2udio/jellyfin.ron"),
+        os.path.expanduser("~/.config/rmpc/jellyfin.ron"),
+        os.path.expanduser("~/.config/jellytui/config.toml"),
+    ) if override is None else (override,))
+    for path in candidates:
+        try:
+            with open(path) as f:
+                content = f.read()
+        except OSError:
+            continue
+        creds = {}
+        for key, value in _CONFIG_RE.findall(content):
+            creds[key] = value
+        if creds.get("server_url") and creds.get("access_token"):
+            return (creds["server_url"].rstrip("/"), creds["access_token"],
+                    creds.get("user_id", ""))
+    return None
+
+
+def jf_get(jf, url, timeout=6):
+    req = urllib.request.Request(url, headers={"X-Emby-Token": jf[1]})
+    with urllib.request.urlopen(req, timeout=timeout) as response:
+        return response.read()
+
+
+def jf_post(jf, url, body, timeout=6):
+    data = json.dumps(body).encode()
+    req = urllib.request.Request(url, data=data, headers={
+        "X-Emby-Token": jf[1], "Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=timeout) as response:
+        return response.read()
+
+
+def jf_item_meta(jf, item_id):
+    """(name, artist) of a Jellyfin item, mirroring s2udio's JfItem."""
+    base, _token, user = jf
+    data = json.loads(jf_get(
+        jf, f"{base}/Users/{user}/Items/{item_id}?Fields=Chapters"))
+    artists = data.get("Artists") or []
+    artist = (data.get("AlbumArtist") or
+              (artists[0] if artists else None) or
+              data.get("SeriesName") or "")
+    return (data.get("Name") or "(untitled)", artist)
+
+
+def jf_write_poster(jf, item_id):
+    try:
+        base, _token, _user = jf
+        image = jf_get(jf, f"{base}/Items/{item_id}/Images/Primary?maxWidth=600",
+                       timeout=10)
+    except Exception:
+        return False
+    if not image:
+        return False
+    try:
+        tmp = POSTER + ".tmp"
+        with open(tmp, "wb") as f:
+            f.write(image)
+        os.replace(tmp, POSTER)
+        return True
+    except OSError:
+        return False
+
+
+def jf_fetch_resume(jf, item_id):
+    base, _token, user = jf
+    data = json.loads(jf_get(jf, f"{base}/UserItems/{item_id}/UserData"))
+    return (data.get("PlaybackPositionTicks") or 0) / 10_000_000.0
+
+
+def jf_report_progress(jf, item_id, position, paused):
+    base, _token, _user = jf
+    jf_post(jf, f"{base}/Sessions/Playing/Progress", {
+        "ItemId": item_id,
+        "PositionTicks": int(position * 10_000_000),
+        "IsPaused": paused,
+        "PlayMethod": "DirectPlay",
+    })
+
+
+def jf_report_stopped(jf, item_id, position):
+    base, _token, _user = jf
+    jf_post(jf, f"{base}/Sessions/Playing/Stopped", {
+        "ItemId": item_id,
+        "PositionTicks": int(position * 10_000_000),
+        "IsPaused": False,
+        "PlayMethod": "DirectPlay",
+    })
+
+
+# ----------------------------------------------------------------- state --
+
+def write_state(st):
+    """Write the mpv-mpris.json schema s2udio/mpDris2 use, atomically."""
+    doc = {
+        "title": st.get("title") or "",
+        "artist": st.get("artist") or "",
+        "art": st.get("art") or "",
+        "playing": not st.get("paused", False),
+        "position": st.get("position") or 0,
+        "duration": st.get("duration") or 0,
+        "socket": st.get("socket") or "",
+        "item_id": st.get("item_id") or "",
+        "volume": st.get("volume"),
+        "playlist": st.get("playlist") or [],
+        "playlist_pos": st.get("playlist_pos"),
+    }
+    try:
+        os.makedirs(CACHE, exist_ok=True)
+        tmp = STATE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(doc, f)
+        os.replace(tmp, STATE)
+    except OSError:
+        pass
+
+
+def delete_state():
+    try:
+        os.remove(STATE)
+    except OSError:
+        pass
+
+
+def claim_pid():
+    """One tracker per session; exit silently when another is alive."""
+    try:
+        os.makedirs(CACHE, exist_ok=True)
+        if os.path.exists(PID_FILE):
+            try:
+                with open(PID_FILE) as f:
+                    old = int(f.read().strip())
+                with open(f"/proc/{old}/cmdline", "rb") as f:
+                    cmdline = f.read().decode("utf-8", "replace")
+                if "s2u-mpv-tracker" in cmdline:
+                    return False
+            except Exception:
+                pass
+        with open(PID_FILE, "w") as f:
+            f.write(str(os.getpid()))
+        return True
+    except OSError:
+        return True
+
+
+def release_pid():
+    try:
+        with open(PID_FILE) as f:
+            if f.read().strip() == str(os.getpid()):
+                os.remove(PID_FILE)
+    except OSError:
+        pass
+
+
+def mpdris2(action):
+    """Hide the paused MPD audio MPRIS while a video session is alive.
+
+    mpDris2 (org.mpris.MediaPlayer2.mpd) always reports MPD's state —
+    including "Paused" while a video plays in mpv — so desktop media
+    controls would show a stale audio entry next to the video one. The
+    tracker stops mpDris2.service at session start and restarts it when
+    mpv exits (audio MPRIS returns for the resumed MPD playback). The
+    service is driven through scripts/s2u-svc (the init abstraction from
+    plan §6.1) instead of a hardcoded systemctl invocation: on systemd
+    targets its systemd-user backend issues the identical systemctl
+    command, and on non-systemd targets it maps to the runit/s6/openrc/
+    sysvinit/launcher backends.
+
+    Skipped when S2U_MPV_SOCKET is set: tests drive the tracker with a
+    fake socket and must not touch the real service.
+    """
+    if os.environ.get("S2U_MPV_SOCKET"):
+        return
+    try:
+        subprocess.run(["s2u-svc", action, "mpDris2.service"],
+                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL, timeout=15)
+    except Exception:
+        pass
+
+
+def spawn_mpris_bridge():
+    """Start the bundled s2udio-mpris daemon if it is not already running.
+
+    It exposes this state file (~/.cache/rmpc/mpv-mpris.json) over D-Bus
+    (org.mpris.MediaPlayer2.s2udio) so desktop media controls show the mpv
+    video; it exits itself when the state file goes stale. Fire and forget.
+
+    Skipped when S2U_MPV_SOCKET is set: tests drive the tracker with a
+    fake socket and must not spawn the real bridge.
+    """
+    if os.environ.get("S2U_MPV_SOCKET"):
+        return
+    try:
+        # -f with a bracket guard: the process comm is "python3" so -x never
+        # matches (which would respawn a duplicate every 30 s, exiting on the
+        # taken bus name); the bracket pattern avoids matching this script.
+        r = subprocess.run(["pgrep", "-f", "[s]2udio-mpris"],
+                           stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, timeout=3)
+        if r.returncode == 0:
+            return
+    except Exception:
+        pass
+    try:
+        with open(os.devnull, "wb") as devnull:
+            subprocess.Popen(["s2udio-mpris"], stdin=devnull,
+                             stdout=devnull, stderr=devnull,
+                             start_new_session=True)
+    except Exception:
+        pass
+
+
+# ------------------------------------------------------------------ main --
+
+def main():
+    if not claim_pid():
+        return
+    spawn_mpris_bridge()
+    last_bridge = 0.0
+    # mpDris2 (MPD audio MPRIS) runs only while MPD is the active source;
+    # the per-tick check below follows the mutual-exclusion winner. None =
+    # no decision yet, so the first tick always acts.
+    mpdris2_want = None
+    try:
+        jf = load_jellyfin()
+        # Caretaker state, keyed by the item currently playing in mpv.
+        item = {"id": None, "meta": None, "poster": False, "resume": 0.0,
+                "resume_applied": False}
+        last_title, last_artist = "", ""
+        last_position = 0.0
+        last_paused = None
+        last_progress = 0.0
+        dead = 0
+        # Mutual-exclusion latches, initialized at caretaker takeover (the
+        # first tick s2udio is not running) so the transition checks below
+        # never fire on pre-existing state.
+        mpd_latch = {"state": None, "mpv_playing": None, "armed": False}
+
+        while True:
+            time.sleep(POLL_S)
+            sock = mpv_socket()
+            if not sock:
+                dead += 1
+                if dead >= DEAD_LIMIT:
+                    break
+                continue
+            st = read_mpv_state(sock)
+            if st is None:
+                # Socket exists but mpv is unreachable (or still starting).
+                dead += 1
+                if dead >= DEAD_LIMIT:
+                    break
+                continue
+            dead = 0
+            st["socket"] = sock
+            # MPRIS source follows the mutual-exclusion winner, in both
+            # s2udio-running and caretaker modes: while the video plays (or
+            # is paused with no MPD playback) hide the paused-MPD entry;
+            # when MPD plays and the video is paused (audio wins), show the
+            # MPD entry again. Runs every tick so play/pause flips are
+            # followed; s2u-svc only on a change.
+            want_mpdris2 = bool(st["paused"]) and mpd_state() == "play"
+            if want_mpdris2 != mpdris2_want:
+                mpdris2("start" if want_mpdris2 else "stop")
+                mpdris2_want = want_mpdris2
+            # Keep the mpv MPRIS bridge alive while a video session exists
+            # (respawn at most every 30 s; the bridge exits itself when the
+            # state file goes stale).
+            if time.time() - last_bridge >= 30:
+                spawn_mpris_bridge()
+                last_bridge = time.time()
+            last_position = st["position"]
+            item_id = item_id_from_url(st["path"])
+
+            if s2u_running():
+                # s2udio owns the state file, the Jellyfin tracking and the
+                # MPD<->mpv mutual exclusion; arm the latches again so the
+                # first caretaker tick after its exit initializes fresh.
+                mpd_latch["armed"] = False
+                continue
+
+            # ---- caretaker mode: s2udio is closed, take over -------------
+            # Mutual exclusion: the video and the music never play at the
+            # same time. Which one pauses depends on which started last:
+            #   - MPD starts playing while the video plays -> pause mpv
+            #   - the video resumes while MPD plays       -> pause MPD
+            # Latches are armed on the first caretaker tick (and re-armed
+            # after s2udio ran), so a pre-existing "both playing" state is
+            # not mistaken for a fresh start.
+            mpv_playing = not st["paused"]
+            if not mpd_latch["armed"]:
+                mpd_latch = {"state": mpd_state(), "mpv_playing": mpv_playing,
+                             "armed": True}
+                # Restore the invariant if a race left both playing (the
+                # video pauses; MPD keeps its music).
+                if mpd_latch["state"] == "play" and mpv_playing:
+                    log("both playing at caretaker takeover; pausing mpv")
+                    mpv_command(sock, ["set_property", "pause", True])
+            else:
+                mpd_state_now = mpd_state()
+                if mpd_state_now == "play" and mpv_playing \
+                        and mpd_latch["state"] != "play":
+                    log("MPD started playing; pausing mpv")
+                    mpv_command(sock, ["set_property", "pause", True])
+                if mpv_playing and mpd_state_now == "play" \
+                        and mpd_latch["mpv_playing"] is False:
+                    log("mpv resumed while MPD plays; pausing MPD")
+                    mpd_pause()
+                mpd_latch["state"] = mpd_state_now
+            mpd_latch["mpv_playing"] = mpv_playing
+
+            if item_id != item["id"]:
+                item = {"id": item_id, "meta": None, "poster": False,
+                        "resume": 0.0, "resume_applied": False}
+            if jf is None:
+                jf = load_jellyfin()  # retry in case the config appeared
+
+            if item_id and jf:
+                if item["meta"] is None:
+                    try:
+                        item["meta"] = jf_item_meta(jf, item_id)
+                        item["poster"] = jf_write_poster(jf, item_id)
+                        item["resume"] = jf_fetch_resume(jf, item_id)
+                    except Exception as err:
+                        log("Jellyfin item fetch failed: %r" % (err,))
+                        item["meta"] = (None, None)
+                if (not item["resume_applied"] and item["resume"] > 10
+                        and st["duration"] > 0
+                        and st["position"] < item["resume"] - 5):
+                    mpv_command(sock, ["set_property", "time-pos",
+                                       item["resume"]])
+                    item["resume_applied"] = True
+                    st["position"] = item["resume"]
+
+            if item_id and item["meta"] and item["meta"][0]:
+                title, artist = item["meta"]
+            else:
+                title = st["media_title"]
+                if is_provisional(title):
+                    # mpv has no real title yet (URL / `index.m3u8`
+                    # basename): prefer the cached resolved info (title +
+                    # channel), then the playlist entry's saved title, and
+                    # only then the previous title.
+                    title, artist = last_title, last_artist
+                    url = st.get("path") or ""
+                    yt = load_yt_info(url)
+                    if yt and yt.get("title"):
+                        title = yt["title"]
+                        if yt.get("channel"):
+                            artist = yt["channel"]
+                    else:
+                        pl_title = _entry_title(st, url)
+                        if pl_title and pl_title != url:
+                            title = pl_title
+                            artist = ""
+                else:
+                    artist = ""
+            last_title, last_artist = title, artist
+
+            now = time.time()
+            if item_id and jf and (
+                    now - last_progress >= PROGRESS_EVERY_S
+                    or st["paused"] != last_paused):
+                try:
+                    jf_report_progress(jf, item_id, st["position"],
+                                       st["paused"])
+                except Exception as err:
+                    log("Jellyfin progress failed: %r" % (err,))
+                last_progress = now
+            last_paused = st["paused"]
+
+            # Duration: mpv may report 0/unavailable for DASH/HLS streams
+            # (the desktop widget then drops the timeline + seeking). The
+            # yt-info cache carries the real duration — fall back to it.
+            duration = st.get("duration") or 0
+            cur_url = st.get("path") or ""
+            if not duration:
+                yt = load_yt_info(cur_url)
+                if yt and yt.get("duration"):
+                    duration = yt["duration"]
+            playlist = []
+            for e in st["playlist"]:
+                p_url = e.get("filename") or ""
+                # NB: local vars — the caretaker's `title`/`artist` (the
+                # playing item's name) must survive this loop for the
+                # write below; shadowing them broke MPRIS titles in
+                # caretaker mode ("stream" instead of the episode name).
+                p_title = e.get("title") or display_title(p_url)
+                p_duration = e.get("duration")
+                original = None
+                if p_url:
+                    yt = load_yt_info(p_url)
+                    if yt and yt.get("original_url"):
+                        original = yt["original_url"]
+                        # mpv's title for a resolved stream is often the URL
+                        # basename; the cache has the real title.
+                        if not e.get("title") and yt.get("title"):
+                            p_title = yt["title"]
+                        if not p_duration and yt.get("duration"):
+                            p_duration = yt["duration"]
+                playlist.append({
+                    "title": p_title,
+                    "url": p_url,
+                    "duration": p_duration,
+                    "original_url": original,
+                })
+            write_state({
+                "title": title,
+                "artist": artist,
+                "art": POSTER if os.path.exists(POSTER) else "",
+                "paused": st["paused"],
+                "position": st["position"],
+                "duration": duration,
+                "socket": sock,
+                "item_id": item_id,
+                "volume": st["volume"],
+                "playlist": playlist,
+                "playlist_pos": st["playlist_pos"],
+            })
+
+        # ---- mpv is gone ----
+        if not s2u_running():
+            if jf and item.get("id"):
+                try:
+                    jf_report_stopped(jf, item["id"], last_position)
+                except Exception:
+                    pass
+            delete_state()
+    finally:
+        mpdris2("start")  # audio MPRIS returns once the video session is over
+        release_pid()
+
+
+def log(message):
+    try:
+        with open(os.path.join(CACHE, "mpv-tracker.log"), "a") as f:
+            f.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S')} {message}\n")
+    except OSError:
+        pass
+
+
+if __name__ == "__main__":
+    main()

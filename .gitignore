@@ -1,0 +1,17 @@
+/target
+**/__pycache__/
+**.ron
+!assets/**.ron
+
+# runtime cache accidentally created as "~" in the repo root
+/~
+/target
+**/__pycache__/
+**.ron
+!assets/**.ron
+
+# runtime cache accidentally created as "~" in the repo root
+/~
+
+# distro-support harness host artifacts (per-run logs + gate JSON)
+/scripts/dev/artifacts/

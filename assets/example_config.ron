@@ -1,0 +1,183 @@
+#![enable(implicit_some)]
+#![enable(unwrap_newtypes)]
+#![enable(unwrap_variant_newtypes)]
+(
+    address: "127.0.0.1:6600",
+    password: None,
+    max_fps: 60,
+    status_update_interval_ms: 16,
+    // Round 23: s2udio's own .lrc library lives inside its config dir;
+    // the user's MPD library is checked first (read-only) for their own
+    // .lrc files and is never written to.
+    lyrics_dir: "~/.config/s2udio/lyrics",
+    enable_lyrics_hot_reload: true,
+    on_song_change: ["rmpc-fetch-lyrics"],
+    exec_on_song_change_at_start: true,
+    cava: (
+        framerate: 90,
+        autosens: true,
+        lower_cutoff_freq: 20,
+        higher_cutoff_freq: 15000,
+        input: (
+            method: Fifo,
+            source: "/tmp/mpd-cava.fifo",
+            sample_rate: 44100,
+            sample_bits: 16,
+            channels: 2,
+        ),
+    ),
+    radio: (
+        playlist: "radio",
+        location: None,
+        max_favourites: 10,
+    ),
+    jellyfin: (
+        config_file: None,
+    ),
+    video: (
+        playback: ask,
+    ),
+    torrent: (
+        enabled: true,
+        port: 3030,
+        min_download_speed_kbps: 500,
+        warmup_secs: 5,
+        max_wait_secs: 15,
+        no_peers_timeout_secs: 30,
+        cache_dir: "~/.cache/s2udio/torrents",
+        auto_pick_file: true,
+        keep_after_play: false,
+    ),
+    keybinds: (
+        global: {
+            " ":          TogglePause,
+            "<Tab>":      NextTab,
+            ">":          NextTrack,
+            "Q":          Quit,
+            "<Esc>":      ShowSettings,
+        },
+
+        navigation: {
+            "<Esc>":      Close,
+            "<CR>":       Confirm,
+            "w":          Up,
+            "<Up>":       Up,
+            "s":          Down,
+            "<Down>":     Down,
+            "W":          SelectUp,
+            "S":          SelectDown,
+            "<S-Up>":     SelectUp,
+            "<S-Down>":   SelectDown,
+        },
+
+        directories: {
+            "w":          FolderUp,
+            "s":          FolderDown,
+            "d":          FolderExpand,
+            "<Right>":    PlayFile,
+        },
+    ),
+    tabs: [
+        (
+            name: "Queue",
+            pane: Split(
+                direction: Vertical,
+                panes: [
+                    (
+                        size: "20",
+                        window_sizes: [(65, "20"), (55, "10"), (43, "10"), (33, "0")],
+                        pane: Split(
+                            direction: Horizontal,
+                            panes: [
+                                (
+                                    size: "2.14r",
+                                    borders: "ALL",
+                                    border_symbols: Rounded,
+                                    pane: Pane(AlbumArt)
+                                ),
+                                (
+                                    size: "100%",
+                                    borders: "ALL",
+                                    border_symbols: Rounded,
+                                    pane: Pane(Lyrics)
+                                ),
+                            ],
+                        ),
+                    ),
+                    (
+                        size: "100%",
+                        pane: Split(
+                            direction: Vertical,
+                            panes: [
+                                (
+                                    size: "3",
+                                    borders: "LEFT | RIGHT | TOP",
+                                    border_symbols: Inherited(parent: Rounded, bottom_left: "├", bottom_right: "┤",),
+                                    pane: Split(
+                                        direction: Horizontal,
+                                        panes: [
+                                            (
+                                                size: "1",
+                                                pane: Pane(Empty())
+                                            ),
+                                            (
+                                                size: "100%",
+                                                pane: Pane(QueueHeader())
+                                            ),
+                                        ]
+                                    )
+                                ),
+                                (
+                                    size: "100%",
+                                    collapse_below: 7,
+                                    borders: "LEFT | RIGHT | BOTTOM",
+                                    border_symbols: Rounded,
+                                    border_title: [(kind: Text(" ")), (kind: Property(Status(QueueLength()))), (kind: Text(" songs / ")), (kind: Property(Status(QueueTimeTotal()))), (kind: Text(" total time "))],
+                                    border_title_position: Bottom,
+                                    border_title_alignment: Left,
+                                    pane: Split(
+                                        direction: Horizontal,
+                                        panes: [
+                                            (
+                                                size: "1",
+                                                pane: Pane(Empty())
+                                            ),
+                                            (
+                                                size: "100%",
+                                                pane: Pane(Queue)
+                                            ),
+                                            (
+                                                size: "2",
+                                                pane: Pane(Empty())
+                                            ),
+                                        ]
+                                    )
+                                ),
+                            ],
+                        )
+                    ),
+                ],
+            ),
+        ),
+        (
+            name: "Radio",
+            borders: "ALL",
+            border_symbols: Rounded,
+            pane: Split(
+                size: "100%",
+                direction: Vertical,
+                panes: [(pane: Pane(Radio), size: "100%", borders: "ALL", border_symbols: Rounded)],
+            )
+        ),
+        (
+            name: "Jellyfin",
+            borders: "ALL",
+            border_symbols: Rounded,
+            pane: Split(
+                size: "100%",
+                direction: Vertical,
+                panes: [(pane: Pane(Jellyfin), size: "100%", borders: "ALL", border_symbols: Rounded)],
+            )
+        ),
+    ],
+)
