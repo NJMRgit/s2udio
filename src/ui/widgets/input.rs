@@ -91,7 +91,11 @@ impl<'a> Input<'a> {
 impl Widget for Input<'_> {
     fn render(self, area: ratatui::prelude::Rect, buf: &mut ratatui::prelude::Buffer) {
         let label_len = self.label.chars().count() as u16;
-        let label_len = if label_len > 0 { label_len + 2 } else { 0 };
+        // The bordered form reserves two columns for its border; the
+        // borderless rows lay the label flush, so the caller's own
+        // " label : value " spacing shows through exactly.
+        let label_len =
+            if label_len > 0 { label_len + if self.borderless { 0 } else { 2 } } else { 0 };
         let [text_area, input_area] =
             *Layout::horizontal([Constraint::Max(label_len), Constraint::Fill(1)])
                 .spacing(self.spacing)

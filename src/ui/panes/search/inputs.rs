@@ -27,29 +27,32 @@ pub const SEARCH_BUTTON_KEY: &str = "search_button";
 pub const CUSTOM_QUERY_KEY: &str = "custom_query";
 pub const LIKE_KEY: &str = "like";
 
-/// Build a filter row's label for the available row width: the label is
-/// padded to `LABEL_PAD` columns (the aligned-colon look) when it fits,
-/// otherwise it shrinks with an ellipsis so the value column keeps at
+/// Build a filter row's label for the available row width. When the pane
+/// has room the label pads to the longest filter category so every colon
+/// aligns **one character past the longest label**, and a space separates
+/// the colon from the value (`Case sensitive : No`). When the pane is
+/// narrow the label shrinks with an ellipsis so the value column keeps at
 /// least `MIN_VALUE` cells (the settings-panel convention - controls are
 /// never cut off, only labels).
-fn filter_label(raw: &str, row_width: u16) -> String {
-    const LABEL_PAD: usize = 18;
+fn filter_label(raw: &str, row_width: u16, longest: usize) -> String {
     const MIN_VALUE: usize = 10;
 
-    // The Input widget bumps the label area by two cells and the value
-    // takes the remainder.
-    let max_label = (row_width as usize).saturating_sub(MIN_VALUE + 2);
+    // The value takes the remainder of the row after the label.
+    let max_label = (row_width as usize).saturating_sub(MIN_VALUE);
     if max_label == 0 {
         return raw.to_string();
     }
-    let colon_room = max_label.saturating_sub(1);
-    if raw.chars().count() <= colon_room {
-        let pad = colon_room.min(LABEL_PAD).max(raw.chars().count());
-        format!("{raw:<pad$}:")
+    // " " + label padded to `longest` + " : " (margin, colon, margin).
+    let full_len = 1 + longest + 3;
+    if full_len <= max_label {
+        format!(" {:<longest$} : ", raw)
     } else {
-        let keep = colon_room.saturating_sub(1);
-        let s: String = raw.chars().take(keep).collect();
-        format!("{s}…:")
+        let keep = max_label.saturating_sub(5); // " : " + the ellipsis
+        if keep == 0 {
+            return raw.to_string();
+        }
+        let s: String = raw.trim_start().chars().take(keep).collect();
+        format!(" {s}… : ")
     }
 }
 
@@ -595,6 +598,17 @@ impl InputGroups {
         pane_focused: bool,
     ) {
         self.area = area;
+        // The colon column aligns to the longest filter category among the
+        // rows that are actually rendered (buttons and separators have no
+        // value column and do not count).
+        let longest = self
+            .inputs
+            .iter()
+            .take(area.height as usize)
+            .filter(|i| !matches!(i, InputType::Button(_) | InputType::Separator))
+            .map(|i| i.label().chars().count())
+            .max()
+            .unwrap_or(0);
         let mut remaining_height = area.height as usize;
         area.height = 1;
         for (idx, input) in self.inputs.iter().enumerate() {
@@ -618,9 +632,10 @@ impl InputGroups {
             });
             let hover_style = self.focused_style;
             // The row's label adapts to the available width so the value
-            // column is never cut off (padded to the aligned-colon width
-            // when there is room, ellipsized when the pane is narrow).
-            let label = filter_label(&input.label(), area.width);
+            // column is never cut off: when there is room the colons align
+            // one character past the longest filter category with a space
+            // on each side; when the pane is narrow the label ellipsizes.
+            let label = filter_label(&input.label(), area.width, longest);
 
             match input {
                 InputType::Textbox(input) => {

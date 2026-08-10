@@ -45,6 +45,15 @@ query, results filtering, multi-select, context menus, enqueue/play.
   (`w`/`s` keep moving the filter highlight / result selection; the keys
   resolve through the `directories` keybind context, so the config's
   existing `d`/`a`/`→`/`←` bindings apply.)
+- **Options menu** (round 27): **Enter** in the populated results opens
+  the right-click options menu (Play for the marked/selected set, Add /
+  Replace queue, playlists, …); **Space** with a multi-selection (≥2
+  marked) also opens the menu instead of toggling playback — a single
+  mark or none keeps Space on the transport.
+- **Filter label spacing** (round 27): with the pane expanded the colons
+  align one character past the longest rendered filter category with a
+  space on each side (`Case sensitive : No`); narrow panes ellipsize the
+  labels, keeping the value column visible.
 - **Filter-row hover** (round 25): the filter/spinner/button rows are
   clickable fields and render with the hover highlight when the pointer
   is over them (the button/list-row treatment; keyboard input clears it).
