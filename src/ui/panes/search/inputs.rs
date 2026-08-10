@@ -27,6 +27,47 @@ pub const SEARCH_BUTTON_KEY: &str = "search_button";
 pub const CUSTOM_QUERY_KEY: &str = "custom_query";
 pub const LIKE_KEY: &str = "like";
 
+/// Build a filter row's label for the available row width: the label is
+/// padded to `LABEL_PAD` columns (the aligned-colon look) when it fits,
+/// otherwise it shrinks with an ellipsis so the value column keeps at
+/// least `MIN_VALUE` cells (the settings-panel convention - controls are
+/// never cut off, only labels).
+fn filter_label(raw: &str, row_width: u16) -> String {
+    const LABEL_PAD: usize = 18;
+    const MIN_VALUE: usize = 10;
+
+    // The Input widget bumps the label area by two cells and the value
+    // takes the remainder.
+    let max_label = (row_width as usize).saturating_sub(MIN_VALUE + 2);
+    if max_label == 0 {
+        return raw.to_string();
+    }
+    let colon_room = max_label.saturating_sub(1);
+    if raw.chars().count() <= colon_room {
+        let pad = colon_room.min(LABEL_PAD).max(raw.chars().count());
+        format!("{raw:<pad$}:")
+    } else {
+        let keep = colon_room.saturating_sub(1);
+        let s: String = raw.chars().take(keep).collect();
+        format!("{s}…:")
+    }
+}
+
+/// Buttons have no value column: the label only shrinks (with an ellipsis)
+/// when the pane is too narrow for it - no padding, no colon.
+fn filter_button_label(raw: &str, row_width: u16) -> String {
+    let max_label = (row_width as usize).saturating_sub(2);
+    if raw.chars().count() <= max_label {
+        raw.to_string()
+    } else if max_label >= 2 {
+        let s: String = raw.chars().take(max_label - 1).collect();
+        format!("{s}…")
+    } else {
+        raw.to_string()
+    }
+}
+
+
 #[derive(derive_more::Debug)]
 #[allow(clippy::struct_excessive_bools)]
 pub(super) struct InputGroups {
@@ -78,7 +119,7 @@ impl InputGroups {
             inputs.push(InputType::Textbox(TextboxInput {
                 key: "",
                 filter_key: Some(tag.value.clone()),
-                label: format!(" {:<18}:", tag.label),
+                label: format!(" {}", tag.label),
                 initial_value: None,
                 buffer_id: BufferId::new(),
             }));
@@ -91,7 +132,7 @@ impl InputGroups {
             inputs.push(InputType::Textbox(TextboxInput {
                 key: CUSTOM_QUERY_KEY,
                 filter_key: None,
-                label: format!(" {:<18}:", "Query"),
+                label: format!(" {}", "Query"),
                 initial_value: None,
                 buffer_id,
             }));
@@ -101,7 +142,7 @@ impl InputGroups {
             inputs.push(InputType::Separator);
             inputs.push(InputType::Spinner(SpinnerInput {
                 key: RATING_MODE_KEY,
-                label: format!(" {:<18}:", "Rating"),
+                label: format!(" {}", "Rating"),
             }));
 
             let buffer_id = BufferId::new();
@@ -109,7 +150,7 @@ impl InputGroups {
             inputs.push(InputType::Numberbox(TextboxInput {
                 key: RATING_VALUE_KEY,
                 filter_key: None,
-                label: format!(" {:<18}:", "Value"),
+                label: format!(" {}", "Value"),
                 initial_value: Some("0".to_owned()),
                 buffer_id,
             }));
@@ -117,7 +158,7 @@ impl InputGroups {
             inputs.push(InputType::Separator);
             inputs.push(InputType::Spinner(SpinnerInput {
                 key: LIKE_KEY,
-                label: format!(" {:<18}:", "Liked"),
+                label: format!(" {}", "Liked"),
             }));
         }
 
@@ -125,16 +166,16 @@ impl InputGroups {
 
         inputs.push(InputType::Spinner(SpinnerInput {
             key: SEARCH_MODE_KEY,
-            label: format!(" {:<18}:", "Search mode"),
+            label: format!(" {}", "Search mode"),
         }));
         inputs.push(InputType::Spinner(SpinnerInput {
             key: FOLD_CASE_KEY,
-            label: format!(" {:<18}:", "Case sensitive"),
+            label: format!(" {}", "Case sensitive"),
         }));
         if strip_diacritics_supported {
             inputs.push(InputType::Spinner(SpinnerInput {
                 key: STRIP_DIACRITICS_KEY,
-                label: format!(" {:<18}:", "Ignore diacritics"),
+                label: format!(" {}", "Ignore diacritics"),
             }));
         }
 
@@ -411,6 +452,17 @@ pub(super) enum InputType {
     Separator,
 }
 
+impl InputType {
+    fn label(&self) -> &str {
+        match self {
+            InputType::Textbox(i) | InputType::Numberbox(i) => &i.label,
+            InputType::Spinner(i) => &i.label,
+            InputType::Button(i) => &i.label,
+            InputType::Separator => "",
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(super) struct TextboxInput {
     pub label: String,
@@ -565,6 +617,10 @@ impl InputGroups {
                 pos.y == area.y && pos.x >= area.x && pos.x < area.x.saturating_add(area.width)
             });
             let hover_style = self.focused_style;
+            // The row's label adapts to the available width so the value
+            // column is never cut off (padded to the aligned-colon width
+            // when there is room, ellipsized when the pane is narrow).
+            let label = filter_label(&input.label(), area.width);
 
             match input {
                 InputType::Textbox(input) => {
@@ -572,7 +628,7 @@ impl InputGroups {
                         .ctx(ctx)
                         .buffer_id(input.buffer_id)
                         .borderless(true)
-                        .label(&input.label)
+                        .label(&label)
                         .placeholder("<None>")
                         .focused(is_focused && ctx.input.is_active(input.buffer_id));
 
@@ -602,7 +658,7 @@ impl InputGroups {
                         .ctx(ctx)
                         .buffer_id(input.buffer_id)
                         .borderless(true)
-                        .label(&input.label)
+                        .label(&label)
                         .placeholder("<None>")
                         .focused(is_focused && ctx.input.is_active(input.buffer_id));
 
@@ -652,7 +708,7 @@ impl InputGroups {
                         .ctx(ctx)
                         .text(text)
                         .borderless(true)
-                        .label(&input.label);
+                        .label(&label);
 
                     let inp = if mouse_hovered {
                         inp.label_style(hover_style)
@@ -669,8 +725,9 @@ impl InputGroups {
                     inp.render(area, buf);
                 }
                 InputType::Button(input) => {
+                    let label = filter_button_label(&input.label, area.width);
                     Button::default()
-                        .label(&input.label)
+                        .label(&label)
                         .label_alignment(Alignment::Left)
                         .style(if mouse_hovered {
                             hover_style
