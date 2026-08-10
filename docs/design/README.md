@@ -13,7 +13,8 @@ tags: [index, design, s2udio]
 
 # s2udio Design Documents
 
-The design of s2udio (the rmpc fork) is split into three sections. Each
+The design of s2udio (the rmpc fork) is split into sections (Backend, Frontend, Tabs,
+Validation, Rewrite, Sessions). Each
 document carries YAML frontmatter (`section`, `doc_type`, `id`,
 `description`, `status`, `updated`, `source_files`, `related`, `tags`) so
 it can be indexed, filtered and cross-referenced.
@@ -56,6 +57,8 @@ docs/design/
 ├── Validation/                   ← validation plans (run per subsystem round)
 │   ├── mpris-validation.md       ← MPRIS & art: timeline/art/track-info across every source
 │   └── distro-support.md         ← distro support: podman test harness, target matrix, gates, roadmap
+├── Rewrite/                      ← the UI reuse rewrite (branch `rewrite` in s2udio-working)
+│   └── ui-reuse-rewrite.md       ← project outline: audit, master-module architecture, phases
 └── Sessions/                     ← session work logs (one file per session)
     └── 2026-08-05.md             ← the session log (create/maintain per HANDOFF)
 ```
