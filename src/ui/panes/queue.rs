@@ -702,70 +702,39 @@ impl QueuePane {
         let Some(border_y) = border_y else { return };
         let y = border_y.saturating_sub(1);
 
-        let base = ctx
-            .config
-            .theme
-            .text_color
-            .map_or_else(Style::default, |c| Style::default().fg(c));
-        let dim = base.add_modifier(Modifier::DIM);
         let active = ctx.queue_tab.get();
-        let chapters_on = active == crate::ctx::QueueTabMode::Chapters;
         let chapters_visible = Self::chapters_available(ctx);
 
+        // The `SubTabBar` widget draws the segments and returns the click
+        // areas (one per visible segment, in order; the missing Chapters
+        // slot stays a zero rect so clicks on it do nothing).
+        let mut segments = vec![
+            crate::ui::widgets::sub_tab_bar::Segment {
+                label: "Audio",
+                active: active == crate::ctx::QueueTabMode::Audio,
+            },
+            crate::ui::widgets::sub_tab_bar::Segment {
+                label: "Video",
+                active: active == crate::ctx::QueueTabMode::Video,
+            },
+        ];
+        if chapters_visible {
+            segments.push(crate::ui::widgets::sub_tab_bar::Segment {
+                label: "Chapters",
+                active: active == crate::ctx::QueueTabMode::Chapters,
+            });
+        }
         // One cell right of the box corner (the leading space), matching
         // ` ● Audio ○ Video ○ Chapters` on its own row above the box.
-        let mut x = corner_x + 1;
         let right = block_area.right().saturating_sub(1);
-        let mouse = ctx.mouse_pos();
-        let mut seg = |x: &mut u16,
-                       areas: &mut [Rect; 3],
-                       idx: usize,
-                       label: String,
-                       on: bool| {
-            let w = (label.width() as u16).min(right.saturating_sub(*x));
-            let area = Rect { x: *x, y, width: w, height: 1 };
-            let base_style = if on { base.add_modifier(Modifier::BOLD) } else { dim };
-            // Hovering a toggle lightens it (clickable text).
-            let style =
-                if mouse.is_some_and(|p| area.contains(p)) {
-                    crate::config::hover_style(base_style)
-                } else {
-                    base_style
-                };
-            frame.render_widget(Line::styled(label, style), area);
-            areas[idx] = area;
-            *x += w;
-        };
-        seg(
-            &mut x,
-            &mut self.toggle_areas,
-            0,
-            if active == crate::ctx::QueueTabMode::Audio {
-                " ● Audio ".to_owned()
-            } else {
-                " ⭘ Audio ".to_owned()
-            },
-            active == crate::ctx::QueueTabMode::Audio,
+        let bar = crate::ui::widgets::sub_tab_bar::SubTabBar::new(
+            &segments,
+            corner_x + 1,
+            y,
+            right,
         );
-        seg(
-            &mut x,
-            &mut self.toggle_areas,
-            1,
-            if active == crate::ctx::QueueTabMode::Video {
-                " ● Video ".to_owned()
-            } else {
-                " ⭘ Video ".to_owned()
-            },
-            active == crate::ctx::QueueTabMode::Video,
-        );
-        if chapters_visible {
-            seg(
-                &mut x,
-                &mut self.toggle_areas,
-                2,
-                if chapters_on { " ● Chapters " } else { " ⭘ Chapters " }.to_owned(),
-                chapters_on,
-            );
+        for (idx, area) in bar.render(frame, ctx).into_iter().enumerate() {
+            self.toggle_areas[idx] = area;
         }
     }
 
