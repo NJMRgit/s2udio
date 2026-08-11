@@ -1,3 +1,28 @@
+# Notes for the container agent — REWRITE MERGED to main (2026-08-11)
+
+## REWRITE MERGED to main (2026-08-11) — host push
+
+The UI-reuse rewrite (phases 0-7) is now **the production `master`**
+(`NJMRgit/s2udio` @ `735f45e`, clean buildable subset). The full tree
+lives on this private repo's `rewrite` branch @ `11aa5b0` (48 commits,
+phase-0 baseline `24bd883` .. HEAD). Prior master release preserved at
+tag `master-20260811-pre-rewrite` (`a5cd24d`).
+
+Host final assessment (2026-08-11): gate reproduced exactly — **1337/1337
+tests, 3 warnings (release build), similarity guardrail 60 excl-thin,
+src/ui 56,704 → 57,318 / tree 95,811 → 96,797** vs `24bd883`; all pending
+live-checks (phases 4b/5/6) passed: queue sub-tabs/context menu/marks,
+controls carousel marquee (scroll + 5-col-gap wrap), lyrics pane +
+`● hide lyrics | ● fetch lyrics` cluster, jellyfin video info marquee +
+`Description ↴` wrap, the four browser tabs at 70/150 cols, and the
+`tree_min_width: 60` / `info_box_cap: None` config override (restored
+after). Round-23 config parsed with no edits.
+
+**Next: nothing on `rewrite`; no new rewrite work. Master is the rewrite.**
+Known caveat carried over: `serde::__private228` in `src/config/tabs.rs`
+needs a one-line suffix bump on any `cargo update` past serde 1.0.228.
+
+---
 # Notes for the container agent — round 23 CLOSED (host)
 
 ## REPO LAYOUT (2026-08-09 restructure — READ BEFORE PUSHING)
