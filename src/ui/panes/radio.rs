@@ -14,7 +14,7 @@ use crate::{
     MpdQueryResult,
     config::{
         keys::{CommonAction, DirectoriesActions},
-        tabs::PaneType,
+        tabs::{PaneType, TreeBrowserArgs},
         utils::tilde_expand,
     },
     ctx::Ctx,
@@ -285,7 +285,7 @@ impl RadioPane {
 
     fn query_favourites(&self, ctx: &Ctx, id: &'static str) {
         let playlist = ctx.config.radio.playlist.clone();
-        ctx.query().id(id).replace_id(id).target(PaneType::Radio).query(move |_client| {
+        ctx.query().id(id).replace_id(id).target(PaneType::Radio { tree: TreeBrowserArgs::default() }).query(move |_client| {
             Ok(MpdQueryResult::Any(Box::new(fetch_stations(&playlist)?)))
         });
     }
@@ -571,7 +571,7 @@ impl RadioPane {
     fn play_selected(&mut self, ctx: &Ctx) -> Result<()> {
         let Some(station) = self.selected_station() else { return Ok(()) };
         let url = station.url;
-        ctx.query().id(PLAY).replace_id(PLAY).target(PaneType::Radio).query(move |client| {
+        ctx.query().id(PLAY).replace_id(PLAY).target(PaneType::Radio { tree: TreeBrowserArgs::default() }).query(move |client| {
             let id = client.add_id(&url, None)?;
             client.play_id(id)?;
             Ok(MpdQueryResult::Any(Box::new(id)))
@@ -666,7 +666,7 @@ impl RadioPane {
         ctx.query()
             .id(REINIT)
             .replace_id(REINIT)
-            .target(PaneType::Radio)
+            .target(PaneType::Radio { tree: TreeBrowserArgs::default() })
             .query(move |_client| {
                 Ok(MpdQueryResult::Any(Box::new(fetch_stations(&playlist)?)))
             });

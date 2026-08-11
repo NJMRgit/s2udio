@@ -75,10 +75,10 @@ impl TabHelpModal {
         if let Some(panes) = tab {
             for pane in panes.panes_iter() {
                 match pane.pane {
-                    PaneType::Directories
-                    | PaneType::Playlists
-                    | PaneType::Radio
-                    | PaneType::Jellyfin => {
+                    PaneType::Directories { .. }
+                    | PaneType::Playlists { .. }
+                    | PaneType::Radio { .. }
+                    | PaneType::Jellyfin { .. } => {
                         include_directories = true;
                     }
                     PaneType::Queue | PaneType::QueueHeader() => include_queue = true,

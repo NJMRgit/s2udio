@@ -14,7 +14,7 @@ use super::Pane;
 use crate::{
     MpdQueryResult,
     config::{
-        tabs::PaneType,
+        tabs::{PaneType, TreeBrowserArgs},
     },
     ctx::Ctx,
     jellyfin::{Jellyfin, JfItem},
@@ -813,7 +813,7 @@ impl JellyfinPane {
         }
         if let Some(url) = self.stream_url(&item) {
             if item.is_audio() {
-                self.play_temp_url(ctx, JF_PLAY, PaneType::Jellyfin, url);
+                self.play_temp_url(ctx, JF_PLAY, PaneType::Jellyfin { tree: TreeBrowserArgs::default() }, url);
                 status_info!("Playing {}", item.name);
             } else {
                 Self::play_video(
@@ -1099,7 +1099,7 @@ impl TreeBrowserCore for JellyfinPane {
                         ctx.query()
                             .id(JF_PLAY)
                             .replace_id(JF_PLAY)
-                            .target(PaneType::Jellyfin)
+                            .target(PaneType::Jellyfin { tree: TreeBrowserArgs::default() })
                             .query(move |client| {
                                 let id = client.add_id(&play_url, None)?;
                                 client.play_id(id)?;
@@ -1966,7 +1966,7 @@ impl Pane for JellyfinPane {
 /// the Ask menu's "Play audio with MPD" option, where the pane itself cannot
 /// be borrowed (the menu stores the closure for later).
 fn jellyfin_play_temp(ctx: &Ctx, url: String) {
-    ctx.query().id(JF_PLAY).replace_id(JF_PLAY).target(PaneType::Jellyfin).query(move |client| {
+    ctx.query().id(JF_PLAY).replace_id(JF_PLAY).target(PaneType::Jellyfin { tree: TreeBrowserArgs::default() }).query(move |client| {
         let id = client.add_id(&url, None)?;
         client.play_id(id)?;
         Ok(MpdQueryResult::Any(Box::new(id)))

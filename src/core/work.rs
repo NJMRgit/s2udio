@@ -86,7 +86,7 @@ fn handle_work_request(
             }
             Ok(WorkDone::MpdCommandFinished {
                 id: crate::ui::panes::radio::RADIO_DIRECTORY,
-                target: Some(crate::config::tabs::PaneType::Radio),
+                target: Some(crate::config::tabs::PaneType::Radio { tree: crate::config::tabs::TreeBrowserArgs::default() }),
                 data: crate::shared::mpd_query::MpdQueryResult::Any(Box::new(directory)),
             })
         }
@@ -97,7 +97,7 @@ fn handle_work_request(
             };
             Ok(WorkDone::MpdCommandFinished {
                 id: crate::ui::panes::radio::RADIO_STATES,
-                target: Some(crate::config::tabs::PaneType::Radio),
+                target: Some(crate::config::tabs::PaneType::Radio { tree: crate::config::tabs::TreeBrowserArgs::default() }),
                 data: crate::shared::mpd_query::MpdQueryResult::Any(Box::new((country, states))),
             })
         }
@@ -105,7 +105,7 @@ fn handle_work_request(
             let stations = radio::fetch_country_top(&country_code);
             Ok(WorkDone::MpdCommandFinished {
                 id: crate::ui::panes::radio::RADIO_COUNTRY_STATIONS,
-                target: Some(crate::config::tabs::PaneType::Radio),
+                target: Some(crate::config::tabs::PaneType::Radio { tree: crate::config::tabs::TreeBrowserArgs::default() }),
                 data: crate::shared::mpd_query::MpdQueryResult::Any(Box::new((
                     country,
                     stations,
@@ -116,7 +116,7 @@ fn handle_work_request(
             let stations = radio::fetch_state_stations(&country, &state);
             Ok(WorkDone::MpdCommandFinished {
                 id: crate::ui::panes::radio::RADIO_STATE_STATIONS,
-                target: Some(crate::config::tabs::PaneType::Radio),
+                target: Some(crate::config::tabs::PaneType::Radio { tree: crate::config::tabs::TreeBrowserArgs::default() }),
                 data: crate::shared::mpd_query::MpdQueryResult::Any(Box::new((
                     country,
                     state,
