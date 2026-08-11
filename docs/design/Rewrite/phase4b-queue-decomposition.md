@@ -8,16 +8,18 @@ description: >
   the tree) into a module root + focused submodules. Prepared for a fresh
   agent to execute; parent spec is `docs/design/Rewrite/ui-reuse-rewrite.md`
   (phase-4 row, §4.4).
-status: "active — awaiting implementer"
+status: "done (2026-08-11)"
 parent: "rewrite/ui-reuse"
 updated: "2026-08-11"
 ---
 
 # Phase 4b — QueuePane Decomposition (handoff plan)
 
-> **Status: PLAN.** 4a (SubTabBar widget) is DONE (`9b46f54`, 1328/1328).
-> This plan covers **4b** only. A new agent completes it; the host
-> reviews/live-checks.
+> **Status: DONE (2026-08-11).** Executed as commits `5bf5a18` (4b1),
+> `80b4844` (4b2), `c81cb2f` (4b3), and the close-out commit (4b4) on
+> `rewrite`; `cargo test --release` **1328/1328**, warnings 3 baseline,
+> zero test edits. queue.rs 4447 → **3485** (production −962). Host
+> live-check (§8) still pending — see the outline §5.3 close-out.
 
 ## 1. Context — read this first
 
