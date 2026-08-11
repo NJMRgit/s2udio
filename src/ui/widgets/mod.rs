@@ -4,6 +4,7 @@ pub mod browser;
 pub mod button;
 pub mod header;
 pub mod input;
+pub mod marquee;
 pub mod progress_bar;
 pub mod scan_status;
 pub mod sub_tab_bar;

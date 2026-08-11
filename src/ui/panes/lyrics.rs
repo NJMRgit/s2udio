@@ -598,7 +598,7 @@ impl LyricsPane {
                 .info_video_shown_at
                 .map(|t| t.elapsed().as_millis())
                 .unwrap_or(0) as u64;
-            crate::ui::panes::controls::ControlsPane::marquee_offset(
+            crate::ui::widgets::marquee::marquee_offset(
                 elapsed_ms,
                 title_len,
                 marquee_area.width,
@@ -606,7 +606,7 @@ impl LyricsPane {
         } else {
             0
         };
-        crate::ui::panes::controls::ControlsPane::draw_panel_at(
+        crate::ui::widgets::marquee::draw_panel_at(
             frame.buffer_mut(),
             marquee_area.x,
             marquee_area.y,

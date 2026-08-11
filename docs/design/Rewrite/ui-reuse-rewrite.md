@@ -191,7 +191,10 @@ ref). Key numbers and audited files:
 | --- | --- |
 | `src/ui/browser.rs` | 1041 → 232 |
 | `src/ui/panes/mod.rs` | 3100 → 3100 |
-| `src/ui/panes/queue.rs` | 4686 → 4478 |
+| `src/ui/panes/queue.rs` | 4686 → 3485 |
+| `src/ui/panes/queue/context_menus.rs` | — → 347 (4b submodule) |
+| `src/ui/panes/queue/video.rs` | — → 373 (4b submodule) |
+| `src/ui/panes/queue/chapters.rs` | — → 325 (4b submodule) |
 | `src/ui/panes/directories.rs` | 2259 → 2121 |
 | `src/ui/panes/jellyfin.rs` | 2845 → 2703 |
 | `src/ui/panes/radio.rs` | 2356 → 2431 |
@@ -213,8 +216,8 @@ ref). Key numbers and audited files:
 | `src/ui/modals/menu/mod.rs` | 649 → 638 (Select dispatch arms gone) |
 | `src/ui/modals/menu/modal.rs` | 615 → 601 (select_section builder → list_section) |
 | `src/ui/modals/outputs.rs` | 258 → 258 (kept — see §5.2) |
-| **src/ui total** | **56,704 → 56,862** |
-| **tree total .rs** | **95,811 → 95,920** |
+| **src/ui total** | **56,704 → 57,070** |
+| **tree total .rs** | **95,811 → 96,128** |
 
 Similarity guardrail baseline: **83 same-named function pairs with ratio > 0.5**
 across `src/ui` (full list: `python3 scripts/dev/ui-metrics.py --pairs`).
@@ -435,7 +438,7 @@ with a behavior-parity live check of the affected tabs.
 | 1 | Extract `SongListCore<T>` from `BrowserPane`; adopt in queue Audio + search results | `ui/browser.rs`, `ui/panes/queue.rs`, `ui/panes/search/mod.rs` | ✅ (2026-08-10, commits `cd103ac`+`cd10c75`+`113d7e7`): `SongListCore<T, S>` trait (hooks + shared default methods) in `src/ui/song_list.rs`; `BrowserPane` is a thin dir-stack adapter (1041 → 232 LOC); queue Audio (`Dir<Song, TableState>`) + search results (`Dir<Song, ListState>`) implement it and delegate all non-specific `CommonAction` arms. Browser panes behavior unchanged; queue/search identical (1312/1312 green incl. all 61 queue/search tests; live check pending host). Net LOC: **src/ui −179** (queue −208, search −236, browser −809, song_list +955, pane adapters +118); the `CommonAction` arms exist once. |
 | 2 | `TreeBrowserCore` unifies directories / jellyfin / radio | `ui/tree_browser.rs`, `ui/panes/directories.rs`, `jellyfin.rs`, `radio.rs` | ✅ (2026-08-10, commits `f5c2ac4`+`948c85c`+`26e9834`): `TreeBrowserCore` trait (hooks + shared defaults, the Phase-1 `SongListCore` pattern) in `src/ui/tree_browser.rs`; all three panes implement it and delegate `render`/`handle_action`/`handle_mouse_event`/`on_event` + the temp-play lifecycle to the shared core. 1312/1312 green (21 directories + 15 jellyfin + 31 radio tests). The §2.2 clone pairs are gone or reduced to shared call sites: `cleanup_temp_play` (×3), `selected_item`, `move_items`, `render`, `render_tips`, `handle_action`, `on_event` (jellyfin↔radio) all deleted from the panes (live in the core); residual >0.5 pairs are thin Pane-delegator shells (`render`/`handle_action`/`handle_mouse_event`/`on_event` routing to the core — same category the baseline already carried) plus pre-existing non-tree pairs. Net LOC: **src/ui +51 vs the Phase-0 table** (pane files −369: directories −187, jellyfin −192, radio +10; core `tree_browser.rs` +598) — the trait-with-hooks pattern trades raw LOC for guaranteed one-implementation (same tradeoff as Phase 1: song_list +955 vs panes −1134); the args/config end-state that shrinks panes further is Phase 6. |
 | 3 | Modal consolidation onto `ListModal`/`InfoListModal` + section merge | `ui/modals/*` | ✅ (2026-08-10, commits `a5aac04`+`53b9e90`): `ListModal<'a, V>` master in `src/ui/modals/list_modal.rs` (args: row/size fns, buttons/confirm_buttons, multi-select + mark_id, bottom title, padding, wheel mode, scrollbar drag); `SelectModal` (317 → 90) + `TorrentFilePicker` (501 → 141) are thin adapters with unchanged public builders — all 15 call sites + the paste picker tests untouched. `menu/select_section.rs` merged into `list_section.rs` (value items + section-level `action`), `SectionType::Select` + 16 dispatch arms deleted. `InfoListModal` generalized to N columns + `header` arg and absorbs `DecodersModal` (248 → 67). 1326/1326 green (+8: 4 ListModal + 4 InfoListModal behavior pins incl. the unified click-row mapping); warnings 3 baseline; similarity guardrail unchanged (60 excl-thin — modals are not in `PANE_FILES`). Net LOC: **src/ui −61** (56,923 → 56,862), tree −110 (96,030 → 95,920) — short of the −600–900 target for the same reason Phase 2 was (+51): the master modules (+763 list_modal, +123 info_list incl. tests) cost more than the thinned consumers saved (select −227, torrent −360, decoders −181, select_section −210); the phase trades raw LOC for one-implementation-by-construction, and the args/config end-state that actually shrinks consumers is Phase 6. Deliberate delta + kept-modals rationale in §5.2. |
-| 4 | QueuePane decomposition: Audio list → `SongListCore`, toggle → `SubTabBar`, Video/Chapters stay as focused specs | `ui/panes/queue.rs` | Queue tab live-check (Audio/Video/Chapters, merged box, esc-deselect, marks); **–~1–1.5k LOC** in queue.rs. **4a ✅ (`9b46f54`): `SubTabBar` widget. 4b in progress — plan: `docs/design/Rewrite/phase4b-queue-decomposition.md`.** |
+| 4 | QueuePane decomposition: Audio list → `SongListCore`, toggle → `SubTabBar`, Video/Chapters stay as focused specs | `ui/panes/queue.rs` | Queue tab live-check (Audio/Video/Chapters, merged box, esc-deselect, marks); **–~1–1.5k LOC** in queue.rs. **4a ✅ (`9b46f54`): `SubTabBar` widget. 4b ✅ (`5bf5a18`+`80b4844`+`c81cb2f`+4b4 close-out): queue.rs decomposed into the module root + `queue/context_menus.rs` + `queue/video.rs` + `queue/chapters.rs` (4447 → 3485, production −962; zero test edits, 1328/1328) — close-out §5.3. Host live-check (§8 of the 4b plan) pending.** |
 | 5 | Shared drawing widgets (marquee/wrap/button cluster) from controls/lyrics | `ui/panes/controls.rs`, `lyrics.rs`, `ui/widgets/` | Visual parity in live check; widgets reused by ≥2 call sites. |
 | 6 | Args expansion: pane-specific constants move into `PaneType`/config args | `src/config/tabs.rs`, panes | Adding a new browser tab = config block + adapter, no new pane file; sidecars migrate cleanly. |
 | 7 | Close-out | — | Final LOC comparison vs baseline; docs (`docs/design/`) `source_files` updated; HANDOFF/notes updated; `rewrite` branch state documented for review. |
@@ -525,7 +528,68 @@ explicit:
    `SectionType::Select` + dead `zip_longest2`), and the consumer-side
    paydown lands with the Phase-6 args/config end-state.
 
+### 5.3 Phase 4b — queue decomposition close-out ✅ (2026-08-11)
+
+Phase 4b decomposed the largest file in the tree (`src/ui/panes/queue.rs`,
+4447 LOC) into a module root + three focused submodules, with **zero
+behavior change and zero test edits** — the 1773 test LOC in queue.rs's
+five `#[cfg(test)]` mods is byte-identical. Executed per the handoff plan
+`docs/design/Rewrite/phase4b-queue-decomposition.md` in four commits on
+`rewrite` (each independently green):
+
+| Commit | Move set | queue.rs after |
+| --- | --- | --- |
+| `5bf5a18` (4b1) | `open_context_menu`, `open_audio_context_menu`, `open_video_context_menu` → `queue/context_menus.rs` (347 LOC) | 4128 |
+| `80b4844` (4b2) | `render_video`, `handle_video_action`, `video_load_entry`, `video_remove_entries`, `video_move`, `video_scroll_to`, `video_page`, `video_jump`, `video_play_selected`, `follow_playing_video` → `queue/video.rs` (373 LOC) | 3782 |
+| `c81cb2f` (4b3) | `render_chapters`, `handle_chapters_action`, `chapters_move`, `chapters_page`, `chapters_jump`, `chapters_select_current`, `chapters_play_selected`, `chapters_scroll_to`, `seek_to` → `queue/chapters.rs` (325 LOC) | 3485 |
+| 4b4 (close-out) | docs + metrics (this section, §2.4, HANDOFF, plan flipped done, session log) | 3485 |
+
+**Real numbers (measured on committed refs with `ui-metrics.py --ref`
+`1867964` vs `--ref HEAD` — the script's default reads the file list from
+HEAD and contents from the worktree, so new files are silently excluded
+unless both sides are committed refs):**
+
+- queue.rs **4447 → 3485 (−962)**: production 2673 → 1711 (**−962**),
+  tests 1775 → 1775 (**untouched**). The −~950 production-LOC target is
+  met (it is a target, not a gate — the user priority is extensibility +
+  predictable behavior).
+- New submodules (all `pub(super)` inherent methods on `QueuePane`, so
+  every call site in queue.rs, `tab_screen.rs` and the test mods compiled
+  unchanged): `queue/context_menus.rs` 347, `queue/video.rs` 373,
+  `queue/chapters.rs` 325.
+- `cargo test --release` **1328/1328** after each commit; warnings 3
+  baseline unchanged (`config/mod.rs` unused-mut, `language.rs` unused ctx,
+  `paste.rs` `AddAfterCurrent`); zero edits to the 1773 test LOC.
+- Similarity guardrail **unchanged at 60 excl-thin pairs** (identical
+  same-named-fn pair set before/after — the moved functions keep unique
+  names, so splitting adds no new >0.5 pairs; queue.rs-only pairs
+  (`act`, `click`, `songs`, `row_bg`, …) stay as-is because the functions
+  still exist, just in child files).
+- Net LOC: **src/ui +83** (56,987 → 57,070), tree +83 (96,045 → 96,128)
+  — the three submodule headers/imports (`use super::…` blocks + `mod`
+  declarations) cost 28 lines per file on average; the split is a pure
+  move, so LOC is a wash by design (the paydown that matters — one
+  implementation per shape — is the phase-4 queue-audio core work already
+  landed in Phase 1, and the remaining consumer paydown is Phase 6).
+- `queue.rs` stays a **file** (not `queue/mod.rs`) — the metrics script's
+  `PANE_FILES` and `tab_screen.rs`/`panes/mod.rs` paths reference the
+  path, and the plan's layout requires it.
+
+**Why this shape is safe (per plan §3):** submodules are children of
+`queue`, so they read queue.rs's private items (`Areas`, helpers, fields)
+with only `use super::…`; the moved functions are inherent methods on
+`QueuePane` in the submodules, so all call sites compile unchanged — with
+one visibility nuance: private inherent methods defined in a child module
+are not visible from the parent, so the moved functions are declared
+`pub(super)` (identical effective visibility to their original private
+declarations in `queue`, which covered `queue` + its test mods).
+
+**Remaining:** the phase-4 host live-check (plan §8 — Audio/Video/
+Chapters, marks, context menus, toggle, scrollbars) before phase 4 closes;
+then phases 5–7.
+
 ## 6. Definition of done (applies per phase)
+
 
 1. `cargo test --release` green (1312 and growing), no new warnings.
 2. Behavior parity: the tabs/panes/modals touched by the phase pass the

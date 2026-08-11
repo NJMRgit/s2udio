@@ -430,11 +430,19 @@ Status (2026-08-10):
 - **Phase 4a ✅** (`9b46f54`): the `● Audio ○ Video ○ Chapters` toggle row
   is now the reusable `SubTabBar` widget (`src/ui/widgets/sub_tab_bar.rs`,
   rewrite §4.4); queue's `render_toggle_on_border` delegates, public API
-  unchanged, 1328/1328 (2 new widget tests). **Phase 4b (in progress) —
-  handoff plan: `docs/design/Rewrite/phase4b-queue-decomposition.md`**
-  (split `queue.rs` 4447 → module root + `queue/context_menus.rs`,
-  `queue/video.rs`, `queue/chapters.rs`; ~−950 production LOC, zero test
-  edits).
+  unchanged, 1328/1328 (2 new widget tests).
+- **Phase 4b ✅** (`5bf5a18` + `80b4844` + `c81cb2f` + 4b4 close-out,
+  2026-08-11): queue.rs decomposed into the module root +
+  `queue/context_menus.rs` (347) + `queue/video.rs` (373) +
+  `queue/chapters.rs` (325) — 4447 → **3485** (production 2673 → 1711,
+  **−962**), zero test edits (1775 test LOC byte-identical), 1328/1328,
+  warnings 3 baseline, guardrail unchanged at 60 excl-thin (identical
+  pair set). Moved fns are `pub(super)` inherent methods on `QueuePane`
+  (private-in-child-module visibility); `seek_to` moved with chapters,
+  `current_chapters`/`chapters_available` stayed; queue.rs stays a FILE.
+  Docs: outline §2.4/phase-row/§5.3, HANDOFF, plan flipped done, session
+  log. **Next: 4c/5 — phase-4 host live-check (plan §8) then Phase 5
+  (shared drawing widgets from controls/lyrics).**
 
 Toolchain env (container): `export PATH="$HOME/.cargo/bin:$PATH"`
 `export RUSTUP_HOME="$HOME/.rustup" CARGO_HOME="$HOME/.cargo"`.
