@@ -158,6 +158,12 @@ pub struct Ctx {
     #[debug(skip)]
     pub(crate) client_request_sender: Sender<ClientRequest>,
     pub(crate) needs_render: Cell<bool>,
+    /// True while a terminal resize is in progress (the event loop's 500 ms
+    /// debounce window). The cava pane skips geometry restarts during this
+    /// window: with the pipewire/pulse input methods a restart makes the USB
+    /// DAC renegotiate its ALSA period (an audible dropout), and the
+    /// debounced resize that follows handles the final geometry anyway.
+    pub(crate) resizing: Cell<bool>,
     pub(crate) stickers_to_fetch: RefCell<HashSet<String>>,
     #[debug(skip)]
     pub(crate) lrc_index: LrcIndex,
@@ -346,6 +352,7 @@ impl Ctx {
             scheduler,
             client_request_sender,
             needs_render: Cell::new(false),
+            resizing: Cell::new(false),
             stickers_to_fetch: RefCell::new(HashSet::new()),
             rendered_frames: 0,
             messages: RingVec::default(),

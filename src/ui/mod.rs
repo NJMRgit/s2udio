@@ -147,8 +147,12 @@ impl Ui {
 
     /// Set by the event loop while the terminal is being resized; while set,
     /// render() shows only the pixel size and skips the normal UI.
-    pub fn set_resizing(&mut self, resizing: bool) {
+    pub fn set_resizing(&mut self, resizing: bool, ctx: &Ctx) {
         self.resizing = resizing;
+        // The cava pane gates its geometry restarts on this flag, so an
+        // in-progress resize cannot respawn the visualizer (and drop the
+        // audio) on every frame; the settled resize re-initializes it.
+        ctx.resizing.set(resizing);
     }
 
     pub fn change_tab(&mut self, new_tab: TabName, ctx: &mut Ctx) -> Result<()> {
