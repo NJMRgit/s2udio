@@ -382,6 +382,79 @@ pub trait MpdClient: Sized {
     fn string_normalization_clear(&mut self) -> MpdResult<()>;
 }
 
+/// Cover-file base names tried (in order) by the local album-art fallback
+/// ([`find_local_cover`]). MPD 0.24's `albumart` command only searches for
+/// `cover.png`, `cover.jpg` and `cover.webp`, but many libraries (and
+/// desktop MPRIS bridges such as mpDris2) store the art as `folder.jpg`,
+/// `front.jpg`, … — s2udio scans the album directory itself when MPD finds
+/// nothing. Matched case-insensitively (e.g. `Folder.jpg`).
+const LOCAL_COVER_NAMES: &[&str] = &[
+    "cover.jpg",
+    "cover.png",
+    "cover.webp",
+    "cover.jpeg",
+    "folder.jpg",
+    "folder.png",
+    "folder.webp",
+    "folder.jpeg",
+    "front.jpg",
+    "front.png",
+    "front.webp",
+    "album.jpg",
+    "album.png",
+    "album.webp",
+    "albumart.jpg",
+    "albumart.png",
+    "albumart.webp",
+];
+
+/// Returns the path of the first cover image found in the album directory
+/// of `song_path` (an MPD URI relative to `music_directory`), preferring
+/// the names in [`LOCAL_COVER_NAMES`] order.
+fn find_local_cover(music_directory: &str, song_path: &str) -> Option<std::path::PathBuf> {
+    let song_path = std::path::Path::new(music_directory).join(song_path);
+    let album_dir = song_path.parent()?;
+    let mut best: Option<(usize, std::path::PathBuf)> = None;
+    for entry in std::fs::read_dir(album_dir).ok()?.flatten() {
+        let file_name = entry.file_name();
+        let Some(name) = file_name.to_str() else {
+            continue;
+        };
+        let lower = name.to_ascii_lowercase();
+        if let Some(index) = LOCAL_COVER_NAMES.iter().position(|cover| *cover == lower)
+            && best.as_ref().is_none_or(|(best_index, _)| index < *best_index)
+        {
+            best = Some((index, entry.path()));
+        }
+    }
+    best.map(|(_, path)| path)
+}
+
+/// Fallback for when MPD cannot find album art: scan the song's album
+/// directory on the local filesystem for common cover file names. Only
+/// works when the MPD server exposes its music directory (socket
+/// connections) and the song is a local file.
+fn local_album_art(client: &mut Client<'_>, path: &str) -> Option<Vec<u8>> {
+    let Some(config) = client.config() else {
+        log::debug!("MPD config unavailable, skipping local album-art fallback");
+        return None;
+    };
+    let Some(cover) = find_local_cover(&config.music_directory, path) else {
+        log::debug!(path; "No local cover file found for the song");
+        return None;
+    };
+    match std::fs::read(&cover) {
+        Ok(bytes) => {
+            log::debug!(path:? = cover; "Found local album art");
+            Some(bytes)
+        }
+        Err(err) => {
+            log::debug!(path:? = cover, error:? = err; "Failed to read local album art");
+            None
+        }
+    }
+}
+
 impl MpdClient for Client<'_> {
     fn version(&mut self) -> Version {
         self.version
@@ -794,17 +867,31 @@ impl MpdClient for Client<'_> {
                 };
                 match second_result {
                     Ok(Some(p)) => Ok(Some(p)),
+                    Ok(None)
+                        if matches!(
+                            order,
+                            AlbumArtOrder::EmbeddedFirst | AlbumArtOrder::FileFirst
+                        ) =>
+                    {
+                        // MPD found no art; the album directory may still
+                        // hold a `folder.jpg`/`front.jpg` that MPD's
+                        // `albumart` command (0.24 searches for `cover.*`
+                        // only) never looks at.
+                        Ok(local_album_art(self, path))
+                    }
                     Ok(None) => {
                         log::debug!("No album art found, falling back to placeholder image");
                         Ok(None)
                     }
                     Err(MpdError::Mpd(MpdFailureResponse { code: ErrorCode::NoExist, .. })) => {
-                        log::debug!("No album art found, falling back to placeholder image");
-                        Ok(None)
+                        // Same fallback for MPD answering "no such file":
+                        // the song exists, but its directory has no
+                        // `cover.*` file.
+                        Ok(local_album_art(self, path))
                     }
                     Err(e) => {
                         status_error!(error:? = e; "Failed to read picture. {}", e.to_status());
-                        Ok(None)
+                        Ok(local_album_art(self, path))
                     }
                 }
             }
@@ -1801,5 +1888,71 @@ mod filter_tests {
             &[Filter::new(Tag::Album, "the greatest"), Filter::new(Tag::Artist, "mrs singer")];
 
         assert_eq!(input.to_query_str(), "(Album == 'the greatest') AND (Artist == 'mrs singer')");
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod local_cover_tests {
+    use std::{fs, path::PathBuf};
+
+    use super::find_local_cover;
+
+    /// Create a unique temporary music dir with an empty `Album` subdir.
+    fn temp_music(tag: &str) -> (PathBuf, PathBuf) {
+        let dir =
+            std::env::temp_dir().join(format!("s2u-local-cover-{tag}-{}", std::process::id()));
+        if dir.exists() {
+            let _ = fs::remove_dir_all(&dir);
+        }
+        let album = dir.join("Album");
+        fs::create_dir_all(&album).unwrap();
+        (dir, album)
+    }
+
+    #[test]
+    fn finds_folder_jpg_when_no_cover_file() {
+        let (music, album) = temp_music("folder-only");
+        fs::write(album.join("Folder.jpg"), b"art").unwrap();
+        fs::write(album.join("01 - Song.flac"), b"audio").unwrap();
+
+        let cover = find_local_cover(music.to_str().unwrap(), "Album/01 - Song.flac").unwrap();
+        assert_eq!(cover, album.join("Folder.jpg"));
+
+        let _ = fs::remove_dir_all(&music);
+    }
+
+    #[test]
+    fn prefers_cover_over_folder() {
+        let (music, album) = temp_music("cover-pref");
+        fs::write(album.join("Folder.jpg"), b"folder").unwrap();
+        fs::write(album.join("cover.png"), b"cover").unwrap();
+
+        let cover = find_local_cover(music.to_str().unwrap(), "Album/01 - Song.flac").unwrap();
+        assert_eq!(cover, album.join("cover.png"));
+
+        let _ = fs::remove_dir_all(&music);
+    }
+
+    #[test]
+    fn none_when_no_cover_files() {
+        let (music, album) = temp_music("no-cover");
+        fs::write(album.join("01 - Song.flac"), b"audio").unwrap();
+        fs::write(album.join("notes.txt"), b"notes").unwrap();
+
+        assert!(find_local_cover(music.to_str().unwrap(), "Album/01 - Song.flac").is_none());
+
+        let _ = fs::remove_dir_all(&music);
+    }
+
+    #[test]
+    fn none_when_album_directory_missing() {
+        let (music, _album) = temp_music("missing-dir");
+
+        assert!(
+            find_local_cover(music.to_str().unwrap(), "No Such Album/01 - Song.flac").is_none()
+        );
+
+        let _ = fs::remove_dir_all(&music);
     }
 }
