@@ -9,14 +9,14 @@ description: >
   rewrite branch-state writeup for review. Docs/metrics only — no behavior
   changes. Prepared for a fresh agent; parent spec is
   `docs/design/Rewrite/ui-reuse-rewrite.md` (phase-7 row, §6 DoD).
-status: "active — awaiting implementer"
+status: "done — executed 2026-08-11 (7.1 4512fbf, 7.2 77b820c, 7.3 close-out; see ui-reuse-rewrite.md §5.6)"
 parent: "rewrite/ui-reuse"
 updated: "2026-08-11"
 ---
 
 # Phase 7 — Rewrite Close-out (handoff plan)
 
-> **Status: PLAN.** Phases 0–6 are DONE on `rewrite` (HEAD `afd50c1`,
+> **Status: DONE (2026-08-11).** Phases 0–6 were DONE on `rewrite` (HEAD `afd50c1`,
 > 1337/1337, warnings 3, guardrail 60 excl-thin). This plan covers **7**
 > only — the close-out. A new agent completes it; the host reviews.
 

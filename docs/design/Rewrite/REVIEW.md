@@ -24,8 +24,10 @@ still waiting on the host, and what to know before touching it.
 
 ## Branch state (UNPUSHED)
 
-- Branch **`rewrite`** (private `NJMRgit/s2udio-working`), HEAD
-  `1a163d7` + the phase-7 commits (7.1 `4512fbf`, 7.2, 7.3).
+- Branch **`rewrite`** (private `NJMRgit/s2udio-working`), HEAD = the
+  7.3 close-out commit; the phase-7 commits are 7.1 `4512fbf`, 7.2
+  `77b820c`, 7.3 (this file was written at 7.2; the 7.3 hash is in the
+  git log and PHASE7-SUMMARY.md — a commit cannot name its own hash).
 - **`origin/rewrite` is BEHIND — it still sits at `24bd883`** (the
   Phase-0 baseline commit); local `rewrite` is **ahead 38**. The whole
   rewrite is **UNPUSHED by design** (user rule: the agent never pushes;
@@ -51,7 +53,7 @@ measured on committed refs; the boundary ref is the phase's last commit.
 | 4b | `1867964` (plan) `5bf5a18` `80b4844` `c81cb2f` `9fee28e` | queue.rs split → `queue/{context_menus,video,chapters}.rs` (4447 → 3485, prod −962) | 1328/1328 | 57,070 (+83) | 96,128 (+83) |
 | 5 | `64be282` (plan) `483a73c` `490c62e` `2fcb10c` `ef4863f` `671bc91` `ec5d553` | marquee/wrap widgets from controls/lyrics; two documented NOT-to-merge decisions | 1328/1328 | 57,173 (+103) | 96,231 (+103) |
 | 6 | `5a2ce9d` (plan) `4a5b054` `a1caf6b` `9abb201` `1e2aa1d` `afd50c1` | `TreeBrowserArgs` config args (serde-defaults, backward compatible) | 1337/1337 | 57,318 (+145) | 96,797 (+566) |
-| 7 | `1a163d7` (plan) + 7.1 `4512fbf` + 7.2 + 7.3 | Close-out: final metrics, docs sweep, HANDOFF/notes/REVIEW, session log | 1337/1337 | 57,318 (+0) | 96,797 (+0) |
+| 7 | `1a163d7` (plan) + 7.1 `4512fbf` + 7.2 `77b820c` + 7.3 | Close-out: final metrics, docs sweep, HANDOFF/notes/REVIEW, session log | 1337/1337 | 57,318 (+0) | 96,797 (+0) |
 
 **Totals vs baseline `24bd883`:** src/ui **+614**, tree **+986** —
 the rewrite is LOC-positive overall and that is reported plainly: the
