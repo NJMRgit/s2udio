@@ -58,7 +58,9 @@ docs/design/
 │   ├── mpris-validation.md       ← MPRIS & art: timeline/art/track-info across every source
 │   └── distro-support.md         ← distro support: podman test harness, target matrix, gates, roadmap
 ├── Rewrite/                      ← the UI reuse rewrite (branch `rewrite` in s2udio-working)
-│   └── ui-reuse-rewrite.md       ← project outline: audit, master-module architecture, phases
+│   ├── ui-reuse-rewrite.md       ← project outline: audit, master-module architecture, phases
+│   ├── new-browser-tab.md        ← construction pattern: config block + adapter, no new pane file
+│   └── phase6-args-expansion.md  ← phase-6 handoff plan (args expansion)
 └── Sessions/                     ← session work logs (one file per session)
     └── 2026-08-05.md             ← the session log (create/maintain per HANDOFF)
 ```

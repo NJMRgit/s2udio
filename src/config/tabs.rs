@@ -1635,4 +1635,38 @@ mod tests {
         assert_eq!(args.tree_hide_below, 120);
         assert_eq!(args.info_box_cap, Some(15));
     }
+
+    /// The construction-pattern bridge (see
+    /// docs/design/Rewrite/new-browser-tab.md): a config block
+    /// (`Directories { tree: ... }`) converts into the pane type, and
+    /// `Config::tree_browser_args` hands those args to the singleton
+    /// adapter; pane types absent from the config fall back to defaults.
+    #[test]
+    fn config_tree_browser_args_read_the_first_occurrence_args() {
+        let tabs_file = TabsFile(vec![TabFile {
+            name: "Local".to_string(),
+            border_type: BorderTypeFile::None,
+            pane: PaneOrSplitFile::Pane(PaneTypeFile::Directories {
+                tree: TreeBrowserArgs {
+                    tree_min_width: 60,
+                    tree_hide_below: 100,
+                    info_box_cap: None,
+                },
+            }),
+        }]);
+        let tabs = tabs_file
+            .convert(&HashMap::new(), &BorderSetLib::default())
+            .expect("a bare Directories tab converts");
+        let config = crate::config::Config { tabs, ..crate::config::Config::default() };
+        assert_eq!(
+            config.tree_browser_args(PaneTypeDiscriminants::Directories),
+            TreeBrowserArgs { tree_min_width: 60, tree_hide_below: 100, info_box_cap: None },
+            "the config block's tree args drive the adapter"
+        );
+        assert_eq!(
+            config.tree_browser_args(PaneTypeDiscriminants::Radio),
+            TreeBrowserArgs::default(),
+            "panes absent from the config fall back to the defaults"
+        );
+    }
 }
