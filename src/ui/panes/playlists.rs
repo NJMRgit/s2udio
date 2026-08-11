@@ -13,7 +13,7 @@ use ratatui::{
 use super::Pane;
 use crate::{
     MpdQueryResult,
-    config::{keys::{CommonAction, DirectoriesActions}, tabs::{PaneType, TreeBrowserArgs}},
+    config::{keys::{CommonAction, DirectoriesActions}, tabs::{PaneType, PaneTypeDiscriminants, TreeBrowserArgs}},
     ctx::Ctx,
     mpd::{
         client::Client,
@@ -153,6 +153,9 @@ pub struct PlaylistsPane {
     /// The item (playlist name / song file) whose info is shown; the
     /// scroll resets when it changes.
     info_key: Option<String>,
+    /// Tree-browser layout args from the config (defaults = today's
+    /// constants: 50-col minimum tree, hidden <= 120, info cap 15).
+    tree_args: TreeBrowserArgs,
     /// Area of the info box's scrollbar (for click/drag scrolling).
     info_scrollbar_area: Rect,
     /// Drag state of the info box's scrollbar (thumb follows the pointer).
@@ -226,7 +229,7 @@ pub(crate) fn stream_display_title(ctx: &Ctx, uri: &str) -> Option<String> {
 }
 
 impl PlaylistsPane {
-    pub fn new(_ctx: &Ctx) -> Self {
+    pub fn new(ctx: &Ctx) -> Self {
         Self {
             stack: DirStack::default(),
             browser: Browser::new(),
@@ -238,6 +241,7 @@ impl PlaylistsPane {
             info_area: Rect::default(),
             info_items_len: 0,
             info_key: None,
+            tree_args: ctx.config.tree_browser_args(PaneTypeDiscriminants::Playlists),
             info_scrollbar_area: Rect::default(),
             info_scrollbar_drag: crate::shared::mouse_event::ScrollbarDrag::default(),
         }
@@ -951,7 +955,7 @@ impl Pane for PlaylistsPane {
         // wide: the right pane then gets the whole area and the collapsed
         // left pane's rect stays default so mouse events (scroll included)
         // can never hit it.
-        let tree_w = crate::ui::panes::directories::tree_width(area.width);
+        let tree_w = self.tree_args.tree_width(area.width);
         let (playlists_area, right) = if tree_w == 0 {
             (Rect::default(), area)
         } else {
@@ -966,7 +970,7 @@ impl Pane for PlaylistsPane {
         // strip stays a fixed 3 rows); the songs list gets the rest. Exact
         // lengths are computed so the rows always fill the area exactly.
         let tips_h = 3;
-        let info_h = (right.height.saturating_sub(tips_h) * 2 / 3).min(15);
+        let info_h = self.tree_args.info_box_height(right.height.saturating_sub(tips_h) * 2 / 3);
         let songs_h = right.height.saturating_sub(tips_h + info_h);
         let [songs_area, tips_area, info_area] = Layout::vertical([
             Constraint::Length(songs_h),

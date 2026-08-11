@@ -14,7 +14,7 @@ use super::Pane;
 use crate::{
     MpdQueryResult,
     config::{
-        tabs::{PaneType, TreeBrowserArgs},
+        tabs::{PaneType, PaneTypeDiscriminants, TreeBrowserArgs},
     },
     ctx::Ctx,
     jellyfin::{Jellyfin, JfItem},
@@ -146,6 +146,9 @@ pub struct JellyfinPane {
     /// Queue id of a song played via PlayFile (temp entry, removed on song
     /// change / stop — mirrors the Radio pane).
     temp_play_id: Option<u32>,
+    /// Tree-browser layout args from the config (defaults = today's
+    /// constants: 50-col minimum tree, hidden <= 120).
+    tree_args: TreeBrowserArgs,
     initialized: bool,
     tree_area: Rect,
     items_area: Rect,
@@ -193,6 +196,7 @@ impl JellyfinPane {
             error: None,
             focus: PaneFocus::Tree,
             temp_play_id: None,
+            tree_args: ctx.config.tree_browser_args(PaneTypeDiscriminants::Jellyfin),
             initialized: false,
             tree_area: Rect::default(),
             items_area: Rect::default(),
@@ -1669,6 +1673,12 @@ impl TreeBrowserCore for JellyfinPane {
 
     // ── defaulted hook overrides ───────────────────────────────────────
 
+    /// The configured tree-browser args drive the shared `split_tree`
+    /// (tree min width / hide threshold).
+    fn tree_args(&self) -> TreeBrowserArgs {
+        self.tree_args.clone()
+    }
+
     fn sync_tree_to_items_cursor(&mut self) {
         let target = self
             .selected_item()
@@ -2220,6 +2230,29 @@ mod tests {
             .map(|y| (0..100).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>())
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// The tree-browser args drive the shared split: `tree_min_width: 60`
+    /// widens the tree at 160 cols (vs the 50 default) and the default
+    /// hide threshold still collapses it on narrow TUIs.
+    #[test]
+    fn tree_args_change_the_tree_width() {
+        let (app_tx, _app_rx) = crossbeam::channel::unbounded();
+        let (work_tx, work_rx) = crossbeam::channel::unbounded();
+        let ctx = crate::tests::fixtures::ctx(
+            (app_tx, _app_rx),
+            (work_tx, work_rx.clone()),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+        );
+        let mut pane = JellyfinPane::new(&ctx);
+        pane.tree_args = TreeBrowserArgs {
+            tree_min_width: 60,
+            ..TreeBrowserArgs::default()
+        };
+        let (tree, _right) = pane.split_tree(ratatui::prelude::Rect::new(0, 0, 160, 30));
+        assert_eq!(tree.width, 60, "tree_min_width: 60 widens the tree at 160 cols");
+        let (tree, _right) = pane.split_tree(ratatui::prelude::Rect::new(0, 0, 100, 30));
+        assert_eq!(tree.width, 0, "the default hide threshold still hides at 100 cols");
     }
 
     /// Selecting an episode fetches the full item (like the queue tab's info

@@ -11,7 +11,7 @@ use crate::{
     MpdQueryResult,
     config::{
         keys::{CommonAction, DirectoriesActions},
-        tabs::PaneType,
+        tabs::{PaneType, TreeBrowserArgs},
     },
     ctx::Ctx,
     mpd::{commands::State, mpd_client::MpdClient},
@@ -143,11 +143,19 @@ pub(in crate::ui) trait TreeBrowserCore: Pane {
     fn tips_area(&self, area: Rect) -> Rect {
         area
     }
+    /// The tree-browser layout args (tree min width / hide threshold;
+    /// the info-box cap is read by the panes that use the capped formula).
+    /// Default: today's constants (50 / 120 / Some(15)); the browser
+    /// panes override this with their configured args.
+    fn tree_args(&self) -> TreeBrowserArgs {
+        TreeBrowserArgs::default()
+    }
     /// Split the pane horizontally into (tree, right). The default hides
-    /// the tree on TUIs ≤ 120 columns (shared by the MPD + Jellyfin
+    /// the tree at/below `tree_hide_below` columns and keeps a
+    /// `tree_min_width`-column tree otherwise (the MPD + Jellyfin
     /// browsers); radio always shows its 30% region tree.
     fn split_tree(&self, area: Rect) -> (Rect, Rect) {
-        let w = crate::ui::panes::directories::tree_width(area.width);
+        let w = self.tree_args().tree_width(area.width);
         if w == 0 {
             (Rect::default(), area)
         } else {

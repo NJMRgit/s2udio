@@ -14,7 +14,7 @@ use crate::{
     MpdQueryResult,
     config::{
         keys::{CommonAction, DirectoriesActions},
-        tabs::{PaneType, TreeBrowserArgs},
+        tabs::{PaneType, PaneTypeDiscriminants, TreeBrowserArgs},
         utils::tilde_expand,
     },
     ctx::Ctx,
@@ -252,6 +252,10 @@ pub struct RadioPane {
     /// Queue id of a station played via PlayFile; removed from the queue when
     /// the song changes or playback stops so it doesn't linger.
     temp_play_id: Option<u32>,
+    /// Tree-browser layout args from the config. The regions tree keeps
+    /// its always-visible 30% share regardless (radio's shape), so the
+    /// args are plumbing for uniformity; the width/hide args do not apply.
+    tree_args: TreeBrowserArgs,
     initialized: bool,
     regions_area: Rect,
     stations_area: Rect,
@@ -259,7 +263,7 @@ pub struct RadioPane {
 }
 
 impl RadioPane {
-    pub fn new(_ctx: &Ctx) -> Self {
+    pub fn new(ctx: &Ctx) -> Self {
         Self {
             favourites: Vec::new(),
             directory: None,
@@ -272,6 +276,7 @@ impl RadioPane {
             expanded: HashSet::new(),
             focus: PaneFocus::Regions,
             temp_play_id: None,
+            tree_args: ctx.config.tree_browser_args(PaneTypeDiscriminants::Radio),
             initialized: false,
             regions_area: Rect::default(),
             stations_area: Rect::default(),
@@ -1302,6 +1307,12 @@ impl TreeBrowserCore for RadioPane {
         area.inner(ratatui::layout::Margin { horizontal: 1, vertical: 0 })
     }
 
+    /// The configured tree-browser args (plumbing for uniformity; the
+    /// regions tree keeps its 30% share below).
+    fn tree_args(&self) -> TreeBrowserArgs {
+        self.tree_args.clone()
+    }
+
     /// The radio region tree always takes its 30% share (no narrow-TUI
     /// collapse).
     fn split_tree(&self, area: Rect) -> (Rect, Rect) {
@@ -1697,10 +1708,12 @@ mod tests {
     };
     use crate::{
         MpdQueryResult,
+        config::tabs::TreeBrowserArgs,
         ctx::Ctx,
         radio::{CountryGroup, DirectoryStation, RadioDirectory, StateGroup},
         shared::events::WorkRequest,
         tests::fixtures::ctx,
+        ui::tree_browser::TreeBrowserCore,
         ui::panes::Pane,
     };
 
@@ -2372,8 +2385,10 @@ mod paste_play_tests {
     use super::RadioPane;
     use crate::{
         MpdQueryResult,
+        config::tabs::TreeBrowserArgs,
         tests::fixtures::ctx,
         ui::panes::Pane,
+        ui::tree_browser::TreeBrowserCore,
     };
 
     /// "Play (don't add to queue)" routes its `addid` result to the Radio
@@ -2427,5 +2442,26 @@ mod paste_play_tests {
         .unwrap();
         assert_eq!(pane.temp_play_id, Some(7));
         assert_eq!(pane_ctx.temp_play_id.get(), Some(7), "the queue pane reads it via Ctx");
+    }
+
+    /// The tree-browser args plumb into the pane uniformly, and radio's
+    /// regions tree keeps its always-visible 30% share regardless of them
+    /// (radio's shape — the width/hide args deliberately do not apply).
+    #[test]
+    fn tree_args_plumb_in_but_keep_the_regions_tree_shape() {
+        let pane_ctx = ctx(
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+        );
+        let mut pane = RadioPane::new(&pane_ctx);
+        pane.tree_args = TreeBrowserArgs {
+            tree_min_width: 60,
+            tree_hide_below: 200,
+            ..TreeBrowserArgs::default()
+        };
+        let (regions, stations) = pane.split_tree(ratatui::prelude::Rect::new(0, 0, 160, 30));
+        assert_eq!(regions.width, 48, "radio keeps its 30% region tree (160*30%)");
+        assert_eq!(stations.width, 112, "the stations pane gets the rest");
     }
 }

@@ -98,6 +98,28 @@ impl Default for TreeBrowserArgs {
     }
 }
 
+impl TreeBrowserArgs {
+    /// The left-tree width at `total` columns: hidden entirely at/below
+    /// `tree_hide_below`, else 30% of the width with a `tree_min_width`
+    /// floor (never the whole area — the right pane keeps >= 1 column).
+    /// With the default args this is exactly the round-7/8
+    /// `directories::tree_width` behavior.
+    pub fn tree_width(&self, total: u16) -> u16 {
+        if total <= self.tree_hide_below {
+            return 0;
+        }
+        let by_percent = (u32::from(total) * 30 / 100) as u16;
+        by_percent.max(self.tree_min_width).min(total - 1)
+    }
+
+    /// The info box height for a raw two-thirds share: capped at
+    /// `info_box_cap` when set (`Some(15)` default = round-9 behavior);
+    /// `None` keeps the raw share (round-8 behavior).
+    pub fn info_box_height(&self, raw: u16) -> u16 {
+        raw.min(self.info_box_cap.unwrap_or(raw))
+    }
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[allow(clippy::large_enum_variant)]
 pub enum PaneTypeFile {
