@@ -427,9 +427,14 @@ Status (2026-08-10):
   standalone (not list-shaped, rationale in outline §5.2):
   `OutputsModal`, `InfoModal`, `DownloadsModal`, `LanguageModal`,
   `TabHelpModal`, `AddRandomModal`.
-- **Next: Phase 4** — QueuePane decomposition (Audio list →
-  `SongListCore`, toggle row → `SubTabBar`, Video/Chapters stay
-  focused specs).
+- **Phase 4a ✅** (`9b46f54`): the `● Audio ○ Video ○ Chapters` toggle row
+  is now the reusable `SubTabBar` widget (`src/ui/widgets/sub_tab_bar.rs`,
+  rewrite §4.4); queue's `render_toggle_on_border` delegates, public API
+  unchanged, 1328/1328 (2 new widget tests). **Phase 4b (in progress) —
+  handoff plan: `docs/design/Rewrite/phase4b-queue-decomposition.md`**
+  (split `queue.rs` 4447 → module root + `queue/context_menus.rs`,
+  `queue/video.rs`, `queue/chapters.rs`; ~−950 production LOC, zero test
+  edits).
 
 Toolchain env (container): `export PATH="$HOME/.cargo/bin:$PATH"`
 `export RUSTUP_HOME="$HOME/.rustup" CARGO_HOME="$HOME/.cargo"`.
