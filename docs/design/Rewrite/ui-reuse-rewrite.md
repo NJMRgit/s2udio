@@ -52,10 +52,16 @@ and a lot of it is re-implemented per pane. The rewrite consolidates every
 repeated UI shape into a **master module parameterized by args**, so:
 
 - congruent behavior is guaranteed by construction (one implementation,
-  not N copies that drift);
+  not N copies that drift) — **predictable behavior**;
 - new tabs/panes/modals are added by *config + args*, not by copying a
-  pane file;
+  pane file — **extensibility**;
 - code complexity and line count go down measurably.
+
+> **User priority (2026-08-10):** the *aim* is extensibility and
+> predictable behavior; LOC reduction is a useful proxy, not a gate.
+> Phases may land LOC-neutral or slightly positive when the shared-core
+> cost buys one-implementation-by-construction (Phase 2 +51, Phase 3 −55
+> vs its −600–900 estimate); the consumer-side paydown is Phase 6.
 
 This is **not** a from-scratch rewrite: the backend (core/, mpd/, radio/,
 jellyfin/, shared/) and the config model stay. It is a consolidation of
@@ -525,7 +531,11 @@ explicit:
    existing design-doc specs and a live check by the user.
 3. No two panes implement the same-named function with similarity > 0.5
    (the clone pairs in §2.2 are gone or reduced to shared call sites).
-4. Net LOC reduction for the phase (tracked against the Phase-0 table).
+4. Net LOC reduction for the phase (tracked against the Phase-0 table)
+   — secondary to the user priority (extensibility + predictable
+   behavior, §1); a phase may close LOC-neutral/positive when the
+   shared-core cost is the price of one-implementation-by-construction
+   (record the real ref-to-ref number in the close-out either way).
 5. Config compatibility: existing `~/.config/s2udio/config.ron` still
    parses (or migrates automatically) after any `PaneType`/`TabsFile`
    arg changes.

@@ -355,7 +355,11 @@ compiled in — never delete. Old history is preserved at the local
 The **UI reuse rewrite** (`docs/design/Rewrite/ui-reuse-rewrite.md`, branch
 `rewrite` of `NJMRgit/s2udio-working`) consolidates `src/ui` around master
 modules + args. Working on `rewrite` only; the distribution repo `master`
-is untouched. **Rust toolchain is now available in the container** (rustup
+is untouched. **User priority (2026-08-10):** the rewrite's aim is extensibility +
+predictable behavior; LOC reduction is a proxy, not a gate (phases may
+close LOC-neutral/positive when the shared-core cost buys
+one-implementation-by-construction — Phase 2 +51, Phase 3 −55).
+**Rust toolchain is now available in the container** (rustup
 1.97.1 installed 2026-08-10, `~/.cargo/bin`, `cargo test --release` runs
 in-container — see the `RUSTUP_HOME`/`CARGO_HOME` env note below) — the
 agent can self-validate; the host still does live checks.
