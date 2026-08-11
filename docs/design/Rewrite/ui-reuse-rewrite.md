@@ -8,7 +8,7 @@ description: >
   audit of shared vs bespoke UI code, the master-module-with-args target
   architecture, and the phased consolidation plan.
 status: "active"
-phase_status: "0: complete (2026-08-10); 1: in progress"
+phase_status: "0: complete (2026-08-10); 1: complete (2026-08-10); 2: next"
 updated: "2026-08-10"
 source_files:
   - src/ui/browser.rs
@@ -197,11 +197,15 @@ ref). Key numbers and audited files:
 | **tree total .rs** | **95,811** |
 
 Similarity guardrail baseline: **83 same-named function pairs with ratio > 0.5**
-across `src/ui` (full list: `python3 scripts/dev/ui-metrics.py --pairs`). The
-intentional thin adapters (`stack`/`stack_mut`/`browser_areas` on
-Albums/TagBrowser/Playlists) are 1.00 — expected; Phase 2 targets the heavy
-duplicated pairs (`render_tree`, `render_items`, `render_tips`, `move_*`,
-`populate_items`, …) from §2.2.
+across `src/ui` (full list: `python3 scripts/dev/ui-metrics.py --pairs`).
+Since Phase 1 the script excludes the *thin-adapter* method names (the
+`SongListCore`/`BrowserPane` hooks + accessors + shared defaults — those are
+the intended shared call sites, not duplication): **51 non-thin pairs > 0.5**
+at baseline `24bd883`, still **51 after Phase 1** (the 9 new pairs — `stack`/
+`stack_mut`/`browser_areas` in browser.rs ↔ panes — are the thin accessors;
+zero new real duplication). Phase 2 targets the heavy duplicated pairs
+(`render_tree`, `render_items`, `render_tips`, `move_*`, `populate_items`, …)
+from §2.2.
 
 ## 3. Target architecture — master modules + args
 
@@ -258,6 +262,20 @@ Rules of the road:
 
 Extracted from `BrowserPane` (browser.rs) by **removing the DirStack
 assumption**; `BrowserPane` becomes a thin dir-stack adapter over it.
+
+> **Implemented (Phase 1, 2026-08-10)** as a trait with hooks, not the
+> struct sketched below: `SongListCore<T, S>` (default `S = ListState`,
+> `TableState` for the queue) over a flat `Dir<T, S>`, with per-pane hooks
+> (`list`/`list_mut`, `open`, `leave`, `enqueue`, `fetch_data(_internal)`,
+> `list_songs_in_item`, `song_format`, `initial_playlist_name`, `delete`,
+> `rename`/`can_rename`, `move_selected`, `show_info`, `scrollbar_area`,
+> `list_area`) and shared default methods (`handle_common_action` +
+> `handle_claimed_common_action`, `handle_insert_mode`, `handle_global_action`,
+> `handle_scrollbar_interaction`, `handle_list_mouse_action`,
+> `open_context_menu`, `items`/`enqueue_items`/`delete_items`/
+> `list_songs_in_items`). The struct sketch below remains the Phase-4/6
+> end-state (args/config-first); the trait achieves the same "one
+> implementation per shape" goal with less indirection.
 
 ```rust
 pub struct SongListCore<T> {
@@ -347,7 +365,7 @@ with a behavior-parity live check of the affected tabs.
 | Phase | Work | Primary targets | Exit criteria |
 | --- | --- | --- | --- |
 | 0 | Baselines & guardrails | — | ✅ (2026-08-10, commit `24bd883`+): branched from `working` at `12d8c6c`; LOC + similarity baseline recorded (§2.4) via committed `scripts/dev/ui-metrics.py`; `cargo test --release` green **1312/1312** (rustc 1.97.1; host may re-run). |
-| 1 | Extract `SongListCore<T>` from `BrowserPane`; adopt in queue Audio + search results | `ui/browser.rs`, `ui/panes/queue.rs`, `ui/panes/search/mod.rs` | Browser panes unchanged; queue/search behavior identical (tests + live check); **–~300–500 net LOC**; the `CommonAction` arms exist once. |
+| 1 | Extract `SongListCore<T>` from `BrowserPane`; adopt in queue Audio + search results | `ui/browser.rs`, `ui/panes/queue.rs`, `ui/panes/search/mod.rs` | ✅ (2026-08-10, commits `cd103ac`+`cd10c75`+`113d7e7`): `SongListCore<T, S>` trait (hooks + shared default methods) in `src/ui/song_list.rs`; `BrowserPane` is a thin dir-stack adapter (1041 → 232 LOC); queue Audio (`Dir<Song, TableState>`) + search results (`Dir<Song, ListState>`) implement it and delegate all non-specific `CommonAction` arms. Browser panes behavior unchanged; queue/search identical (1312/1312 green incl. all 61 queue/search tests; live check pending host). Net LOC: **src/ui −179** (queue −208, search −236, browser −809, song_list +955, pane adapters +118); the `CommonAction` arms exist once. |
 | 2 | `TreeBrowserCore<T>` unifies directories / jellyfin / radio | `ui/panes/directories.rs`, `jellyfin.rs`, `radio.rs` | Three panes render identically to today; pairwise similarity of same-named fns ≤ 0.2 (or deleted); **–~3–4k LOC**. |
 | 3 | Modal consolidation onto `ListModal`/`InfoListModal` + section merge | `ui/modals/*` | Each converted modal passes its behavior checks; `menu/select_section` merged; **–~600–900 LOC**. |
 | 4 | QueuePane decomposition: Audio list → `SongListCore`, toggle → `SubTabBar`, Video/Chapters stay as focused specs | `ui/panes/queue.rs` | Queue tab live-check (Audio/Video/Chapters, merged box, esc-deselect, marks); **–~1–1.5k LOC** in queue.rs. |
