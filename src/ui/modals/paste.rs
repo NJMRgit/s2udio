@@ -17,7 +17,7 @@
 use anyhow::Result;
 
 use crate::{
-    config::{tabs::PaneType, utils::tilde_expand},
+    config::{tabs::{PaneType, TreeBrowserArgs}, utils::tilde_expand},
     ctx::Ctx,
     mpd::{QueuePosition, mpd_client::MpdClient},
     shared::{
@@ -1296,7 +1296,7 @@ fn play_item(ctx: &Ctx, item: &PastedItem) -> Result<()> {
             }
             // addid+playid of a temporary entry, cleaned up on song change
             // by the Radio pane (which receives the result).
-            ctx.query().id(PASTE_PLAY).replace_id(PASTE_PLAY).target(PaneType::Radio).query(
+            ctx.query().id(PASTE_PLAY).replace_id(PASTE_PLAY).target(PaneType::Radio { tree: TreeBrowserArgs::default() }).query(
                 move |client| {
                     let id = client.add_id(&uri, None)?;
                     client.play_id(id)?;
@@ -1307,7 +1307,7 @@ fn play_item(ctx: &Ctx, item: &PastedItem) -> Result<()> {
         }
         PastedItem::Url(url) => {
             let url = url.clone();
-            ctx.query().id(PASTE_PLAY).replace_id(PASTE_PLAY).target(PaneType::Radio).query(
+            ctx.query().id(PASTE_PLAY).replace_id(PASTE_PLAY).target(PaneType::Radio { tree: TreeBrowserArgs::default() }).query(
                 move |client| {
                     let id = client.add_id(&url, None)?;
                     client.play_id(id)?;
@@ -1437,7 +1437,7 @@ fn play_torrent(ctx: &Ctx, items: &[PastedItem], download: bool) -> Result<()> {
 
 /// Play a pasted item's audio through MPD as a temporary entry.
 fn paste_play_temp(ctx: &Ctx, url: String) {
-    ctx.query().id(PASTE_PLAY).replace_id(PASTE_PLAY).target(PaneType::Radio).query(move |client| {
+    ctx.query().id(PASTE_PLAY).replace_id(PASTE_PLAY).target(PaneType::Radio { tree: TreeBrowserArgs::default() }).query(move |client| {
         let id = client.add_id(&url, None)?;
         client.play_id(id)?;
         Ok(crate::MpdQueryResult::Any(Box::new(id)))
@@ -1581,7 +1581,7 @@ pub fn apply_resolved_streams(
     match action {
         YtAction::Play => {
             let url = urls[0].clone();
-            ctx.query().id(PASTE_PLAY).replace_id(PASTE_PLAY).target(PaneType::Radio).query(
+            ctx.query().id(PASTE_PLAY).replace_id(PASTE_PLAY).target(PaneType::Radio { tree: TreeBrowserArgs::default() }).query(
                 move |client| {
                     let id = client.add_id(&url, None)?;
                     client.play_id(id)?;

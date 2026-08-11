@@ -1236,7 +1236,7 @@ fn main_task<B: Backend + std::io::Write>(
                                 ));
                                 if let Err(err) = ui.on_command_finished(
                                     crate::ui::panes::jellyfin::JF_ITEM,
-                                    Some(crate::config::tabs::PaneType::Jellyfin),
+                                    Some(crate::config::tabs::PaneType::Jellyfin { tree: crate::config::tabs::TreeBrowserArgs::default() }),
                                     data,
                                     &mut ctx,
                                 ) {
@@ -1454,7 +1454,7 @@ fn main_task<B: Backend + std::io::Write>(
                                 let data = crate::MpdQueryResult::Any(Box::new(data));
                                 if let Err(err) = ui.on_command_finished(
                                     crate::ui::panes::jellyfin::JF_CHAPTERS,
-                                    Some(crate::config::tabs::PaneType::Jellyfin),
+                                    Some(crate::config::tabs::PaneType::Jellyfin { tree: crate::config::tabs::TreeBrowserArgs::default() }),
                                     data,
                                     &mut ctx,
                                 ) {
@@ -1469,7 +1469,7 @@ fn main_task<B: Backend + std::io::Write>(
                                 let data = crate::MpdQueryResult::Any(Box::new(data));
                                 if let Err(err) = ui.on_command_finished(
                                     id,
-                                    Some(crate::config::tabs::PaneType::Jellyfin),
+                                    Some(crate::config::tabs::PaneType::Jellyfin { tree: crate::config::tabs::TreeBrowserArgs::default() }),
                                     data,
                                     &mut ctx,
                                 ) {

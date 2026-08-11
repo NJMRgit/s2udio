@@ -13,7 +13,7 @@ use super::Pane;
 use crate::{
     MpdQueryResult,
     config::{
-        tabs::PaneType,
+        tabs::{PaneType, TreeBrowserArgs},
     },
     ctx::Ctx,
     mpd::{
@@ -372,7 +372,7 @@ impl DirectoriesPane {
         ctx.query()
             .id(FETCH_DATA)
             .replace_id("directories_data")
-            .target(PaneType::Directories)
+            .target(PaneType::Directories { tree: TreeBrowserArgs::default() })
             .query(move |client| {
                 let entries = if path.is_empty() {
                     client.lsinfo(None)?
@@ -747,7 +747,7 @@ impl DirectoriesPane {
             );
             return Ok(());
         }
-        self.play_temp_url(ctx, PLAY_FILE, PaneType::Directories, file);
+        self.play_temp_url(ctx, PLAY_FILE, PaneType::Directories { tree: TreeBrowserArgs::default() }, file);
         Ok(())
     }
 
@@ -1202,7 +1202,7 @@ impl Pane for DirectoriesPane {
     fn before_show(&mut self, ctx: &Ctx) -> Result<()> {
         if !self.initialized {
             self.fetch_children(&Path::new(), ctx);
-            ctx.query().id(TREE).replace_id(TREE).target(PaneType::Directories).query(
+            ctx.query().id(TREE).replace_id(TREE).target(PaneType::Directories { tree: TreeBrowserArgs::default() }).query(
                 move |client| {
                     let dirs: Vec<String> = client
                         .list_all(None)?

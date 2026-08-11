@@ -443,6 +443,23 @@ Status (2026-08-10):
   Docs: outline §2.4/phase-row/§5.3, HANDOFF, plan flipped done, session
   log. **Next: 4c/5 — phase-4 host live-check (plan §8) then Phase 5
   (shared drawing widgets from controls/lyrics).**
+- **Phase 5 ✅** (`483a73c` + `490c62e` + `2fcb10c` + `ef4863f` + 5b5
+  close-out, 2026-08-11): shared drawing widgets extracted from
+  controls/lyrics per `docs/design/Rewrite/phase5-drawing-widgets.md` —
+  **marquee** (`ui/widgets/marquee.rs`, 282 LOC: `draw_marquee`/
+  `marquee_offset`/`draw_panel_at` + the `CAROUSEL_*` constants, cycle
+  math untouched; the 2 marquee timing tests moved with the code) adopted
+  by controls (2 render sites) + lyrics + jellyfin; **wrap**
+  (`ui/widgets/wrap.rs`, 84 LOC: `wrap_to_width`/`wrap_spans`) adopted by
+  lyrics + jellyfin (jellyfin's `lyrics::wrap_to_width` import flipped).
+  Controls.rs 1516 → 1319, lyrics.rs 2543 → 2475, src/ui +103, 1328/1328
+  after every commit, warnings 3 baseline, guardrail 60 excl-thin
+  identical pair set. Button cluster + now-playing templates:
+  **documented decisions NOT to merge** (§3 — three cluster shapes / two
+  template shapes; rationale in outline §5.4 + plan §3a). `ScrollingLine`
+  kept (different continuous-`|`-wrap cycle). **Next: 6 — args expansion
+  (pane-specific constants into `PaneType`/config args); phase-4/5 host
+  live-checks pending.**
 
 Toolchain env (container): `export PATH="$HOME/.cargo/bin:$PATH"`
 `export RUSTUP_HOME="$HOME/.rustup" CARGO_HOME="$HOME/.cargo"`.

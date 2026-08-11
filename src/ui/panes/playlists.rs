@@ -13,7 +13,7 @@ use ratatui::{
 use super::Pane;
 use crate::{
     MpdQueryResult,
-    config::{keys::{CommonAction, DirectoriesActions}, tabs::PaneType},
+    config::{keys::{CommonAction, DirectoriesActions}, tabs::{PaneType, TreeBrowserArgs}},
     ctx::Ctx,
     mpd::{
         client::Client,
@@ -926,7 +926,7 @@ impl PlaylistsPane {
                 _ => None,
             })
             .collect();
-        ctx.query().id(PLAYLIST_KINDS).replace_id(PLAYLIST_KINDS).target(PaneType::Playlists).query(
+        ctx.query().id(PLAYLIST_KINDS).replace_id(PLAYLIST_KINDS).target(PaneType::Playlists { tree: TreeBrowserArgs::default() }).query(
             move |client| {
                 // `listplaylistinfo` ranges need MPD >= 0.24; older servers
                 // fall back to fetching the whole playlist.
@@ -1015,7 +1015,7 @@ impl Pane for PlaylistsPane {
         let id = if self.initialized { REINIT } else { INIT };
         let compare = StringCompare::from(ctx.config.browser_song_sort.as_ref());
         let radio_playlist = ctx.config.radio.playlist.clone();
-        ctx.query().id(id).target(PaneType::Playlists).replace_id(id).query(move |client| {
+        ctx.query().id(id).target(PaneType::Playlists { tree: TreeBrowserArgs::default() }).replace_id(id).query(move |client| {
             let result: Vec<_> = client
                 .list_playlists()
                 .context("Cannot list playlists")?
@@ -1042,7 +1042,7 @@ impl Pane for PlaylistsPane {
                 };
                 let sort_opts = ctx.config.browser_song_sort.clone();
                 let radio_playlist = ctx.config.radio.playlist.clone();
-                ctx.query().id(id).replace_id(id).target(PaneType::Playlists).query(
+                ctx.query().id(id).replace_id(id).target(PaneType::Playlists { tree: TreeBrowserArgs::default() }).query(
                     move |client| {
                         let result: Vec<_> = client
                             .list_playlists()
@@ -1564,7 +1564,7 @@ impl SongListCore<DirOrSong, ListState> for PlaylistsPane {
                 ctx.query()
                     .id(FETCH_DATA)
                     .replace_id("playlists_data")
-                    .target(PaneType::Playlists)
+                    .target(PaneType::Playlists { tree: TreeBrowserArgs::default() })
                     .query(move |client| {
                         let data = client
                             .list_playlist_info(&playlist, None)?
@@ -1585,7 +1585,7 @@ impl SongListCore<DirOrSong, ListState> for PlaylistsPane {
             DirOrSong::Dir { name, .. } => {
                 let playlist = name.clone();
                 ctx.query()
-                    .target(PaneType::Playlists)
+                    .target(PaneType::Playlists { tree: TreeBrowserArgs::default() })
                     .replace_id(PLAYLIST_INFO)
                     .id(PLAYLIST_INFO)
                     .query(move |client| {

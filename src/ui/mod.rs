@@ -29,7 +29,7 @@ use crate::{
         UiSettings,
         cli::{Args, Command},
         keys::{CommonAction, GlobalAction, Key, KeyConfig, actions::RateKind},
-        tabs::{PaneType, SizedPaneOrSplit, TabName},
+        tabs::{PaneType, SizedPaneOrSplit, TabName, TreeBrowserArgs},
         theme::level_styles::LevelStyles,
     },
     core::{
@@ -237,10 +237,10 @@ impl Ui {
             // The Jellyfin tab's poster is a terminal-side overlay too;
             // hide it while the window is in a transient size.
             let jellyfin_hidden = self.tabs.get(&ctx.active_tab).is_some_and(|tab| {
-                tab.panes.panes_iter().any(|p| p.pane == PaneType::Jellyfin)
+                tab.panes.panes_iter().any(|p| p.pane == PaneType::Jellyfin { tree: TreeBrowserArgs::default() })
             });
             if jellyfin_hidden {
-                let id = PaneType::Jellyfin;
+                let id = PaneType::Jellyfin { tree: TreeBrowserArgs::default() };
                 if let Ok(Panes::Jellyfin(jellyfin)) = self.panes.get_mut(&id, ctx) {
                     jellyfin.hide_pending_poster(ctx);
                 }
@@ -1418,7 +1418,7 @@ impl Ui {
         let Some(tab) = self.tabs.get_mut(&ctx.active_tab) else {
             return Ok(());
         };
-        let Some(pane) = tab.panes.panes_iter().find(|p| p.pane == PaneType::Jellyfin) else {
+        let Some(pane) = tab.panes.panes_iter().find(|p| p.pane == PaneType::Jellyfin { tree: TreeBrowserArgs::default() }) else {
             return Ok(());
         };
         let mut pane = self.panes.get_mut(&pane.pane, ctx)?;

@@ -9,16 +9,18 @@ description: >
   wrap helpers (wrap_to_width / wrap_spans), button cluster, now-playing
   line templates. Prepared for a fresh agent to execute; parent spec is
   `docs/design/Rewrite/ui-reuse-rewrite.md` (phase-5 row, §4.5).
-status: "active — awaiting implementer"
+status: "done — executed 2026-08-11 (commits 483a73c, 490c62e, 2fcb10c, ef4863f, 5b5 close-out); §3 decisions in §3a, numbers in outline §5.4"
 parent: "rewrite/ui-reuse"
 updated: "2026-08-11"
 ---
 
 # Phase 5 — Shared Drawing Widgets (handoff plan)
 
-> **Status: PLAN.** 4b (queue decomposition) is DONE (`5bf5a18`+`80b4844`+
-> `c81cb2f`+`9fee28e`, 1328/1328, close-out §5.3). This plan covers **5**
-> only. A new agent completes it; the host reviews/live-checks.
+> **Status: DONE** (2026-08-11): 5b1 `483a73c`, 5b2 `490c62e`,
+> 5b3 `2fcb10c` (documented decision), 5b4 `ef4863f` (documented
+> decision), 5b5 close-out — 1328/1328, warnings 3 baseline, guardrail 60
+> excl-thin identical pair set; real numbers in outline §5.4. The host
+> live-check (plan §8) is pending.
 
 ## 1. Context — read this first
 
@@ -83,6 +85,60 @@ decision beats a forced merge. Minimum for the phase to close: **marquee**
 and **wrap** land as real widgets with ≥2 call sites each (their shapes
 are already shared — see the cross-pane calls in §4). `button_cluster`
 and `now_playing` follow the decision rule.
+
+
+## 3a. Decision record (5b3 / 5b4)
+
+Executed per §3; each verdict below is a **documented decision not to
+merge** (a valid phase outcome — the shapes are genuinely different and
+unification would change observable behavior).
+
+### 5b3 — button cluster: NOT merged
+
+The lyrics header cluster (`LyricsBtn` + `button_line`,
+`src/ui/panes/lyrics.rs`) and the controls row-0 clusters
+(`mpv_button_layout` / `transport_zones`, `src/ui/panes/controls.rs`)
+are **three different shapes**, not one shape with args:
+
+| | Lyrics header | Controls mpv row-0 | Transport row |
+| --- | --- | --- | --- |
+| Buttons | `● hide lyrics` `● fetch lyrics` (glyph+label spans) | `⤓` `[Audio]` `[Sub]` (plain labels) | `◀◀` `▶`/`❙❙` `▶▶` `■` (fixed slots) |
+| Separator | space-padded ` | ` | 1-col gap (no separator) | literal pipes (`|`) in the row text |
+| Collapse | 2 tiers + hidden by width | none (the title region shrinks) | none (fixed 25-col geometry) |
+| Hover | **label text only** — glyph + leading space + separator keep the base style (pinned cell-by-cell by `hover_highlights_only_the_label_text`) | whole label lightened (`set_string` of the label with `hover_style`) | whole slot lightened |
+| Pressed state | per-button `●`/`⭘` marker while held | none | none |
+| Click zones | `Rect` stored in pane fields | `(x1, x2)` ranges | fixed `transport_zones` offsets |
+| Write primitive | `buf.set_line` (clipped) | `buf.set_string` | `put` |
+
+Unifying them would require a per-button hover-scope enum, separator
+style enum, collapse-tier table, optional pressed-glyph callback, and a
+zone-output shape — a configuration surface as large as the code it
+replaces, and any single hover mode changes one side's visible behavior
+(a whole-label hover on the lyrics cluster highlights the `●`/space,
+breaking the pinned test; a label-only hover on the mpv cluster drops
+the hover entirely for `⤓`/`[Audio]`, which contain no space to split).
+Decision rule §3: do NOT merge; keep the three clusters in their panes.
+
+### 5b4 — now-playing line templates: NOT merged
+
+`controls.rs::artist_title_line` / `channel_line` (row-1/row-0 of the
+controls bar) and the lyrics info header (`render_mpv_info` + the
+`render_info` song/video box) both describe "what is playing", but the
+similarity stops at the semantics:
+
+| | Controls `artist_title_line` / `channel_line` | Lyrics info header |
+| --- | --- | --- |
+| Data resolution | mpv title / yt-stream title / mpd song tags via `multiple_tag_resolution_strategy` + `format_tag_separator`; missing tags omitted; `No Playback` fallback | Jellyfin `item` metadata (year prefix, episode S/E), `yt_stream_info_parts`, plain mpv title; channel/subs context |
+| Styles | theme-derived (`ControlsTheme`: artist/title/separator styles, blur-following) | explicit ANSI white title, yellow `preview_label_style` keys, bold `Time:` |
+| Layout | one centered line inside a region, carousel-marquee on overflow | fixed `year -- ` prefix + marquee window + right-aligned `Time:` + context row + wrapped description + pinned credits |
+
+The one genuinely shared piece — the marquee cycle — is already the
+5b1 `marquee.rs` widget (adopted by controls, lyrics **and** jellyfin).
+A shared line template would need args for the data-source resolution,
+the style palette, the prefix, the marquee behavior and the time/context
+rows — a fork, not an arg; forcing it would change visible rendering
+(styles, fallbacks, layout). Decision rule §3: do NOT merge; the
+templates stay pane-local, the cycle is shared.
 
 ## 4. Candidate inventory (measured @ `9fee28e`)
 
