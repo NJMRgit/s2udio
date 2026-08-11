@@ -388,13 +388,16 @@ Status (2026-08-10):
   src/ui +51 vs the Phase-0 table (panes −369: directories −187,
   jellyfin −192, radio +10; core +598) — trait-with-hooks trades raw LOC
   for one-implementation-by-construction, same tradeoff as Phase 1; the
-  args/config end-state is Phase 6. **Behavior deltas to live-check**:
+  args/config end-state is Phase 6. **Behavior deltas to live-check** (delta close-out planned as
+  **Phase 2.1** — outline §5.1, HANDOFF Pending):
   (1) jellyfin/radio items-box titles drop the space before the count
-  (`" Items (3) "` → `" Items(3) "`); (2) jellyfin's Stop cleanup now
-  also clears `ctx.temp_play_id` (queue-hide flag) and directories
-  gains the Stop/Player temp-play cleanup radio/jellyfin already had;
-  (3) radio's `PLAY` result now sets `ctx.temp_play_id` (like its
-  `PASTE_PLAY` arm) so the queue hides the temp entry consistently.
+  (`" Items (3) "` → `" Items(3) "`) — **Phase 2.1 restores parity**;
+  (2) jellyfin's Stop cleanup now also clears `ctx.temp_play_id`
+  (queue-hide flag) and directories gains the Stop/Player temp-play
+  cleanup radio/jellyfin already had — **kept intentionally, to be pinned
+  by Phase 2.1 tests**; (3) radio's `PLAY` result now sets
+  `ctx.temp_play_id` (like its `PASTE_PLAY` arm) so the queue hides the
+  temp entry consistently — **kept intentionally, to be pinned**.
 - **Next: Phase 3** — modal consolidation onto `ListModal`/`InfoListModal`
   + the `menu/select_section` merge.
 
@@ -403,6 +406,17 @@ Toolchain env (container): `export PATH="$HOME/.cargo/bin:$PATH"`
 
 ## Pending
 
+- **Phase 2.1 — delta close-out (planned 2026-08-10, see outline §5.1).**
+  (1) Restore the items-box title spacing the shared `render_items`
+  flattened: `items_title` becomes the pre-padded title (directories
+  `" Library"`, jellyfin/radio `" Items "` / `" Favourites "` etc.), the
+  shared format becomes `"{}({}) "`, plus one render test per pane
+  asserting the exact title. (2) Keep the temp-play unification (Stop
+  cleanup + `ctx.temp_play_id` clearing + directories Stop arm) and pin
+  it: directories Stop-drops the temp entry, jellyfin Stop clears
+  `ctx.temp_play_id`, radio `PLAY` sets `ctx.temp_play_id` — one test
+  each. (3) HANDOFF deltas bullet → resolved state; full suite green,
+  warnings ≤ 3, guardrail unchanged; commit `phase 2.1`.
 - **Round 25 (2026-08-10 user live-check) — host-implemented fixes:
   search tab `a`/`d`/`←`/`→` filter↔results navigation, search filter
   hover, video-queue anchor hardening on removal paths (commit pending).

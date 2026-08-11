@@ -405,6 +405,34 @@ Rough order of business for isodev: **Phase 1 first** (highest leverage,
 smallest blast radius), then 2 and 3 in either order, then 4–6. Phases 1–3
 already remove most of the measured duplication.
 
+### 5.1 Phase 2.1 — delta close-out (planned 2026-08-10)
+
+Phase 2's consolidation changed three observable behaviors vs the
+pre-phase-2 panes; Phase 2.1 closes them so the parity DoD is fully met
+and the remaining changes are deliberate (pinned by tests), not
+incidental:
+
+1. **Items-box title spacing (restore parity).** The shared
+   `render_items` formats the title as `" {}({}) "` (directories style),
+   which drops the space jellyfin/radio had before the count
+   (`" Items (3) "` → `" Items(3) "`). Fix: the `items_title` hook returns
+   the title *as it appears left of `(n)`* — pre-padded — and the shared
+   format becomes `"{}({}) "`; directories returns `" Library"` /
+   `" Downloads"` / `" {name}"`, jellyfin `" Items "` / `" {label} "`,
+   radio the padded region titles. Add one render test per pane asserting
+   the exact box title.
+2. **Temp-play stop/unification (keep + pin).** The shared core clears
+   `ctx.temp_play_id` on the Stop transition everywhere and gives
+   directories the `PlaybackStateChanged`/`Player` Stop cleanup
+   radio/jellyfin already had. These are fixes (jellyfin's two stop arms
+   disagreed, radio's `PLAY` vs `PASTE_PLAY` arms disagreed, directories
+   leaked its temp entry on Stop); keep them and pin with regression
+   tests: directories Stop drops the entry, jellyfin Stop clears
+   `ctx.temp_play_id`, radio `PLAY` result sets `ctx.temp_play_id`.
+3. **Docs + verification.** Update HANDOFF's "behavior deltas" bullet to
+   the resolved state, run `cargo test --release` (1312 + new tests),
+   warnings ≤ 3, guardrail unchanged, commit as `phase 2.1`.
+
 ## 6. Definition of done (applies per phase)
 
 1. `cargo test --release` green (1312 and growing), no new warnings.
