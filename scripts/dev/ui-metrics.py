@@ -63,6 +63,9 @@ THIN_ADAPTERS = {
     "on_tree_double_click", "handle_items_left_click", "on_confirm",
     "on_select_range", "on_close", "move_tree", "move_items",
     "render_tree", "render_items", "render_tips", "cleanup_temp_play",
+    # Phase-6 TreeBrowserCore hook: the panes' tree-browser layout args
+    # (thin accessors over the pane's configured TreeBrowserArgs).
+    "tree_args",
 }
 
 PANE_FILES = [
