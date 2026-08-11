@@ -13,7 +13,7 @@ use super::Pane;
 use crate::{
     MpdQueryResult,
     config::{
-        tabs::{PaneType, TreeBrowserArgs},
+        tabs::{PaneType, PaneTypeDiscriminants, TreeBrowserArgs},
     },
     ctx::Ctx,
     mpd::{
@@ -52,12 +52,12 @@ const PLAY_FILE: &str = "dir_play_file";
 ///
 /// Shared by the MPD (directories), Playlists and Jellyfin tabs: all
 /// three browser panes split their width with this helper.
+/// Test-only parity pin for the round-7/8 tree-width behavior (the
+/// production callers read the args directly via
+/// `TreeBrowserArgs::tree_width`).
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn tree_width(total: u16) -> u16 {
-    if total <= 120 {
-        return 0;
-    }
-    let by_percent = (u32::from(total) * 30 / 100) as u16;
-    by_percent.max(50).min(total - 1)
+    TreeBrowserArgs::default().tree_width(total)
 }
 
 /// Split a full MPD path ("A/B/C") into a dirstack `Path`.
@@ -323,6 +323,9 @@ pub struct DirectoriesPane {
     marked: MarkState,
     /// Path of the node whose children are shown (None = the Library root).
     selected: Option<Path>,
+    /// Tree-browser layout args from the config (defaults = today's
+    /// constants: 50-col minimum tree, hidden <= 120, info cap 15).
+    tree_args: TreeBrowserArgs,
     /// Children lists keyed by path, so backing out never refetches.
     loaded: HashMap<Path, Vec<DirOrSong>>,
     /// Paths with a fetch in flight (avoid duplicate requests).
@@ -334,7 +337,7 @@ pub struct DirectoriesPane {
 }
 
 impl DirectoriesPane {
-    pub fn new(_ctx: &Ctx) -> Self {
+    pub fn new(ctx: &Ctx) -> Self {
         Self {
             tree: DirTree::default(),
             tree_state: ListState::default(),
@@ -344,6 +347,7 @@ impl DirectoriesPane {
             items_inner: Rect::default(),
             marked: MarkState::default(),
             selected: None,
+            tree_args: ctx.config.tree_browser_args(PaneTypeDiscriminants::Directories),
             loaded: HashMap::new(),
             pending: HashSet::new(),
             temp_play_id: None,
@@ -1063,7 +1067,9 @@ impl TreeBrowserCore for DirectoriesPane {
     /// lengths are computed so the rows always fill the area exactly.
     fn layout_vertical(&self, right: Rect) -> (Rect, Rect, Rect) {
         let tips_h = 3;
-        let info_h = (right.height.saturating_sub(tips_h) * 2 / 3).min(15);
+        let info_h = self
+            .tree_args
+            .info_box_height(right.height.saturating_sub(tips_h) * 2 / 3);
         let files_h = right.height.saturating_sub(tips_h + info_h);
         let [files_area, tips_area, info_area] = Layout::vertical([
             Constraint::Length(files_h),
@@ -1075,6 +1081,12 @@ impl TreeBrowserCore for DirectoriesPane {
     }
 
     // ── defaulted hook overrides ───────────────────────────────────────
+
+    /// The configured tree-browser args drive the shared `split_tree`
+    /// (tree min width / hide threshold).
+    fn tree_args(&self) -> TreeBrowserArgs {
+        self.tree_args.clone()
+    }
 
     /// Keep the tree highlight on the right-pane cursor: the highlighted
     /// item's row in the tree when it has one (a folder), otherwise the
@@ -1994,6 +2006,28 @@ mod tests {
             pane.tree_inner
         );
         assert!(pane.items_inner.x >= pane.tree_inner.width, "right pane starts after the tree");
+    }
+
+    /// The tree-browser args drive the shared layout hooks: a non-default
+    /// `tree_min_width` widens the tree (60 cols at 160 vs the 50
+    /// default) and `info_box_cap: None` removes the 15-row info cap.
+    #[test]
+    fn tree_args_change_the_tree_width_and_info_cap() {
+        let mut ctx = test_ctx();
+        let mut pane = DirectoriesPane::new(&ctx);
+        pane.tree_args = TreeBrowserArgs {
+            tree_min_width: 60,
+            info_box_cap: None,
+            ..TreeBrowserArgs::default()
+        };
+
+        let (tree, _right) = pane.split_tree(Rect::new(0, 0, 160, 30));
+        assert_eq!(tree.width, 60, "tree_min_width: 60 widens the tree at 160 cols");
+        let (tree, _right) = pane.split_tree(Rect::new(0, 0, 100, 30));
+        assert_eq!(tree.width, 0, "the default hide threshold still hides at 100 cols");
+
+        let (_items, _tips, info) = pane.layout_vertical(Rect::new(0, 0, 60, 40));
+        assert_eq!(info.height, 24, "info_box_cap: None keeps the raw 2/3 share (40-3)*2/3");
     }
 
     /// Enter opens the right-click context menu on a folder AND on a song
