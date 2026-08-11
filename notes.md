@@ -3,9 +3,12 @@
 ## REWRITE MERGED to main (2026-08-11) — host push
 
 The UI-reuse rewrite (phases 0-7) is now **the production `master`**
-(`NJMRgit/s2udio` @ `735f45e`, clean buildable subset). The full tree
-lives on this private repo's `rewrite` branch @ `11aa5b0` (48 commits,
-phase-0 baseline `24bd883` .. HEAD). Prior master release preserved at
+(`NJMRgit/s2udio` @ `bcf742c`, clean buildable subset — a merge commit
+carrying both the old release `a5cd24d` and the rewrite lineage, full
+history preserved). The full tree lives on this private repo's `working`
+branch @ `05a3e94` (rewrite phases 0-7 on top of the round-23..27
+lineage); the separate `rewrite` branch was folded into `working` and
+deleted on 2026-08-11. Prior master release preserved at
 tag `master-20260811-pre-rewrite` (`a5cd24d`).
 
 Host final assessment (2026-08-11): gate reproduced exactly — **1337/1337
