@@ -101,7 +101,11 @@ impl InfoListModal {
                     (0..column_areas.len())
                         .map(|col| {
                             Cell::from(Text::from(
-                                wrapped.get(line).and_then(|r| r.get(col)).cloned().unwrap_or_default(),
+                                wrapped
+                                    .get(line)
+                                    .and_then(|r| r.get(col))
+                                    .cloned()
+                                    .unwrap_or_default(),
                             ))
                         })
                         .collect::<Vec<_>>(),
