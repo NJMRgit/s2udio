@@ -8,7 +8,7 @@ description: >
   audit of shared vs bespoke UI code, the master-module-with-args target
   architecture, and the phased consolidation plan.
 status: "active"
-phase_status: "0: complete (2026-08-10); 1: complete (2026-08-10); 2: complete (2026-08-10); 3: next"
+phase_status: "0: complete (2026-08-10); 1: complete (2026-08-10); 2: complete (2026-08-10); 2.1: complete (2026-08-10); 3: next"
 updated: "2026-08-10"
 source_files:
   - src/ui/browser.rs
@@ -185,9 +185,9 @@ ref). Key numbers and audited files:
 | `src/ui/browser.rs` | 1041 → 232 |
 | `src/ui/panes/mod.rs` | 3100 → 3100 |
 | `src/ui/panes/queue.rs` | 4686 → 4478 |
-| `src/ui/panes/directories.rs` | 2259 → 2072 |
-| `src/ui/panes/jellyfin.rs` | 2845 → 2653 |
-| `src/ui/panes/radio.rs` | 2356 → 2366 |
+| `src/ui/panes/directories.rs` | 2259 → 2121 |
+| `src/ui/panes/jellyfin.rs` | 2845 → 2703 |
+| `src/ui/panes/radio.rs` | 2356 → 2431 |
 | `src/ui/panes/search/mod.rs` | 2039 → 1803 |
 | `src/ui/panes/playlists.rs` | 1716 → 1755 |
 | `src/ui/panes/tag_browser.rs` | 588 → 628 |
@@ -195,9 +195,9 @@ ref). Key numbers and audited files:
 | `src/ui/panes/controls.rs` | 1516 → 1516 |
 | `src/ui/panes/lyrics.rs` | 2543 → 2543 |
 | `src/ui/song_list.rs` | — → 955 (Phase 1 core) |
-| `src/ui/tree_browser.rs` | — → 598 (Phase 2 core) |
-| **src/ui total** | **56,704 → 56,755** |
-| **tree total .rs** | **95,811 → 95,862** |
+| `src/ui/tree_browser.rs` | — → 602 (Phase 2 core; +4 Phase 2.1) |
+| **src/ui total** | **56,704 → 56,923** |
+| **tree total .rs** | **95,811 → 96,030** |
 
 Similarity guardrail baseline: **83 same-named function pairs with ratio > 0.5**
 across `src/ui` (full list: `python3 scripts/dev/ui-metrics.py --pairs`).
@@ -215,7 +215,10 @@ shells (`render`/`handle_action`/`handle_mouse_event`/`on_event` routing to
 the core — the same category the baseline already carried, e.g. `handle_action`
 mod.rs↔lyrics 1.00). Phase 2 targets the heavy duplicated pairs
 (`render_tree`, `render_items`, `render_tips`, `move_*`, `populate_items`, …)
-from §2.2 — all deleted from the panes.
+from §2.2 — all deleted from the panes. After Phase 2.1 the count is
+**unchanged at 60** (identical pair set; the `items_title`
+directories↔radio pair dropped 0.61 → 0.37 — the pre-padded titles are
+shorter/less alike now).
 
 ## 3. Target architecture — master modules + args
 
@@ -387,7 +390,8 @@ now-playing line templates — one implementation, args for style/content.
 ## 5. Phased plan
 
 Each phase lands on `rewrite` as its own commit(s), keeps
-`cargo test --release` green (current suite: **1312 tests** (baseline at commit `24bd883`)), and ends
+`cargo test --release` green (current suite: **1318 tests** — 1312 at the
+`24bd883` baseline, +6 from Phase 2.1), and ends
 with a behavior-parity live check of the affected tabs.
 
 | Phase | Work | Primary targets | Exit criteria |
@@ -405,7 +409,7 @@ Rough order of business for isodev: **Phase 1 first** (highest leverage,
 smallest blast radius), then 2 and 3 in either order, then 4–6. Phases 1–3
 already remove most of the measured duplication.
 
-### 5.1 Phase 2.1 — delta close-out (planned 2026-08-10)
+### 5.1 Phase 2.1 — delta close-out ✅ (2026-08-10)
 
 Phase 2's consolidation changed three observable behaviors vs the
 pre-phase-2 panes; Phase 2.1 closes them so the parity DoD is fully met
@@ -432,6 +436,22 @@ incidental:
 3. **Docs + verification.** Update HANDOFF's "behavior deltas" bullet to
    the resolved state, run `cargo test --release` (1312 + new tests),
    warnings ≤ 3, guardrail unchanged, commit as `phase 2.1`.
+
+**Implemented (2026-08-10)**: `render_items` now formats
+`"{}({}) "` and each pane's `items_title` returns the pre-padded title —
+directories `" Library"` / `" Downloads"` / `" {name}"`, jellyfin
+`" Items "` / `" {label} "`, radio `" Favourites "` / `" Local — closest "`
+/ `" {name} "` / `" {state} "` / `" Stations "`. The pre-Phase-2 titles are
+restored exactly (`" Library(3) "`, `" Items (3) "`, `" Stations (3) "`).
+**1318/1318** green (+6: one render title test per pane — the
+directories/jellyfin/radio items-box titles — plus three temp-play pins:
+directories Stop drops the temp entry, jellyfin Stop clears
+`ctx.temp_play_id`, radio `PLAY` sets `ctx.temp_play_id`); warnings 3
+baseline unchanged; similarity guardrail unchanged (60 excl-thin pairs,
+identical pair set vs the Phase-2 close-out; the `items_title`
+directories↔radio pair dropped 0.61 → 0.37, now well under the
+threshold). Net LOC: **src/ui +168** (panes +155 tests/comments,
+tree_browser +4), tree total .rs **96,030** — see §2.4 table.
 
 ## 6. Definition of done (applies per phase)
 

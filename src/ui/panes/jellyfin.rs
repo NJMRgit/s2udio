@@ -1639,10 +1639,13 @@ impl TreeBrowserCore for JellyfinPane {
     }
 
     fn items_title(&self) -> String {
+        // Pre-padded on both sides (as it appears left of the `(n)`
+        // count): the shared format appends "(n)" directly, restoring the
+        // pre-Phase-2 `" Items (3) "` spacing (Phase 2.1 parity).
         self.selected
             .as_ref()
-            .map(|kind| kind.label())
-            .unwrap_or_else(|| "Items".to_owned())
+            .map(|kind| format!(" {} ", kind.label()))
+            .unwrap_or_else(|| " Items ".to_owned())
     }
 
     fn tips_lines(&self, ctx: &Ctx) -> Vec<Line<'static>> {
@@ -2649,5 +2652,52 @@ mod tests {
             pane.tree_area
         );
         assert!(pane.items_area.x >= pane.tree_area.width, "items pane starts after the tree");
+    }
+
+    /// The items-box title keeps the pre-Phase-2 jellyfin spacing: padded
+    /// on both sides with the count after a space — `" Items (3) "` (Phase
+    /// 2.1 parity close-out; the shared render flattened it to
+    /// `" Items(3) "`).
+    #[test]
+    fn items_box_title_keeps_the_jellyfin_spacing() {
+        let (app_tx, _app_rx) = crossbeam::channel::unbounded();
+        let ctx = crate::tests::fixtures::ctx(
+            (app_tx, _app_rx),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+        );
+        let mut pane = JellyfinPane::new(&ctx);
+        pane.items = vec![
+            crate::jellyfin::JfItem { id: "i1".to_owned(), name: "One".to_owned(), kind: "Episode".to_owned(), ..Default::default() },
+            crate::jellyfin::JfItem { id: "i2".to_owned(), name: "Two".to_owned(), kind: "Episode".to_owned(), ..Default::default() },
+            crate::jellyfin::JfItem { id: "i3".to_owned(), name: "Three".to_owned(), kind: "Episode".to_owned(), ..Default::default() },
+        ];
+        let text = render_text(&mut pane, &ctx);
+        assert!(
+            text.contains(" Items (3) "),
+            "the items-box title is ` Items (3) `, not ` Items(3) `: {text}"
+        );
+    }
+
+    /// The temp-play entry is cleared on the stop transition everywhere —
+    /// pins the unified Stop cleanup (before Phase 2, jellyfin's two stop
+    /// arms disagreed on whether `ctx.temp_play_id` was cleared).
+    #[test]
+    fn stop_clears_the_temp_play_id() {
+        let (app_tx, _app_rx) = crossbeam::channel::unbounded();
+        let mut ctx = crate::tests::fixtures::ctx(
+            (app_tx, _app_rx),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+        );
+        let mut pane = JellyfinPane::new(&ctx);
+        pane.temp_play_id = Some(7);
+        ctx.temp_play_id.set(Some(7));
+        ctx.status.state = crate::mpd::commands::State::Stop;
+
+        let mut event = crate::ui::UiEvent::PlaybackStateChanged;
+        pane.on_event(&mut event, true, &ctx).unwrap();
+        assert_eq!(pane.temp_play_id, None);
+        assert_eq!(ctx.temp_play_id.get(), None, "the queue pane reads it via Ctx");
     }
 }
