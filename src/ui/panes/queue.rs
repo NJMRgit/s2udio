@@ -7,10 +7,11 @@ use ratatui::{
     Frame,
     layout::Flex,
     prelude::{Constraint, Layout, Rect},
-    style::{Modifier, Style},
+    style::Style,
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState, Row, StatefulWidget, TableState},
+    widgets::{Block, Borders, ListState, Row, TableState},
 };
+
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
@@ -23,7 +24,7 @@ use crate::{
             DirectoriesActions,
             GlobalAction,
             QueueActions,
-            actions::{AddKind, AutoplayKind, DeleteKind, RateKind, SaveKind},
+            actions::{AddKind, AutoplayKind},
         },
         theme::{
             AlbumSeparator,
@@ -31,7 +32,7 @@ use crate::{
         },
     },
     core::command::{create_env, run_external},
-    ctx::{Ctx, LIKE_STICKER, RATING_STICKER},
+    ctx::Ctx,
     mpd::{
         QueuePosition,
         client::Client,
@@ -47,22 +48,15 @@ use crate::{
         song_ext::SongsExt,
     },
     ui::{
-        UiAppEvent,
         UiEvent,
         dirstack::{Dir, MarkState},
+        song_list::SongListCore,
         input::InputResultEvent,
         modals::{
             confirm_modal::{Action, ConfirmModal},
             info_list_modal::InfoListModal,
-            input_modal::InputModal,
             menu::{
-                add_to_playlist_or_show_modal,
                 create_add_modal,
-                create_delete_modal,
-                create_rating_modal,
-                create_save_modal,
-                delete_from_playlist_or_show_confirmation,
-                modal::MenuModal,
             },
             select_modal::SelectModal,
         },
@@ -70,6 +64,10 @@ use crate::{
         widgets::virtualized_table::VirtualizedTable,
     },
 };
+
+mod context_menus;
+mod video;
+mod chapters;
 
 #[derive(Debug)]
 pub struct QueuePane {
@@ -266,26 +264,6 @@ impl QueuePane {
         Self::set_tab(self, ctx, next);
     }
 
-    /// The list the Queue tab should show while a video plays in mpv: its
-    /// Chapters list when the video has markers (and the auto-chapters
-    /// setting allows it), else the mpv playlist (Video list). Called when
-    /// a video session starts (launch, reattach) and when the video's
-    /// chapters arrive, so the tab never keeps showing the stale audio list
-    /// after a video was added. A no-op while the video is not the active
-    /// UI source (nothing plays in mpv, or MPD playback has taken over and
-    /// paused it — the Queue list then belongs to the music).
-    pub(crate) fn follow_playing_video(&mut self, ctx: &Ctx) {
-        if !crate::core::mpv::mpv_is_ui_source(ctx) {
-            return;
-        }
-        let mode = if ctx.config.ui.auto_show_chapters && Self::chapters_available(ctx) {
-            crate::ctx::QueueTabMode::Chapters
-        } else {
-            crate::ctx::QueueTabMode::Video
-        };
-        Self::set_tab(self, ctx, mode);
-    }
-
     pub fn new(ctx: &Ctx) -> Self {
         let (column_widths, column_formats) = Self::init(ctx);
 
@@ -348,325 +326,6 @@ impl QueuePane {
             Box::new(self.queue.marked().iter().map(|idx| (*idx, &self.queue.items[*idx])))
         }
     }
-
-    fn open_context_menu(&mut self, ctx: &Ctx) {
-        // The menu acts on the list currently shown: in Video mode it
-        // manages the video queue (never the MPD audio queue), and in Audio
-        // mode it manages the MPD queue.
-        if ctx.queue_tab.get() == crate::ctx::QueueTabMode::Video {
-            self.open_video_context_menu(ctx);
-            return;
-        }
-        self.open_audio_context_menu(ctx);
-    }
-
-    /// Video-mode context menu: play / remove / clear the **video queue**
-    /// (the persistent playlist). While a Jellyfin item plays, the list is
-    /// the live mpv session's own playlist — Remove and Clear are hidden
-    /// (live mpv state).
-    fn open_video_context_menu(&mut self, ctx: &Ctx) {
-        let jellyfin = crate::core::mpv::session_playlist_shown(ctx);
-        let selected_idx = self.video_state.selected();
-        let playlist: Vec<crate::core::mpv::MpvPlaylistEntry> = if jellyfin {
-            ctx.mpv.playlist.borrow().clone()
-        } else {
-            ctx.video_playlist.borrow().clone()
-        };
-        let title = selected_idx
-            .and_then(|i| playlist.get(i))
-            .map(|e| e.title.clone())
-            .unwrap_or_else(|| " Video ".to_owned());
-        // A stream entry (resolved YouTube/Soundcloud link): offer Download,
-        // which saves it into s2udio-downloads and replaces the entry with
-        // the file.
-        let download_stream = selected_idx
-            .and_then(|i| playlist.get(i))
-            .and_then(|entry| {
-                let info = ctx.yt_info.borrow();
-                info.get(&entry.url).cloned().or_else(|| {
-                    info.values().find(|e| e.original_url == entry.url).cloned()
-                })
-            })
-            .map(|info| (info, selected_idx.unwrap_or(0)));
-
-        let menu = MenuModal::new(ctx)
-            .width(60)
-            .title(format!(" {title} "))
-            .list_section(ctx, |section| {
-                let mut section = section;
-                if let Some(play_idx) = selected_idx {
-                    section = section.item("Play from here", move |ctx| {
-                        let entries: Vec<crate::core::mpv::MpvPlaylistEntry> = if jellyfin {
-                            ctx.mpv.playlist.borrow().iter().skip(play_idx).cloned().collect()
-                        } else {
-                            ctx.video_playlist.borrow().iter().skip(play_idx).cloned().collect()
-                        };
-                        if !entries.is_empty() {
-                            crate::core::mpv::play_video_entries(ctx, entries);
-                        }
-                        Ok(())
-                    });
-                }
-                if let Some((info, index)) = download_stream {
-                    section = section.item("Download", move |ctx| {
-                        crate::ui::modals::paste::open_stream_download_menu(
-                            ctx,
-                            &info,
-                            &crate::shared::ytdlp::ReplaceAction::VideoPlaylist { index },
-                        );
-                        Ok(())
-                    });
-                }
-                if !jellyfin {
-                    // Remove deletes every marked entry (like the audio
-                    // queue list), or just the highlighted one.
-                    let marked_indices: Vec<usize> = self.video_marked.iter().collect();
-                    let remove_uses_marks = !marked_indices.is_empty();
-                    section = section.item("Remove", move |ctx| {
-                        let remove: Vec<usize> = if !marked_indices.is_empty() {
-                            marked_indices.clone()
-                        } else {
-                            selected_idx.into_iter().collect()
-                        };
-                        {
-                            let mut playlist = ctx.video_playlist.borrow_mut();
-                            for idx in remove.iter().rev() {
-                                if *idx < playlist.len() {
-                                    playlist.remove(*idx);
-                                }
-                            }
-                        }
-                        crate::ui::modals::paste::save_video_playlist(ctx);
-                        if remove_uses_marks {
-                            // The marked indices no longer exist after the
-                            // removals; drop the selection.
-                            ctx.app_event_sender.send(crate::AppEvent::UiEvent(
-                                UiAppEvent::ClearQueueMarked,
-                            ))?;
-                        }
-                        ctx.render()?;
-                        Ok(())
-                    });
-                    section = section.item("Clear video queue", move |ctx| {
-                        modal!(
-                            ctx,
-                            ConfirmModal::builder()
-                                .ctx(ctx)
-                                .message(vec![
-                                    "Are you sure you want to clear the video queue?",
-                                    "This cannot be undone (playing video keeps playing).",
-                                ])
-                                .action(crate::ui::modals::confirm_modal::Action::Single {
-                                    on_confirm: Box::new(|ctx| {
-                                        ctx.video_playlist.borrow_mut().clear();
-                                        crate::ui::modals::paste::save_video_playlist(ctx);
-                                        ctx.render()?;
-                                        Ok(())
-                                    }),
-                                    confirm_label: Some("Clear"),
-                                    cancel_label: None,
-                                })
-                                .size((45, 6))
-                                .build()
-                        );
-                        Ok(())
-                    });
-                    // The persistent video queue becomes a stored MPD
-                    // playlist (video-only by construction). Jellyfin
-                    // sessions are not eligible: their list is the live mpv
-                    // playlist, and Jellyfin video already has its own
-                    // queue handling.
-                    section = section.item("Create video playlist", move |ctx| {
-                        let entries: Vec<crate::core::mpv::MpvPlaylistEntry> =
-                            ctx.video_playlist.borrow().clone();
-                        if entries.is_empty() {
-                            status_warn!("The video queue is empty");
-                            return Ok(());
-                        }
-                        modal!(
-                            ctx,
-                            InputModal::new(ctx)
-                                .title("Create video playlist")
-                                .confirm_label("Save")
-                                .input_label("Playlist name:")
-                                .on_confirm(move |ctx, value| {
-                                    let value = value.to_owned();
-                                    let uris: Vec<String> =
-                                        entries.iter().map(|e| e.url.clone()).collect();
-                                    ctx.command(move |client| {
-                                        client.create_playlist(&value, uris)?;
-                                        Ok(())
-                                    });
-                                    Ok(())
-                                })
-                        );
-                        Ok(())
-                    });
-                }
-                Some(section)
-            })
-            .list_section(ctx, |section| Some(section.item("Cancel", |_ctx| Ok(()))))
-            .build();
-
-        modal!(ctx, menu);
-    }
-
-    fn open_audio_context_menu(&mut self, ctx: &Ctx) {
-        let selected_song = self.queue.selected().cloned();
-        let selected_song_id = selected_song.as_ref().map(|s| s.id);
-        // A resolved YouTube-style stream row (the queue entry holds the
-        // resolved stream URL, or the original link): offer Download, which
-        // saves it into s2udio-downloads and replaces the row with the file.
-        let download_ctx = selected_song.as_ref().and_then(|song| {
-            let info = ctx.yt_info.borrow();
-            info.get(&song.file).cloned().or_else(|| {
-                info.values().find(|e| e.original_url == song.file).cloned()
-            })
-        }).map(|info| (info, selected_song_id.unwrap_or(u32::MAX)));
-        // Marked ranges are deleted together when the menu's Remove is
-        // picked (highest range first, so the indices stay valid).
-        let marked_ranges: Vec<std::ops::RangeInclusive<usize>> =
-            self.queue.marked().ranges().collect();
-
-        let modal = MenuModal::new(ctx)
-            .list_section(ctx, |mut section| {
-                let play_song = selected_song.clone();
-                section.add_item("Play", move |ctx| {
-                    if let Some(song) = play_song.as_ref() {
-                        play_queue_song(song, ctx);
-                    }
-                    Ok(())
-                });
-                section.add_item("Show info", move |ctx| {
-                    if let Some(song) = selected_song {
-                        modal!(
-                            ctx,
-                            InfoListModal::builder()
-                                .items(&song)
-                                .title("Song info")
-                                .column_widths(&[30, 70])
-                                .build()
-                        );
-                    }
-                    Ok(())
-                });
-                if let Some((info, song_id)) = download_ctx {
-                    section.add_item("Download", move |ctx| {
-                        crate::ui::modals::paste::open_stream_download_menu(
-                            ctx,
-                            &info,
-                            &crate::shared::ytdlp::ReplaceAction::Queue { song_id },
-                        );
-                        Ok(())
-                    });
-                }
-                Some(section)
-            })
-            .list_section(ctx, |mut section| {
-                // The visible queue rows only: hidden entries (the temporary
-                // "play without adding to queue" item, radio/stream rows)
-                // never leak into a playlist.
-                let items = self.queue.items.iter().map(|song| song.file.clone()).collect_vec();
-                let items_add = items.clone();
-                section.add_item("Add queue to playlist", move |ctx| {
-                    // The radio favourites playlist is Radio-tab-owned: it
-                    // never appears as an add target.
-                    let radio_playlist = ctx.config.radio.playlist.clone();
-                    let playlists = ctx.query_sync(move |client| {
-                        Ok(client
-                            .picker_playlists(&radio_playlist)?
-                            .into_iter()
-                            .map(|p| p.name)
-                            .collect_vec())
-                    })?;
-                    let items = items_add.clone();
-
-                    modal!(
-                        ctx,
-                        SelectModal::builder()
-                            .ctx(ctx)
-                            .options(playlists)
-                            .confirm_label("Add")
-                            .title("Select a playlist")
-                            .on_confirm(move |ctx, selected, _idx| {
-                                let items = items.clone();
-                                ctx.command(move |client| {
-                                    client.add_to_playlist_multiple(&selected, items)?;
-                                    Ok(())
-                                });
-                                Ok(())
-                            })
-                            .build()
-                    );
-                    Ok(())
-                });
-                section.add_item("Create audio playlist", move |ctx| {
-                    if items.is_empty() {
-                        status_warn!("No songs in the queue to save");
-                        return Ok(());
-                    }
-                    let items = items.clone();
-                    modal!(
-                        ctx,
-                        InputModal::new(ctx)
-                            .title("Create audio playlist")
-                            .confirm_label("Save")
-                            .input_label("Playlist name:")
-                            .on_confirm(move |ctx, value| {
-                                let value = value.to_owned();
-                                let items = items.clone();
-                                ctx.command(move |client| {
-                                    client.create_playlist(&value, items)?;
-                                    Ok(())
-                                });
-                                Ok(())
-                            })
-                    );
-                    Ok(())
-                });
-
-                Some(section)
-            })
-            .list_section(ctx, |section| {
-                let section = section
-                    .item("Remove", move |ctx| {
-                        if !marked_ranges.is_empty() {
-                            for range in marked_ranges.iter().rev() {
-                                let range = range.clone();
-                                ctx.command(move |client| {
-                                    client.delete_from_queue(range.into())?;
-                                    Ok(())
-                                });
-                            }
-                            // The marked indices no longer exist after the
-                            // deletions; drop the selection.
-                            ctx.app_event_sender
-                                .send(crate::AppEvent::UiEvent(UiAppEvent::ClearQueueMarked))?;
-                        } else if let Some(id) = selected_song_id {
-                            ctx.command(move |client| {
-                                client.delete_id(id)?;
-                                Ok(())
-                            });
-                        }
-                        Ok(())
-                    })
-                    .item("Clear queue", |ctx| {
-                        ctx.command(|client| {
-                            client.clear()?;
-                            Ok(())
-                        });
-                        Ok(())
-                    });
-                Some(section)
-            })
-            .list_section(ctx, |section| {
-                let section = section.item("Cancel", |_ctx| Ok(()));
-                Some(section)
-            })
-            .build();
-
-        modal!(ctx, modal);
-    }
 }
 
 impl QueuePane {
@@ -706,370 +365,42 @@ impl QueuePane {
         let Some(border_y) = border_y else { return };
         let y = border_y.saturating_sub(1);
 
-        let base = ctx
-            .config
-            .theme
-            .text_color
-            .map_or_else(Style::default, |c| Style::default().fg(c));
-        let dim = base.add_modifier(Modifier::DIM);
         let active = ctx.queue_tab.get();
-        let chapters_on = active == crate::ctx::QueueTabMode::Chapters;
         let chapters_visible = Self::chapters_available(ctx);
 
+        // The `SubTabBar` widget draws the segments and returns the click
+        // areas (one per visible segment, in order; the missing Chapters
+        // slot stays a zero rect so clicks on it do nothing).
+        let mut segments = vec![
+            crate::ui::widgets::sub_tab_bar::Segment {
+                label: "Audio",
+                active: active == crate::ctx::QueueTabMode::Audio,
+            },
+            crate::ui::widgets::sub_tab_bar::Segment {
+                label: "Video",
+                active: active == crate::ctx::QueueTabMode::Video,
+            },
+        ];
+        if chapters_visible {
+            segments.push(crate::ui::widgets::sub_tab_bar::Segment {
+                label: "Chapters",
+                active: active == crate::ctx::QueueTabMode::Chapters,
+            });
+        }
         // One cell right of the box corner (the leading space), matching
         // ` ● Audio ○ Video ○ Chapters` on its own row above the box.
-        let mut x = corner_x + 1;
         let right = block_area.right().saturating_sub(1);
-        let mouse = ctx.mouse_pos();
-        let mut seg = |x: &mut u16,
-                       areas: &mut [Rect; 3],
-                       idx: usize,
-                       label: String,
-                       on: bool| {
-            let w = (label.width() as u16).min(right.saturating_sub(*x));
-            let area = Rect { x: *x, y, width: w, height: 1 };
-            let base_style = if on { base.add_modifier(Modifier::BOLD) } else { dim };
-            // Hovering a toggle lightens it (clickable text).
-            let style =
-                if mouse.is_some_and(|p| area.contains(p)) {
-                    crate::config::hover_style(base_style)
-                } else {
-                    base_style
-                };
-            frame.render_widget(Line::styled(label, style), area);
-            areas[idx] = area;
-            *x += w;
-        };
-        seg(
-            &mut x,
-            &mut self.toggle_areas,
-            0,
-            if active == crate::ctx::QueueTabMode::Audio {
-                " ● Audio ".to_owned()
-            } else {
-                " ⭘ Audio ".to_owned()
-            },
-            active == crate::ctx::QueueTabMode::Audio,
+        let bar = crate::ui::widgets::sub_tab_bar::SubTabBar::new(
+            &segments,
+            corner_x + 1,
+            y,
+            right,
         );
-        seg(
-            &mut x,
-            &mut self.toggle_areas,
-            1,
-            if active == crate::ctx::QueueTabMode::Video {
-                " ● Video ".to_owned()
-            } else {
-                " ⭘ Video ".to_owned()
-            },
-            active == crate::ctx::QueueTabMode::Video,
-        );
-        if chapters_visible {
-            seg(
-                &mut x,
-                &mut self.toggle_areas,
-                2,
-                if chapters_on { " ● Chapters " } else { " ⭘ Chapters " }.to_owned(),
-                chapters_on,
-            );
+        for (idx, area) in bar.render(frame, ctx).into_iter().enumerate() {
+            self.toggle_areas[idx] = area;
         }
     }
 
-    /// The chapter list (Chapter | start | duration), replacing the song
-    /// table in Chapters mode. The values are laid out in the same columns as
-    /// the QueueHeaderPane's `Chapter | Time | Duration` labels, so they line
-    /// up underneath them. A click highlights a chapter; clicking the
-    /// highlighted chapter again seeks to it (MPD or mpv).
-    fn render_chapters(&mut self, frame: &mut Frame, ctx: &Ctx) -> Result<()> {
-        let chapters = Self::current_chapters(ctx);
-        let fmt = &ctx.config.duration_format;
-        let position = if crate::core::mpv::mpv_is_ui_source(ctx) {
-            ctx.mpv.position
-        } else {
-            ctx.status.elapsed.as_secs_f64()
-        };
-        let current_idx = chapters
-            .iter()
-            .rposition(|c| position >= c.start_secs)
-            .unwrap_or(0);
-        self.chapters_items_len = chapters.len();
-
-        // The chapters table uses its own columns (matching the chapters
-        // header): Chapter (flexible) | Time (centered) | Duration
-        // (right-aligned at the right edge, like the queue's Duration column).
-        let area = self.areas[Areas::Table];
-        let hover_idx = crate::ui::panes::hovered_item(
-            ctx.mouse_pos(),
-            area,
-            self.chapters_state.offset(),
-            chapters.len(),
-            1,
-        );
-        let widths = Layout::horizontal([
-            Constraint::Min(0),
-            Constraint::Length(CHAPTER_TIME_COL),
-            Constraint::Length(CHAPTER_DURATION_COL),
-        ])
-        .flex(Flex::Start)
-        .spacing(1)
-        .split(area);
-        // The marker prefix (❯ / two spaces) lives inside the chapter column.
-        let title_field = (widths[0].width as usize).saturating_sub(2);
-        let time_w = widths[1].width as usize;
-        let duration_w = widths[2].width as usize;
-
-        let items: Vec<ListItem> = chapters
-            .iter()
-            .enumerate()
-            .map(|(idx, chapter)| {
-                let is_current = idx == current_idx;
-                let style = if hover_idx == Some(idx) {
-                    ctx.config.theme.hovered_item_style
-                } else if is_current {
-                    ctx.config.theme.current_item_style
-                } else {
-                    ctx.config.as_list_text_style()
-                };
-                let start = fmt.format(chapter.start_secs as u64);
-                let duration = fmt.format(chapter.duration() as u64);
-                let prefix = if is_current { "❯ " } else { "  " };
-                let mut title = chapter.title.clone();
-                // Width-safe truncation: keep graphemes until the title
-                // column is full.
-                truncate_to_width(&mut title, title_field);
-                // Pad by display width (not char count), so wide glyphs
-                // (CJK etc.) can never push the time/duration columns right.
-                let title_pad = title_field.saturating_sub(title.width());
-                // Time is centered in its column; the duration is
-                // right-aligned at the table's right edge.
-                let pad_left = time_w.saturating_sub(start.width()) / 2;
-                let pad_right = time_w.saturating_sub(start.width() + pad_left);
-                let dur_pad = duration_w.saturating_sub(duration.width());
-                ListItem::new(Line::styled(
-                    format!(
-                        "{prefix}{title}{} {}{start}{} {}{duration}",
-                        " ".repeat(title_pad),
-                        " ".repeat(pad_left),
-                        " ".repeat(pad_right),
-                        " ".repeat(dur_pad),
-                    ),
-                    style,
-                ))
-            })
-            .collect();
-
-        // The click-selected chapter (first click highlights it, the second
-        // seeks) gets the accent highlight.
-        let list = List::new(items).highlight_style(if hover_idx == self.chapters_state.selected() {
-            ctx.config.theme.hovered_item_style
-        } else {
-            ctx.config.theme.highlighted_item_style
-        });
-        StatefulWidget::render(list, area, frame.buffer_mut(), &mut self.chapters_state);
-
-        if let Some(scrollbar) = ctx.config.as_styled_scrollbar()
-            && self.areas[Areas::Scrollbar].width > 0
-        {
-            let max = self.chapters_items_len.saturating_sub(self.areas[Areas::Table].height as usize);
-            let position = self.chapters_state.offset().min(max);
-            // content_length = max + 1 so the bottom position is reachable
-            // (ratatui clamps positions to content_length - 1); the viewport
-            // length keeps the thumb proportional to the visible rows.
-            StatefulWidget::render(
-                scrollbar,
-                self.areas[Areas::Scrollbar],
-                frame.buffer_mut(),
-                &mut ratatui::widgets::ScrollbarState::new(max + 1)
-                    .position(position)
-                    .viewport_content_length(self.areas[Areas::Table].height as usize),
-            );
-        }
-        Ok(())
-    }
-
-    /// Seek to a chapter start (MPD or the mpv session): the source whose
-    /// chapters the list is showing.
-    fn seek_to(&self, seconds: f64, ctx: &Ctx) {
-        if crate::core::mpv::mpv_is_ui_source(ctx)
-            && let Some(socket) = ctx.mpv.socket.clone()
-        {
-            crate::core::mpv::mpv_seek(&socket, seconds);
-            return;
-        }
-        ctx.command(move |client| {
-            use crate::mpd::mpd_client::ValueChange;
-            let _ = client.seek_current(ValueChange::Set(seconds.max(0.0) as u32));
-            Ok(())
-        });
-    }
-
-    /// The list shown in the Video view: the Jellyfin session's own
-    /// playlist (the season episodes actually playing) while a Jellyfin
-    /// item plays, else the persistent video playlist (which is left
-    /// untouched during Jellyfin playback and returns when it stops).
-    fn render_video(&mut self, frame: &mut Frame, ctx: &Ctx) -> Result<()> {
-        let area = self.areas[Areas::Table];
-        let jellyfin = crate::core::mpv::session_playlist_shown(ctx);
-        let playlist: std::cell::Ref<'_, Vec<crate::core::mpv::MpvPlaylistEntry>> = if jellyfin {
-            ctx.mpv.playlist.borrow()
-        } else {
-            ctx.video_playlist.borrow()
-        };
-        self.video_items_len = playlist.len();
-        // The playlist can change under the marks (session switches,
-        // removals elsewhere); drop any mark that no longer has a row.
-        self.video_marked.clamp(playlist.len());
-        let hover_idx = crate::ui::panes::hovered_item(
-            ctx.mouse_pos(),
-            area,
-            self.video_state.offset(),
-            playlist.len(),
-            1,
-        );
-        if let Some(sel) = self.video_state.selected() {
-            if playlist.is_empty() {
-                self.video_state.select(None);
-            } else if sel >= playlist.len() {
-                self.video_state.select(Some(playlist.len() - 1));
-            }
-        }
-
-        if playlist.is_empty() {
-            let style = ctx.config.as_list_text_style().add_modifier(Modifier::DIM);
-            frame.render_widget(
-                ratatui::widgets::Paragraph::new("No video playing").style(style),
-                Rect { x: area.x + 1, y: area.y, width: area.width.saturating_sub(2), height: 1 },
-            );
-            return Ok(());
-        }
-
-        let fmt = &ctx.config.duration_format;
-        let current_idx = if jellyfin {
-            ctx.mpv.playlist_pos.get().filter(|i| *i < playlist.len())
-        } else {
-            crate::core::mpv::video_playlist_current_idx(ctx).filter(|i| *i < playlist.len())
-        };
-        // Title (flexible) | Duration (right-aligned at the right edge,
-        // like the queue's Duration column).
-        let widths = Layout::horizontal([
-            Constraint::Min(0),
-            Constraint::Length(CHAPTER_DURATION_COL),
-        ])
-        .flex(Flex::Start)
-        .spacing(1)
-        .split(area);
-        let title_field = widths[0].width as usize;
-        let duration_w = widths[1].width as usize;
-
-        let items: Vec<ListItem> = playlist
-            .iter()
-            .enumerate()
-            .map(|(idx, entry)| {
-                let is_current = current_idx == Some(idx);
-                // Marked rows render with the lighter marked highlight
-                // (like the audio queue list); the row under the mouse
-                // gets the hover highlight.
-                let style = if self.video_marked.contains(idx) {
-                    ctx.config.theme.marked_item_style
-                } else if hover_idx == Some(idx) {
-                    ctx.config.theme.hovered_item_style
-                } else if is_current {
-                    ctx.config.theme.current_item_style
-                } else {
-                    ctx.config.as_list_text_style()
-                };
-                let duration = entry
-                    .duration
-                    .map(|d| fmt.format(d as u64))
-                    .unwrap_or_else(|| "-".to_owned());
-                let prefix = if is_current { "❯ " } else { "  " };
-                let mut title = entry.title.clone();
-                truncate_to_width(&mut title, title_field.saturating_sub(2));
-                let title_pad = title_field.saturating_sub(2 + title.width());
-                let dur_pad = duration_w.saturating_sub(duration.width());
-                ListItem::new(Line::styled(
-                    format!(
-                        "{prefix}{title}{} {}{duration}",
-                        " ".repeat(title_pad),
-                        " ".repeat(dur_pad),
-                    ),
-                    style,
-                ))
-            })
-            .collect();
-
-        let list = List::new(items)
-            .highlight_style(if hover_idx == self.video_state.selected() {
-                ctx.config.theme.hovered_item_style
-            } else {
-                ctx.config.theme.highlighted_item_style
-            });
-        StatefulWidget::render(list, area, frame.buffer_mut(), &mut self.video_state);
-
-        if let Some(scrollbar) = ctx.config.as_styled_scrollbar()
-            && self.areas[Areas::Scrollbar].width > 0
-        {
-            let max = self.video_items_len.saturating_sub(self.areas[Areas::Table].height as usize);
-            let position = self.video_state.offset().min(max);
-            // content_length = max + 1 so the bottom position is reachable
-            // (ratatui clamps positions to content_length - 1); the viewport
-            // length keeps the thumb proportional to the visible rows.
-            StatefulWidget::render(
-                scrollbar,
-                self.areas[Areas::Scrollbar],
-                frame.buffer_mut(),
-                &mut ratatui::widgets::ScrollbarState::new(max + 1)
-                    .position(position)
-                    .viewport_content_length(self.areas[Areas::Table].height as usize),
-            );
-        }
-        Ok(())
-    }
-
-    /// Play the visible Video list from `idx` onwards: the entries are
-    /// handed to mpv (a fresh instance when none runs, otherwise the
-    /// running one is switched to them); neither the Jellyfin session
-    /// playlist nor the persistent playlist is mutated.
-    fn video_load_entry(&self, idx: usize, ctx: &Ctx) {
-        let entries: Vec<crate::core::mpv::MpvPlaylistEntry> =
-            if crate::core::mpv::session_playlist_shown(ctx) {
-                ctx.mpv.playlist.borrow().iter().skip(idx).cloned().collect()
-            } else {
-                ctx.video_playlist.borrow().iter().skip(idx).cloned().collect()
-            };
-        if !entries.is_empty() {
-            crate::core::mpv::play_video_entries(ctx, entries);
-        }
-    }
-
-    /// Remove the entries at `indices` from the persistent video playlist
-    /// and save it. The selection shifts up past the removed rows and the
-    /// marks are dropped (their indices no longer exist).
-    fn video_remove_entries(&mut self, indices: Vec<usize>, ctx: &Ctx) {
-        if indices.is_empty() {
-            return;
-        }
-        {
-            let mut playlist = ctx.video_playlist.borrow_mut();
-            for idx in indices.iter().rev() {
-                if *idx < playlist.len() {
-                    playlist.remove(*idx);
-                }
-            }
-        }
-        crate::ui::modals::paste::save_video_playlist(ctx);
-        let len = ctx.video_playlist.borrow().len();
-        self.video_items_len = len;
-        self.video_marked.clear();
-        self.video_marked.clear_anchor();
-        if let Some(sel) = self.video_state.selected() {
-            let removed_below = indices.iter().filter(|&&i| i < sel).count();
-            let new_sel = sel.saturating_sub(removed_below);
-            if len == 0 {
-                self.video_state.select(None);
-            } else {
-                self.video_state.select(Some(new_sel.min(len - 1)));
-            }
-        }
-    }
 }
 
 impl Pane for QueuePane {
@@ -2011,6 +1342,10 @@ impl Pane for QueuePane {
                 QueueActions::Unused => {}
             }
         } else if let Some(action) = event.claim_common().map(|v| v.to_owned()) {
+            // Audio mode: the queue list reuses the shared SongListCore
+            // arms (navigation, half/page/top/bottom, filter + jump-
+            // matching, range-select, invert, esc-deselect, rate, save,
+            // delete-from-playlist). Queue-specific semantics stay here:
             match action {
                 CommonAction::Select => {
                     // Space: play/pause the currently highlighted track.
@@ -2026,20 +1361,6 @@ impl Pane for QueuePane {
                         });
                     }
                     return Ok(());
-                }
-                CommonAction::Up => {
-                    if !self.queue.is_empty() {
-                        self.queue.prev(ctx.config.scrolloff, ctx.config.wrap_navigation);
-                    }
-
-                    ctx.render()?;
-                }
-                CommonAction::Down => {
-                    if !self.queue.is_empty() {
-                        self.queue.next(ctx.config.scrolloff, ctx.config.wrap_navigation);
-                    }
-
-                    ctx.render()?;
                 }
                 CommonAction::MoveUp if !self.queue.marked().is_empty() => {
                     if self.queue.is_empty() {
@@ -2157,108 +1478,29 @@ impl Pane for QueuePane {
                     self.queue.items.swap(idx, new_idx);
                     ctx.render()?;
                 }
-                CommonAction::DownHalf => {
-                    if !self.queue.is_empty() {
-                        self.queue.next_half_viewport(ctx.config.scrolloff);
-                    }
-
-                    ctx.render()?;
-                }
-                CommonAction::UpHalf => {
-                    if !self.queue.is_empty() {
-                        self.queue.prev_half_viewport(ctx.config.scrolloff);
-                    }
-
-                    ctx.render()?;
-                }
-                CommonAction::PageDown => {
-                    if !self.queue.is_empty() {
-                        self.queue.next_viewport(ctx.config.scrolloff);
-                    }
-
-                    ctx.render()?;
-                }
-                CommonAction::PageUp => {
-                    if !self.queue.is_empty() {
-                        self.queue.prev_viewport(ctx.config.scrolloff);
-                    }
-
-                    ctx.render()?;
-                }
-                CommonAction::Bottom => {
-                    if !self.queue.is_empty() {
-                        self.queue.last();
-                    }
-
-                    ctx.render()?;
-                }
-                CommonAction::Top => {
-                    if !self.queue.is_empty() {
-                        self.queue.first();
-                    }
-
-                    ctx.render()?;
-                }
-                CommonAction::Right => {}
-                CommonAction::Left => {}
-                CommonAction::EnterSearch => {
-                    ctx.input.insert_mode(self.queue.filter_buffer_id);
-                    ctx.input.clear_buffer(self.queue.filter_buffer_id);
-                    self.queue.set_filter_active(true);
-
-                    ctx.render()?;
-                }
-                CommonAction::NextResult => {
-                    self.queue.jump_next_matching(self.column_formats.as_slice(), ctx);
-
-                    ctx.render()?;
-                }
-                CommonAction::PreviousResult => {
-                    self.queue.jump_previous_matching(self.column_formats.as_slice(), ctx);
-
-                    ctx.render()?;
-                }
-                CommonAction::SelectDown | CommonAction::SelectUp => {
-                    let dir = if matches!(action, CommonAction::SelectDown) { 1 } else { -1 };
-                    let start = self.queue.state.get_selected().unwrap_or(0);
-                    if self.queue.state.mark_anchor().is_none() || self.queue.state.marked.is_empty() {
-                        self.queue.state.set_mark_anchor(start);
-                    }
-                    let anchor = self.queue.state.mark_anchor().unwrap_or(start);
-                    // Move first so the newly reached row is included in the
-                    // range and backing up deselects the row being left.
-                    if dir > 0 {
-                        self.queue.next(ctx.config.scrolloff, ctx.config.wrap_navigation);
-                    } else {
-                        self.queue.prev(ctx.config.scrolloff, ctx.config.wrap_navigation);
-                    }
-                    let sel = self.queue.state.get_selected().unwrap_or(start);
-                    // Replace the previous shift range.
-                    if let Some((lo, hi)) = self.queue.state.take_range_mark() {
-                        for i in lo..=hi {
-                            self.queue.state.marked.remove(&i);
+                CommonAction::Delete => {
+                    // `Del` removes the highlighted song (or every marked
+                    // song), like the `x` key — same as the context menu's
+                    // Remove.
+                    if !self.queue.marked().is_empty() {
+                        for range in self.queue.marked().ranges().rev() {
+                            ctx.command(move |client| {
+                                client.delete_from_queue(range.into())?;
+                                Ok(())
+                            });
                         }
+                        self.queue.marked_mut().clear();
+                        self.queue.state.clear_mark_anchor();
+                        status_info!("Marked songs removed from queue");
+                    } else if let Some(selected_song) = self.queue.selected() {
+                        let id = selected_song.id;
+                        ctx.command(move |client| {
+                            client.delete_id(id)?;
+                            Ok(())
+                        });
+                    } else {
+                        status_error!("No song selected");
                     }
-                    let (lo, hi) = (anchor.min(sel), anchor.max(sel));
-                    if lo < hi {
-                        self.queue.state.mark_range(lo, hi);
-                        self.queue.state.set_range_mark(lo, hi);
-                    }
-
-                    ctx.render()?;
-                }
-                CommonAction::InvertSelection => {
-                    self.queue.invert_marked();
-
-                    ctx.render()?;
-                }
-                CommonAction::Close if !self.queue.marked().is_empty() => {
-                    self.queue.marked_mut().clear();
-                    self.queue.state.clear_mark_anchor();
-                    // Esc is bound to both Close and ShowSettings: clearing a
-                    // selection consumes the keypress, so the settings panel
-                    // only opens on a second Esc (when nothing is selected).
-                    event.consume();
                     ctx.render()?;
                 }
                 CommonAction::AddOptions { kind: AddKind::Action(options) } => {
@@ -2294,7 +1536,7 @@ impl Pane for QueuePane {
                         modal!(
                             ctx,
                             InfoListModal::builder()
-                                .items(selected_song)
+                                .rows(selected_song)
                                 .title("Song info")
                                 .column_widths(&[30, 70])
                                 .build()
@@ -2303,154 +1545,16 @@ impl Pane for QueuePane {
                         status_error!("No song selected");
                     }
                 }
-                CommonAction::Delete => {
-                    // `Del` removes the highlighted song (or every marked
-                    // song), like the `x` key — same as the context menu's
-                    // Remove.
-                    if !self.queue.marked().is_empty() {
-                        for range in self.queue.marked().ranges().rev() {
-                            ctx.command(move |client| {
-                                client.delete_from_queue(range.into())?;
-                                Ok(())
-                            });
-                        }
-                        self.queue.marked_mut().clear();
-                        self.queue.state.clear_mark_anchor();
-                        status_info!("Marked songs removed from queue");
-                    } else if let Some(selected_song) = self.queue.selected() {
-                        let id = selected_song.id;
-                        ctx.command(move |client| {
-                            client.delete_id(id)?;
-                            Ok(())
-                        });
-                    } else {
-                        status_error!("No song selected");
-                    }
-                    ctx.render()?;
-                }
-                CommonAction::Rename => {}
-                CommonAction::Close => {}
-                CommonAction::FocusInput => {}
                 CommonAction::Confirm => {
                     // Enter opens the context menu (like right-click);
                     // `d`/`→` still play the highlighted track.
                     self.open_context_menu(ctx);
                 }
-                CommonAction::PaneDown => {}
-                CommonAction::PaneUp => {}
-                CommonAction::PaneRight => {}
-                CommonAction::PaneLeft => {}
                 CommonAction::ContextMenu => {
                     self.open_context_menu(ctx);
                 }
-                CommonAction::Rate {
-                    kind: RateKind::Value(value),
-                    current: false,
-                    min_rating: _,
-                    max_rating: _,
-                } => {
-                    let items = self.enqueue_items(false).0;
-                    ctx.command(move |client| {
-                        client.set_sticker_multiple(RATING_STICKER, value.to_string(), items)?;
-                        Ok(())
-                    });
-                }
-                CommonAction::Rate {
-                    kind: RateKind::Modal { values, custom, like },
-                    current: false,
-                    min_rating,
-                    max_rating,
-                } => {
-                    let items = self.enqueue_items(false).0;
-                    modal!(
-                        ctx,
-                        create_rating_modal(
-                            items,
-                            values.as_slice(),
-                            min_rating,
-                            max_rating,
-                            custom,
-                            like,
-                            ctx
-                        )
-                    );
-                }
-                CommonAction::Rate { kind: RateKind::Like(), current: false, .. } => {
-                    let items = self.enqueue_items(false).0;
-                    ctx.command(move |client| {
-                        client.set_sticker_multiple(LIKE_STICKER, "2".to_string(), items)?;
-                        Ok(())
-                    });
-                }
-                CommonAction::Rate { kind: RateKind::Neutral(), current: false, .. } => {
-                    let items = self.enqueue_items(false).0;
-                    ctx.command(move |client| {
-                        client.set_sticker_multiple(LIKE_STICKER, "1".to_string(), items)?;
-                        Ok(())
-                    });
-                }
-                CommonAction::Rate { kind: RateKind::Dislike(), current: false, .. } => {
-                    let items = self.enqueue_items(false).0;
-                    ctx.command(move |client| {
-                        client.set_sticker_multiple(LIKE_STICKER, "0".to_string(), items)?;
-                        Ok(())
-                    });
-                }
-                CommonAction::Rate { kind: _, current: true, min_rating: _, max_rating: _ } => {
-                    event.abandon();
-                }
-                CommonAction::Save {
-                    kind: SaveKind::Playlist { name, all, duplicates_strategy },
-                } => {
-                    let song_paths: Vec<String> =
-                        self.items(all).map(|(_, song)| song.file.clone()).collect();
-                    if song_paths.is_empty() {
-                        status_warn!("No songs selected to save");
-                        return Ok(());
-                    }
-
-                    add_to_playlist_or_show_modal(name, song_paths, duplicates_strategy, ctx);
-                }
-                CommonAction::Save { kind: SaveKind::Modal { all, duplicates_strategy } } => {
-                    let song_paths: Vec<String> =
-                        self.items(all).map(|(_, song)| song.file.clone()).collect();
-                    if song_paths.is_empty() {
-                        status_warn!("No songs selected to save");
-                        return Ok(());
-                    }
-                    let modal = create_save_modal(song_paths, None, duplicates_strategy, ctx)?;
-                    modal!(ctx, modal);
-                }
-                CommonAction::DeleteFromPlaylist {
-                    kind: DeleteKind::Playlist { name, all, confirmation },
-                } => {
-                    let song_paths: HashSet<String> =
-                        self.items(all).map(|(_, song)| song.file.clone()).collect();
-                    if song_paths.is_empty() {
-                        status_warn!("No songs selected to delete");
-                        return Ok(());
-                    }
-
-                    delete_from_playlist_or_show_confirmation(
-                        name,
-                        &song_paths,
-                        confirmation,
-                        ctx,
-                    )?;
-                }
-                CommonAction::DeleteFromPlaylist {
-                    kind: DeleteKind::Modal { all, confirmation },
-                } => {
-                    let song_paths: HashSet<String> =
-                        self.items(all).map(|(_, song)| song.file.clone()).collect();
-                    if song_paths.is_empty() {
-                        status_warn!("No songs selected to delete");
-                        return Ok(());
-                    }
-
-                    let modal = create_delete_modal(song_paths, confirmation, ctx)?;
-                    modal!(ctx, modal);
-                }
+                CommonAction::Right | CommonAction::Left => {}
+                other => self.handle_claimed_common_action(other, event, ctx)?,
             }
         } else if let Some(action) = event.claim_global() {
             match action {
@@ -2488,335 +1592,30 @@ impl Pane for QueuePane {
     }
 }
 
+impl SongListCore<Song, TableState> for QueuePane {
+    fn list(&self) -> &Dir<Song, TableState> {
+        &self.queue
+    }
+
+    fn list_mut(&mut self) -> &mut Dir<Song, TableState> {
+        &mut self.queue
+    }
+
+    fn list_songs_in_item(
+        &self,
+        item: Song,
+    ) -> impl FnOnce(&mut Client<'_>) -> Result<Vec<Song>> + Send + Sync + Clone + 'static {
+        move |_client| Ok(vec![item])
+    }
+
+    /// The queue filter jump-matching uses the queue's own column formats
+    /// (not the generic browser song format).
+    fn song_format(&self, _ctx: &Ctx) -> Vec<Property<SongProperty>> {
+        self.column_formats.clone()
+    }
+}
+
 impl QueuePane {
-    /// Keyboard handling for Chapters mode: navigate the chapter list
-    /// (w/s/↑/↓, PageUp/PageDown, Home/End) and play a chapter with
-    /// d/→/Enter. `c` still toggles back to the queue.
-    fn handle_chapters_action(&mut self, event: &mut ActionEvent, ctx: &mut Ctx) -> Result<()> {
-        if let Some(action) = event.claim_directories() {
-            return match action {
-                DirectoriesActions::FolderUp => self.chapters_move(-1, ctx),
-                DirectoriesActions::FolderDown => self.chapters_move(1, ctx),
-                DirectoriesActions::FolderExpand | DirectoriesActions::PlayFile => {
-                    self.chapters_play_selected(ctx)
-                }
-                DirectoriesActions::FolderCollapse => Ok(()),
-            };
-        }
-        if let Some(action) = event.claim_queue() {
-            match action {
-                QueueActions::ToggleChapters => {
-                    // Cycle back to the Audio view.
-                    self.cycle_tab(ctx);
-                    ctx.render()?;
-                }
-                QueueActions::JumpToCurrent => {
-                    let chapters = Self::current_chapters(ctx);
-                    let position = if crate::core::mpv::mpv_is_ui_source(ctx) {
-                        ctx.mpv.position
-                    } else {
-                        ctx.status.elapsed.as_secs_f64()
-                    };
-                    let idx = chapters
-                        .iter()
-                        .rposition(|c| position >= c.start_secs)
-                        .unwrap_or(0);
-                    self.chapters_jump(idx, ctx)?;
-                }
-                _ => {}
-            }
-            return Ok(());
-        }
-        if let Some(action) = event.claim_common().map(|v| v.to_owned()) {
-            match action {
-                CommonAction::Up => self.chapters_move(-1, ctx)?,
-                CommonAction::Down => self.chapters_move(1, ctx)?,
-                CommonAction::PageUp => self.chapters_page(-1, ctx)?,
-                CommonAction::PageDown => self.chapters_page(1, ctx)?,
-                CommonAction::Top => self.chapters_jump(0, ctx)?,
-                CommonAction::Bottom => self.chapters_jump(usize::MAX, ctx)?,
-                CommonAction::Confirm => self.chapters_play_selected(ctx)?,
-                CommonAction::Select => {
-                    if matches!(ctx.status.state, State::Play | State::Pause) {
-                        ctx.command(move |client| {
-                            client.pause_toggle()?;
-                            Ok(())
-                        });
-                    } else {
-                        ctx.command(move |client| {
-                            client.play()?;
-                            Ok(())
-                        });
-                    }
-                }
-                _ => event.abandon(),
-            }
-            return Ok(());
-        }
-        if let Some(action) = event.claim_global() {
-            match action {
-                // < / > seek the playing track (like the queue view).
-                GlobalAction::PreviousTrack => {
-                    if matches!(ctx.status.state, State::Play | State::Pause) {
-                        ctx.command(move |client| {
-                            client.seek_current(ValueChange::Decrease(5))?;
-                            Ok(())
-                        });
-                    }
-                }
-                GlobalAction::NextTrack => {
-                    if matches!(ctx.status.state, State::Play | State::Pause) {
-                        ctx.command(move |client| {
-                            client.seek_current(ValueChange::Increase(5))?;
-                            Ok(())
-                        });
-                    }
-                }
-                _ => event.abandon(),
-            }
-            return Ok(());
-        }
-        Ok(())
-    }
-
-    /// Keyboard handling for Video mode: navigate the mpv playlist with
-    /// w/s/↑/↓, load an entry with d/→/Enter. `c` cycles back to Audio.
-    fn handle_video_action(&mut self, event: &mut ActionEvent, ctx: &mut Ctx) -> Result<()> {
-        if let Some(action) = event.claim_directories() {
-            return match action {
-                DirectoriesActions::FolderUp => self.video_move(-1, ctx),
-                DirectoriesActions::FolderDown => self.video_move(1, ctx),
-                DirectoriesActions::FolderExpand | DirectoriesActions::PlayFile => {
-                    self.video_play_selected(ctx)
-                }
-                DirectoriesActions::FolderCollapse => Ok(()),
-            };
-        }
-        if let Some(action) = event.claim_queue() {
-            match action {
-                QueueActions::ToggleChapters => {
-                    self.cycle_tab(ctx);
-                    ctx.render()?;
-                }
-                QueueActions::JumpToCurrent => {
-                    let idx = if crate::core::mpv::session_playlist_shown(ctx) {
-                        ctx.mpv.playlist_pos.get()
-                    } else {
-                        crate::core::mpv::video_playlist_current_idx(ctx)
-                    };
-                    if let Some(idx) = idx.filter(|i| *i < self.video_items_len) {
-                        self.video_jump(idx, ctx)?;
-                    }
-                }
-                _ => {}
-            }
-            return Ok(());
-        }
-        if let Some(action) = event.claim_common().map(|v| v.to_owned()) {
-            match action {
-                CommonAction::Up => self.video_move(-1, ctx)?,
-                CommonAction::Down => self.video_move(1, ctx)?,
-                CommonAction::PageUp => self.video_page(-1, ctx)?,
-                CommonAction::PageDown => self.video_page(1, ctx)?,
-                CommonAction::Top => self.video_jump(0, ctx)?,
-                CommonAction::Bottom => self.video_jump(usize::MAX, ctx)?,
-                // Enter opens the context menu (like right-click);
-                // `d`/`→` still load the highlighted entry.
-                CommonAction::Confirm => self.open_context_menu(ctx),
-                CommonAction::SelectUp | CommonAction::SelectDown => {
-                    // Shift+Up/Down: range-select from the anchor (set by
-                    // plain clicks / the first shift-press), moving first
-                    // so the newly reached row is included; each press
-                    // replaces the previous range.
-                    let dir = if matches!(action, CommonAction::SelectDown) { 1 } else { -1 };
-                    let start = self.video_state.selected().unwrap_or(0);
-                    if self.video_marked.anchor().is_none() || self.video_marked.is_empty() {
-                        self.video_marked.set_anchor(start);
-                    }
-                    self.video_move(dir, ctx)?;
-                    let sel = self.video_state.selected().unwrap_or(start);
-                    self.video_marked.select_range(sel);
-                    ctx.render()?;
-                }
-                CommonAction::Delete => {
-                    // Remove the marked entries (or the highlighted one)
-                    // from the persistent video playlist (a live session
-                    // keeps playing them; the queue no longer contains
-                    // them). The Jellyfin session's own playlist is live
-                    // mpv state — never deletable.
-                    if !crate::core::mpv::session_playlist_shown(ctx) {
-                        let indices: Vec<usize> = if self.video_marked.is_empty() {
-                            self.video_state.selected().into_iter().collect()
-                        } else {
-                            self.video_marked.iter().collect()
-                        };
-                        if !indices.is_empty() {
-                            self.video_remove_entries(indices, ctx);
-                            ctx.render()?;
-                        }
-                    }
-                }
-                CommonAction::Select => {
-                    // Toggle the video's pause.
-                    if let Some(socket) = ctx.mpv.socket.clone() {
-                        crate::core::mpv::mpv_toggle_pause(&socket);
-                    }
-                }
-                CommonAction::Close if !self.video_marked.is_empty() => {
-                    self.video_marked.clear();
-                    self.video_marked.clear_anchor();
-                    // Esc is bound to both Close and ShowSettings: clearing a
-                    // selection consumes the keypress, so the settings panel
-                    // only opens on a second Esc (when nothing is selected).
-                    event.consume();
-                    ctx.render()?;
-                }
-                _ => event.abandon(),
-            }
-            return Ok(());
-        }
-        event.abandon();
-        Ok(())
-    }
-
-    /// Move the video list highlight by `dir` rows (clamped). The first
-    /// move from no selection highlights the first entry (menu convention).
-    fn video_move(&mut self, dir: i64, ctx: &Ctx) -> Result<()> {
-        let len = self.video_items_len;
-        if len == 0 {
-            return Ok(());
-        }
-        let Some(current) = self.video_state.selected() else {
-            self.video_state.select(Some(0));
-            ctx.render()?;
-            return Ok(());
-        };
-        let new = ((current as i64) + dir).clamp(0, len as i64 - 1) as usize;
-        if new != current {
-            self.video_state.select(Some(new));
-            ctx.render()?;
-        }
-        Ok(())
-    }
-
-    /// Scroll the video list to a scrollbar fraction (0.0..=1.0): the
-    /// offset lands so the thumb matches the pointer. `max` mirrors the
-    /// renderer's `items_len - table_height`.
-    fn video_scroll_to(&mut self, perc: f64, ctx: &Ctx) {
-        let max = self.video_items_len.saturating_sub(self.areas[Areas::Table].height as usize);
-        let new = ((perc.clamp(0.0, 1.0)) * max as f64).floor() as usize;
-        let _ = self.video_jump(new.min(max), ctx);
-    }
-
-    /// Scroll the chapters list to a scrollbar fraction (0.0..=1.0).
-    fn chapters_scroll_to(&mut self, perc: f64, ctx: &Ctx) {
-        let max =
-            self.chapters_items_len.saturating_sub(self.areas[Areas::Table].height as usize);
-        let new = ((perc.clamp(0.0, 1.0)) * max as f64).floor() as usize;
-        let _ = self.chapters_jump(new.min(max), ctx);
-    }
-
-    /// Page the video list by one viewport in `dir` direction.
-    fn video_page(&mut self, dir: i64, ctx: &Ctx) -> Result<()> {
-        let viewport = self.areas[Areas::Table].height.max(1) as i64;
-        self.video_move(dir * viewport, ctx)
-    }
-
-    /// Highlight the playlist entry at `idx` (clamped to the list).
-    fn video_jump(&mut self, idx: usize, ctx: &Ctx) -> Result<()> {
-        let len = self.video_items_len;
-        if len == 0 {
-            return Ok(());
-        }
-        let idx = idx.min(len - 1);
-        if self.video_state.selected() != Some(idx) {
-            self.video_state.select(Some(idx));
-            ctx.render()?;
-        }
-        Ok(())
-    }
-
-    /// Load the highlighted playlist entry in mpv (the current view's
-    /// equivalent of playing a song).
-    fn video_play_selected(&mut self, ctx: &Ctx) -> Result<()> {
-        if let Some(idx) = self.video_state.selected() {
-            self.video_load_entry(idx, ctx);
-        }
-        Ok(())
-    }
-
-    /// Move the chapters highlight by `dir` rows (clamped). The first move
-    /// from no selection highlights the first chapter (menu convention).
-    fn chapters_move(&mut self, dir: i64, ctx: &Ctx) -> Result<()> {
-        let len = self.chapters_items_len;
-        if len == 0 {
-            return Ok(());
-        }
-        let Some(current) = self.chapters_state.selected() else {
-            self.chapters_state.select(Some(0));
-            ctx.render()?;
-            return Ok(());
-        };
-        let new = ((current as i64) + dir).clamp(0, len as i64 - 1) as usize;
-        if new != current {
-            self.chapters_state.select(Some(new));
-            ctx.render()?;
-        }
-        Ok(())
-    }
-
-    /// Page the chapters list by one viewport in `dir` direction.
-    fn chapters_page(&mut self, dir: i64, ctx: &Ctx) -> Result<()> {
-        let viewport = self.areas[Areas::Table].height.max(1) as i64;
-        self.chapters_move(dir * viewport, ctx)
-    }
-
-    /// Highlight the chapter at `idx` (clamped to the list).
-    fn chapters_jump(&mut self, idx: usize, ctx: &Ctx) -> Result<()> {
-        let len = self.chapters_items_len;
-        if len == 0 {
-            return Ok(());
-        }
-        let idx = idx.min(len - 1);
-        if self.chapters_state.selected() != Some(idx) {
-            self.chapters_state.select(Some(idx));
-            ctx.render()?;
-        }
-        Ok(())
-    }
-
-    /// Select the chapter currently playing, used when the chapters view
-    /// opens (startup, tab re-entry, toggling) so the highlight lands on
-    /// the track's current position.
-    fn chapters_select_current(&mut self, ctx: &Ctx) {
-        let chapters = Self::current_chapters(ctx);
-        if chapters.is_empty() {
-            return;
-        }
-        let position = if crate::core::mpv::mpv_is_ui_source(ctx) {
-            ctx.mpv.position
-        } else {
-            ctx.status.elapsed.as_secs_f64()
-        };
-        let idx = chapters
-            .iter()
-            .rposition(|c| position >= c.start_secs)
-            .unwrap_or(0);
-        self.chapters_state.select(Some(idx));
-    }
-
-    /// Seek to the highlighted chapter (MPD or mpv). The highlight stays
-    /// put so keyboard navigation continues from the played chapter (the
-    /// mouse's click-highlight-then-click-again behavior lives in
-    /// `handle_mouse_event`).
-    fn chapters_play_selected(&mut self, ctx: &Ctx) -> Result<()> {
-        let Some(idx) = self.chapters_state.selected() else { return Ok(()) };
-        let chapters = Self::current_chapters(ctx);
-        if let Some(chapter) = chapters.get(idx) {
-            self.seek_to(chapter.start_secs, ctx);
-        }
-        Ok(())
-    }
 
     fn scrollbar_area(&self) -> Option<Rect> {
         let area = self.areas[Areas::Scrollbar];

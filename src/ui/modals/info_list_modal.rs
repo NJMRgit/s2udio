@@ -27,32 +27,37 @@ use crate::{
     ui::dirstack::DirState,
 };
 
+/// The row source of `InfoListModal` (a local newtype so `From<Vec<Song>>`
+/// and `From<&Song>` can provide the key/value rows).
+#[derive(Debug)]
+pub struct KeyValues(Vec<Vec<String>>);
+
+/// One master implementation of the "read-only N-column table modal"
+/// shape (Phase 3): a bordered table with a header row, scrollbar,
+/// wheel/click selection and Close. Absorbs the legacy two-column
+/// key/value info modal and the three-column decoders modal; per-modal
+/// differences are args (`rows`, `header` labels, `column_widths`,
+/// `title`, `size`) — never a fork.
 #[derive(Debug)]
 pub struct InfoListModal {
     id: Id,
     scrolling_state: DirState<TableState>,
     table_area: Rect,
-    items: KeyValues,
+    rows: Vec<Vec<String>>,
     column_widths: &'static [u16],
+    header: Vec<String>,
     title: &'static str,
     size: (u16, u16),
-}
-
-#[derive(Debug)]
-pub struct KeyValues(Vec<KeyValue>);
-#[derive(Debug)]
-struct KeyValue {
-    key: String,
-    value: String,
 }
 
 #[bon]
 impl InfoListModal {
     #[builder]
     pub fn new(
-        items: impl Into<KeyValues>,
+        rows: impl Into<KeyValues>,
         title: &'static str,
         column_widths: &'static [u16],
+        header: Option<Vec<String>>,
         size: Option<(u16, u16)>,
     ) -> Self {
         let mut scrolling_state = DirState::default();
@@ -60,34 +65,53 @@ impl InfoListModal {
         Self {
             id: id::new(),
             scrolling_state,
-            items: items.into(),
+            rows: rows.into().0,
             table_area: Rect::default(),
             title,
             column_widths,
+            header: header.unwrap_or_else(|| vec!["Tag".to_owned(), "Value".to_owned()]),
             size: size.unwrap_or((80, 80)),
         }
     }
 
-    fn row<'a>(
-        key: &'a str,
-        key_width: u16,
-        value: &'a str,
-        value_width: u16,
-    ) -> impl Iterator<Item = Row<'a>> {
-        let key = textwrap::wrap(key, key_width as usize);
-        let value = textwrap::wrap(value, value_width as usize);
+    /// Wrap every cell at its column's width and zip the wrapped lines
+    /// into table rows (shorter columns pad with empty cells).
+    fn rows_for<'a>(&self, column_areas: &[Rect]) -> Vec<Row<'a>> {
+        let wrapped: Vec<Vec<String>> = self
+            .rows
+            .iter()
+            .map(|cells| {
+                cells
+                    .iter()
+                    .zip(column_areas.iter())
+                    .map(|(cell, area)| {
+                        textwrap::wrap(cell, area.width as usize)
+                            .into_iter()
+                            .map(String::from)
+                            .collect()
+                    })
+                    .collect()
+            })
+            .collect();
 
-        key.into_iter().zip_longest(value).map(|item| {
-            let (key, value) = match item {
-                itertools::EitherOrBoth::Both(key, value) => (Some(key), Some(value)),
-                itertools::EitherOrBoth::Left(key) => (Some(key), None),
-                itertools::EitherOrBoth::Right(value) => (None, Some(value)),
-            };
-            Row::new([
-                Cell::from(Text::from(key.unwrap_or_default())),
-                Cell::from(Text::from(value.unwrap_or_default())),
-            ])
-        })
+        let max_lines = wrapped.iter().map(Vec::len).max().unwrap_or(1);
+        (0..max_lines)
+            .map(|line| {
+                Row::new(
+                    (0..column_areas.len())
+                        .map(|col| {
+                            Cell::from(Text::from(
+                                wrapped
+                                    .get(line)
+                                    .and_then(|r| r.get(col))
+                                    .cloned()
+                                    .unwrap_or_default(),
+                            ))
+                        })
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect()
     }
 }
 
@@ -122,24 +146,12 @@ impl Modal for InfoListModal {
             self.column_widths.iter().map(|w| Constraint::Percentage(*w)).collect_vec();
         let column_areas = Layout::horizontal(&column_constraints).spacing(1).split(table_area);
 
-        let rows = self
-            .items
-            .0
-            .iter()
-            .flat_map(|item| {
-                InfoListModal::row(
-                    &item.key,
-                    column_areas[0].width,
-                    &item.value,
-                    column_areas[1].width,
-                )
-            })
-            .collect_vec();
+        let rows = self.rows_for(&column_areas);
 
         self.scrolling_state.set_content_and_viewport_len(rows.len(), table_area.height.into());
 
         let header_table = Table::new(
-            vec![Row::new([Cell::from("Tag"), Cell::from("Value")])],
+            vec![Row::new(self.header.iter().map(|h| Cell::from(h.as_str())).collect::<Vec<_>>())],
             &column_constraints,
         )
         .column_spacing(1)
@@ -242,6 +254,12 @@ impl Modal for InfoListModal {
     }
 }
 
+impl From<Vec<Vec<String>>> for KeyValues {
+    fn from(rows: Vec<Vec<String>>) -> Self {
+        KeyValues(rows)
+    }
+}
+
 impl From<Vec<Song>> for KeyValues {
     fn from(value: Vec<Song>) -> Self {
         let mut result = Vec::new();
@@ -266,12 +284,14 @@ impl From<Vec<Song>> for KeyValues {
             .unique()
             .count();
 
-        result.push(KeyValue { key: "Songs".to_owned(), value: value.len().to_string() });
-        result
-            .push(KeyValue { key: "Total duration".to_owned(), value: total_duration.to_string() });
-        result.push(KeyValue { key: "Artists".to_owned(), value: total_artists.to_string() });
-        result.push(KeyValue { key: "Albums".to_owned(), value: total_albums.to_string() });
-        result.push(KeyValue { key: "Genres".to_owned(), value: total_genres.to_string() });
+        result.push(vec!["Songs".to_owned(), value.len().to_string()]);
+        result.push(vec![
+            "Total duration".to_owned(),
+            total_duration.to_string(),
+        ]);
+        result.push(vec!["Artists".to_owned(), total_artists.to_string()]);
+        result.push(vec!["Albums".to_owned(), total_albums.to_string()]);
+        result.push(vec!["Genres".to_owned(), total_genres.to_string()]);
         KeyValues(result)
     }
 }
@@ -279,17 +299,17 @@ impl From<Vec<Song>> for KeyValues {
 impl From<&Song> for KeyValues {
     fn from(song: &Song) -> Self {
         let mut result = Vec::new();
-        result.push(KeyValue { key: "File".to_owned(), value: song.file.clone() });
+        result.push(vec!["File".to_owned(), song.file.clone()]);
         let file_name = song.file_name().unwrap_or_default();
         if !file_name.is_empty() {
-            result.push(KeyValue { key: "Filename".to_owned(), value: file_name.into_owned() });
+            result.push(vec!["Filename".to_owned(), file_name.into_owned()]);
         }
 
         if let Some(title) = song.metadata.get("title") {
             result.extend(
                 title
                     .iter()
-                    .map(|item| KeyValue { key: "Title".to_owned(), value: item.to_owned() }),
+                    .map(|item| vec!["Title".to_owned(), item.to_owned()]),
             );
         }
 
@@ -297,7 +317,7 @@ impl From<&Song> for KeyValues {
             result.extend(
                 artist
                     .iter()
-                    .map(|item| KeyValue { key: "Artist".to_owned(), value: item.to_owned() }),
+                    .map(|item| vec!["Artist".to_owned(), item.to_owned()]),
             );
         }
 
@@ -305,13 +325,13 @@ impl From<&Song> for KeyValues {
             result.extend(
                 album
                     .iter()
-                    .map(|item| KeyValue { key: "Album".to_owned(), value: item.to_owned() }),
+                    .map(|item| vec!["Album".to_owned(), item.to_owned()]),
             );
         }
 
         let duration = song.duration.as_ref().map(|d| d.as_secs().to_string()).unwrap_or_default();
         if !duration.is_empty() {
-            result.push(KeyValue { key: "Duration".to_owned(), value: duration });
+            result.push(vec!["Duration".to_owned(), duration]);
         }
 
         result.extend(
@@ -321,10 +341,117 @@ impl From<&Song> for KeyValues {
                     !["title", "album", "artist", "duration"].contains(&(*key).as_str())
                 })
                 .flat_map(|(k, v)| {
-                    v.iter().map(|item| KeyValue { key: k.to_owned(), value: item.to_owned() })
+                    v.iter().map(|item| vec![k.to_owned(), item.to_owned()])
                 }),
         );
 
         KeyValues(result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::{config::keys::CommonAction, shared::keys::Actions, ui::ActionEvent};
+
+    fn test_ctx() -> (Ctx, crossbeam::channel::Receiver<crate::AppEvent>) {
+        let (app_tx, app_rx) = crossbeam::channel::unbounded();
+        let ctx = crate::tests::fixtures::ctx(
+            (app_tx, app_rx.clone()),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+        );
+        (ctx, app_rx)
+    }
+
+    fn render(modal: &mut InfoListModal, ctx: &mut Ctx) -> String {
+        let backend = ratatui::backend::TestBackend::new(100, 30);
+        let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| modal.render(frame, ctx).expect("modal renders"))
+            .expect("draw ok");
+        terminal.backend().buffer().content.iter().map(|c| c.symbol()).collect()
+    }
+
+    /// The two-column key/value shape (legacy InfoListModal behavior):
+    /// the header defaults to Tag/Value and the rows render.
+    #[test]
+    fn two_column_info_renders_tag_value_header_and_rows() {
+        let (mut ctx, _rx) = test_ctx();
+        let rows = vec![
+            vec!["Songs".to_owned(), "2".to_owned()],
+            vec!["Total duration".to_owned(), "1:30".to_owned()],
+        ];
+        let mut modal = InfoListModal::builder()
+            .title("Playlist info")
+            .column_widths(&[30, 70])
+            .rows(rows)
+            .size((40, 20))
+            .build();
+        let out = render(&mut modal, &mut ctx);
+        assert!(out.contains("Tag"), "default header renders Tag: {out}");
+        assert!(out.contains("Value"), "default header renders Value");
+        assert!(out.contains("Songs"), "row renders");
+        assert!(out.contains("1:30"), "wrapped row renders");
+    }
+
+    /// The three-column decoders shape renders its own header and rows.
+    #[test]
+    fn three_column_decoders_shape_renders_custom_header() {
+        let (mut ctx, _rx) = test_ctx();
+        let rows = vec![
+            vec!["mad".to_owned(), "audio/mpeg".to_owned(), "mp3".to_owned()],
+            vec!["flac".to_owned(), "audio/flac".to_owned(), "flac".to_owned()],
+        ];
+        let mut modal = InfoListModal::builder()
+            .title("Decoder plugins")
+            .column_widths(&[10, 45, 45])
+            .header(vec!["Plugin".to_owned(), "MIME types".to_owned(), "Suffixes".to_owned()])
+            .rows(rows)
+            .build();
+        let out = render(&mut modal, &mut ctx);
+        assert!(out.contains("Decoder plugins"), "title renders");
+        assert!(out.contains("Plugin"), "custom header renders");
+        assert!(out.contains("MIME types"), "custom header renders");
+        assert!(out.contains("Suffixes"), "custom header renders");
+        assert!(out.contains("audio/mpeg"), "rows render");
+    }
+
+    /// Long cells wrap into multiple table rows (the zip_longest shape).
+    #[test]
+    fn long_cells_wrap_into_multiple_rows() {
+        let (mut ctx, _rx) = test_ctx();
+        let rows =
+            vec![vec!["Key".to_owned(), "a very long value that wraps across lines".to_owned()]];
+        let mut modal = InfoListModal::builder()
+            .title("Song info")
+            .column_widths(&[30, 70])
+            .rows(rows)
+            .build();
+        let out = render(&mut modal, &mut ctx);
+        assert!(out.contains("Key"), "first row renders after wrapping");
+        assert!(out.contains("wraps"), "wrapped continuation renders");
+    }
+
+    /// Esc closes the modal (PopModal with the modal's id).
+    #[test]
+    fn close_hides_the_modal() {
+        let (mut ctx, app_rx) = test_ctx();
+        let mut modal = InfoListModal::builder()
+            .title("Song info")
+            .column_widths(&[30, 70])
+            .rows(vec![vec!["File".to_owned(), "a.mp3".to_owned()]])
+            .build();
+        let mut action = ActionEvent::from(Arc::new(vec![Actions::Common(CommonAction::Close)]));
+        modal.handle_key(&mut action, &mut ctx).unwrap();
+        assert!(
+            app_rx.iter().any(|ev| matches!(
+                ev,
+                crate::AppEvent::UiEvent(crate::ui::UiAppEvent::PopModal(id)) if id == modal.id()
+            )),
+            "Esc must close the info modal"
+        );
     }
 }

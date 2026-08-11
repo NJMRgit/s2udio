@@ -29,7 +29,7 @@ use crate::{
     ui::{
         FILTER_PREFIX,
         input::{BufferId, InputResultEvent},
-        modals::{Modal, menu::select_section::SelectSection},
+        modals::Modal,
     },
 };
 
@@ -472,20 +472,6 @@ impl<'a> MenuModal<'a> {
         self
     }
 
-    pub fn select_section(
-        mut self,
-        ctx: &Ctx,
-        cb: impl FnOnce(SelectSection) -> Option<SelectSection>,
-    ) -> Self {
-        let section = SelectSection::new(ctx.config.theme.current_item_style);
-        let section = cb(section);
-        if let Some(mut section) = section {
-            section.state.set_content_len(Some(section.items.len()));
-            self.sections.push(SectionType::Select(section));
-            self.areas.push(Rect::default());
-        }
-        self
-    }
 
     fn next(&mut self) {
         let result = self.sections[self.current_section_idx].down();

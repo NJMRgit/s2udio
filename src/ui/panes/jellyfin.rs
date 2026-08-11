@@ -7,15 +7,14 @@ use ratatui::{
     prelude::IntoCrossterm,
     style::{Color, Modifier},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
+    widgets::{Borders, List, ListItem, ListState, Paragraph},
 };
 
 use super::Pane;
 use crate::{
     MpdQueryResult,
     config::{
-        keys::{CommonAction, DirectoriesActions},
-        tabs::PaneType,
+        tabs::{PaneType, PaneTypeDiscriminants, TreeBrowserArgs},
     },
     ctx::Ctx,
     jellyfin::{Jellyfin, JfItem},
@@ -37,8 +36,8 @@ use crate::{
             sixel::Sixel,
             ueberzug::{Layer, Ueberzug},
         },
-        input::InputResultEvent,
         modals::menu::modal::MenuModal,
+        tree_browser::{TreeBrowserCore, TreeRowView},
     },
 };
 
@@ -147,6 +146,9 @@ pub struct JellyfinPane {
     /// Queue id of a song played via PlayFile (temp entry, removed on song
     /// change / stop — mirrors the Radio pane).
     temp_play_id: Option<u32>,
+    /// Tree-browser layout args from the config (defaults = today's
+    /// constants: 50-col minimum tree, hidden <= 120).
+    tree_args: TreeBrowserArgs,
     initialized: bool,
     tree_area: Rect,
     items_area: Rect,
@@ -194,6 +196,7 @@ impl JellyfinPane {
             error: None,
             focus: PaneFocus::Tree,
             temp_play_id: None,
+            tree_args: ctx.config.tree_browser_args(PaneTypeDiscriminants::Jellyfin),
             initialized: false,
             tree_area: Rect::default(),
             items_area: Rect::default(),
@@ -475,41 +478,6 @@ impl JellyfinPane {
         }
     }
 
-    /// Back out one level: the right pane shows the parent's children (with
-    /// the row we came from highlighted), the tree highlight follows and
-    /// the branch we left collapses. At the root this is a no-op.
-    fn select_parent(&mut self, ctx: &Ctx) -> Result<()> {
-        let Some(current) = self.selected.clone() else { return Ok(()) };
-        let prev_id = current.id().to_owned();
-        let prev_key = current.key();
-        // Moving up collapses the branch we leave: the tree shows the path
-        // up to the current node, not the whole history of expansions.
-        self.expanded.remove(&prev_key);
-        match self.parent_of(&current) {
-            Some(parent) => {
-                self.selected = Some(parent.clone());
-                self.ensure_loaded(&parent, ctx);
-                self.rebuild_tree();
-                self.populate_items();
-                self.select_items_item(&prev_id);
-                self.sync_tree_to_items_cursor();
-                self.sync_poster(ctx);
-                ctx.render()?;
-            }
-            None => {
-                // Back to the root: list every library, keep the cursor on
-                // the library we came from; the tree follows it.
-                self.selected = None;
-                self.rebuild_tree();
-                self.populate_items();
-                self.select_items_item(&prev_id);
-                self.sync_tree_to_items_cursor();
-                self.sync_poster(ctx);
-                ctx.render()?;
-            }
-        }
-        Ok(())
-    }
 
     fn select_node(&mut self, kind: &JfNodeKind, ctx: &Ctx) -> Result<()> {
         self.selected = Some(kind.clone());
@@ -661,48 +629,8 @@ impl JellyfinPane {
         Ok(())
     }
 
-    /// Highlight a tree row and mirror it in the right pane: the current
-    /// node becomes the highlighted row and the right pane shows its
-    /// children.
-    fn highlight_tree_node(&mut self, idx: usize, ctx: &Ctx) -> Result<()> {
-        let Some(node) = self.tree.get(idx).cloned() else { return Ok(()) };
-        self.tree_list.select(Some(idx));
-        self.selected = Some(node.kind.clone());
-        self.ensure_loaded(&node.kind, ctx);
-        self.populate_items();
-        self.sync_poster(ctx);
-        ctx.render()?;
-        Ok(())
-    }
 
-    fn move_tree(&mut self, dir: i64, ctx: &Ctx) -> Result<()> {
-        if self.tree.is_empty() {
-            return Ok(());
-        }
-        let current = self.tree_list.selected().unwrap_or(0) as i64;
-        let new_idx = (current + dir).clamp(0, self.tree.len() as i64 - 1) as usize;
-        if new_idx != current as usize {
-            self.highlight_tree_node(new_idx, ctx)?;
-        }
-        Ok(())
-    }
 
-    fn move_items(&mut self, dir: i64, ctx: &Ctx) -> Result<()> {
-        if self.items.is_empty() {
-            return Ok(());
-        }
-        let current = self.item_list.selected().unwrap_or(0) as i64;
-        let new_idx = (current + dir).clamp(0, self.items.len() as i64 - 1) as usize;
-        if new_idx != current as usize {
-            self.item_list.select(Some(new_idx));
-            // The left pane follows the right-pane cursor when the item has
-            // a tree row (libraries, series, seasons).
-            self.sync_tree_to_items_cursor();
-            self.sync_poster(ctx);
-            ctx.render()?;
-        }
-        Ok(())
-    }
 
     /// The stream URL for an item id (audio vs video endpoint).
     fn stream_url(&self, item: &JfItem) -> Option<String> {
@@ -859,28 +787,7 @@ impl JellyfinPane {
         Ok(())
     }
 
-    fn play_url_temp(&mut self, ctx: &Ctx, url: String) {
-        // Drop any previous temporary entry first (like the Directories pane).
-        if let Some(prev) = self.temp_play_id.take() {
-            ctx.temp_play_id.set(None);
-            ctx.command(move |client| {
-                client.delete_id(prev)?;
-                Ok(())
-            });
-        }
-        ctx.query().id(JF_PLAY).replace_id(JF_PLAY).target(PaneType::Jellyfin).query(
-            move |client| {
-                let id = client.add_id(&url, None)?;
-                client.play_id(id)?;
-                Ok(MpdQueryResult::Any(Box::new(id)))
-            },
-        );
-    }
 
-    fn selected_item(&self) -> Option<JfItem> {
-        let idx = self.item_list.selected()?;
-        self.items.get(idx).cloned()
-    }
 
     /// Play the highlighted item. Audio plays through MPD (temporary entry,
     /// like radio stations); video launches per the configured playback mode
@@ -910,7 +817,7 @@ impl JellyfinPane {
         }
         if let Some(url) = self.stream_url(&item) {
             if item.is_audio() {
-                self.play_url_temp(ctx, url);
+                self.play_temp_url(ctx, JF_PLAY, PaneType::Jellyfin { tree: TreeBrowserArgs::default() }, url);
                 status_info!("Playing {}", item.name);
             } else {
                 Self::play_video(
@@ -925,143 +832,10 @@ impl JellyfinPane {
         Ok(())
     }
 
-    fn open_menu(&mut self, ctx: &Ctx) -> Result<()> {
-        let Some(item) = self.selected_item() else { return Ok(()) };
-        if !item.is_playable() {
-            return Ok(());
-        }
-        let name = item.name.clone();
-        let is_audio_item = item.is_audio();
-        // Build the stream URLs before the closures so they only capture
-        // owned Strings.
-        let play_url = self.stream_url(&item).unwrap_or_default();
-        let item_id = item.id.clone();
-        let item_name = item.name.clone();
-        let add_url = play_url.clone();
-        let append_url = play_url.clone();
-        let menu = MenuModal::new(ctx)
-            .width(60)
-            .title(format!(" {name} "))
-            .list_section(ctx, |section| {
-                let mut section = section;
-                if is_audio_item {
-                    section = section.item("Play now", move |ctx| {
-                        ctx.query()
-                            .id(JF_PLAY)
-                            .replace_id(JF_PLAY)
-                            .target(PaneType::Jellyfin)
-                            .query(move |client| {
-                                let id = client.add_id(&play_url, None)?;
-                                client.play_id(id)?;
-                                Ok(MpdQueryResult::Any(Box::new(id)))
-                            });
-                        Ok(())
-                    });
-                } else {
-                    let mpv_url = play_url.clone();
-                    let season_id = item.season_id.clone();
-                    section = section.item("Play with MPV (video)", move |ctx| {
-                        JellyfinPane::play_video(
-                            ctx,
-                            mpv_url.clone(),
-                            item_name.clone(),
-                            item_id.clone(),
-                            season_id.clone(),
-                        )
-                    });
-                    section = section.item("Play audio with MPD", move |ctx| {
-                        jellyfin_play_temp(ctx, play_url.clone());
-                        Ok(())
-                    });
-                }
-                section = section.item("Add to queue", move |ctx| {
-                    ctx.command(move |client| {
-                        client.add(
-                            &add_url,
-                            Some(crate::mpd::QueuePosition::RelativeAdd(0)),
-                        )?;
-                        Ok(())
-                    });
-                    Ok(())
-                });
-                section = section.item("Append to queue", move |ctx| {
-                    ctx.command(move |client| {
-                        client.add(&append_url, None)?;
-                        Ok(())
-                    });
-                    Ok(())
-                });
-                section.add_item("Cancel", |_ctx| Ok(()));
-                Some(section)
-            })
-            .build();
-        modal!(ctx, menu);
-        Ok(())
-    }
 
     /// Drop the temporary play song once playback has moved on.
-    fn cleanup_temp_play(&mut self, ctx: &Ctx) {
-        if let Some(temp) = self.temp_play_id
-            && ctx.status.songid != Some(temp)
-        {
-            self.temp_play_id = None;
-            ctx.temp_play_id.set(None);
-            ctx.command(move |client| {
-                client.delete_id(temp)?;
-                Ok(())
-            });
-        }
-    }
 
-    fn render_tree(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) {
-        let base = ctx.config.as_list_name_style();
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(ctx.config.as_border_style())
-            .title(" Libraries ");
-        let inner = block.inner(area);
-        let hover_idx = crate::ui::panes::hovered_item(
-            ctx.mouse_pos(),
-            inner,
-            self.tree_list.offset(),
-            self.tree.len(),
-            1,
-        );
-        let hovered = ctx.config.theme.hovered_item_style;
-        let items: Vec<ListItem> = self
-            .tree
-            .iter()
-            .enumerate()
-            .map(|(idx, node)| {
-                let indent = "  ".repeat(usize::from(node.depth));
-                let arrow = if node.expandable {
-                    if node.expanded { "▼ " } else { "▶ " }
-                } else {
-                    ""
-                };
-                let mut item =
-                    ListItem::new(Line::from(format!("{indent}{arrow}{}", node.kind.label())));
-                if hover_idx == Some(idx) {
-                    item = item.style(hovered);
-                }
-                item
-            })
-            .collect();
-        ratatui::widgets::StatefulWidget::render(
-            List::new(items)
-                .highlight_style(if hover_idx == self.tree_list.selected() {
-                    ctx.config.theme.hovered_item_style
-                } else {
-                    ctx.config.theme.current_item_style
-                })
-                .style(base),
-            inner,
-            frame.buffer_mut(),
-            &mut self.tree_list,
-        );
-        ratatui::widgets::Widget::render(block, area, frame.buffer_mut());
-        self.tree_area = inner;
-    }
+
 
     /// Second (dim) line of an item row.
     fn item_subline(item: &JfItem) -> String {
@@ -1122,7 +896,98 @@ impl JellyfinPane {
         parts.join(" · ")
     }
 
-    fn render_items(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) {
+
+
+}
+
+impl JellyfinPane {
+    /// Display the poster queued by the last render. Called by the event
+    /// loop after the frame's buffer flush, so the flush cannot overwrite
+    /// the overlay's placeholder cells.
+    pub(crate) fn flush_pending_poster(&mut self, ctx: &Ctx) {
+        self.poster.flush_pending(ctx);
+    }
+
+    /// Hide the poster overlay (window resizing / transient state).
+    pub(crate) fn hide_pending_poster(&mut self, ctx: &Ctx) {
+        self.poster.hide(ctx);
+    }
+}
+
+impl TreeBrowserCore for JellyfinPane {
+    type Item = JfItem;
+
+    // ── tree ───────────────────────────────────────────────────────────
+
+    fn tree_rows(&self) -> Vec<TreeRowView> {
+        self.tree
+            .iter()
+            .map(|node| TreeRowView {
+                label: node.kind.label(),
+                depth: node.depth,
+                expandable: node.expandable,
+                expanded: node.expanded,
+                root: false,
+            })
+            .collect()
+    }
+
+    fn tree_selected(&self) -> usize {
+        self.tree_list.selected().unwrap_or(0)
+    }
+
+    fn tree_list(&self) -> &ListState {
+        &self.tree_list
+    }
+
+    fn tree_list_mut(&mut self) -> &mut ListState {
+        &mut self.tree_list
+    }
+
+    fn tree_area(&self) -> Rect {
+        self.tree_area
+    }
+
+    fn set_tree_area(&mut self, area: Rect) {
+        self.tree_area = area;
+    }
+
+    fn set_expanded_idx(&mut self, idx: usize, expanded: bool, ctx: &Ctx) -> Result<()> {
+        let Some(node) = self.tree.get(idx).cloned() else { return Ok(()) };
+        self.set_expanded(&node.kind, expanded, ctx)
+    }
+
+    // ── items ──────────────────────────────────────────────────────────
+
+    fn items_len(&self) -> usize {
+        self.items.len()
+    }
+
+    fn items_list(&self) -> &ListState {
+        &self.item_list
+    }
+
+    fn items_list_mut(&mut self) -> &mut ListState {
+        &mut self.item_list
+    }
+
+    fn items_area(&self) -> Rect {
+        self.items_area
+    }
+
+    fn set_items_area(&mut self, area: Rect) {
+        self.items_area = area;
+    }
+
+    fn item_at(&self, idx: usize) -> Option<Self::Item> {
+        self.items.get(idx).cloned()
+    }
+
+    fn item_row_height(&self) -> u16 {
+        2
+    }
+
+    fn item_row(&self, idx: usize, hovered: bool, ctx: &Ctx) -> ListItem<'static> {
         let base = ctx.config.as_list_name_style();
         let dim = ctx.config.as_list_text_style();
         // The Jellyfin item currently playing: the mpv video session, or the
@@ -1133,101 +998,159 @@ impl JellyfinPane {
             ctx.find_current_song_in_queue()
                 .and_then(|(_, song)| crate::jellyfin::item_id_from_url(&song.file))
         };
-
-        let title = self
-            .selected
-            .as_ref()
-            .map(|kind| format!(" {} ", kind.label()))
-            .unwrap_or_else(|| " Items ".to_owned());
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(ctx.config.as_border_style())
-            .title(format!("{title}({}) ", self.items.len()));
-        let inner = block.inner(area);
-        // Item rows are two lines tall (name + subline): the hover row
-        // maps both lines to the same item.
-        let hover_idx = crate::ui::panes::hovered_item(
-            ctx.mouse_pos(),
-            inner,
-            self.item_list.offset(),
-            self.items.len(),
-            2,
-        );
-        let hovered = ctx.config.theme.hovered_item_style;
-
-        let items: Vec<ListItem> = self
-            .items
-            .iter()
-            .enumerate()
-            .map(|(idx, item)| {
-                let is_playing = playing_id.as_deref() == Some(item.id.as_str());
-                let prefix = if item.is_playable() {
-                    if is_playing { "▶ " } else { "  " }
-                } else if item.is_container() {
-                    "▸ "
-                } else {
-                    "  "
-                };
-                // The playing episode gets the selection-style highlight so
-                // it stands out wherever it is listed; the row under the
-                // mouse gets the hover highlight.
-                let name_style =
-                    if is_playing { ctx.config.theme.current_item_style } else { base };
-                let sub_style = if is_playing {
-                    ctx.config.theme.current_item_style
-                } else {
-                    dim
-                };
-                let mut lines = vec![
-                    Line::from(Span::styled(format!("{prefix}{}", item.name), name_style)),
-                    Line::from(Span::styled(
-                        format!("  {}", Self::item_subline(item)),
-                        sub_style,
-                    )),
-                ];
-                if hover_idx == Some(idx) {
-                    for line in lines.iter_mut() {
-                        *line = line.clone().patch_style(hovered);
-                    }
-                }
-                ListItem::new(lines)
-            })
-            .collect();
-
-        ratatui::widgets::StatefulWidget::render(
-            List::new(items)
-                .highlight_style(if hover_idx == self.item_list.selected() {
-                    ctx.config.theme.hovered_item_style
-                } else {
-                    ctx.config.theme.current_item_style
-                })
-                .style(base),
-            inner,
-            frame.buffer_mut(),
-            &mut self.item_list,
-        );
-        ratatui::widgets::Widget::render(block, area, frame.buffer_mut());
-        self.items_area = inner;
+        let item = &self.items[idx];
+        let is_playing = playing_id.as_deref() == Some(item.id.as_str());
+        let prefix = if item.is_playable() {
+            if is_playing { "▶ " } else { "  " }
+        } else if item.is_container() {
+            "▸ "
+        } else {
+            "  "
+        };
+        // The playing episode gets the selection-style highlight so it
+        // stands out wherever it is listed; the row under the mouse gets
+        // the hover highlight.
+        let name_style = if is_playing { ctx.config.theme.current_item_style } else { base };
+        let sub_style = if is_playing { ctx.config.theme.current_item_style } else { dim };
+        let mut lines = vec![
+            Line::from(Span::styled(format!("{prefix}{}", item.name), name_style)),
+            Line::from(Span::styled(format!("  {}", Self::item_subline(item)), sub_style)),
+        ];
+        if hovered {
+            for line in lines.iter_mut() {
+                *line = line.clone().patch_style(ctx.config.theme.hovered_item_style);
+            }
+        }
+        ListItem::new(lines)
     }
 
-    fn render_tips(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) {
-        let base = ctx.config.as_list_name_style();
-        let dim = ctx.config.as_list_text_style();
-        let tips = vec![
-            Line::from(vec![
-                Span::styled("w/s · ↑/↓", base),
-                Span::styled("  libraries · items", dim),
-            ]),
-            Line::from(vec![
-                Span::styled("d / a", base),
-                Span::styled("  expand · collapse", dim),
-            ]),
-            Line::from(vec![
-                Span::styled("Enter · →", base),
-                Span::styled("  play track · open", dim),
-            ]),
-        ];
-        frame.render_widget(Paragraph::new(tips).style(dim), area);
+    // ── behavior hooks ─────────────────────────────────────────────────
+
+    fn highlight_tree_node(&mut self, idx: usize, ctx: &Ctx) -> Result<()> {
+        let Some(node) = self.tree.get(idx).cloned() else { return Ok(()) };
+        self.tree_list.select(Some(idx));
+        self.selected = Some(node.kind.clone());
+        self.ensure_loaded(&node.kind, ctx);
+        self.populate_items();
+        self.sync_poster(ctx);
+        ctx.render()?;
+        Ok(())
+    }
+
+    fn select_parent(&mut self, ctx: &Ctx) -> Result<()> {
+        let Some(current) = self.selected.clone() else { return Ok(()) };
+        let prev_id = current.id().to_owned();
+        let prev_key = current.key();
+        // Moving up collapses the branch we leave: the tree shows the path
+        // up to the current node, not the whole history of expansions.
+        self.expanded.remove(&prev_key);
+        match self.parent_of(&current) {
+            Some(parent) => {
+                self.selected = Some(parent.clone());
+                self.ensure_loaded(&parent, ctx);
+                self.rebuild_tree();
+                self.populate_items();
+                self.select_items_item(&prev_id);
+                self.sync_tree_to_items_cursor();
+                self.sync_poster(ctx);
+                ctx.render()?;
+            }
+            None => {
+                // Back to the root: list every library, keep the cursor on
+                // the library we came from; the tree follows it.
+                self.selected = None;
+                self.rebuild_tree();
+                self.populate_items();
+                self.select_items_item(&prev_id);
+                self.sync_tree_to_items_cursor();
+                self.sync_poster(ctx);
+                ctx.render()?;
+            }
+        }
+        Ok(())
+    }
+
+    fn activate_selected(&mut self, ctx: &Ctx) -> Result<()> {
+        let Some(item) = self.selected_item() else { return Ok(()) };
+        if item.is_playable() {
+            self.play_selected(ctx)
+        } else {
+            self.open_item(item, ctx)
+        }
+    }
+
+    fn open_context_menu(&mut self, ctx: &Ctx) -> Result<()> {
+        let Some(item) = self.selected_item() else { return Ok(()) };
+        if !item.is_playable() {
+            return Ok(());
+        }
+        let name = item.name.clone();
+        let is_audio_item = item.is_audio();
+        // Build the stream URLs before the closures so they only capture
+        // owned Strings.
+        let play_url = self.stream_url(&item).unwrap_or_default();
+        let item_id = item.id.clone();
+        let item_name = item.name.clone();
+        let add_url = play_url.clone();
+        let append_url = play_url.clone();
+        let menu = MenuModal::new(ctx)
+            .width(60)
+            .title(format!(" {name} "))
+            .list_section(ctx, |section| {
+                let mut section = section;
+                if is_audio_item {
+                    section = section.item("Play now", move |ctx| {
+                        ctx.query()
+                            .id(JF_PLAY)
+                            .replace_id(JF_PLAY)
+                            .target(PaneType::Jellyfin { tree: TreeBrowserArgs::default() })
+                            .query(move |client| {
+                                let id = client.add_id(&play_url, None)?;
+                                client.play_id(id)?;
+                                Ok(MpdQueryResult::Any(Box::new(id)))
+                            });
+                        Ok(())
+                    });
+                } else {
+                    let mpv_url = play_url.clone();
+                    let season_id = item.season_id.clone();
+                    section = section.item("Play with MPV (video)", move |ctx| {
+                        JellyfinPane::play_video(
+                            ctx,
+                            mpv_url.clone(),
+                            item_name.clone(),
+                            item_id.clone(),
+                            season_id.clone(),
+                        )
+                    });
+                    section = section.item("Play audio with MPD", move |ctx| {
+                        jellyfin_play_temp(ctx, play_url.clone());
+                        Ok(())
+                    });
+                }
+                section = section.item("Add to queue", move |ctx| {
+                    ctx.command(move |client| {
+                        client.add(
+                            &add_url,
+                            Some(crate::mpd::QueuePosition::RelativeAdd(0)),
+                        )?;
+                        Ok(())
+                    });
+                    Ok(())
+                });
+                section = section.item("Append to queue", move |ctx| {
+                    ctx.command(move |client| {
+                        client.add(&append_url, None)?;
+                        Ok(())
+                    });
+                    Ok(())
+                });
+                section.add_item("Cancel", |_ctx| Ok(()));
+                Some(section)
+            })
+            .build();
+        modal!(ctx, menu);
+        Ok(())
     }
 
     fn render_info(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) {
@@ -1313,7 +1236,7 @@ impl JellyfinPane {
                     let text_width = (((area.width.saturating_sub(2)) * 3 / 5)
                         .saturating_sub(3))
                     .max(10) as usize;
-                    for line in crate::ui::panes::lyrics::wrap_to_width(
+                    for line in crate::ui::widgets::wrap::wrap_to_width(
                         &crate::ui::panes::lyrics::scrub_emoji(overview),
                         text_width,
                     ) {
@@ -1552,7 +1475,7 @@ impl JellyfinPane {
                     .info_song_shown_at
                     .map(|t| t.elapsed().as_millis())
                     .unwrap_or(0) as u64;
-                crate::ui::panes::controls::ControlsPane::marquee_offset(
+                crate::ui::widgets::marquee::marquee_offset(
                     elapsed_ms,
                     title_len,
                     marquee_area.width,
@@ -1560,7 +1483,7 @@ impl JellyfinPane {
             } else {
                 0
             };
-            crate::ui::panes::controls::ControlsPane::draw_panel_at(
+            crate::ui::widgets::marquee::draw_panel_at(
                 frame.buffer_mut(),
                 marquee_area.x,
                 marquee_area.y,
@@ -1705,57 +1628,121 @@ impl JellyfinPane {
         self.info_scrollbar_area = scrollbar_area;
     }
 
-
-}
-
-impl JellyfinPane {
-    /// Display the poster queued by the last render. Called by the event
-    /// loop after the frame's buffer flush, so the flush cannot overwrite
-    /// the overlay's placeholder cells.
-    pub(crate) fn flush_pending_poster(&mut self, ctx: &Ctx) {
-        self.poster.flush_pending(ctx);
+    fn temp_play_id(&self) -> Option<u32> {
+        self.temp_play_id
     }
 
-    /// Hide the poster overlay (window resizing / transient state).
-    pub(crate) fn hide_pending_poster(&mut self, ctx: &Ctx) {
-        self.poster.hide(ctx);
+    fn set_temp_play_id(&mut self, id: Option<u32>) {
+        self.temp_play_id = id;
+    }
+
+    // ── rendering hooks ────────────────────────────────────────────────
+
+    fn tree_title(&self) -> &'static str {
+        " Libraries "
+    }
+
+    fn items_title(&self) -> String {
+        // Pre-padded on both sides (as it appears left of the `(n)`
+        // count): the shared format appends "(n)" directly, restoring the
+        // pre-Phase-2 `" Items (3) "` spacing (Phase 2.1 parity).
+        self.selected
+            .as_ref()
+            .map(|kind| format!(" {} ", kind.label()))
+            .unwrap_or_else(|| " Items ".to_owned())
+    }
+
+    fn tips_lines(&self, ctx: &Ctx) -> Vec<Line<'static>> {
+        let base = ctx.config.as_list_name_style();
+        let dim = ctx.config.as_list_text_style();
+        vec![
+            Line::from(vec![
+                Span::styled("w/s · ↑/↓", base),
+                Span::styled("  libraries · items", dim),
+            ]),
+            Line::from(vec![
+                Span::styled("d / a", base),
+                Span::styled("  expand · collapse", dim),
+            ]),
+            Line::from(vec![
+                Span::styled("Enter · →", base),
+                Span::styled("  play track · open", dim),
+            ]),
+        ]
+    }
+
+    // ── defaulted hook overrides ───────────────────────────────────────
+
+    /// The configured tree-browser args drive the shared `split_tree`
+    /// (tree min width / hide threshold).
+    fn tree_args(&self) -> TreeBrowserArgs {
+        self.tree_args.clone()
+    }
+
+    fn sync_tree_to_items_cursor(&mut self) {
+        let target = self
+            .selected_item()
+            .map(|item| item.id)
+            .or_else(|| self.selected.as_ref().map(|k| k.id().to_owned()));
+        let Some(target) = target else { return };
+        if let Some(idx) = self.tree.iter().position(|node| node.kind.item().id == target) {
+            self.tree_list.select(Some(idx));
+        } else if let Some(kind) = self.selected.as_ref()
+            && let Some(idx) = self.tree.iter().position(|node| node.kind.key() == kind.key())
+        {
+            self.tree_list.select(Some(idx));
+        }
+    }
+
+    fn on_items_cursor_moved(&mut self, ctx: &Ctx) -> Result<()> {
+        // The tree highlight follows the right-pane cursor, and the info
+        // box fetches the newly highlighted item's poster.
+        self.sync_tree_to_items_cursor();
+        self.sync_poster(ctx);
+        ctx.render()?;
+        Ok(())
+    }
+
+    fn on_tree_focus(&mut self) {
+        self.focus = PaneFocus::Tree;
+    }
+
+    fn on_items_focus(&mut self) {
+        self.focus = PaneFocus::Items;
+    }
+
+    /// The tree pane is hidden on TUIs ≤ 120 columns wide: reset the tree
+    /// rect so mouse events (scroll included) can never hit the collapsed
+    /// pane.
+    fn on_tree_hidden(&mut self) {
+        self.tree_area = Rect::default();
+    }
+
+    /// Double-click on a tree row: expand/collapse expandable nodes, open
+    /// leaf containers (e.g. a season).
+    fn on_tree_double_click(&mut self, idx: usize, ctx: &Ctx) -> Result<()> {
+        self.highlight_tree_node(idx, ctx)?;
+        let Some(node) = self.tree.get(idx).cloned() else { return Ok(()) };
+        if node.expandable {
+            self.set_expanded(&node.kind, !node.expanded, ctx)?;
+        } else {
+            // Leaf container (e.g. a season): open it.
+            self.set_expanded(&node.kind, true, ctx)?;
+        }
+        Ok(())
+    }
+
+    fn on_reconnected(&mut self, ctx: &Ctx) -> Result<()> {
+        self.initialized = false;
+        self.temp_play_id = None;
+        self.before_show(ctx)?;
+        Ok(())
     }
 }
 
 impl Pane for JellyfinPane {
     fn render(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) -> Result<()> {
-        // The left library-tree pane keeps the same 50-column minimum as
-        // the MPD folder tree and is hidden entirely on TUIs ≤ 120 columns
-        // wide: the right pane then gets the whole area, and the tree's
-        // rect is reset so mouse events (scroll included) can never hit
-        // the collapsed pane.
-        let tree_w = crate::ui::panes::directories::tree_width(area.width);
-        let (tree_area, right) = if tree_w == 0 {
-            (Rect::default(), area)
-        } else {
-            let [tree_area, right] = Layout::horizontal([
-                Constraint::Length(tree_w),
-                Constraint::Length(area.width - tree_w),
-            ])
-            .areas(area);
-            (tree_area, right)
-        };
-        let [items_area, tips_area, info_area] = Layout::vertical([
-            Constraint::Percentage(60),
-            Constraint::Length(3),
-            Constraint::Percentage(33),
-        ])
-        .areas(right);
-
-        if tree_w == 0 {
-            self.tree_area = Rect::default();
-        } else {
-            self.render_tree(frame, tree_area, ctx);
-        }
-        self.render_items(frame, items_area, ctx);
-        self.render_tips(frame, tips_area, ctx);
-        self.render_info(frame, info_area, ctx);
-        Ok(())
+        self.render_tree_browser(frame, area, ctx)
     }
 
     fn before_show(&mut self, ctx: &Ctx) -> Result<()> {
@@ -1775,38 +1762,13 @@ impl Pane for JellyfinPane {
     }
 
     fn on_event(&mut self, event: &mut UiEvent, is_visible: bool, ctx: &Ctx) -> Result<()> {
+        // The temp-play lifecycle (SongChanged / stop / reconnected) lives
+        // in the shared tree-browser core; the poster-overlay arms are
+        // jellyfin-specific.
+        if self.handle_tree_events(event, is_visible, ctx)? {
+            return Ok(());
+        }
         match event {
-            UiEvent::SongChanged => self.cleanup_temp_play(ctx),
-            // Fired after ctx.status is refreshed (unlike Player, which
-            // arrives while the status is still stale), so the Stop
-            // transition is reliably visible here.
-            UiEvent::PlaybackStateChanged => {
-                if ctx.status.state == State::Stop
-                    && let Some(temp) = self.temp_play_id
-                {
-                    self.temp_play_id = None;
-                    ctx.command(move |client| {
-                        client.delete_id(temp)?;
-                        Ok(())
-                    });
-                }
-            }
-            UiEvent::Player => {
-                // Streams keep the same queue entry while playing, so
-                // SongChanged never fires. After stop, MPD still reports the
-                // last songid, so drop the temp entry on the state transition
-                // itself instead of waiting for a song change.
-                if ctx.status.state == State::Stop
-                    && let Some(temp) = self.temp_play_id
-                {
-                    self.temp_play_id = None;
-                    ctx.temp_play_id.set(None);
-                    ctx.command(move |client| {
-                        client.delete_id(temp)?;
-                        Ok(())
-                    });
-                }
-            }
             // The poster overlay must not cover modals; redraw it when the
             // modal closes or the tab is shown again.
             UiEvent::ModalOpened => {
@@ -1825,11 +1787,6 @@ impl Pane for JellyfinPane {
             UiEvent::Hidden if !is_visible => {
                 self.poster.hide(ctx);
             }
-            UiEvent::Reconnected => {
-                self.initialized = false;
-                self.temp_play_id = None;
-                self.before_show(ctx)?;
-            }
             _ => {}
         }
         Ok(())
@@ -1837,32 +1794,7 @@ impl Pane for JellyfinPane {
 
     fn handle_mouse_event(&mut self, event: MouseEvent, ctx: &Ctx) -> Result<()> {
         if self.tree_area.contains(event.into()) {
-            self.focus = PaneFocus::Tree;
-            match event.kind {
-                MouseEventKind::LeftClick => {
-                    let row = usize::from(event.y.saturating_sub(self.tree_area.y));
-                    self.highlight_tree_node(self.tree_list.offset() + row, ctx)?;
-                }
-                MouseEventKind::DoubleClick => {
-                    let row = usize::from(event.y.saturating_sub(self.tree_area.y));
-                    let idx = self.tree_list.offset() + row;
-                    self.highlight_tree_node(idx, ctx)?;
-                    if let Some(node) = self.tree.get(idx).cloned() {
-                        if node.expandable {
-                            self.set_expanded(&node.kind, !node.expanded, ctx)?;
-                        } else {
-                            // Leaf container (e.g. a season): open it.
-                            self.set_expanded(&node.kind, true, ctx)?;
-                        }
-                    }
-                }
-                MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
-                    let dir = if matches!(event.kind, MouseEventKind::ScrollUp) { -1 } else { 1 };
-                    self.move_tree(dir, ctx)?;
-                }
-                _ => {}
-            }
-            return Ok(());
+            return self.handle_tree_mouse(event, ctx);
         }
 
         // A click / drag on the info text's scrollbar scrolls it (the
@@ -1912,126 +1844,18 @@ impl Pane for JellyfinPane {
         }
 
         if self.items_area.contains(event.into()) {
-            self.focus = PaneFocus::Items;
-            let row = usize::from(event.y.saturating_sub(self.items_area.y));
-            let idx = self.item_list.offset() + row / 2;
-            match event.kind {
-                MouseEventKind::RightClick => {
-                    if idx < self.items.len() {
-                        self.item_list.select(Some(idx));
-                        self.sync_tree_to_items_cursor();
-                        self.sync_poster(ctx);
-                        ctx.render()?;
-                        return self.open_menu(ctx);
-                    }
-                }
-                MouseEventKind::LeftClick | MouseEventKind::DoubleClick => {
-                    if idx < self.items.len() {
-                        self.item_list.select(Some(idx));
-                        // Keep the info box in sync with the click selection
-                        // (like the keyboard path): clear the old poster and
-                        // fetch the newly highlighted item's image.
-                        self.sync_tree_to_items_cursor();
-                        self.sync_poster(ctx);
-                        if matches!(event.kind, MouseEventKind::DoubleClick) {
-                            let item = self.items[idx].clone();
-                            if item.is_playable() {
-                                self.play_selected(ctx)?;
-                            } else if item.is_container() {
-                                self.open_item(item, ctx)?;
-                            }
-                        }
-                    }
-                }
-                MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
-                    let dir = if matches!(event.kind, MouseEventKind::ScrollUp) { -1 } else { 1 };
-                    self.move_items(dir, ctx)?;
-                }
-                _ => {}
-            }
-            return Ok(());
+            return self.handle_items_mouse(event, ctx);
         }
 
-        Ok(())
-    }
-
-    fn handle_insert_mode(&mut self, kind: InputResultEvent, ctx: &mut Ctx) -> Result<()> {
-        let _ = (kind, ctx);
         Ok(())
     }
 
     fn handle_action(&mut self, event: &mut ActionEvent, ctx: &mut Ctx) -> Result<()> {
-        // Common actions come first: `w/s`/arrows drive the right-pane list
-        // (the primary navigation surface; both panes share the selection),
-        // while the tree is a mirror that follows the current node.
-        if let Some(action) = event.claim_common() {
-            match action {
-                CommonAction::Up | CommonAction::Down => {
-                    self.focus = PaneFocus::Items;
-                    let dir = if matches!(action, CommonAction::Up) { -1 } else { 1 };
-                    return self.move_items(dir, ctx);
-                }
-                CommonAction::Left => {
-                    // `←` backs out one level (same as `a`).
-                    self.focus = PaneFocus::Items;
-                    return self.select_parent(ctx);
-                }
-                CommonAction::Top => {
-                    if !self.items.is_empty() {
-                        self.item_list.select(Some(0));
-                        self.sync_tree_to_items_cursor();
-                        self.sync_poster(ctx);
-                        ctx.render()?;
-                    }
-                    return Ok(());
-                }
-                CommonAction::Bottom => {
-                    if !self.items.is_empty() {
-                        self.item_list.select(Some(self.items.len() - 1));
-                        self.sync_tree_to_items_cursor();
-                        self.sync_poster(ctx);
-                        ctx.render()?;
-                    }
-                    return Ok(());
-                }
-                CommonAction::Confirm => {
-                    let Some(item) = self.selected_item() else { return Ok(()) };
-                    if item.is_playable() {
-                        return self.play_selected(ctx);
-                    }
-                    return self.open_item(item, ctx);
-                }
-                CommonAction::ContextMenu => return self.open_menu(ctx),
-                _ => event.abandon(),
-            }
-        }
-        if let Some(action) = event.claim_directories() {
-            return match action {
-                DirectoriesActions::FolderUp | DirectoriesActions::FolderDown => {
-                    // Normally claimed by Common Up/Down above; keep a
-                    // tree fallback for other bindings.
-                    self.focus = PaneFocus::Tree;
-                    let dir = if matches!(action, DirectoriesActions::FolderUp) { -1 } else { 1 };
-                    self.move_tree(dir, ctx)
-                }
-                // `d` mirrors `→` (wasd = arrow keys): open the highlighted
-                // container or play the highlighted item.
-                DirectoriesActions::FolderExpand | DirectoriesActions::PlayFile => {
-                    let Some(item) = self.selected_item() else { return Ok(()) };
-                    if item.is_container() {
-                        self.open_item(item, ctx)
-                    } else {
-                        self.play_selected(ctx)
-                    }
-                }
-                DirectoriesActions::FolderCollapse => {
-                    // `a` / `←`: back out one level (parent's children in
-                    // the right pane). At the root this is a no-op.
-                    self.focus = PaneFocus::Items;
-                    self.select_parent(ctx)
-                }
-            };
-        }
+        // Shared tree-browser action arms: w/s/arrows move the right-pane
+        // list, `a`/`←` back out, `d`/`→` open/play, Enter plays a track
+        // or opens a container, right-click opens the item menu. The focus
+        // (tree vs items) is tracked by the shared hooks.
+        self.handle_tree_action(event, ctx)?;
         Ok(())
     }
 
@@ -2139,11 +1963,8 @@ impl Pane for JellyfinPane {
             },
             // Temp-play id results come as plain u32.
             Err(any) => {
-                if id == JF_PLAY
-                    && let Ok(boxed) = any.downcast::<u32>()
-                {
-                    self.temp_play_id = Some(*boxed);
-                    ctx.temp_play_id.set(Some(*boxed));
+                if id == JF_PLAY {
+                    self.handle_play_result(any, ctx)?;
                 }
             }
         }
@@ -2155,7 +1976,7 @@ impl Pane for JellyfinPane {
 /// the Ask menu's "Play audio with MPD" option, where the pane itself cannot
 /// be borrowed (the menu stores the closure for later).
 fn jellyfin_play_temp(ctx: &Ctx, url: String) {
-    ctx.query().id(JF_PLAY).replace_id(JF_PLAY).target(PaneType::Jellyfin).query(move |client| {
+    ctx.query().id(JF_PLAY).replace_id(JF_PLAY).target(PaneType::Jellyfin { tree: TreeBrowserArgs::default() }).query(move |client| {
         let id = client.add_id(&url, None)?;
         client.play_id(id)?;
         Ok(MpdQueryResult::Any(Box::new(id)))
@@ -2409,6 +2230,29 @@ mod tests {
             .map(|y| (0..100).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>())
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// The tree-browser args drive the shared split: `tree_min_width: 60`
+    /// widens the tree at 160 cols (vs the 50 default) and the default
+    /// hide threshold still collapses it on narrow TUIs.
+    #[test]
+    fn tree_args_change_the_tree_width() {
+        let (app_tx, _app_rx) = crossbeam::channel::unbounded();
+        let (work_tx, work_rx) = crossbeam::channel::unbounded();
+        let ctx = crate::tests::fixtures::ctx(
+            (app_tx, _app_rx),
+            (work_tx, work_rx.clone()),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+        );
+        let mut pane = JellyfinPane::new(&ctx);
+        pane.tree_args = TreeBrowserArgs {
+            tree_min_width: 60,
+            ..TreeBrowserArgs::default()
+        };
+        let (tree, _right) = pane.split_tree(ratatui::prelude::Rect::new(0, 0, 160, 30));
+        assert_eq!(tree.width, 60, "tree_min_width: 60 widens the tree at 160 cols");
+        let (tree, _right) = pane.split_tree(ratatui::prelude::Rect::new(0, 0, 100, 30));
+        assert_eq!(tree.width, 0, "the default hide threshold still hides at 100 cols");
     }
 
     /// Selecting an episode fetches the full item (like the queue tab's info
@@ -2841,5 +2685,52 @@ mod tests {
             pane.tree_area
         );
         assert!(pane.items_area.x >= pane.tree_area.width, "items pane starts after the tree");
+    }
+
+    /// The items-box title keeps the pre-Phase-2 jellyfin spacing: padded
+    /// on both sides with the count after a space — `" Items (3) "` (Phase
+    /// 2.1 parity close-out; the shared render flattened it to
+    /// `" Items(3) "`).
+    #[test]
+    fn items_box_title_keeps_the_jellyfin_spacing() {
+        let (app_tx, _app_rx) = crossbeam::channel::unbounded();
+        let ctx = crate::tests::fixtures::ctx(
+            (app_tx, _app_rx),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+        );
+        let mut pane = JellyfinPane::new(&ctx);
+        pane.items = vec![
+            crate::jellyfin::JfItem { id: "i1".to_owned(), name: "One".to_owned(), kind: "Episode".to_owned(), ..Default::default() },
+            crate::jellyfin::JfItem { id: "i2".to_owned(), name: "Two".to_owned(), kind: "Episode".to_owned(), ..Default::default() },
+            crate::jellyfin::JfItem { id: "i3".to_owned(), name: "Three".to_owned(), kind: "Episode".to_owned(), ..Default::default() },
+        ];
+        let text = render_text(&mut pane, &ctx);
+        assert!(
+            text.contains(" Items (3) "),
+            "the items-box title is ` Items (3) `, not ` Items(3) `: {text}"
+        );
+    }
+
+    /// The temp-play entry is cleared on the stop transition everywhere —
+    /// pins the unified Stop cleanup (before Phase 2, jellyfin's two stop
+    /// arms disagreed on whether `ctx.temp_play_id` was cleared).
+    #[test]
+    fn stop_clears_the_temp_play_id() {
+        let (app_tx, _app_rx) = crossbeam::channel::unbounded();
+        let mut ctx = crate::tests::fixtures::ctx(
+            (app_tx, _app_rx),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+        );
+        let mut pane = JellyfinPane::new(&ctx);
+        pane.temp_play_id = Some(7);
+        ctx.temp_play_id.set(Some(7));
+        ctx.status.state = crate::mpd::commands::State::Stop;
+
+        let mut event = crate::ui::UiEvent::PlaybackStateChanged;
+        pane.on_event(&mut event, true, &ctx).unwrap();
+        assert_eq!(pane.temp_play_id, None);
+        assert_eq!(ctx.temp_play_id.get(), None, "the queue pane reads it via Ctx");
     }
 }

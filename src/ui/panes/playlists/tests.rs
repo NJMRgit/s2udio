@@ -12,6 +12,7 @@ use std::{
 use rstest::{fixture, rstest};
 
 use crate::{
+    config::tabs::TreeBrowserArgs,
     ctx::Ctx,
     mpd::commands::Song,
     tests::fixtures::ctx,
@@ -1447,6 +1448,23 @@ mod left_pane_width_regimes {
             "songs pane starts after the left pane"
         );
     }
+
+    /// The tree-browser args drive the left pane: `tree_min_width: 60`
+    /// widens it (58 = 60 minus the 2 border columns) while the default
+    /// hide threshold still collapses it on narrow TUIs.
+    #[test]
+    fn tree_args_widen_the_tree() {
+        let ctx = ctx();
+        let mut pane = pane_with_playlist(&ctx);
+        pane.tree_args = TreeBrowserArgs {
+            tree_min_width: 60,
+            ..TreeBrowserArgs::default()
+        };
+        render_at(&mut pane, &ctx, 160);
+        assert_eq!(pane.playlists_area.width, 58, "60-col tree pane minus its 2 border columns");
+        render_at(&mut pane, &ctx, 80);
+        assert_eq!(pane.playlists_area, Rect::default(), "default hide threshold still hides at 80 cols");
+    }
 }
 
 /// Round 9: the info box's height is capped at 15 rows on tall terminals
@@ -1520,5 +1538,17 @@ mod info_box_height_cap {
         assert_eq!(pane.info_area.height, 11, "uncapped 2/3 split below 25 rows");
         // 20 − 3 tips − 11 info − 2 borders = the songs list gets 4 rows.
         assert_eq!(pane.songs_area.height, 4, "songs list fills the remainder");
+    }
+
+    /// `info_box_cap: None` removes the cap: at 40 rows the info box keeps
+    /// the raw 2/3 share (24) instead of the capped 15.
+    #[test]
+    fn tree_args_none_cap_keeps_the_raw_two_thirds_share() {
+        let ctx = ctx();
+        let mut pane = pane_with_playlist(&ctx);
+        pane.tree_args = TreeBrowserArgs { info_box_cap: None, ..TreeBrowserArgs::default() };
+        render_at(&mut pane, &ctx, 160, 40);
+        assert_eq!(pane.info_area.height, 24, "info_box_cap: None keeps (40-3)*2/3 = 24");
+        assert_eq!(pane.songs_area.height, 11, "songs list fills the remainder");
     }
 }

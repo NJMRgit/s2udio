@@ -15,7 +15,7 @@ use itertools::Itertools;
 use search::SearchFile;
 use serde::{Deserialize, Serialize};
 use sort_mode::{SortMode, SortModeFile, SortOptions};
-use tabs::{PaneType, Tabs, TabsFile, validate_tabs};
+use tabs::{PaneType, PaneTypeDiscriminants, Tabs, TabsFile, TreeBrowserArgs, validate_tabs};
 use theme::properties::{SongProperty, SongPropertyFile};
 use torrent::{Torrent, TorrentFile};
 use utils::tilde_expand;
@@ -374,6 +374,32 @@ impl Config {
             PaneType::Cava => !self.ui.show_cava,
             _ => false,
         }
+    }
+
+    /// The tree-browser args of the first `Directories` / `Playlists` /
+    /// `Jellyfin` / `Radio` pane in the tab + theme layouts. The pane
+    /// container keeps one pane instance per type, so the first
+    /// occurrence's args drive that singleton; a config without the pane
+    /// falls back to the defaults (50 / 120 / Some(15) — today's
+    /// constants).
+    pub fn tree_browser_args(&self, pane: PaneTypeDiscriminants) -> TreeBrowserArgs {
+        self.tabs
+            .tabs
+            .values()
+            .flat_map(|tab| tab.panes.panes_iter())
+            .chain(self.theme.layout.panes_iter())
+            .filter_map(|p| match &p.pane {
+                PaneType::Directories { tree }
+                | PaneType::Playlists { tree }
+                | PaneType::Jellyfin { tree }
+                | PaneType::Radio { tree } => {
+                    Some((PaneTypeDiscriminants::from(&p.pane), tree.clone()))
+                }
+                _ => None,
+            })
+            .find(|(disc, _)| *disc == pane)
+            .map(|(_, args)| args)
+            .unwrap_or_default()
     }
 
     /// Whether a tab should be hidden from the tab bar and tab cycling. The

@@ -6,15 +6,14 @@ use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
+    widgets::{Block, Borders, List, ListItem, ListState},
 };
 
 use super::Pane;
 use crate::{
     MpdQueryResult,
     config::{
-        keys::{CommonAction, DirectoriesActions},
-        tabs::PaneType,
+        tabs::{PaneType, PaneTypeDiscriminants, TreeBrowserArgs},
     },
     ctx::Ctx,
     mpd::{
@@ -25,7 +24,7 @@ use crate::{
     shared::{
         keys::ActionEvent,
         macros::modal,
-        mouse_event::{MouseEvent, MouseEventKind},
+        mouse_event::MouseEvent,
         mpd_client_ext::{Enqueue, MpdClientExt},
     },
     ui::{
@@ -37,6 +36,7 @@ use crate::{
             menu::modal::MenuModal,
             select_modal::SelectModal,
         },
+        tree_browser::{TreeBrowserCore, TreeRowView},
     },
 };
 
@@ -52,12 +52,12 @@ const PLAY_FILE: &str = "dir_play_file";
 ///
 /// Shared by the MPD (directories), Playlists and Jellyfin tabs: all
 /// three browser panes split their width with this helper.
+/// Test-only parity pin for the round-7/8 tree-width behavior (the
+/// production callers read the args directly via
+/// `TreeBrowserArgs::tree_width`).
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn tree_width(total: u16) -> u16 {
-    if total <= 120 {
-        return 0;
-    }
-    let by_percent = (u32::from(total) * 30 / 100) as u16;
-    by_percent.max(50).min(total - 1)
+    TreeBrowserArgs::default().tree_width(total)
 }
 
 /// Split a full MPD path ("A/B/C") into a dirstack `Path`.
@@ -323,6 +323,9 @@ pub struct DirectoriesPane {
     marked: MarkState,
     /// Path of the node whose children are shown (None = the Library root).
     selected: Option<Path>,
+    /// Tree-browser layout args from the config (defaults = today's
+    /// constants: 50-col minimum tree, hidden <= 120, info cap 15).
+    tree_args: TreeBrowserArgs,
     /// Children lists keyed by path, so backing out never refetches.
     loaded: HashMap<Path, Vec<DirOrSong>>,
     /// Paths with a fetch in flight (avoid duplicate requests).
@@ -334,7 +337,7 @@ pub struct DirectoriesPane {
 }
 
 impl DirectoriesPane {
-    pub fn new(_ctx: &Ctx) -> Self {
+    pub fn new(ctx: &Ctx) -> Self {
         Self {
             tree: DirTree::default(),
             tree_state: ListState::default(),
@@ -344,6 +347,7 @@ impl DirectoriesPane {
             items_inner: Rect::default(),
             marked: MarkState::default(),
             selected: None,
+            tree_args: ctx.config.tree_browser_args(PaneTypeDiscriminants::Directories),
             loaded: HashMap::new(),
             pending: HashSet::new(),
             temp_play_id: None,
@@ -372,7 +376,7 @@ impl DirectoriesPane {
         ctx.query()
             .id(FETCH_DATA)
             .replace_id("directories_data")
-            .target(PaneType::Directories)
+            .target(PaneType::Directories { tree: TreeBrowserArgs::default() })
             .query(move |client| {
                 let entries = if path.is_empty() {
                     client.lsinfo(None)?
@@ -443,32 +447,6 @@ impl DirectoriesPane {
         }
     }
 
-    /// Keep the tree highlight on the right-pane cursor: the highlighted
-    /// item's row in the tree when it has one (a folder), otherwise the
-    /// current node's row (songs have no tree row).
-    fn sync_tree_to_items_cursor(&mut self) {
-        let target = self
-            .selected_item()
-            .and_then(|item| match item {
-                DirOrSong::Dir { full_path, .. } => Some(split_path(&full_path)),
-                DirOrSong::Song(_) => None,
-            })
-            .or_else(|| self.selected.clone());
-        let Some(target) = target else { return };
-        let idx = {
-            let mut flat = Vec::new();
-            self.tree.visible(&self.tree.root, 0, &mut flat);
-            let by_item = flat.iter().position(|(n, _)| n.path == target.as_slice());
-            let by_node = self
-                .selected
-                .as_ref()
-                .and_then(|selected| flat.iter().position(|(n, _)| n.path == selected.as_slice()));
-            by_item.or(by_node)
-        };
-        if let Some(idx) = idx {
-            self.tree.selected = idx;
-        }
-    }
 
     /// Open a highlighted folder: expand its path in the tree and show its
     /// children in the right pane (used by `d`/`→` and double-click).
@@ -484,28 +462,6 @@ impl DirectoriesPane {
         Ok(())
     }
 
-    /// Back out one level: the right pane shows the parent's children (with
-    /// the row we came from highlighted), the tree highlight follows and
-    /// the branch we left collapses. At the root this is a no-op.
-    fn select_parent(&mut self, ctx: &Ctx) -> Result<()> {
-        let Some(current) = self.selected.clone() else { return Ok(()) };
-        if current.is_empty() {
-            return Ok(());
-        }
-        let prev = current.clone();
-        // Moving up collapses the branch we leave: the tree shows the path
-        // up to the current node, not the whole history of expansions.
-        self.tree.collapse(prev.as_slice());
-        let mut parent = current;
-        parent.pop();
-        self.selected = if parent.is_empty() { None } else { Some(parent.clone()) };
-        self.fetch_children(&parent, ctx);
-        self.populate_items();
-        self.select_items_item(&prev);
-        self.sync_tree_to_items_cursor();
-        ctx.render()?;
-        Ok(())
-    }
 
     /// Expand or collapse a tree node. The Library root is never
     /// collapsible. The right pane mirrors the highlighted node: when the
@@ -527,65 +483,14 @@ impl DirectoriesPane {
         Ok(())
     }
 
-    /// Highlight a tree row and mirror it in the right pane: the current
-    /// node becomes the highlighted row and the right pane shows its
-    /// children (the Library root shows the top-level list).
-    fn highlight_tree_node(&mut self, idx: usize, ctx: &Ctx) -> Result<()> {
-        let node_path: Option<Vec<String>> = {
-            let mut flat = Vec::new();
-            self.tree.visible(&self.tree.root, 0, &mut flat);
-            flat.get(idx).map(|(node, _)| node.path.clone())
-        };
-        let Some(node_path) = node_path else { return Ok(()) };
-        self.tree.selected = idx;
-        if node_path.is_empty() {
-            self.selected = None;
-            self.fetch_children(&Path::new(), ctx);
-        } else {
-            let path = Path::from(node_path);
-            self.selected = Some(path.clone());
-            self.fetch_children(&path, ctx);
-        }
-        self.populate_items();
-        ctx.render()?;
-        Ok(())
-    }
 
     /// Move the tree highlight; the highlighted folder's children fill the
     /// right pane.
-    fn move_tree(&mut self, dir: i64, ctx: &Ctx) -> Result<()> {
-        let len = {
-            let mut flat = Vec::new();
-            self.tree.visible(&self.tree.root, 0, &mut flat);
-            flat.len()
-        };
-        if len == 0 {
-            return Ok(());
-        }
-        let current = i64::try_from(self.tree.selected.min(len - 1)).unwrap_or(0);
-        let new_idx = (current + dir).clamp(0, i64::try_from(len - 1).unwrap_or(0)) as usize;
-        if new_idx != self.tree.selected {
-            self.highlight_tree_node(new_idx, ctx)?;
-        }
-        Ok(())
-    }
+
 
     /// Move the right-pane cursor; the left tree follows when the item has
     /// a tree row (folders).
-    fn move_items(&mut self, dir: i64, ctx: &Ctx) -> Result<()> {
-        if self.items.is_empty() {
-            return Ok(());
-        }
-        let current = i64::try_from(self.item_list.selected().unwrap_or(0)).unwrap_or(0);
-        let new_idx = (current + dir).clamp(0, i64::try_from(self.items.len() - 1).unwrap_or(0))
-            as usize;
-        if new_idx != current as usize {
-            self.item_list.select(Some(new_idx));
-            self.sync_tree_to_items_cursor();
-            ctx.render()?;
-        }
-        Ok(())
-    }
+
 
     /// Context menu for a tree folder: add the whole subtree to the queue
     /// or to a playlist.
@@ -816,10 +721,6 @@ impl DirectoriesPane {
         Ok(())
     }
 
-    fn selected_item(&self) -> Option<DirOrSong> {
-        let idx = self.item_list.selected()?;
-        self.items.get(idx).cloned()
-    }
 
     /// Right arrow / `d` (or double-click on a file): play the
     /// highlighted file immediately without adding it to the queue (it is
@@ -832,13 +733,7 @@ impl DirectoriesPane {
         // playing files never grows the queue (the SongChanged cleanup below
         // only fires when the song actually moves on, which can lag or miss
         // consecutive plays).
-        if let Some(prev) = self.temp_play_id.take() {
-            ctx.temp_play_id.set(None);
-            ctx.command(move |client| {
-                client.delete_id(prev)?;
-                Ok(())
-            });
-        }
+        self.drop_temp_play(ctx);
         let file = song.file.clone();
         // The Downloads folder lives outside the MPD library (MPD cannot
         // play files from it): play the file through mpv instead — mpv
@@ -856,211 +751,202 @@ impl DirectoriesPane {
             );
             return Ok(());
         }
-        ctx.query().id(PLAY_FILE).replace_id(PLAY_FILE).target(PaneType::Directories).query(
-            move |client| {
-                let id = client.add_id(&file, None)?;
-                client.play_id(id)?;
-                Ok(MpdQueryResult::Any(Box::new(id)))
-            },
-        );
+        self.play_temp_url(ctx, PLAY_FILE, PaneType::Directories { tree: TreeBrowserArgs::default() }, file);
         Ok(())
     }
 
-    /// Drop the temporary play song once playback has moved on.
-    fn cleanup_temp_play(&mut self, ctx: &Ctx) {
-        if let Some(temp) = self.temp_play_id
-            && ctx.status.songid != Some(temp)
-        {
-            self.temp_play_id = None;
-            ctx.temp_play_id.set(None);
-            ctx.command(move |client| {
-                client.delete_id(temp)?;
-                Ok(())
-            });
-        }
-    }
 
-    fn render_tree(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) {
+
+}
+
+impl TreeBrowserCore for DirectoriesPane {
+    type Item = DirOrSong;
+
+    // ── tree ───────────────────────────────────────────────────────────
+
+    fn tree_rows(&self) -> Vec<TreeRowView> {
         let mut flat = Vec::new();
         self.tree.visible(&self.tree.root, 0, &mut flat);
-
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(ctx.config.as_border_style())
-            .title(" Folders ");
-        let inner = block.inner(area);
-        self.tree_inner = inner;
-
-        // The row under the mouse gets the hover highlight (slightly
-        // brighter than the keyboard selection, dimmer than marked rows).
-        let hover_idx = crate::ui::panes::hovered_item(
-            ctx.mouse_pos(),
-            inner,
-            self.tree_state.offset(),
-            flat.len(),
-            1,
-        );
-        let hovered_style = ctx.config.theme.hovered_item_style;
-        let items: Vec<ListItem> = flat
-            .iter()
-            .enumerate()
-            .map(|(idx, (node, depth))| {
-                // The Library root is never collapsible: no arrow, and the
-                // ↴ glyph marks the always-open entry point.
-                if node.path.is_empty() {
-                    return ListItem::new(Line::from(Span::raw("Library ↴")));
-                }
-                // Only folders with subdirectories get an arrow; leaves keep
-                // a spacer so the names stay aligned.
-                let arrow = if node.children.is_empty() {
-                    "  "
-                } else if node.expanded {
-                    "▾ "
+        flat.into_iter()
+            .map(|(node, depth)| TreeRowView {
+                // The root renders as the always-open entry point: the
+                // ↴ glyph is part of its label (no collapsible arrow).
+                label: if node.path.is_empty() {
+                    "Library ↴".to_owned()
                 } else {
-                    "▸ "
-                };
-                let indent = "  ".repeat(*depth);
-                let mut item = ListItem::new(Line::from(Span::raw(format!(
-                    "{indent}{arrow}{}",
-                    node.display_name()
-                ))));
-                if hover_idx == Some(idx) {
-                    item = item.style(hovered_style);
-                }
-                item
+                    node.display_name().to_owned()
+                },
+                depth: depth as u8,
+                expandable: !node.children.is_empty(),
+                expanded: node.expanded,
+                root: node.path.is_empty(),
             })
-            .collect();
-
-        self.tree_state.select(Some(self.tree.selected.min(flat.len().saturating_sub(1))));
-        ratatui::widgets::StatefulWidget::render(
-            List::new(items)
-                .highlight_style(if hover_idx == self.tree_state.selected() {
-                    ctx.config.theme.hovered_item_style
-                } else {
-                    ctx.config.theme.current_item_style
-                })
-                .style(ctx.config.as_list_name_style()),
-            inner,
-            frame.buffer_mut(),
-            &mut self.tree_state,
-        );
-        ratatui::widgets::Widget::render(block, area, frame.buffer_mut());
+            .collect()
     }
 
-    fn render_items(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) {
+    fn tree_selected(&self) -> usize {
+        self.tree.selected
+    }
+
+    fn tree_list(&self) -> &ListState {
+        &self.tree_state
+    }
+
+    fn tree_list_mut(&mut self) -> &mut ListState {
+        &mut self.tree_state
+    }
+
+    fn tree_area(&self) -> Rect {
+        self.tree_inner
+    }
+
+    fn set_tree_area(&mut self, area: Rect) {
+        self.tree_inner = area;
+    }
+
+    fn set_expanded_idx(&mut self, idx: usize, expanded: bool, ctx: &Ctx) -> Result<()> {
+        let path = {
+            let mut flat = Vec::new();
+            self.tree.visible(&self.tree.root, 0, &mut flat);
+            flat.get(idx).map(|(node, _)| Path::from(node.path.clone()))
+        };
+        let Some(path) = path else { return Ok(()) };
+        self.set_expanded(&path, expanded, ctx)
+    }
+
+    // ── items ──────────────────────────────────────────────────────────
+
+    fn items_len(&self) -> usize {
+        self.items.len()
+    }
+
+    fn items_list(&self) -> &ListState {
+        &self.item_list
+    }
+
+    fn items_list_mut(&mut self) -> &mut ListState {
+        &mut self.item_list
+    }
+
+    fn items_area(&self) -> Rect {
+        self.items_inner
+    }
+
+    fn set_items_area(&mut self, area: Rect) {
+        self.items_inner = area;
+    }
+
+    fn item_at(&self, idx: usize) -> Option<Self::Item> {
+        self.items.get(idx).cloned()
+    }
+
+    fn item_row(&self, idx: usize, hovered: bool, ctx: &Ctx) -> ListItem<'static> {
         // The MPD browser rows: directories get a ▶ prefix, songs get none
         // (no D/S markers); multi-selected rows render with the lighter
         // marked highlight (like the queue list), the row under the mouse
         // with the hover highlight.
-        let title = match self.selected.as_ref() {
-            Some(path) => path.current_dir().map_or_else(|| "Library".to_owned(), |name| {
-                if name == crate::ui::modals::paste::DOWNLOADS_DIR_NAME {
-                    "Downloads".to_owned()
+        let is_marked = self.marked.contains(idx);
+        let item = match &self.items[idx] {
+            DirOrSong::Dir { name, .. } => ListItem::from(Line::from(vec![
+                Span::from("▶ "),
+                Span::from(if name.is_empty() {
+                    "Untitled".to_owned()
                 } else {
-                    name.to_owned()
-                }
-            }),
-            None => "Library".to_owned(),
+                    name.clone()
+                }),
+            ])),
+            DirOrSong::Song(song) => {
+                let spans: Vec<Span> = ctx
+                    .config
+                    .theme
+                    .browser_song_format
+                    .0
+                    .iter()
+                    .map(|prop| {
+                        Span::from(
+                            prop.as_string(
+                                Some(song),
+                                &ctx.config.theme.format_tag_separator,
+                                ctx.config.theme.multiple_tag_resolution_strategy,
+                                ctx,
+                            )
+                            .unwrap_or_default(),
+                        )
+                    })
+                    .collect();
+                ListItem::from(Line::from(spans))
+            }
         };
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(ctx.config.as_border_style())
-            .title(format!(" {title}({}) ", self.items.len()));
-        let inner = block.inner(area);
-        self.items_inner = inner;
-
-        let hover_idx = crate::ui::panes::hovered_item(
-            ctx.mouse_pos(),
-            inner,
-            self.item_list.offset(),
-            self.items.len(),
-            1,
-        );
-        let hovered_style = ctx.config.theme.hovered_item_style;
-        let items: Vec<ListItem> = self
-            .items
-            .iter()
-            .enumerate()
-            .map(|(idx, item)| {
-                let is_marked = self.marked.contains(idx);
-                let item = match item {
-                    DirOrSong::Dir { name, .. } => ListItem::from(Line::from(vec![
-                        Span::from("▶ "),
-                        Span::from(if name.is_empty() {
-                            "Untitled".to_owned()
-                        } else {
-                            name.clone()
-                        }),
-                    ])),
-                    DirOrSong::Song(song) => {
-                        let spans: Vec<Span> = ctx
-                            .config
-                            .theme
-                            .browser_song_format
-                            .0
-                            .iter()
-                            .map(|prop| {
-                                Span::from(
-                                    prop.as_string(
-                                        Some(song),
-                                        &ctx.config.theme.format_tag_separator,
-                                        ctx.config.theme.multiple_tag_resolution_strategy,
-                                        ctx,
-                                    )
-                                    .unwrap_or_default(),
-                                )
-                            })
-                            .collect();
-                        ListItem::from(Line::from(spans))
-                    }
-                };
-                if is_marked {
-                    item.style(ctx.config.theme.marked_item_style)
-                } else if hover_idx == Some(idx) {
-                    item.style(hovered_style)
-                } else {
-                    item
-                }
-            })
-            .collect();
-
-        ratatui::widgets::StatefulWidget::render(
-            List::new(items)
-                .highlight_style(if hover_idx == self.item_list.selected() {
-                    ctx.config.theme.hovered_item_style
-                } else {
-                    ctx.config.theme.current_item_style
-                })
-                .style(ctx.config.as_list_name_style()),
-            inner,
-            frame.buffer_mut(),
-            &mut self.item_list,
-        );
-        ratatui::widgets::Widget::render(block, area, frame.buffer_mut());
+        if is_marked {
+            item.style(ctx.config.theme.marked_item_style)
+        } else if hovered {
+            item.style(ctx.config.theme.hovered_item_style)
+        } else {
+            item
+        }
     }
 
-    fn render_tips(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) {
-        let base = ctx.config.as_list_name_style();
-        let dim = ctx.config.as_list_text_style();
-        let tips = vec![
-            Line::from(vec![
-                Span::styled("w/s · ↑/↓", base),
-                Span::styled("  folders · items", dim),
-            ]),
-            Line::from(vec![
-                Span::styled("d / a", base),
-                Span::styled("  open · back out", dim),
-            ]),
-            Line::from(vec![
-                Span::styled("Enter", base),
-                Span::styled("  context menu", dim),
-            ]),
-            Line::from(vec![
-                Span::styled("d / →", base),
-                Span::styled("  open · play", dim),
-            ]),
-        ];
-        frame.render_widget(Paragraph::new(tips).style(dim), area);
+    // ── behavior hooks ─────────────────────────────────────────────────
+
+    fn highlight_tree_node(&mut self, idx: usize, ctx: &Ctx) -> Result<()> {
+        let node_path: Option<Vec<String>> = {
+            let mut flat = Vec::new();
+            self.tree.visible(&self.tree.root, 0, &mut flat);
+            flat.get(idx).map(|(node, _)| node.path.clone())
+        };
+        let Some(node_path) = node_path else { return Ok(()) };
+        self.tree.selected = idx;
+        if node_path.is_empty() {
+            self.selected = None;
+            self.fetch_children(&Path::new(), ctx);
+        } else {
+            let path = Path::from(node_path);
+            self.selected = Some(path.clone());
+            self.fetch_children(&path, ctx);
+        }
+        self.populate_items();
+        ctx.render()?;
+        Ok(())
+    }
+
+    fn select_parent(&mut self, ctx: &Ctx) -> Result<()> {
+        let Some(current) = self.selected.clone() else { return Ok(()) };
+        if current.is_empty() {
+            return Ok(());
+        }
+        let prev = current.clone();
+        // Moving up collapses the branch we leave: the tree shows the path
+        // up to the current node, not the whole history of expansions.
+        self.tree.collapse(prev.as_slice());
+        let mut parent = current;
+        parent.pop();
+        self.selected = if parent.is_empty() { None } else { Some(parent.clone()) };
+        self.fetch_children(&parent, ctx);
+        self.populate_items();
+        self.select_items_item(&prev);
+        self.sync_tree_to_items_cursor();
+        ctx.render()?;
+        Ok(())
+    }
+
+    fn activate_selected(&mut self, ctx: &Ctx) -> Result<()> {
+        let Some(item) = self.selected_item() else { return Ok(()) };
+        if item.is_file() {
+            self.play_selected_file(ctx)
+        } else {
+            self.open_item(item, ctx)
+        }
+    }
+
+    fn open_context_menu(&mut self, ctx: &Ctx) -> Result<()> {
+        let Some(item) = self.selected_item() else { return Ok(()) };
+        if item.is_file() {
+            self.open_song_menu(ctx)
+        } else {
+            let DirOrSong::Dir { full_path, .. } = item else { return Ok(()) };
+            let path = split_path(&full_path);
+            self.open_folder_menu(&path, ctx)
+        }
     }
 
     fn render_info(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) {
@@ -1113,154 +999,77 @@ impl DirectoriesPane {
         );
     }
 
-    fn handle_tree_mouse(&mut self, event: MouseEvent, ctx: &Ctx) -> Result<()> {
-        let row = usize::from(event.y.saturating_sub(self.tree_inner.y)) + self.tree_state.offset();
-        match event.kind {
-            MouseEventKind::LeftClick => self.highlight_tree_node(row, ctx),
-            MouseEventKind::DoubleClick => {
-                // Double-click selects the folder and toggles it: a folder
-                // with subdirectories expands/collapses, a bottom directory
-                // just opens (its files fill the right pane).
-                self.highlight_tree_node(row, ctx)?;
-                let toggle: Option<(Path, bool)> = {
-                    let mut flat = Vec::new();
-                    self.tree.visible(&self.tree.root, 0, &mut flat);
-                    flat.get(row)
-                        .filter(|(node, _)| !node.path.is_empty() && !node.children.is_empty())
-                        .map(|(node, _)| (Path::from(node.path.clone()), node.expanded))
-                };
-                if let Some((path, expanded)) = toggle {
-                    self.set_expanded(&path, !expanded, ctx)?;
-                }
-                Ok(())
-            }
-            MouseEventKind::RightClick => {
-                // Context menu for the clicked folder (or the Library root).
-                let path = {
-                    let mut flat = Vec::new();
-                    self.tree.visible(&self.tree.root, 0, &mut flat);
-                    flat.get(row).map(|(node, _)| Path::from(node.path.clone()))
-                };
-                if let Some(path) = path {
-                    self.open_folder_menu(&path, ctx)
-                } else {
-                    Ok(())
-                }
-            }
-            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
-                let dir = if matches!(event.kind, MouseEventKind::ScrollUp) { -1 } else { 1 };
-                self.move_tree(dir, ctx)
-            }
-            _ => Ok(()),
-        }
+    fn temp_play_id(&self) -> Option<u32> {
+        self.temp_play_id
     }
 
-    fn handle_items_mouse(&mut self, event: MouseEvent, ctx: &Ctx) -> Result<()> {
-        let row = usize::from(event.y.saturating_sub(self.items_inner.y)) + self.item_list.offset();
-        match event.kind {
-            MouseEventKind::DoubleClick => {
-                if row < self.items.len() {
-                    self.item_list.select(Some(row));
-                    // Keep the tree highlight in sync with the click
-                    // selection (like the keyboard path).
-                    self.sync_tree_to_items_cursor();
-                    let item = self.items[row].clone();
-                    if item.is_file() {
-                        self.play_selected_file(ctx)?;
-                    } else {
-                        self.open_item(item, ctx)?;
-                    }
-                    ctx.render()?;
-                }
-            }
-            MouseEventKind::LeftClick
-                if event.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) =>
-            {
-                if row < self.items.len() {
-                    self.item_list.select(Some(row));
-                    self.marked.toggle(row);
-                    self.sync_tree_to_items_cursor();
-                    ctx.render()?;
-                }
-            }
-            MouseEventKind::LeftClick
-                if event.modifiers.contains(crossterm::event::KeyModifiers::ALT) =>
-            {
-                if row < self.items.len() {
-                    if self.marked.anchor().is_none() {
-                        self.marked.set_anchor(row);
-                    }
-                    // Replace the previous alt/shift range, so alt+clicking
-                    // closer to the anchor deselects the items beyond it.
-                    self.marked.select_range(row);
-                    self.item_list.select(Some(row));
-                    self.sync_tree_to_items_cursor();
-                    ctx.render()?;
-                }
-            }
-            MouseEventKind::LeftClick => {
-                if row < self.items.len() {
-                    // A plain click on a different row drops the
-                    // multi-selection; clicking the selected row keeps it.
-                    if !self.marked.is_empty()
-                        && Some(row) != self.item_list.selected()
-                    {
-                        self.marked.clear();
-                    }
-                    self.item_list.select(Some(row));
-                    self.marked.set_anchor(row);
-                    self.marked.clear_range();
-                    // Keep the tree highlight in sync with the click
-                    // selection (like the keyboard path).
-                    self.sync_tree_to_items_cursor();
-                    ctx.render()?;
-                }
-            }
-            MouseEventKind::RightClick => {
-                if row < self.items.len() {
-                    self.item_list.select(Some(row));
-                    self.sync_tree_to_items_cursor();
-                    ctx.render()?;
-                    let item = self.items[row].clone();
-                    if item.is_file() {
-                        return self.open_song_menu(ctx);
-                    }
-                    let DirOrSong::Dir { full_path, .. } = item else { return Ok(()) };
-                    let path = split_path(&full_path);
-                    return self.open_folder_menu(&path, ctx);
-                }
-            }
-            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
-                let dir = if matches!(event.kind, MouseEventKind::ScrollUp) { -1 } else { 1 };
-                self.move_items(dir, ctx)?;
-            }
-            _ => {}
-        }
-        Ok(())
+    fn set_temp_play_id(&mut self, id: Option<u32>) {
+        self.temp_play_id = id;
     }
-}
 
-impl Pane for DirectoriesPane {
-    fn render(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) -> Result<()> {
-        // The left folder-tree pane keeps a 50-column minimum and is
-        // hidden entirely on TUIs ≤ 120 columns wide (the right pane
-        // then gets the whole area).
-        let tree_w = tree_width(area.width);
-        let (tree_area, right) = if tree_w == 0 {
-            (Rect::default(), area)
+    // ── rendering hooks ────────────────────────────────────────────────
+
+    fn tree_title(&self) -> &'static str {
+        " Folders "
+    }
+
+    /// The MPD tree arrows: ▾/▸ for folders with subdirectories, a
+    /// two-space spacer for leaves so the names stay aligned (no ▼/▶).
+    fn tree_arrow(&self, row: &TreeRowView) -> &'static str {
+        if row.expandable {
+            if row.expanded { "▾ " } else { "▸ " }
         } else {
-            let [tree_area, right] = Layout::horizontal([
-                Constraint::Length(tree_w),
-                Constraint::Length(area.width - tree_w),
-            ])
-            .areas(area);
-            (tree_area, right)
-        };
-        // The info box takes about two thirds of the pane height (the tips
-        // strip stays a fixed 3 rows); the item list gets the rest. Exact
-        // lengths are computed so the rows always fill the area exactly.
+            "  "
+        }
+    }
+
+    fn items_title(&self) -> String {
+        // Pre-padded (as it appears left of the `(n)` count): the shared
+        // format appends "(n)" directly, so the title keeps the
+        // directories spacing `" Library(3) "` (Phase 2.1 parity).
+        match self.selected.as_ref() {
+            Some(path) => path.current_dir().map_or_else(|| " Library".to_owned(), |name| {
+                if name == crate::ui::modals::paste::DOWNLOADS_DIR_NAME {
+                    " Downloads".to_owned()
+                } else {
+                    format!(" {name}")
+                }
+            }),
+            None => " Library".to_owned(),
+        }
+    }
+
+    fn tips_lines(&self, ctx: &Ctx) -> Vec<Line<'static>> {
+        let base = ctx.config.as_list_name_style();
+        let dim = ctx.config.as_list_text_style();
+        vec![
+            Line::from(vec![
+                Span::styled("w/s · ↑/↓", base),
+                Span::styled("  folders · items", dim),
+            ]),
+            Line::from(vec![
+                Span::styled("d / a", base),
+                Span::styled("  open · back out", dim),
+            ]),
+            Line::from(vec![
+                Span::styled("Enter", base),
+                Span::styled("  context menu", dim),
+            ]),
+            Line::from(vec![
+                Span::styled("d / →", base),
+                Span::styled("  open · play", dim),
+            ]),
+        ]
+    }
+
+    /// The info box takes about two thirds of the pane height (the tips
+    /// strip stays a fixed 3 rows); the item list gets the rest. Exact
+    /// lengths are computed so the rows always fill the area exactly.
+    fn layout_vertical(&self, right: Rect) -> (Rect, Rect, Rect) {
         let tips_h = 3;
-        let info_h = (right.height.saturating_sub(tips_h) * 2 / 3).min(15);
+        let info_h = self
+            .tree_args
+            .info_box_height(right.height.saturating_sub(tips_h) * 2 / 3);
         let files_h = right.height.saturating_sub(tips_h + info_h);
         let [files_area, tips_area, info_area] = Layout::vertical([
             Constraint::Length(files_h),
@@ -1268,20 +1077,144 @@ impl Pane for DirectoriesPane {
             Constraint::Length(info_h),
         ])
         .areas(right);
+        (files_area, tips_area, info_area)
+    }
 
-        if tree_w > 0 {
-            self.render_tree(frame, tree_area, ctx);
+    // ── defaulted hook overrides ───────────────────────────────────────
+
+    /// The configured tree-browser args drive the shared `split_tree`
+    /// (tree min width / hide threshold).
+    fn tree_args(&self) -> TreeBrowserArgs {
+        self.tree_args.clone()
+    }
+
+    /// Keep the tree highlight on the right-pane cursor: the highlighted
+    /// item's row in the tree when it has one (a folder), otherwise the
+    /// current node's row (songs have no tree row).
+    fn sync_tree_to_items_cursor(&mut self) {
+        let target = self
+            .selected_item()
+            .and_then(|item| match item {
+                DirOrSong::Dir { full_path, .. } => Some(split_path(&full_path)),
+                DirOrSong::Song(_) => None,
+            })
+            .or_else(|| self.selected.clone());
+        let Some(target) = target else { return };
+        let idx = {
+            let mut flat = Vec::new();
+            self.tree.visible(&self.tree.root, 0, &mut flat);
+            let by_item = flat.iter().position(|(n, _)| n.path == target.as_slice());
+            let by_node = self
+                .selected
+                .as_ref()
+                .and_then(|selected| flat.iter().position(|(n, _)| n.path == selected.as_slice()));
+            by_item.or(by_node)
+        };
+        if let Some(idx) = idx {
+            self.tree.selected = idx;
         }
-        self.render_items(frame, files_area, ctx);
-        self.render_tips(frame, tips_area, ctx);
-        self.render_info(frame, info_area, ctx);
+    }
+
+    fn on_confirm(&mut self, ctx: &mut Ctx) -> Result<()> {
+        // Enter opens the context menu (like right-click), same as the
+        // Playlists pane; `d`/`→` keep open/play below.
+        self.open_context_menu(ctx)
+    }
+
+    fn on_select_range(&mut self, dir: i64, ctx: &mut Ctx) -> Result<bool> {
+        // Shift+Up/Down: range-select from the anchor (set by plain clicks /
+        // the first shift-press), moving first so the newly reached row is
+        // included; each press replaces the previous range.
+        let start = self.item_list.selected().unwrap_or(0);
+        if self.marked.anchor().is_none() || self.marked.is_empty() {
+            self.marked.set_anchor(start);
+        }
+        self.move_items(dir, ctx)?;
+        let sel = self.item_list.selected().unwrap_or(start);
+        self.marked.select_range(sel);
+        ctx.render()?;
+        Ok(true)
+    }
+
+    fn on_close(&mut self, ctx: &Ctx) -> Result<bool> {
+        if !self.marked.is_empty() {
+            self.marked.clear();
+            self.marked.clear_anchor();
+            // Esc is bound to both Close and ShowSettings: clearing a
+            // selection consumes the keypress, so the settings panel only
+            // opens on a second Esc (when nothing is selected).
+            ctx.render()?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    fn handle_items_left_click(&mut self, row: usize, event: &MouseEvent, ctx: &Ctx) -> Result<()> {
+        if row >= self.items_len() {
+            return Ok(());
+        }
+        if event.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) {
+            self.item_list.select(Some(row));
+            self.marked.toggle(row);
+            self.sync_tree_to_items_cursor();
+            ctx.render()?;
+        } else if event.modifiers.contains(crossterm::event::KeyModifiers::ALT) {
+            if self.marked.anchor().is_none() {
+                self.marked.set_anchor(row);
+            }
+            // Replace the previous alt/shift range, so alt+clicking closer
+            // to the anchor deselects the items beyond it.
+            self.marked.select_range(row);
+            self.item_list.select(Some(row));
+            self.sync_tree_to_items_cursor();
+            ctx.render()?;
+        } else {
+            // A plain click on a different row drops the multi-selection;
+            // clicking the selected row keeps it.
+            if !self.marked.is_empty() && Some(row) != self.item_list.selected() {
+                self.marked.clear();
+            }
+            self.item_list.select(Some(row));
+            self.marked.set_anchor(row);
+            self.marked.clear_range();
+            self.sync_tree_to_items_cursor();
+            ctx.render()?;
+        }
         Ok(())
+    }
+
+    fn tree_context_menu(&mut self, idx: usize, ctx: &Ctx) -> Result<()> {
+        // Context menu for the clicked folder (or the Library root).
+        let path = {
+            let mut flat = Vec::new();
+            self.tree.visible(&self.tree.root, 0, &mut flat);
+            flat.get(idx).map(|(node, _)| Path::from(node.path.clone()))
+        };
+        if let Some(path) = path {
+            self.open_folder_menu(&path, ctx)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn on_reconnected(&mut self, ctx: &Ctx) -> Result<()> {
+        self.initialized = false;
+        self.before_show(ctx)?;
+        self.temp_play_id = None;
+        Ok(())
+    }
+}
+
+impl Pane for DirectoriesPane {
+    fn render(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) -> Result<()> {
+        self.render_tree_browser(frame, area, ctx)
     }
 
     fn before_show(&mut self, ctx: &Ctx) -> Result<()> {
         if !self.initialized {
             self.fetch_children(&Path::new(), ctx);
-            ctx.query().id(TREE).replace_id(TREE).target(PaneType::Directories).query(
+            ctx.query().id(TREE).replace_id(TREE).target(PaneType::Directories { tree: TreeBrowserArgs::default() }).query(
                 move |client| {
                     let dirs: Vec<String> = client
                         .list_all(None)?
@@ -1300,7 +1233,13 @@ impl Pane for DirectoriesPane {
         Ok(())
     }
 
-    fn on_event(&mut self, event: &mut UiEvent, _is_visible: bool, ctx: &Ctx) -> Result<()> {
+    fn on_event(&mut self, event: &mut UiEvent, is_visible: bool, ctx: &Ctx) -> Result<()> {
+        // The temp-play lifecycle (SongChanged / stop / reconnected) lives
+        // in the shared tree-browser core; the Database reset is
+        // directories-specific.
+        if self.handle_tree_events(event, is_visible, ctx)? {
+            return Ok(());
+        }
         match event {
             UiEvent::Database => {
                 self.loaded.clear();
@@ -1312,119 +1251,20 @@ impl Pane for DirectoriesPane {
                 self.initialized = false;
                 self.before_show(ctx)?;
             }
-            UiEvent::Reconnected => {
-                self.initialized = false;
-                self.before_show(ctx)?;
-                self.temp_play_id = None;
-            }
-            UiEvent::SongChanged => {
-                // Remove the temporary play song from the queue once
-                // playback has moved on.
-                self.cleanup_temp_play(ctx);
-            }
             _ => {}
         }
         Ok(())
     }
 
     fn handle_mouse_event(&mut self, event: MouseEvent, ctx: &Ctx) -> Result<()> {
-        if self.tree_inner.contains(event.into()) {
-            return self.handle_tree_mouse(event, ctx);
-        }
-        if self.items_inner.contains(event.into()) {
-            return self.handle_items_mouse(event, ctx);
-        }
-        Ok(())
+        self.handle_tree_mouse_event(event, ctx)
     }
 
     fn handle_action(&mut self, event: &mut ActionEvent, ctx: &mut Ctx) -> Result<()> {
-        // Common actions come first: `w/s`/arrows drive the right-pane list
-        // (the primary navigation surface; both panes share the selection),
-        // while the tree is a mirror that follows the current node.
-        if let Some(action) = event.claim_common() {
-            match action {
-                CommonAction::Up | CommonAction::Down => {
-                    let dir = if matches!(action, CommonAction::Up) { -1 } else { 1 };
-                    return self.move_items(dir, ctx);
-                }
-                CommonAction::Left => {
-                    // `←` backs out one level (same as `a`).
-                    return self.select_parent(ctx);
-                }
-                CommonAction::Top => {
-                    if !self.items.is_empty() {
-                        self.item_list.select(Some(0));
-                        self.sync_tree_to_items_cursor();
-                        ctx.render()?;
-                    }
-                    return Ok(());
-                }
-                CommonAction::Bottom => {
-                    if !self.items.is_empty() {
-                        self.item_list.select(Some(self.items.len() - 1));
-                        self.sync_tree_to_items_cursor();
-                        ctx.render()?;
-                    }
-                    return Ok(());
-                }
-                CommonAction::SelectUp | CommonAction::SelectDown => {
-                    // Shift+Up/Down: range-select from the anchor (set by
-                    // plain clicks / the first shift-press), moving first so
-                    // the newly reached row is included; each press
-                    // replaces the previous range.
-                    let dir = if matches!(action, CommonAction::SelectDown) { 1 } else { -1 };
-                    let start = self.item_list.selected().unwrap_or(0);
-                    if self.marked.anchor().is_none() || self.marked.is_empty() {
-                        self.marked.set_anchor(start);
-                    }
-                    self.move_items(dir, ctx)?;
-                    let sel = self.item_list.selected().unwrap_or(start);
-                    self.marked.select_range(sel);
-                    ctx.render()?;
-                    return Ok(());
-                }
-                // Enter opens the context menu (like right-click), same as
-                // the Playlists pane; `d`/`→` keep open/play below.
-                CommonAction::Confirm => return self.open_context_menu(ctx),
-                CommonAction::ContextMenu => return self.open_context_menu(ctx),
-                CommonAction::Close if !self.marked.is_empty() => {
-                    self.marked.clear();
-                    self.marked.clear_anchor();
-                    // Esc is bound to both Close and ShowSettings: clearing a
-                    // selection consumes the keypress, so the settings panel
-                    // only opens on a second Esc (when nothing is selected).
-                    event.consume();
-                    ctx.render()?;
-                    return Ok(());
-                }
-                _ => event.abandon(),
-            }
-        }
-        if let Some(action) = event.claim_directories() {
-            return match action {
-                DirectoriesActions::FolderUp | DirectoriesActions::FolderDown => {
-                    // Normally claimed by Common Up/Down above; keep a
-                    // tree fallback for other bindings.
-                    let dir = if matches!(action, DirectoriesActions::FolderUp) { -1 } else { 1 };
-                    self.move_tree(dir, ctx)
-                }
-                // `d` mirrors `→` (wasd = arrow keys): open the highlighted
-                // folder or play the highlighted file.
-                DirectoriesActions::FolderExpand | DirectoriesActions::PlayFile => {
-                    let Some(item) = self.selected_item() else { return Ok(()) };
-                    if item.is_file() {
-                        self.play_selected_file(ctx)
-                    } else {
-                        self.open_item(item, ctx)
-                    }
-                }
-                DirectoriesActions::FolderCollapse => {
-                    // `a` / `←`: back out one level (parent's children in
-                    // the right pane). At the root this is a no-op.
-                    self.select_parent(ctx)
-                }
-            };
-        }
+        // Shared tree-browser action arms: w/s/arrows move the right-pane
+        // list, `a`/`←` back out, `d`/`→` open/play, Enter/right-click the
+        // context menu, Shift+Up/Down range-select, Esc clears the marks.
+        self.handle_tree_action(event, ctx)?;
         Ok(())
     }
 
@@ -1495,25 +1335,13 @@ impl Pane for DirectoriesPane {
 }
 
 impl DirectoriesPane {
-    /// Context menu for the highlighted item: a folder's whole-subtree
-    /// menu or a file's queue/playlist menu.
-    fn open_context_menu(&mut self, ctx: &Ctx) -> Result<()> {
-        let Some(item) = self.selected_item() else { return Ok(()) };
-        if item.is_file() {
-            self.open_song_menu(ctx)
-        } else {
-            let DirOrSong::Dir { full_path, .. } = item else { return Ok(()) };
-            let path = split_path(&full_path);
-            self.open_folder_menu(&path, ctx)
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
-        config::keys::GlobalAction,
+        config::keys::{CommonAction, DirectoriesActions, GlobalAction},
         shared::keys::Actions,
     };
 
@@ -2048,6 +1876,52 @@ mod tests {
         assert!(text.contains("alpha_song"), "the song row still shows the file: {text}");
     }
 
+    /// The items-box title keeps the pre-Phase-2 directories spacing: a
+    /// single leading space before the name, then the `(n)` count with no
+    /// extra space — `" Library(3) "` (Phase 2.1 parity close-out).
+    #[test]
+    fn items_box_title_keeps_the_directories_spacing() {
+        let ctx = test_ctx();
+        let mut pane = DirectoriesPane::new(&ctx);
+        pane.items = vec![song("a.flac"), song("b.flac"), song("c.flac")];
+
+        let backend = ratatui::backend::TestBackend::new(80, 30);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| pane.render(frame, Rect::new(0, 0, 80, 30), &ctx).unwrap())
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let text: String = (0..30u16)
+            .map(|y| {
+                (0..80u16).map(|x| buffer[(x, y)].symbol().to_string()).collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("
+");
+        assert!(
+            text.contains(" Library(3) "),
+            "the items-box title is ` Library(3) `, not ` Library (3) ` or `Library(3) `: {text}"
+        );
+    }
+
+    /// The MPD browser's temp-play entry is dropped on the stop transition
+    /// (the shared tree-browser core; pins the Phase-2 fix that gave
+    /// directories the Stop cleanup radio/jellyfin already had — before it
+    /// the entry leaked into the queue after Stop).
+    #[test]
+    fn stop_drops_the_temp_play_entry() {
+        let mut ctx = test_ctx();
+        let mut pane = DirectoriesPane::new(&ctx);
+        pane.temp_play_id = Some(7);
+        ctx.temp_play_id.set(Some(7));
+        ctx.status.state = crate::mpd::commands::State::Stop;
+
+        let mut event = crate::ui::UiEvent::PlaybackStateChanged;
+        pane.on_event(&mut event, true, &ctx).unwrap();
+        assert_eq!(pane.temp_play_id, None);
+        assert_eq!(ctx.temp_play_id.get(), None, "the queue pane reads it via Ctx");
+    }
+
     #[test]
     fn marked_rows_render_with_the_marked_style() {
         let mut ctx = test_ctx();
@@ -2132,6 +2006,28 @@ mod tests {
             pane.tree_inner
         );
         assert!(pane.items_inner.x >= pane.tree_inner.width, "right pane starts after the tree");
+    }
+
+    /// The tree-browser args drive the shared layout hooks: a non-default
+    /// `tree_min_width` widens the tree (60 cols at 160 vs the 50
+    /// default) and `info_box_cap: None` removes the 15-row info cap.
+    #[test]
+    fn tree_args_change_the_tree_width_and_info_cap() {
+        let mut ctx = test_ctx();
+        let mut pane = DirectoriesPane::new(&ctx);
+        pane.tree_args = TreeBrowserArgs {
+            tree_min_width: 60,
+            info_box_cap: None,
+            ..TreeBrowserArgs::default()
+        };
+
+        let (tree, _right) = pane.split_tree(Rect::new(0, 0, 160, 30));
+        assert_eq!(tree.width, 60, "tree_min_width: 60 widens the tree at 160 cols");
+        let (tree, _right) = pane.split_tree(Rect::new(0, 0, 100, 30));
+        assert_eq!(tree.width, 0, "the default hide threshold still hides at 100 cols");
+
+        let (_items, _tips, info) = pane.layout_vertical(Rect::new(0, 0, 60, 40));
+        assert_eq!(info.height, 24, "info_box_cap: None keeps the raw 2/3 share (40-3)*2/3");
     }
 
     /// Enter opens the right-click context menu on a folder AND on a song

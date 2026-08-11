@@ -13,12 +13,13 @@ use crate::{
         commands::Song,
         mpd_client::{Filter, MpdClient, Tag},
     },
-    shared::{cmp::StringCompare, keys::ActionEvent, mouse_event::MouseEvent},
+    shared::{cmp::StringCompare, keys::ActionEvent, mouse_event::MouseEvent, mpd_client_ext::Enqueue},
     ui::{
         UiEvent,
         browser::BrowserPane,
         dir_or_song::DirOrSong,
-        dirstack::{DirStack, DirStackItem},
+        song_list::SongListCore,
+        dirstack::{Dir, DirStack, DirStackItem},
         input::InputResultEvent,
         widgets::browser::{Browser, BrowserArea},
     },
@@ -80,11 +81,11 @@ impl Pane for AlbumsPane {
     }
 
     fn handle_mouse_event(&mut self, event: MouseEvent, ctx: &Ctx) -> Result<()> {
-        self.handle_mouse_action(event, ctx)
+        self.handle_stack_mouse_action(event, ctx)
     }
 
     fn handle_insert_mode(&mut self, kind: InputResultEvent, ctx: &mut Ctx) -> Result<()> {
-        BrowserPane::handle_insert_mode(self, kind, ctx)?;
+        SongListCore::handle_insert_mode(self, kind, ctx)?;
         Ok(())
     }
 
@@ -109,7 +110,7 @@ impl Pane for AlbumsPane {
                 };
 
                 self.stack_mut().insert(path, data);
-                self.fetch_data_internal(ctx)?;
+                SongListCore::fetch_data_internal(self, ctx)?;
                 ctx.render()?;
             }
             (INIT, MpdQueryResult::LsInfo { data, path: _ }) => {
@@ -121,7 +122,7 @@ impl Pane for AlbumsPane {
                     .map(DirOrSong::name_only)
                     .collect_vec();
                 self.stack = DirStack::new(root);
-                self.fetch_data_internal(ctx)?;
+                SongListCore::fetch_data_internal(self, ctx)?;
                 ctx.render()?;
             }
             _ => {}
@@ -130,17 +131,41 @@ impl Pane for AlbumsPane {
     }
 }
 
-impl BrowserPane<DirOrSong> for AlbumsPane {
-    fn stack(&self) -> &DirStack<DirOrSong, ListState> {
-        &self.stack
+impl SongListCore<DirOrSong, ListState> for AlbumsPane {
+    fn list(&self) -> &Dir<DirOrSong, ListState> {
+        self.stack().current()
     }
 
-    fn stack_mut(&mut self) -> &mut DirStack<DirOrSong, ListState> {
-        &mut self.stack
+    fn list_mut(&mut self) -> &mut Dir<DirOrSong, ListState> {
+        self.stack_mut().current_mut()
     }
 
-    fn browser_areas(&self) -> EnumMap<BrowserArea, Rect> {
-        self.browser.areas
+    fn scrollbar_area(&self) -> Option<Rect> {
+        BrowserPane::scrollbar_area(self)
+    }
+
+    fn list_area(&self) -> Option<Rect> {
+        BrowserPane::list_area(self)
+    }
+
+    fn open(&mut self, autoplay: bool, ctx: &Ctx) -> Result<()> {
+        BrowserPane::open(self, autoplay, ctx)
+    }
+
+    fn leave(&mut self, ctx: &Ctx) -> Result<()> {
+        BrowserPane::leave(self, ctx)
+    }
+
+    fn fetch_data_internal(&mut self, ctx: &Ctx) -> Result<()> {
+        BrowserPane::fetch_data_internal(self, ctx)
+    }
+
+    fn enqueue<'a>(&self, items: impl Iterator<Item = &'a DirOrSong>) -> (Vec<Enqueue>, Option<usize>) {
+        BrowserPane::enqueue(self, items)
+    }
+
+    fn initial_playlist_name(&self, all: bool) -> Option<String> {
+        BrowserPane::initial_playlist_name(self, all)
     }
 
     fn list_songs_in_item(
@@ -186,5 +211,19 @@ impl BrowserPane<DirOrSong> for AlbumsPane {
         }
 
         Ok(())
+    }
+}
+
+impl BrowserPane<DirOrSong> for AlbumsPane {
+    fn stack(&self) -> &DirStack<DirOrSong, ListState> {
+        &self.stack
+    }
+
+    fn stack_mut(&mut self) -> &mut DirStack<DirOrSong, ListState> {
+        &mut self.stack
+    }
+
+    fn browser_areas(&self) -> EnumMap<BrowserArea, Rect> {
+        self.browser.areas
     }
 }

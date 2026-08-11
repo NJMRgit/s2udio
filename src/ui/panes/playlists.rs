@@ -13,7 +13,7 @@ use ratatui::{
 use super::Pane;
 use crate::{
     MpdQueryResult,
-    config::{keys::{CommonAction, DirectoriesActions}, tabs::PaneType},
+    config::{keys::{CommonAction, DirectoriesActions}, tabs::{PaneType, PaneTypeDiscriminants, TreeBrowserArgs}},
     ctx::Ctx,
     mpd::{
         client::Client,
@@ -33,6 +33,7 @@ use crate::{
         UiEvent,
         browser::{BrowserPane, MoveDirection},
         dir_or_song::DirOrSong,
+        song_list::SongListCore,
         dirstack::{Dir, DirStack, DirStackItem},
         input::InputResultEvent,
         modals::{
@@ -152,6 +153,9 @@ pub struct PlaylistsPane {
     /// The item (playlist name / song file) whose info is shown; the
     /// scroll resets when it changes.
     info_key: Option<String>,
+    /// Tree-browser layout args from the config (defaults = today's
+    /// constants: 50-col minimum tree, hidden <= 120, info cap 15).
+    tree_args: TreeBrowserArgs,
     /// Area of the info box's scrollbar (for click/drag scrolling).
     info_scrollbar_area: Rect,
     /// Drag state of the info box's scrollbar (thumb follows the pointer).
@@ -225,7 +229,7 @@ pub(crate) fn stream_display_title(ctx: &Ctx, uri: &str) -> Option<String> {
 }
 
 impl PlaylistsPane {
-    pub fn new(_ctx: &Ctx) -> Self {
+    pub fn new(ctx: &Ctx) -> Self {
         Self {
             stack: DirStack::default(),
             browser: Browser::new(),
@@ -237,6 +241,7 @@ impl PlaylistsPane {
             info_area: Rect::default(),
             info_items_len: 0,
             info_key: None,
+            tree_args: ctx.config.tree_browser_args(PaneTypeDiscriminants::Playlists),
             info_scrollbar_area: Rect::default(),
             info_scrollbar_drag: crate::shared::mouse_event::ScrollbarDrag::default(),
         }
@@ -549,7 +554,7 @@ impl PlaylistsPane {
         } else {
             root.next(ctx.config.scrolloff, ctx.config.wrap_navigation);
         }
-        self.fetch_data_internal(ctx)?;
+        SongListCore::fetch_data_internal(self, ctx)?;
         ctx.render()?;
         Ok(())
     }
@@ -587,7 +592,7 @@ impl PlaylistsPane {
         // Inside a playlist: play the highlighted song (replace the queue
         // with it and start playback), like `d`/`→`/Enter on a file in the
         // MPD pane.
-        self.open(true, ctx)?;
+        SongListCore::open(self, true, ctx)?;
         ctx.render()?;
         Ok(())
     }
@@ -595,7 +600,7 @@ impl PlaylistsPane {
     /// Back out one level to the playlist list (no-op at the root).
     fn back_out(&mut self, ctx: &Ctx) -> Result<()> {
         self.stack_mut().leave();
-        self.fetch_data_internal(ctx)?;
+        SongListCore::fetch_data_internal(self, ctx)?;
         ctx.render()?;
         Ok(())
     }
@@ -906,7 +911,7 @@ impl PlaylistsPane {
 
     fn open_selected_playlist(&mut self, ctx: &Ctx) -> Result<()> {
         self.stack_mut().enter();
-        self.fetch_data_internal(ctx)?;
+        SongListCore::fetch_data_internal(self, ctx)?;
         ctx.render()?;
         Ok(())
     }
@@ -925,7 +930,7 @@ impl PlaylistsPane {
                 _ => None,
             })
             .collect();
-        ctx.query().id(PLAYLIST_KINDS).replace_id(PLAYLIST_KINDS).target(PaneType::Playlists).query(
+        ctx.query().id(PLAYLIST_KINDS).replace_id(PLAYLIST_KINDS).target(PaneType::Playlists { tree: TreeBrowserArgs::default() }).query(
             move |client| {
                 // `listplaylistinfo` ranges need MPD >= 0.24; older servers
                 // fall back to fetching the whole playlist.
@@ -950,7 +955,7 @@ impl Pane for PlaylistsPane {
         // wide: the right pane then gets the whole area and the collapsed
         // left pane's rect stays default so mouse events (scroll included)
         // can never hit it.
-        let tree_w = crate::ui::panes::directories::tree_width(area.width);
+        let tree_w = self.tree_args.tree_width(area.width);
         let (playlists_area, right) = if tree_w == 0 {
             (Rect::default(), area)
         } else {
@@ -965,7 +970,7 @@ impl Pane for PlaylistsPane {
         // strip stays a fixed 3 rows); the songs list gets the rest. Exact
         // lengths are computed so the rows always fill the area exactly.
         let tips_h = 3;
-        let info_h = (right.height.saturating_sub(tips_h) * 2 / 3).min(15);
+        let info_h = self.tree_args.info_box_height(right.height.saturating_sub(tips_h) * 2 / 3);
         let songs_h = right.height.saturating_sub(tips_h + info_h);
         let [songs_area, tips_area, info_area] = Layout::vertical([
             Constraint::Length(songs_h),
@@ -1014,7 +1019,7 @@ impl Pane for PlaylistsPane {
         let id = if self.initialized { REINIT } else { INIT };
         let compare = StringCompare::from(ctx.config.browser_song_sort.as_ref());
         let radio_playlist = ctx.config.radio.playlist.clone();
-        ctx.query().id(id).target(PaneType::Playlists).replace_id(id).query(move |client| {
+        ctx.query().id(id).target(PaneType::Playlists { tree: TreeBrowserArgs::default() }).replace_id(id).query(move |client| {
             let result: Vec<_> = client
                 .list_playlists()
                 .context("Cannot list playlists")?
@@ -1041,7 +1046,7 @@ impl Pane for PlaylistsPane {
                 };
                 let sort_opts = ctx.config.browser_song_sort.clone();
                 let radio_playlist = ctx.config.radio.playlist.clone();
-                ctx.query().id(id).replace_id(id).target(PaneType::Playlists).query(
+                ctx.query().id(id).replace_id(id).target(PaneType::Playlists { tree: TreeBrowserArgs::default() }).query(
                     move |client| {
                         let result: Vec<_> = client
                             .list_playlists()
@@ -1104,10 +1109,10 @@ impl Pane for PlaylistsPane {
                         let dir = self.stack.root_mut();
                         dir.select_idx(idx, ctx.config.scrolloff);
                         let is_double = matches!(event.kind, MouseEventKind::DoubleClick);
-                        self.fetch_data_internal(ctx)?;
+                        SongListCore::fetch_data_internal(self, ctx)?;
                         if is_double {
                             self.stack_mut().enter();
-                            self.fetch_data_internal(ctx)?;
+                            SongListCore::fetch_data_internal(self, ctx)?;
                         }
                         ctx.render()?;
                     }
@@ -1119,7 +1124,7 @@ impl Pane for PlaylistsPane {
                     } else {
                         dir.scroll_down(ctx.config.scroll_amount, ctx.config.scrolloff);
                     }
-                    self.fetch_data_internal(ctx)?;
+                    SongListCore::fetch_data_internal(self, ctx)?;
                     ctx.render()?;
                 }
                 _ => {}
@@ -1178,8 +1183,8 @@ impl Pane for PlaylistsPane {
                     if let Some(idx) = self.stack.current().state.get_at_rendered_row(row) {
                         let dir = self.stack.current_mut();
                         dir.select_idx(idx, ctx.config.scrolloff);
-                        self.open(true, ctx)?;
-                        self.fetch_data_internal(ctx)?;
+                        SongListCore::open(self, true, ctx)?;
+                        SongListCore::fetch_data_internal(self, ctx)?;
                     }
                 }
                 MouseEventKind::LeftClick => {
@@ -1265,7 +1270,7 @@ impl Pane for PlaylistsPane {
     }
 
     fn handle_insert_mode(&mut self, kind: InputResultEvent, ctx: &mut Ctx) -> Result<()> {
-        BrowserPane::handle_insert_mode(self, kind, ctx)?;
+        SongListCore::handle_insert_mode(self, kind, ctx)?;
         Ok(())
     }
 
@@ -1333,7 +1338,7 @@ impl Pane for PlaylistsPane {
                     InfoListModal::builder()
                         .column_widths(&[30, 70])
                         .title("Playlist info")
-                        .items(data)
+                        .rows(data)
                         .size((40, 20))
                         .build()
                 );
@@ -1354,7 +1359,7 @@ impl Pane for PlaylistsPane {
                 };
 
                 self.stack_mut().insert(path, data);
-                self.fetch_data_internal(ctx)?;
+                SongListCore::fetch_data_internal(self, ctx)?;
                 ctx.render()?;
             }
             (INIT, MpdQueryResult::DirOrSong { data, path: _ }) => {
@@ -1502,17 +1507,41 @@ impl Pane for PlaylistsPane {
     }
 }
 
-impl BrowserPane<DirOrSong> for PlaylistsPane {
-    fn stack(&self) -> &DirStack<DirOrSong, ListState> {
-        &self.stack
+impl SongListCore<DirOrSong, ListState> for PlaylistsPane {
+    fn list(&self) -> &Dir<DirOrSong, ListState> {
+        self.stack().current()
     }
 
-    fn stack_mut(&mut self) -> &mut DirStack<DirOrSong, ListState> {
-        &mut self.stack
+    fn list_mut(&mut self) -> &mut Dir<DirOrSong, ListState> {
+        self.stack_mut().current_mut()
     }
 
-    fn browser_areas(&self) -> EnumMap<BrowserArea, Rect> {
-        self.browser.areas
+    fn scrollbar_area(&self) -> Option<Rect> {
+        BrowserPane::scrollbar_area(self)
+    }
+
+    fn list_area(&self) -> Option<Rect> {
+        BrowserPane::list_area(self)
+    }
+
+    fn open(&mut self, autoplay: bool, ctx: &Ctx) -> Result<()> {
+        BrowserPane::open(self, autoplay, ctx)
+    }
+
+    fn leave(&mut self, ctx: &Ctx) -> Result<()> {
+        BrowserPane::leave(self, ctx)
+    }
+
+    fn fetch_data_internal(&mut self, ctx: &Ctx) -> Result<()> {
+        BrowserPane::fetch_data_internal(self, ctx)
+    }
+
+    fn enqueue<'a>(&self, items: impl Iterator<Item = &'a DirOrSong>) -> (Vec<Enqueue>, Option<usize>) {
+        BrowserPane::enqueue(self, items)
+    }
+
+    fn initial_playlist_name(&self, all: bool) -> Option<String> {
+        BrowserPane::initial_playlist_name(self, all)
     }
 
     fn list_songs_in_item(
@@ -1539,7 +1568,7 @@ impl BrowserPane<DirOrSong> for PlaylistsPane {
                 ctx.query()
                     .id(FETCH_DATA)
                     .replace_id("playlists_data")
-                    .target(PaneType::Playlists)
+                    .target(PaneType::Playlists { tree: TreeBrowserArgs::default() })
                     .query(move |client| {
                         let data = client
                             .list_playlist_info(&playlist, None)?
@@ -1560,7 +1589,7 @@ impl BrowserPane<DirOrSong> for PlaylistsPane {
             DirOrSong::Dir { name, .. } => {
                 let playlist = name.clone();
                 ctx.query()
-                    .target(PaneType::Playlists)
+                    .target(PaneType::Playlists { tree: TreeBrowserArgs::default() })
                     .replace_id(PLAYLIST_INFO)
                     .id(PLAYLIST_INFO)
                     .query(move |client| {
@@ -1712,5 +1741,19 @@ impl BrowserPane<DirOrSong> for PlaylistsPane {
         ctx.render()?;
 
         Ok(())
+    }
+}
+
+impl BrowserPane<DirOrSong> for PlaylistsPane {
+    fn stack(&self) -> &DirStack<DirOrSong, ListState> {
+        &self.stack
+    }
+
+    fn stack_mut(&mut self) -> &mut DirStack<DirOrSong, ListState> {
+        &mut self.stack
+    }
+
+    fn browser_areas(&self) -> EnumMap<BrowserArea, Rect> {
+        self.browser.areas
     }
 }
