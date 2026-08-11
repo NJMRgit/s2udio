@@ -202,8 +202,8 @@ ref). Key numbers and audited files:
 | `src/ui/panes/playlists.rs` | 1716 → 1755 |
 | `src/ui/panes/tag_browser.rs` | 588 → 628 |
 | `src/ui/panes/albums.rs` | 190 → 229 |
-| `src/ui/panes/controls.rs` | 1516 → 1516 |
-| `src/ui/panes/lyrics.rs` | 2543 → 2543 |
+| `src/ui/panes/controls.rs` | 1516 → 1319 |
+| `src/ui/panes/lyrics.rs` | 2543 → 2475 |
 | `src/ui/song_list.rs` | — → 955 (Phase 1 core) |
 | `src/ui/tree_browser.rs` | — → 602 (Phase 2 core; +4 Phase 2.1) |
 | `src/ui/modals/list_modal.rs` | — → 763 (Phase 3 core; +tests) |
@@ -216,8 +216,10 @@ ref). Key numbers and audited files:
 | `src/ui/modals/menu/mod.rs` | 649 → 638 (Select dispatch arms gone) |
 | `src/ui/modals/menu/modal.rs` | 615 → 601 (select_section builder → list_section) |
 | `src/ui/modals/outputs.rs` | 258 → 258 (kept — see §5.2) |
-| **src/ui total** | **56,704 → 57,070** |
-| **tree total .rs** | **95,811 → 96,128** |
+| `src/ui/widgets/marquee.rs` | — → 282 (Phase 5 core: carousel cycle + marquee) |
+| `src/ui/widgets/wrap.rs` | — → 84 (Phase 5 core: wrap helpers) |
+| **src/ui total** | **56,704 → 57,173** |
+| **tree total .rs** | **95,811 → 96,231** |
 
 Similarity guardrail baseline: **83 same-named function pairs with ratio > 0.5**
 across `src/ui` (full list: `python3 scripts/dev/ui-metrics.py --pairs`).
@@ -439,7 +441,7 @@ with a behavior-parity live check of the affected tabs.
 | 2 | `TreeBrowserCore` unifies directories / jellyfin / radio | `ui/tree_browser.rs`, `ui/panes/directories.rs`, `jellyfin.rs`, `radio.rs` | ✅ (2026-08-10, commits `f5c2ac4`+`948c85c`+`26e9834`): `TreeBrowserCore` trait (hooks + shared defaults, the Phase-1 `SongListCore` pattern) in `src/ui/tree_browser.rs`; all three panes implement it and delegate `render`/`handle_action`/`handle_mouse_event`/`on_event` + the temp-play lifecycle to the shared core. 1312/1312 green (21 directories + 15 jellyfin + 31 radio tests). The §2.2 clone pairs are gone or reduced to shared call sites: `cleanup_temp_play` (×3), `selected_item`, `move_items`, `render`, `render_tips`, `handle_action`, `on_event` (jellyfin↔radio) all deleted from the panes (live in the core); residual >0.5 pairs are thin Pane-delegator shells (`render`/`handle_action`/`handle_mouse_event`/`on_event` routing to the core — same category the baseline already carried) plus pre-existing non-tree pairs. Net LOC: **src/ui +51 vs the Phase-0 table** (pane files −369: directories −187, jellyfin −192, radio +10; core `tree_browser.rs` +598) — the trait-with-hooks pattern trades raw LOC for guaranteed one-implementation (same tradeoff as Phase 1: song_list +955 vs panes −1134); the args/config end-state that shrinks panes further is Phase 6. |
 | 3 | Modal consolidation onto `ListModal`/`InfoListModal` + section merge | `ui/modals/*` | ✅ (2026-08-10, commits `a5aac04`+`53b9e90`): `ListModal<'a, V>` master in `src/ui/modals/list_modal.rs` (args: row/size fns, buttons/confirm_buttons, multi-select + mark_id, bottom title, padding, wheel mode, scrollbar drag); `SelectModal` (317 → 90) + `TorrentFilePicker` (501 → 141) are thin adapters with unchanged public builders — all 15 call sites + the paste picker tests untouched. `menu/select_section.rs` merged into `list_section.rs` (value items + section-level `action`), `SectionType::Select` + 16 dispatch arms deleted. `InfoListModal` generalized to N columns + `header` arg and absorbs `DecodersModal` (248 → 67). 1326/1326 green (+8: 4 ListModal + 4 InfoListModal behavior pins incl. the unified click-row mapping); warnings 3 baseline; similarity guardrail unchanged (60 excl-thin — modals are not in `PANE_FILES`). Net LOC: **src/ui −61** (56,923 → 56,862), tree −110 (96,030 → 95,920) — short of the −600–900 target for the same reason Phase 2 was (+51): the master modules (+763 list_modal, +123 info_list incl. tests) cost more than the thinned consumers saved (select −227, torrent −360, decoders −181, select_section −210); the phase trades raw LOC for one-implementation-by-construction, and the args/config end-state that actually shrinks consumers is Phase 6. Deliberate delta + kept-modals rationale in §5.2. |
 | 4 | QueuePane decomposition: Audio list → `SongListCore`, toggle → `SubTabBar`, Video/Chapters stay as focused specs | `ui/panes/queue.rs` | Queue tab live-check (Audio/Video/Chapters, merged box, esc-deselect, marks); **–~1–1.5k LOC** in queue.rs. **4a ✅ (`9b46f54`): `SubTabBar` widget. 4b ✅ (`5bf5a18`+`80b4844`+`c81cb2f`+4b4 close-out): queue.rs decomposed into the module root + `queue/context_menus.rs` + `queue/video.rs` + `queue/chapters.rs` (4447 → 3485, production −962; zero test edits, 1328/1328) — close-out §5.3. Host live-check (§8 of the 4b plan) pending.** |
-| 5 | Shared drawing widgets (marquee/wrap/button cluster) from controls/lyrics | `ui/panes/controls.rs`, `lyrics.rs`, `ui/widgets/` | Visual parity in live check; widgets reused by ≥2 call sites. |
+| 5 | Shared drawing widgets (marquee/wrap/button cluster) from controls/lyrics | `ui/panes/controls.rs`, `lyrics.rs`, `ui/widgets/` | ✅ (2026-08-11, `483a73c`+`490c62e`+`2fcb10c`+`ef4863f`+5b5 close-out): `MarqueeLine` (`ui/widgets/marquee.rs`, 282) + wrap helpers (`ui/widgets/wrap.rs`, 84) extracted with the carousel cycle math untouched; controls (2 render sites) + lyrics + jellyfin adopt the marquee widget, lyrics + jellyfin adopt wrap — ≥2 call sites each. Button cluster + now-playing templates: **documented decisions NOT to merge** (§3 — three cluster shapes / two line-template shapes, see §5.4). 1328/1328 after each commit, warnings 3 baseline, guardrail 60 excl-thin identical pair set. Live check (§8 of the plan) pending. |
 | 6 | Args expansion: pane-specific constants move into `PaneType`/config args | `src/config/tabs.rs`, panes | Adding a new browser tab = config block + adapter, no new pane file; sidecars migrate cleanly. |
 | 7 | Close-out | — | Final LOC comparison vs baseline; docs (`docs/design/`) `source_files` updated; HANDOFF/notes updated; `rewrite` branch state documented for review. |
 
@@ -587,6 +589,97 @@ declarations in `queue`, which covered `queue` + its test mods).
 **Remaining:** the phase-4 host live-check (plan §8 — Audio/Video/
 Chapters, marks, context menus, toggle, scrollbars) before phase 4 closes;
 then phases 5–7.
+
+
+### 5.4 Phase 5 — shared drawing widgets close-out ✅ (2026-08-11)
+
+Phase 5 extracted the shared drawing machinery from `ControlsPane` /
+`LyricsPane` into `src/ui/widgets/`, per the handoff plan
+`docs/design/Rewrite/phase5-drawing-widgets.md`, in five commits on
+`rewrite` (each independently green, **1328/1328** after every commit,
+warnings 3 baseline unchanged, similarity guardrail unchanged at **60
+excl-thin pairs with an identical pair set**):
+
+| Commit | Move set | pane LOC after |
+| --- | --- | --- |
+| `483a73c` (5b1) | `draw_marquee` + `marquee_offset` + `draw_panel_at` + the `CAROUSEL_*` constants (+ the 2 marquee timing tests, 85 test LOC moved with their code, assertions untouched) → `widgets/marquee.rs` (282 LOC); lyrics **and** jellyfin cross-pane `ControlsPane::marquee_offset`/`draw_panel_at` calls flip to the widget | controls.rs 1516 → 1319 |
+| `490c62e` (5b2) | `wrap_to_width` (pub(crate)) + `wrap_spans` (+ the wrap test moved with them) → `widgets/wrap.rs` (84 LOC); jellyfin's `lyrics::wrap_to_width` import flips to the widget | lyrics.rs 2543 → 2475 |
+| `2fcb10c` (5b3) | button cluster — **documented decision NOT to merge** (§3, rationale below) | — |
+| `ef4863f` (5b4) | now-playing line templates — **documented decision NOT to merge** (§3, rationale below) | — |
+| 5b5 (close-out) | docs + metrics (this section, §2.4, HANDOFF, plan flipped done, session log) | — |
+
+**Call sites (≥2 per extracted widget, the phase-5 exit criterion):**
+`marquee.rs` is adopted by **controls** (2 render sites) + **lyrics**
+(video-info title marquee) + **jellyfin** (header title marquee) — 3
+panes; `wrap.rs` by **lyrics** (`wrap_to_width` ×2 + `wrap_spans`) +
+**jellyfin** (episode overview) — 2 panes. The cross-pane coupling that
+motivated the phase (`lyrics.rs`/`jellyfin.rs` reaching into
+`ControlsPane`, `jellyfin.rs` reaching into `lyrics.rs`) is gone; panes
+now reach into `ui::widgets` only.
+
+**Real numbers (measured on committed refs with `ui-metrics.py --ref`
+`64be282` vs `--ref HEAD` — the script reads the file list from the ref,
+so new files are only counted once committed):**
+
+- controls.rs **1516 → 1319 (−197)**: production 1038 → 926 (**−112**),
+  tests 478 → 393 (−85, the 2 marquee timing tests moved with the code —
+  assertions byte-identical, call paths updated to the widget).
+- lyrics.rs **2543 → 2475 (−68)**: production 1424 → 1363 (**−61**),
+  tests 1119 → 1112 (−7, the wrap test moved with its code).
+- New widgets: `marquee.rs` **282** (193 prod + 89 test),
+  `wrap.rs` **84** (72 prod + 12 test). `widgets/mod.rs` 21 → 23.
+- Net LOC: **src/ui +103** (57,070 → 57,173), tree +103 (96,128 →
+  96,231) — a pure move plus the widget headers/imports/doc-comment cost
+  (marquee.rs carries the full cycle documentation with the constants);
+  the marquee cycle is now one implementation shared by three panes, and
+  the wrap helpers one implementation shared by two panes (the user
+  priority: extensibility + predictable behavior; LOC is a proxy, not a
+  gate).
+- Similarity guardrail: **60 excl-thin pairs before and after**,
+  identical pair set — the moved functions keep unique names and live in
+  `ui/widgets/` (outside the pane-pair analysis), so no new >0.5 pairs
+  appear and the controls/lyrics `draw_spans`/`draw_line` pairs (if any)
+  are unaffected because those helpers stay in controls.rs per the plan.
+
+**§3 decisions (documented in the plan §3a, both NOT to merge):**
+
+1. **Button cluster** (`2fcb10c`): the lyrics header cluster (`LyricsBtn` +
+   `button_line`), the controls mpv row-0 cluster (`mpv_button_layout`)
+   and the transport row (`transport_zones`) are **three different
+   shapes** — glyph+label spans with a space-padded ` | ` separator,
+   2-tier width collapse, label-text-only hover (the `●`/space keep the
+   base style, pinned cell-by-cell by `hover_highlights_only_the_label_text`)
+   and a per-button `●`/`⭘` pressed marker vs plain whole labels with a
+   1-col gap, no collapse (the title region shrinks instead), whole-label
+   hover and `(x1,x2)` click zones vs a fixed 25-col centered slot row
+   with literal pipes. Any single hover mode changes one side's visible
+   behavior (whole-label hover would highlight the lyrics `●`; label-only
+   hover would drop the mpv hover entirely — `⤓`/`[Audio]` contain no
+   space to split). A shared widget would need a hover-scope enum, a
+   separator enum, a collapse-tier table, an optional pressed-glyph
+   callback and a zone-output shape — a fork, not an arg.
+2. **Now-playing line templates** (`ef4863f`): controls
+   `artist_title_line`/`channel_line` and the lyrics info header share
+   only the *semantics* (what is playing). The data resolution differs
+   (mpv/yt/mpd tag strategy + fallbacks vs Jellyfin-item/year-prefix/
+   episode + yt-stream parts), the styles differ (theme-derived
+   blur-following palette vs explicit ANSI white + yellow keys + bold
+   `Time:`), and the layout differs (one centered marquee line vs fixed
+   prefix + marquee window + context rows + description + pinned
+   credits). The one genuinely shared piece — the marquee cycle — is
+   already the 5b1 widget, adopted by all three panes.
+3. **`ScrollingLine` (property.rs) kept** (plan §4a adopt-vs-keep): its
+   cycle is a different shape — a continuous `|`-separated repeat
+   (`line + " | " + line`, `(elapsed_sec × speed) % (line_len + 3)`),
+   whole-second progress, no holds, no 3× faster wrap — vs the carousel's
+   hold-2s → scroll-to-tail → hold-2s → 3× wrap with a 5-col gap. Unifying
+   would change the property pane's scrolling behavior (modulo cycle vs
+   phase cycle) — a behavior-visible change; `ScrollingLine` stays a thin
+   widget (single caller by design) and the close-out records why.
+
+**Remaining:** the phase-5 host live-check (plan §8 — controls carousel
+cycle, lyrics header cluster + info marquee + wrap, jellyfin overview
+wrap, property scrolling line); then Phase 6 (args expansion).
 
 ## 6. Definition of done (applies per phase)
 

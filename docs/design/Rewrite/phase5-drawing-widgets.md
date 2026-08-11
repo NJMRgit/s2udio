@@ -9,16 +9,18 @@ description: >
   wrap helpers (wrap_to_width / wrap_spans), button cluster, now-playing
   line templates. Prepared for a fresh agent to execute; parent spec is
   `docs/design/Rewrite/ui-reuse-rewrite.md` (phase-5 row, §4.5).
-status: "active — awaiting implementer"
+status: "done — executed 2026-08-11 (commits 483a73c, 490c62e, 2fcb10c, ef4863f, 5b5 close-out); §3 decisions in §3a, numbers in outline §5.4"
 parent: "rewrite/ui-reuse"
 updated: "2026-08-11"
 ---
 
 # Phase 5 — Shared Drawing Widgets (handoff plan)
 
-> **Status: PLAN.** 4b (queue decomposition) is DONE (`5bf5a18`+`80b4844`+
-> `c81cb2f`+`9fee28e`, 1328/1328, close-out §5.3). This plan covers **5**
-> only. A new agent completes it; the host reviews/live-checks.
+> **Status: DONE** (2026-08-11): 5b1 `483a73c`, 5b2 `490c62e`,
+> 5b3 `2fcb10c` (documented decision), 5b4 `ef4863f` (documented
+> decision), 5b5 close-out — 1328/1328, warnings 3 baseline, guardrail 60
+> excl-thin identical pair set; real numbers in outline §5.4. The host
+> live-check (plan §8) is pending.
 
 ## 1. Context — read this first
 
