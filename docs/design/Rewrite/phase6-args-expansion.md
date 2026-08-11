@@ -11,14 +11,14 @@ description: >
   adapter" construction pattern. Prepared for a fresh agent to execute;
   parent spec is `docs/design/Rewrite/ui-reuse-rewrite.md` (phase-6 row,
   §3 rules).
-status: "active — awaiting implementer"
+status: "done — implemented 2026-08-11 (4a5b054 + a1caf6b + 9abb201 + 6.4 close-out; see ui-reuse-rewrite.md §5.5)"
 parent: "rewrite/ui-reuse"
 updated: "2026-08-11"
 ---
 
 # Phase 6 — Args Expansion (handoff plan)
 
-> **Status: PLAN.** Phase 5 (shared drawing widgets) is DONE
+> **Status: DONE (2026-08-11).** Phase 5 (shared drawing widgets) is DONE
 > (`483a73c`+`490c62e`+`2fcb10c`+`ef4863f`+`671bc91`, 1328/1328, host
 > live-validated 2026-08-11: behavior + appearance identical to master,
 > blur auto-theme/hover/selection/marquee all verified). This plan covers

@@ -364,7 +364,7 @@ one-implementation-by-construction — Phase 2 +51, Phase 3 −55).
 in-container — see the `RUSTUP_HOME`/`CARGO_HOME` env note below) — the
 agent can self-validate; the host still does live checks.
 
-Status (2026-08-10):
+Status (2026-08-11):
 - **Phase 0 ✅** (`d0d3a56`): baseline LOC + similarity metrics
   (`scripts/dev/ui-metrics.py` — token-sequence difflib ratio over
   comment-stripped fn bodies; thin-adapter names excluded from the
@@ -460,6 +460,32 @@ Status (2026-08-10):
   kept (different continuous-`|`-wrap cycle). **Next: 6 — args expansion
   (pane-specific constants into `PaneType`/config args); phase-4/5 host
   live-checks pending.**
+- **Phase 6 ✅** (`4a5b054` + `a1caf6b` + `9abb201` + 6.4 close-out,
+  2026-08-11): pane-specific browser constants moved into `PaneType`/
+  config args per `docs/design/Rewrite/phase6-args-expansion.md` —
+  `TreeBrowserArgs { tree_min_width: 50, tree_hide_below: 120,
+  info_box_cap: Some(15) }` (serde defaults = today's constants) on the
+  four browser variants of BOTH enums; the four panes + `TreeBrowserCore`
+  read the args (tree width / hide threshold / info cap; `None` = the
+  round-8 uncapped info box). **Backward compat is load-bearing and was
+  NOT free**: RON cannot deserialize a struct variant from its unit form,
+  so `PaneTypeFile::Deserialize` is manual (serde Content capture +
+  `{Variant: ()}` → `{Variant: Seq([])}` rewrite + derived-mirror replay;
+  the versioned `__private228` module, pinned by the lockfile) — today's
+  bare `Directories`/`Playlists`/`Jellyfin`/`Radio` config syntax parses
+  with default args (pinned: `bare_browser_panes_parse_with_default_tree_args`,
+  `explicit_tree_args_round_trip`, `default_args_are_today_s_constants`).
+  1337/1337 (1328 + 9), warnings 3 baseline, guardrail **60 excl-thin,
+  identical pair set** (`tree_args` added to the thin-adapter list).
+  Net LOC: src/ui **+145** (57,173 → 57,318), tree **+566** (96,231 →
+  96,797; tabs.rs 1277 → 1672 — the serde machinery is the price of the
+  compat guarantee). 6.3 construction pattern: **documented decision**
+  (`docs/design/Rewrite/new-browser-tab.md`) — new browser tab = config
+  block + thin adapter over the shared cores, never a new core; the four
+  adapters stay per-backend (radio focus/regions tree, jellyfin shared
+  selection/poster, playlists list-shaped pane, directories Downloads —
+  a backend enum would fork, §3 rule). **Next: 7 — close-out; phase-4/5/6
+  host live-checks pending (plan §8 of each).**
 
 Toolchain env (container): `export PATH="$HOME/.cargo/bin:$PATH"`
 `export RUSTUP_HOME="$HOME/.rustup" CARGO_HOME="$HOME/.cargo"`.
