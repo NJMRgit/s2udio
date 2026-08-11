@@ -113,9 +113,14 @@ pub(in crate::ui) trait TreeBrowserCore: Pane {
     // ── rendering hooks ────────────────────────────────────────────────
 
     fn tree_title(&self) -> &'static str;
-    /// The arrow glyph of a tree row ("▼ "/"▶ " expanded/collapsed).
+    /// The arrow glyph of a tree row ("▼ "/"▶ " expanded/collapsed;
+    /// non-expandable rows get no arrow).
     fn tree_arrow(&self, row: &TreeRowView) -> &'static str {
-        if row.expanded { "▼ " } else { "▶ " }
+        if row.expandable {
+            if row.expanded { "▼ " } else { "▶ " }
+        } else {
+            ""
+        }
     }
     fn tree_highlight(&self, hover_idx: Option<usize>, ctx: &Ctx) -> Style {
         if hover_idx == self.tree_list().selected() {
