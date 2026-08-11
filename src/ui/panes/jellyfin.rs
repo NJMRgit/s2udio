@@ -1232,7 +1232,7 @@ impl TreeBrowserCore for JellyfinPane {
                     let text_width = (((area.width.saturating_sub(2)) * 3 / 5)
                         .saturating_sub(3))
                     .max(10) as usize;
-                    for line in crate::ui::panes::lyrics::wrap_to_width(
+                    for line in crate::ui::widgets::wrap::wrap_to_width(
                         &crate::ui::panes::lyrics::scrub_emoji(overview),
                         text_width,
                     ) {
