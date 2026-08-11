@@ -27,7 +27,6 @@ use crate::{
     },
     ui::modals::{
         confirm_modal::{Action, ConfirmModal},
-        menu::select_section::SelectSection,
     },
 };
 
@@ -35,7 +34,6 @@ mod input_section;
 mod list_section;
 pub mod modal;
 mod multi_action_section;
-mod select_section;
 
 trait Section {
     fn down(&mut self) -> bool;
@@ -70,7 +68,6 @@ trait Section {
 #[derive(Debug)]
 enum SectionType<'a> {
     Menu(ListSection),
-    Select(SelectSection),
     Multi(MultiActionSection<'a>),
     Input(InputSection<'a>),
 }
@@ -81,7 +78,6 @@ impl Section for SectionType<'_> {
             SectionType::Menu(s) => s.down(),
             SectionType::Multi(s) => s.down(),
             SectionType::Input(s) => s.down(),
-            SectionType::Select(s) => s.down(),
         }
     }
 
@@ -90,7 +86,6 @@ impl Section for SectionType<'_> {
             SectionType::Menu(s) => s.up(),
             SectionType::Multi(s) => s.up(),
             SectionType::Input(s) => s.up(),
-            SectionType::Select(s) => s.up(),
         }
     }
 
@@ -99,7 +94,6 @@ impl Section for SectionType<'_> {
             SectionType::Menu(s) => s.right(),
             SectionType::Multi(s) => s.right(),
             SectionType::Input(s) => s.right(),
-            SectionType::Select(s) => s.right(),
         }
     }
 
@@ -108,7 +102,6 @@ impl Section for SectionType<'_> {
             SectionType::Menu(s) => s.left(),
             SectionType::Multi(s) => s.left(),
             SectionType::Input(s) => s.left(),
-            SectionType::Select(s) => s.left(),
         }
     }
 
@@ -117,7 +110,6 @@ impl Section for SectionType<'_> {
             SectionType::Menu(s) => s.selected(),
             SectionType::Multi(s) => s.selected(),
             SectionType::Input(s) => s.selected(),
-            SectionType::Select(s) => s.selected(),
         }
     }
 
@@ -126,7 +118,7 @@ impl Section for SectionType<'_> {
             SectionType::Menu(s) => s.select(idx),
             SectionType::Multi(s) => s.select(idx),
             SectionType::Input(s) => s.select(idx),
-            SectionType::Select(s) => s.select(idx),
+
         }
     }
 
@@ -135,7 +127,7 @@ impl Section for SectionType<'_> {
             SectionType::Menu(s) => s.unselect(ctx),
             SectionType::Multi(s) => s.unselect(ctx),
             SectionType::Input(s) => s.unselect(ctx),
-            SectionType::Select(s) => s.unselect(ctx),
+
         }
     }
 
@@ -144,7 +136,7 @@ impl Section for SectionType<'_> {
             SectionType::Menu(s) => s.unfocus(ctx),
             SectionType::Multi(s) => s.unfocus(ctx),
             SectionType::Input(s) => s.unfocus(ctx),
-            SectionType::Select(s) => s.unfocus(ctx),
+
         }
     }
 
@@ -153,7 +145,7 @@ impl Section for SectionType<'_> {
             SectionType::Menu(s) => s.confirm(ctx),
             SectionType::Multi(s) => s.confirm(ctx),
             SectionType::Input(s) => s.confirm(ctx),
-            SectionType::Select(s) => s.confirm(ctx),
+
         }
     }
 
@@ -162,7 +154,7 @@ impl Section for SectionType<'_> {
             SectionType::Menu(s) => s.on_close(ctx),
             SectionType::Multi(s) => s.on_close(ctx),
             SectionType::Input(s) => s.on_close(ctx),
-            SectionType::Select(s) => s.on_close(ctx),
+
         }
     }
 
@@ -171,7 +163,6 @@ impl Section for SectionType<'_> {
             SectionType::Menu(s) => s.len(),
             SectionType::Multi(s) => s.len(),
             SectionType::Input(s) => s.len(),
-            SectionType::Select(s) => s.len(),
         }
     }
 
@@ -180,7 +171,6 @@ impl Section for SectionType<'_> {
             SectionType::Menu(s) => s.preferred_height(),
             SectionType::Multi(s) => s.preferred_height(),
             SectionType::Input(s) => s.preferred_height(),
-            SectionType::Select(s) => s.preferred_height(),
         }
     }
 
@@ -189,7 +179,7 @@ impl Section for SectionType<'_> {
             SectionType::Menu(s) => s.render(area, buf, filter, ctx),
             SectionType::Multi(s) => s.render(area, buf, filter, ctx),
             SectionType::Input(s) => s.render(area, buf, filter, ctx),
-            SectionType::Select(s) => s.render(area, buf, filter, ctx),
+
         }
     }
 
@@ -198,7 +188,7 @@ impl Section for SectionType<'_> {
             SectionType::Menu(s) => s.left_click(pos, ctx),
             SectionType::Multi(s) => s.left_click(pos, ctx),
             SectionType::Input(s) => s.left_click(pos, ctx),
-            SectionType::Select(s) => s.left_click(pos, ctx),
+
         }
     }
 
@@ -207,7 +197,7 @@ impl Section for SectionType<'_> {
             SectionType::Menu(s) => s.double_click(pos, ctx),
             SectionType::Multi(s) => s.double_click(pos, ctx),
             SectionType::Input(s) => s.double_click(pos, ctx),
-            SectionType::Select(s) => s.double_click(pos, ctx),
+
         }
     }
 
@@ -216,7 +206,6 @@ impl Section for SectionType<'_> {
             SectionType::Menu(s) => s.item_labels_iter(),
             SectionType::Multi(s) => s.item_labels_iter(),
             SectionType::Input(s) => s.item_labels_iter(),
-            SectionType::Select(s) => s.item_labels_iter(),
         }
     }
 }
@@ -266,13 +255,13 @@ pub fn create_rating_modal<'a>(
 
             Some(section)
         })
-        .select_section(ctx, move |mut section| {
+        .list_section(ctx, move |mut section| {
             if values.is_empty() {
                 return None;
             }
 
             for i in values {
-                section.add_item(i.to_string(), i.to_string());
+                section.add_select_item(i.to_string(), i.to_string());
             }
 
             section.action(move |ctx, value| {
@@ -403,14 +392,14 @@ pub fn create_save_modal<'a>(
             });
             Some(sect)
         })
-        .select_section(ctx, move |mut sect| {
+        .list_section(ctx, move |mut sect| {
             sect.action(move |ctx, playlist_name| {
                 add_to_playlist_or_show_modal(playlist_name, song_paths, duplicate_strategy, ctx);
                 Ok(())
             });
             for mut playlist in playlists {
                 let playlist_name = std::mem::take(&mut playlist.name);
-                sect.add_item(playlist_name.clone(), playlist_name);
+                sect.add_select_item(playlist_name.clone(), playlist_name);
                 sect.add_max_height(12);
             }
             Some(sect)
@@ -552,9 +541,9 @@ pub fn create_delete_modal<'a>(
         });
 
     Ok(MenuModal::new(ctx)
-        .select_section(ctx, move |mut sect| {
+        .list_section(ctx, move |mut sect| {
             for playlist in playlists {
-                sect.add_item(playlist.name.clone(), playlist.name);
+                sect.add_select_item(playlist.name.clone(), playlist.name);
             }
             sect.add_max_height(12);
             sect.action(move |ctx, playlist| {

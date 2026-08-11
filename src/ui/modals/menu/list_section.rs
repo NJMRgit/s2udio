@@ -11,6 +11,29 @@ use ratatui::{
 use super::Section;
 use crate::{ctx::Ctx, shared::ext::rect::RectExt, ui::dirstack::DirState};
 
+/// One row in a `ListSection`. Two kinds:
+///
+/// - **Action items** (`add_item`): running the row's closure on confirm.
+/// - **Select items** (`add_select_item`): carrying a value that the
+///   section-level `action` callback receives on confirm (the old
+///   `SelectSection` shape — merged here so menu and value-picker
+///   sections are one implementation).
+///
+/// Either kind can be a `disabled` header row (e.g. "[Audio]" group
+/// labels): rendered dim, skipped by navigation, never confirmed.
+#[derive(derive_more::Debug)]
+pub struct MenuItem {
+    pub label: String,
+    /// `Some` for select items: the value handed to the section's
+    /// `on_select` callback when this row is confirmed.
+    pub value: Option<String>,
+    #[debug(skip)]
+    pub on_confirm: Option<Box<dyn FnOnce(&Ctx) -> Result<()> + Send + Sync + 'static>>,
+    /// Header rows (e.g. "[Audio]" group labels): rendered dim, skipped by
+    /// navigation and never confirmed.
+    pub disabled: bool,
+}
+
 #[derive(derive_more::Debug, Default)]
 pub struct ListSection {
     pub items: Vec<MenuItem>,
@@ -18,6 +41,11 @@ pub struct ListSection {
     pub current_item_style: Style,
     max_height: Option<usize>,
     pub state: DirState<ListState>,
+    /// Select-section callback: receives the confirmed item's value
+    /// (`add_select_item` rows). Mutually exclusive with per-item
+    /// `on_confirm` closures; a section uses one or the other.
+    #[debug(skip)]
+    on_select: Option<Box<dyn FnOnce(&Ctx, String) -> Result<()> + Send + Sync + 'static>>,
     /// Runs once when the modal this section belongs to closes (e.g. the
     /// paste popup clears its scan state when it is dismissed).
     #[debug(skip)]
@@ -30,16 +58,6 @@ pub enum ListSectionArea {
     Scrollbar = 1,
 }
 
-#[derive(derive_more::Debug)]
-pub struct MenuItem {
-    pub label: String,
-    #[debug(skip)]
-    pub on_confirm: Option<Box<dyn FnOnce(&Ctx) -> Result<()> + Send + Sync + 'static>>,
-    /// Header rows (e.g. "[Audio]" group labels): rendered dim, skipped by
-    /// navigation and never confirmed.
-    pub disabled: bool,
-}
-
 #[allow(dead_code)]
 impl ListSection {
     pub fn new(current_item_style: Style) -> Self {
@@ -49,6 +67,7 @@ impl ListSection {
             current_item_style,
             max_height: None,
             state: DirState::default(),
+            on_select: None,
             on_close: None,
         }
     }
@@ -60,6 +79,7 @@ impl ListSection {
     ) -> Self {
         self.items.push(MenuItem {
             label: label.into(),
+            value: None,
             on_confirm: Some(Box::new(on_confirm)),
             disabled: false,
         });
@@ -73,9 +93,32 @@ impl ListSection {
     ) -> &mut Self {
         self.items.push(MenuItem {
             label: label.into(),
+            value: None,
             on_confirm: Some(Box::new(on_confirm)),
             disabled: false,
         });
+        self
+    }
+
+    /// A value-picker row (the old `SelectSection` shape): the section's
+    /// `action` callback receives `value` when this row is confirmed.
+    pub fn add_select_item(&mut self, label: impl Into<String>, value: impl Into<String>) -> &mut Self {
+        self.items.push(MenuItem {
+            label: label.into(),
+            value: Some(value.into()),
+            on_confirm: None,
+            disabled: false,
+        });
+        self
+    }
+
+    /// The select-section confirm callback, receiving the confirmed row's
+    /// value. Only meaningful together with `add_select_item` rows.
+    pub fn action(
+        &mut self,
+        on_select: impl FnOnce(&Ctx, String) -> Result<()> + Send + Sync + 'static,
+    ) -> &mut Self {
+        self.on_select = Some(Box::new(on_select));
         self
     }
 
@@ -84,6 +127,7 @@ impl ListSection {
     pub fn header(&mut self, label: impl Into<String>) -> &mut Self {
         self.items.push(MenuItem {
             label: label.into(),
+            value: None,
             on_confirm: None,
             disabled: true,
         });
@@ -197,12 +241,21 @@ impl Section for ListSection {
     }
 
     fn confirm(&mut self, ctx: &Ctx) -> Result<bool> {
-        let Some(selected_idx) = self.state.get_selected() else { return Ok(false) };
+        let Some(selected_idx) = self.state.get_selected() else {
+            return Ok(false);
+        };
         if self.items[selected_idx].disabled {
             return Ok(false);
         }
-        if let Some(cb) = self.items[selected_idx].on_confirm.take() {
+        let item = &mut self.items[selected_idx];
+        if let Some(cb) = item.on_confirm.take() {
             (cb)(ctx)?;
+            return Ok(true);
+        }
+        if let Some(value) = item.value.take()
+            && let Some(cb) = self.on_select.take()
+        {
+            (cb)(ctx, value)?;
         }
         Ok(true)
     }
