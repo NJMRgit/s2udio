@@ -36,9 +36,32 @@ play video → run_mpv_playlist (launch mpv, spawn tracker)
 
 ## Launch & IPC
 
-- mpv is launched with **no `--input-ipc-server`** — with the user's
-  mpvSockets.lua it made mpv exit instantly. The per-instance socket
-  `/tmp/mpvSockets/<pid>` is discovered at runtime for pause commands.
+- **SVP support** (Settings -> mpv -> "svp support", config.ron
+  `mpv.svp`, persisted to state.ron): when **on**, mpv is launched with
+  `--input-ipc-server=/tmp/mpvsocket` — a fixed socket that SVP4's
+  manager also connects to for frame interpolation. s2udio tracks
+  playback (pause/seek/volume/state poll) over the **same socket**, so
+  one mpv has one socket and both clients talk to it. When **off**
+  (default), no flag is passed and mpv's IPC socket is whatever the
+  user's mpv.conf / scripts provide (mpvSockets.lua per-instance sockets
+  are still discovered as a fallback).
+  mpvSockets.lua is no longer shipped: its runtime override of
+  `input-ipc-server` closed `/tmp/mpvsocket` out from under SVP
+  (the file lingered as a dead socket and SVPManager got
+  connection-refused).
+- Socket discovery (`mpv_socket()`): live `/tmp/mpvsocket` first, then
+  the newest per-instance socket under `/tmp/mpvSockets` (legacy
+  mpvSockets.lua setups), then the stale fixed path so callers can
+  detect the dead socket. `s2u-mpv-tracker` mirrors the same order.
+- The player binary comes from config.ron `mpv.bin` (default `"mpv"`).
+  With SVP4, point it at SVP's bundled mpv (`~/.local/bin/SVP4/mpv/mpv`):
+  it carries SVP's own portable VapourSynth (core R73 / API R4.1) +
+  Python 3.12 (SVP components `deps.vapoursynth` v72, `deps.python`
+  3.12.11, `opt.mpv` 0.41.0, installed via `svp4-maintenance
+  --installPackages deps.python,deps.vapoursynth,opt.mpv`). The distro
+  VapourSynth 77 + Python 3.14 stack crashes SVPflow/RIFE ~20-30 s in
+  (SIGSEGV in `libsvpflow2.so`/`libvstrt.so`), so the bundled mpv is not
+  optional with SVP.
 - `play_video_entries` probes the socket before switching and launches a
   fresh mpv when it is dead.
 - A switch requested before the socket is up is stored in

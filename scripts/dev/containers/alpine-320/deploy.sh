@@ -22,7 +22,6 @@ mkdir -p "$BIN_DIR" "$HOME/.config/s2udio/themes" "$HOME/.config/s2udio/lyrics" 
 for s in rmpc-fetch-lyrics s2u-mpv-tracker s2udio-mpris s2u-mpdris2 s2u-svc; do
     install -Dm755 "/s2udio/scripts/$s" "$BIN_DIR/$s"
 done
-install -Dm644 /s2udio/scripts/mpvSockets.lua "$HOME/.config/mpv/scripts/mpvSockets.lua"
 cp -n /s2udio/assets/example_config.ron "$HOME/.config/s2udio/config.ron" || true
 cp -n /s2udio/assets/example_theme.ron "$HOME/.config/s2udio/themes/default.ron" || true
 

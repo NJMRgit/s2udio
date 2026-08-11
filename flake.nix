@@ -62,7 +62,6 @@
             install -Dm755 scripts/s2u-mpdris2     $out/bin/s2u-mpdris2
             install -Dm755 scripts/rmpc-fetch-lyrics $out/bin/rmpc-fetch-lyrics
             install -Dm755 scripts/s2u-svc         $out/bin/s2u-svc
-            install -Dm644 scripts/mpvSockets.lua  $out/share/s2udio/mpvSockets.lua
             install -Dm644 assets/example_config.ron $out/share/s2udio/example_config.ron
             install -Dm644 assets/example_theme.ron  $out/share/s2udio/example_theme.ron
             # the app is launched as `s2udio` (setup.sh renames s2u -> s2udio)

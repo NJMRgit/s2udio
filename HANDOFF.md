@@ -1008,9 +1008,27 @@ Toolchain env (container): `export PATH="$HOME/.cargo/bin:$PATH"`
   (poll-written) + `mpris-mpv-art`; the bridge exits when the state file
   is stale (> 10 s) or gone, so no stale video MPRIS lingers. Local-file
   covers come from mpDris2 itself.
-- mpv: do NOT pass `--input-ipc-server` (mpvSockets.lua makes it exit
-  instantly); the per-instance socket `/tmp/mpvSockets/<pid>` is
-  discovered at runtime. Reattach zombie: `mpv_exchange` returns `None`
+- mpv: **SVP support toggle** (Settings -> mpv -> "svp support";
+  config.ron `mpv.svp`, default off, persisted to state.ron). On: s2udio
+  launches mpv with `--input-ipc-server=/tmp/mpvsocket` and tracks
+  playback over that **fixed socket** — the same socket SVP4's manager
+  connects to for frame interpolation (one mpv, one socket, both
+  clients). Off (default): no flag, mpv's IPC socket comes from the
+  user's own mpv.conf / scripts. mpvSockets.lua is no longer installed:
+  its runtime override of `input-ipc-server` killed `/tmp/mpvsocket` out
+  from under SVP. Discovery: live `/tmp/mpvsocket` first, then legacy
+  `/tmp/mpvSockets/<pid>`, then the stale fixed path. Reattach zombie:
+  `mpv_exchange` returns `None`
+- **mpv binary**: config.ron `mpv.bin` selects the player binary
+  (default `"mpv"`). With SVP4 the host uses SVP's bundled mpv
+  (`~/.local/bin/SVP4/mpv/mpv`): it carries SVP's own portable
+  VapourSynth (core R73 / API R4.1) + Python 3.12, which the SVPflow
+  plugins are built against — the distro VapourSynth 77 + Python 3.14
+  stack made mpv SIGSEGV in `libsvpflow2`/`libvstrt` ~20-30 s into
+  playback. SVP4's `deps.python` (3.12.11), `deps.vapoursynth` (v72)
+  and `opt.mpv` (0.41.0) components are installed into the SVP folder
+  via `svp4-maintenance --installPackages ...` (headless, with
+  `QT_QPA_PLATFORM=minimal`).
   on a failed connect; the poll synthesizes `MpvSessionEnded` after 5
   stale reads. Temp-play cleanup fires on `PlaybackStateChanged` (after
   `ctx.status` refreshes), not `Player`.

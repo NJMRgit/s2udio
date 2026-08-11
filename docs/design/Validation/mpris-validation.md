@@ -231,7 +231,8 @@ Setup: paste a local video path → `[Video] Play` (mpv).
 - **Timeline**: `mpris:length` = mpv duration; `Position` advances;
   `Seek`/`SetPosition` → verify against mpv itself:
   `echo '{"command":["get_property","time-pos"]}' | socat -
-  /tmp/mpvSockets/<pid>` reflects the jump; daemon survives.
+  /tmp/mpvsocket` (the fixed IPC socket s2udio launches mpv with)
+  reflects the jump; daemon survives.
 - **Art**: no art source → `mpris:artUrl` absent, `mpris-mpv-art` must
   **not linger** from a previous video (cleared on session start / entry
   change); TUI art pane shows the **video placeholder** (expected:

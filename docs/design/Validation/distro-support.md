@@ -17,7 +17,6 @@ source_files:
   - scripts/s2u-mpv-tracker
   - scripts/s2udio-mpris
   - scripts/s2u-mpdris2
-  - scripts/mpvSockets.lua
   - src/core/mpv.rs (tracker spawn)
   - src/core/event_loop.rs (systemd couplings)
 related:
@@ -35,8 +34,9 @@ Today s2udio is Arch/CachyOS-only: `setup.sh` is pacman/AUR-specific and the
 runtime assumes a **systemd user session** (`systemctl --user` for MPD and
 the mpDris2 shim, incl. the tracker's stop/start mutual exclusion while a
 video plays). Everything else — the Rust app, the `~/.config/s2udio` /
-`~/.cache/s2udio` paths, the python bridge scripts, `mpvSockets.lua` — is
-already distro-agnostic.
+`~/.cache/s2udio` paths, the python bridge scripts, and the mpv IPC
+socket contract (`input-ipc-server=/tmp/mpvsocket`) — is already
+distro-agnostic.
 
 **Goal:** s2udio installs and runs on **Fedora, Debian, Ubuntu, Nix**
 (NixOS + the nix package manager) and on **non-systemd init systems**
@@ -70,7 +70,7 @@ rootless podman containers that are removed when testing completes**.
 | Python deps | dbus-python + PyGObject in `s2udio-mpris`, `s2u-mpdris2`, `s2u-mpv-tracker` | distro python package names differ |
 | Rust build | `cargo build --release` → `s2u` → `~/.local/bin/s2udio` | rust toolchain per distro |
 | Config/cache paths | `~/.config/s2udio`, `~/.cache/s2udio` (round 23) | already distro-agnostic ✓ |
-| mpv | `mpv-full` recommended (Arch-only concept), `mpvSockets.lua` → `~/.config/mpv/scripts/` | plain `mpv` everywhere else |
+| mpv | `mpv-full` recommended (Arch-only concept); mpv.conf gets `input-ipc-server=/tmp/mpvsocket` | plain `mpv` everywhere else |
 | MPD | user-level MPD (`~/.config/mpd/mpd.conf`, user unit), fifo output appended | Debian/Ubuntu ship a *system* mpd — differs |
 
 ## 3. Target matrix
@@ -260,8 +260,9 @@ avoid root).
 
 - App code (`src/`) — only the tracker's `systemctl` call and any other
   direct init calls get rewired to `s2u-svc`.
-- Config/cache paths, bridge scripts' logic, `mpvSockets.lua` install path,
-  cava fifo append, MPRIS state schema.
+- Config/cache paths, bridge scripts' logic, the mpv IPC socket contract
+  (`input-ipc-server=/tmp/mpvsocket`), cava fifo append, MPRIS state
+  schema.
 
 ## 7. Validation gates (per target)
 
@@ -275,7 +276,7 @@ avoid root).
 | G5 | MPRIS audio: `org.mpris.MediaPlayer2.mpd` serves Metadata/Position for a local file |
 | G6 | MPRIS video: `s2u-mpv-tracker` + `s2udio-mpris` up; `org.mpris.MediaPlayer2.s2udio` serves title/artist/art/position; Seek routes to the mpv socket |
 | G7 | yt-dlp resolves a real YouTube URL (recorded as soft gate — network) |
-| G8 | mpv headless play (`--vo=null --ao=null`) runs; `mpvSockets.lua` socket appears; state file written |
+| G8 | mpv headless play (`--vo=null --ao=null --input-ipc-server=/tmp/mpvsocket`) runs; `/tmp/mpvsocket` appears; state file written |
 | G9 | cava fifo configured; cava runs briefly headless |
 | G10 | TUI smoke: tmux pty launch, `capture-pane` shows the Queue tab |
 | G11 | Service abstraction: `s2u-svc start/stop/is-active` round-trips on the target init |
