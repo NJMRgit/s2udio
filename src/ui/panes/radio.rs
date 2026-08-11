@@ -1264,12 +1264,15 @@ impl TreeBrowserCore for RadioPane {
     }
 
     fn items_title(&self) -> String {
+        // Pre-padded on both sides (as it appears left of the `(n)`
+        // count): the shared format appends "(n)" directly, restoring the
+        // pre-Phase-2 `" Stations (3) "` spacing (Phase 2.1 parity).
         match &self.selected {
-            Some(RegionKind::Favourites) => "Favourites".to_owned(),
-            Some(RegionKind::Local) => "Local — closest".to_owned(),
-            Some(RegionKind::Country(name)) => name.clone(),
-            Some(RegionKind::State { state, .. }) => state.clone(),
-            None => "Stations".to_owned(),
+            Some(RegionKind::Favourites) => " Favourites ".to_owned(),
+            Some(RegionKind::Local) => " Local — closest ".to_owned(),
+            Some(RegionKind::Country(name)) => format!(" {name} "),
+            Some(RegionKind::State { state, .. }) => format!(" {state} "),
+            None => " Stations ".to_owned(),
         }
     }
 
@@ -1689,7 +1692,8 @@ mod tests {
     use rstest::rstest;
 
     use super::{
-        RadioPane, RadioStation, RegionKind, PaneFocus, is_stream_url, m3u_content, parse_m3u,
+        RadioPane, RadioStation, RegionKind, PaneFocus, StationRow, is_stream_url, m3u_content,
+        parse_m3u,
     };
     use crate::{
         MpdQueryResult,
@@ -2323,6 +2327,44 @@ mod tests {
         .unwrap();
         assert!(pane.regions.is_empty());
     }
+
+    /// The items-box title keeps the pre-Phase-2 radio spacing: padded on
+    /// both sides with the count after a space — `" Stations (3) "` (Phase
+    /// 2.1 parity close-out; the shared render flattened it to
+    /// `" Stations(3) "`).
+    #[test]
+    fn items_box_title_keeps_the_radio_spacing() {
+        let (app_tx, _app_rx) = crossbeam::channel::unbounded();
+        let ctx = crate::tests::fixtures::ctx(
+            (app_tx, _app_rx),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+        );
+        let mut pane = RadioPane::new(&ctx);
+        pane.stations = vec![
+            StationRow::Favourite(station("One", "http://one.example/stream")),
+            StationRow::Favourite(station("Two", "http://two.example/stream")),
+            StationRow::Favourite(station("Three", "http://three.example/stream")),
+        ];
+
+        let backend = ratatui::backend::TestBackend::new(120, 30);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| pane.render(frame, ratatui::prelude::Rect::new(0, 0, 120, 30), &ctx).unwrap())
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let text: String = (0..30u16)
+            .map(|y| {
+                (0..120u16).map(|x| buffer[(x, y)].symbol().to_string()).collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("
+");
+        assert!(
+            text.contains(" Stations (3) "),
+            "the items-box title is ` Stations (3) `, not ` Stations(3) `: {text}"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -2362,5 +2404,28 @@ mod paste_play_tests {
         pane.on_event(&mut event, true, &pane_ctx).unwrap();
         assert_eq!(pane.temp_play_id, None);
         assert_eq!(pane_ctx.temp_play_id.get(), None);
+    }
+
+    /// The `PLAY` arm (a station played with `d`/`→`) records the temp id
+    /// the same way the paste arm does, so the Queue pane hides the entry
+    /// consistently (pins the Phase-2 unification: radio's `PLAY` result
+    /// sets `ctx.temp_play_id` like its `PASTE_PLAY` arm).
+    #[test]
+    fn play_result_registers_the_hidden_entry() {
+        let mut pane_ctx = ctx(
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+        );
+        let mut pane = RadioPane::new(&pane_ctx);
+        pane.on_query_finished(
+            super::PLAY,
+            MpdQueryResult::Any(Box::new(7u32)),
+            true,
+            &pane_ctx,
+        )
+        .unwrap();
+        assert_eq!(pane.temp_play_id, Some(7));
+        assert_eq!(pane_ctx.temp_play_id.get(), Some(7), "the queue pane reads it via Ctx");
     }
 }

@@ -370,17 +370,54 @@ Status (2026-08-10):
   thin dir-stack adapter (1041 → 232 LOC); queue Audio + search results
   adopt the core and delegate all non-specific `CommonAction` arms
   (queue −208, search −236 LOC; src/ui net −179). 1312/1312 green.
-- **Next: Phase 2** — `TreeBrowserCore<T>` unifying directories/jellyfin/
-  radio (the heavy clone pairs: `render_tree`/`render_items`/
-  `render_tips`/`move_*`/`populate_items`). Phase 1 hook pattern applies:
-  pane `SongListCore` impls delegate stack-specific hooks to the adapter
-  trait's defaults.
+- **Phase 2 ✅** (`f5c2ac4` + `948c85c` + `26e9834`): `TreeBrowserCore`
+  (trait with hooks, `src/ui/tree_browser.rs`) unifies directories /
+  jellyfin / radio — the shared tree+items mechanics now exist once:
+  `render_tree_browser`/`render_tree`/`render_items`/`render_tips`,
+  `move_tree`/`move_items`, tree+items mouse routing, the common action
+  arms, the temp-play lifecycle (`cleanup_temp_play`/`temp_play_on_stop`/
+  `drop_temp_play`/`play_temp_url`/`handle_play_result`), split/layout
+  hooks. All three panes implement the trait (thin accessors + pane
+  hooks) and delegate `render`/`handle_action`/`handle_mouse_event`/
+  `on_event` to the shared defaults; radio keeps its focus-based
+  `handle_action`/mouse/back_out. 1312/1312 green (directories 21,
+  jellyfin 15, radio 31). Metrics: the 9 heavy tree-family pairs + the
+  jellyfin↔radio `on_event` temp-play pair are gone (live in the core);
+  residual >0.5 pairs are thin Pane-delegator shells (same category the
+  baseline already carried) + pre-existing non-tree pairs. Net LOC:
+  src/ui +51 vs the Phase-0 table (panes −369: directories −187,
+  jellyfin −192, radio +10; core +598) — trait-with-hooks trades raw LOC
+  for one-implementation-by-construction, same tradeoff as Phase 1; the
+  args/config end-state is Phase 6. **Behavior deltas — RESOLVED by
+  Phase 2.1** (2026-08-10): (1) jellyfin/radio items-box titles keep the
+  space before the count again (`" Items (3) "`, `" Stations (3) "` —
+  `items_title` is now the pre-padded title, the shared format is
+  `"{}({}) "`; one render test per pane pins the exact title); (2) the
+  unified temp-play Stop cleanup is kept and pinned (directories Stop
+  drops the temp entry, jellyfin Stop clears `ctx.temp_play_id`, radio
+  `PLAY` sets `ctx.temp_play_id` — one regression test each);
+  (3) 1318/1318 green, warnings 3 baseline, guardrail unchanged at 60.
+- **Next: Phase 3** — modal consolidation onto `ListModal`/`InfoListModal`
+  + the `menu/select_section` merge.
 
 Toolchain env (container): `export PATH="$HOME/.cargo/bin:$PATH"`
 `export RUSTUP_HOME="$HOME/.rustup" CARGO_HOME="$HOME/.cargo"`.
 
 ## Pending
 
+- **Phase 2.1 — delta close-out: DONE (2026-08-10, see
+  outline §5.1).** (1) Items-box title parity restored: `items_title`
+  returns the pre-padded title (directories `" Library"` / `" Downloads"` /
+  `" {name}"`, jellyfin `" Items "` / `" {label} "`, radio `" Favourites "` /
+  `" Local — closest "` / `" {name} "` / `" {state} "` / `" Stations "`),
+  the shared `render_items` format is `"{}({}) "` — titles are exactly
+  `" Library(3) "` / `" Items (3) "` / `" Stations (3) "` again. (2)
+  Temp-play unification kept + pinned: directories Stop drops the temp
+  entry, jellyfin Stop clears `ctx.temp_play_id`, radio `PLAY` sets
+  `ctx.temp_play_id` — one regression test each. (3) Docs updated (this
+  bullet + the Phase-2 deltas bullet → resolved); full suite green
+  **1318/1318** (+6), warnings 3 baseline, similarity guardrail unchanged
+  (60 excl-thin pairs, identical pair set); committed as `phase 2.1`.
 - **Round 25 (2026-08-10 user live-check) — host-implemented fixes:
   search tab `a`/`d`/`←`/`→` filter↔results navigation, search filter
   hover, video-queue anchor hardening on removal paths (commit pending).

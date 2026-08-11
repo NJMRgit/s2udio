@@ -347,7 +347,11 @@ pub(in crate::ui) trait TreeBrowserCore: Pane {
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(ctx.config.as_border_style())
-            .title(format!(" {}({}) ", self.items_title(), self.items_len()));
+            // `items_title` is the title as it appears left of the count,
+            // pre-padded per pane (" Library", " Items ", " Stations ") —
+            // the shared format only appends "(n)" so each pane keeps its
+            // own pre-Phase-2 spacing (Phase 2.1 parity close-out).
+            .title(format!("{}({}) ", self.items_title(), self.items_len()));
         let inner = block.inner(area);
         self.set_items_area(inner);
 

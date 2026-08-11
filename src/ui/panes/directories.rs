@@ -1020,15 +1020,18 @@ impl TreeBrowserCore for DirectoriesPane {
     }
 
     fn items_title(&self) -> String {
+        // Pre-padded (as it appears left of the `(n)` count): the shared
+        // format appends "(n)" directly, so the title keeps the
+        // directories spacing `" Library(3) "` (Phase 2.1 parity).
         match self.selected.as_ref() {
-            Some(path) => path.current_dir().map_or_else(|| "Library".to_owned(), |name| {
+            Some(path) => path.current_dir().map_or_else(|| " Library".to_owned(), |name| {
                 if name == crate::ui::modals::paste::DOWNLOADS_DIR_NAME {
-                    "Downloads".to_owned()
+                    " Downloads".to_owned()
                 } else {
-                    name.to_owned()
+                    format!(" {name}")
                 }
             }),
-            None => "Library".to_owned(),
+            None => " Library".to_owned(),
         }
     }
 
@@ -1859,6 +1862,52 @@ mod tests {
         assert!(!text.contains('D'), "no D marker on the folder row: {text}");
         assert!(!text.contains("S alpha"), "no S marker on the song row: {text}");
         assert!(text.contains("alpha_song"), "the song row still shows the file: {text}");
+    }
+
+    /// The items-box title keeps the pre-Phase-2 directories spacing: a
+    /// single leading space before the name, then the `(n)` count with no
+    /// extra space — `" Library(3) "` (Phase 2.1 parity close-out).
+    #[test]
+    fn items_box_title_keeps_the_directories_spacing() {
+        let ctx = test_ctx();
+        let mut pane = DirectoriesPane::new(&ctx);
+        pane.items = vec![song("a.flac"), song("b.flac"), song("c.flac")];
+
+        let backend = ratatui::backend::TestBackend::new(80, 30);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| pane.render(frame, Rect::new(0, 0, 80, 30), &ctx).unwrap())
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let text: String = (0..30u16)
+            .map(|y| {
+                (0..80u16).map(|x| buffer[(x, y)].symbol().to_string()).collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("
+");
+        assert!(
+            text.contains(" Library(3) "),
+            "the items-box title is ` Library(3) `, not ` Library (3) ` or `Library(3) `: {text}"
+        );
+    }
+
+    /// The MPD browser's temp-play entry is dropped on the stop transition
+    /// (the shared tree-browser core; pins the Phase-2 fix that gave
+    /// directories the Stop cleanup radio/jellyfin already had — before it
+    /// the entry leaked into the queue after Stop).
+    #[test]
+    fn stop_drops_the_temp_play_entry() {
+        let mut ctx = test_ctx();
+        let mut pane = DirectoriesPane::new(&ctx);
+        pane.temp_play_id = Some(7);
+        ctx.temp_play_id.set(Some(7));
+        ctx.status.state = crate::mpd::commands::State::Stop;
+
+        let mut event = crate::ui::UiEvent::PlaybackStateChanged;
+        pane.on_event(&mut event, true, &ctx).unwrap();
+        assert_eq!(pane.temp_play_id, None);
+        assert_eq!(ctx.temp_play_id.get(), None, "the queue pane reads it via Ctx");
     }
 
     #[test]
