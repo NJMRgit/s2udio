@@ -249,6 +249,12 @@ where
         self.state.select(Some(idx), scrolloff);
     }
 
+    /// Select `idx` and scroll it to the first visible row (see
+    /// [`DirState::select_at_top`]).
+    pub fn select_at_top(&mut self, idx: usize) {
+        self.state.select_at_top(idx);
+    }
+
     pub fn next_half_viewport(&mut self, scrolloff: usize) {
         self.state.next_half_viewport(scrolloff);
     }

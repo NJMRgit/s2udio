@@ -1848,7 +1848,7 @@ fn main_task<B: Backend + std::io::Write>(
                     status_error!("{}", err);
                 }
                 AppEvent::Resized { columns, rows } => {
-                    ui.set_resizing(true, &ctx);
+                    ui.set_resizing(true);
                     ctx.scheduler.schedule_replace(
                         *ON_RESIZE_SCHEDULE_ID,
                         Duration::from_millis(500),
@@ -1860,7 +1860,7 @@ fn main_task<B: Backend + std::io::Write>(
                     render_wanted = true;
                 }
                 AppEvent::ResizedDebounced { columns, rows } => {
-                    ui.set_resizing(false, &ctx);
+                    ui.set_resizing(false);
                     if let Err(err) = ui.resize(Rect::new(0, 0, columns, rows), &ctx) {
                         log::error!(error:? = err, event:?; "UI failed to handle resize event");
                     }
