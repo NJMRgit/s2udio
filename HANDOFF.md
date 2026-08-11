@@ -417,7 +417,9 @@ Status (2026-08-10):
   green (+8: 4 ListModal + 4 InfoListModal behavior pins incl. the
   unified click-row mapping — the legacy SelectModal's extra `-1` is
   fixed, see outline §5.2), warnings 3 baseline, guardrail unchanged at
-  60. Net LOC: **src/ui −824** (56,923 → 56,099), tree −873. Kept
+  60. Net LOC: **src/ui −61** (56,923 → 56,862), tree −110 — short of the
+  −600–900 target (same tradeoff as Phase 2's +51: masters front-load the
+  shared core; consumer paydown is Phase 6). Kept
   standalone (not list-shaped, rationale in outline §5.2):
   `OutputsModal`, `InfoModal`, `DownloadsModal`, `LanguageModal`,
   `TabHelpModal`, `AddRandomModal`.

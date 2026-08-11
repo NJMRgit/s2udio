@@ -206,8 +206,8 @@ ref). Key numbers and audited files:
 | `src/ui/modals/menu/mod.rs` | 649 → 638 (Select dispatch arms gone) |
 | `src/ui/modals/menu/modal.rs` | 615 → 601 (select_section builder → list_section) |
 | `src/ui/modals/outputs.rs` | 258 → 258 (kept — see §5.2) |
-| **src/ui total** | **56,704 → 56,099** |
-| **tree total .rs** | **95,811 → 95,157** |
+| **src/ui total** | **56,704 → 56,862** |
+| **tree total .rs** | **95,811 → 95,920** |
 
 Similarity guardrail baseline: **83 same-named function pairs with ratio > 0.5**
 across `src/ui` (full list: `python3 scripts/dev/ui-metrics.py --pairs`).
@@ -427,7 +427,7 @@ with a behavior-parity live check of the affected tabs.
 | 0 | Baselines & guardrails | — | ✅ (2026-08-10, commit `24bd883`+): branched from `working` at `12d8c6c`; LOC + similarity baseline recorded (§2.4) via committed `scripts/dev/ui-metrics.py`; `cargo test --release` green **1312/1312** (rustc 1.97.1; host may re-run). |
 | 1 | Extract `SongListCore<T>` from `BrowserPane`; adopt in queue Audio + search results | `ui/browser.rs`, `ui/panes/queue.rs`, `ui/panes/search/mod.rs` | ✅ (2026-08-10, commits `cd103ac`+`cd10c75`+`113d7e7`): `SongListCore<T, S>` trait (hooks + shared default methods) in `src/ui/song_list.rs`; `BrowserPane` is a thin dir-stack adapter (1041 → 232 LOC); queue Audio (`Dir<Song, TableState>`) + search results (`Dir<Song, ListState>`) implement it and delegate all non-specific `CommonAction` arms. Browser panes behavior unchanged; queue/search identical (1312/1312 green incl. all 61 queue/search tests; live check pending host). Net LOC: **src/ui −179** (queue −208, search −236, browser −809, song_list +955, pane adapters +118); the `CommonAction` arms exist once. |
 | 2 | `TreeBrowserCore` unifies directories / jellyfin / radio | `ui/tree_browser.rs`, `ui/panes/directories.rs`, `jellyfin.rs`, `radio.rs` | ✅ (2026-08-10, commits `f5c2ac4`+`948c85c`+`26e9834`): `TreeBrowserCore` trait (hooks + shared defaults, the Phase-1 `SongListCore` pattern) in `src/ui/tree_browser.rs`; all three panes implement it and delegate `render`/`handle_action`/`handle_mouse_event`/`on_event` + the temp-play lifecycle to the shared core. 1312/1312 green (21 directories + 15 jellyfin + 31 radio tests). The §2.2 clone pairs are gone or reduced to shared call sites: `cleanup_temp_play` (×3), `selected_item`, `move_items`, `render`, `render_tips`, `handle_action`, `on_event` (jellyfin↔radio) all deleted from the panes (live in the core); residual >0.5 pairs are thin Pane-delegator shells (`render`/`handle_action`/`handle_mouse_event`/`on_event` routing to the core — same category the baseline already carried) plus pre-existing non-tree pairs. Net LOC: **src/ui +51 vs the Phase-0 table** (pane files −369: directories −187, jellyfin −192, radio +10; core `tree_browser.rs` +598) — the trait-with-hooks pattern trades raw LOC for guaranteed one-implementation (same tradeoff as Phase 1: song_list +955 vs panes −1134); the args/config end-state that shrinks panes further is Phase 6. |
-| 3 | Modal consolidation onto `ListModal`/`InfoListModal` + section merge | `ui/modals/*` | ✅ (2026-08-10, commits `a5aac04`+`53b9e90`): `ListModal<'a, V>` master in `src/ui/modals/list_modal.rs` (args: row/size fns, buttons/confirm_buttons, multi-select + mark_id, bottom title, padding, wheel mode, scrollbar drag); `SelectModal` (317 → 90) + `TorrentFilePicker` (501 → 141) are thin adapters with unchanged public builders — all 15 call sites + the paste picker tests untouched. `menu/select_section.rs` merged into `list_section.rs` (value items + section-level `action`), `SectionType::Select` + 16 dispatch arms deleted. `InfoListModal` generalized to N columns + `header` arg and absorbs `DecodersModal` (248 → 67). 1326/1326 green (+8: 4 ListModal + 4 InfoListModal behavior pins incl. the unified click-row mapping); warnings 3 baseline; similarity guardrail unchanged (60 excl-thin — modals are not in `PANE_FILES`). Net LOC: **src/ui −824** (56,923 → 56,099), tree total .rs **−873** (96,030 → 95,157) — the −600–900 target. Deliberate delta + kept-modals rationale in §5.2. |
+| 3 | Modal consolidation onto `ListModal`/`InfoListModal` + section merge | `ui/modals/*` | ✅ (2026-08-10, commits `a5aac04`+`53b9e90`): `ListModal<'a, V>` master in `src/ui/modals/list_modal.rs` (args: row/size fns, buttons/confirm_buttons, multi-select + mark_id, bottom title, padding, wheel mode, scrollbar drag); `SelectModal` (317 → 90) + `TorrentFilePicker` (501 → 141) are thin adapters with unchanged public builders — all 15 call sites + the paste picker tests untouched. `menu/select_section.rs` merged into `list_section.rs` (value items + section-level `action`), `SectionType::Select` + 16 dispatch arms deleted. `InfoListModal` generalized to N columns + `header` arg and absorbs `DecodersModal` (248 → 67). 1326/1326 green (+8: 4 ListModal + 4 InfoListModal behavior pins incl. the unified click-row mapping); warnings 3 baseline; similarity guardrail unchanged (60 excl-thin — modals are not in `PANE_FILES`). Net LOC: **src/ui −61** (56,923 → 56,862), tree −110 (96,030 → 95,920) — short of the −600–900 target for the same reason Phase 2 was (+51): the master modules (+763 list_modal, +123 info_list incl. tests) cost more than the thinned consumers saved (select −227, torrent −360, decoders −181, select_section −210); the phase trades raw LOC for one-implementation-by-construction, and the args/config end-state that actually shrinks consumers is Phase 6. Deliberate delta + kept-modals rationale in §5.2. |
 | 4 | QueuePane decomposition: Audio list → `SongListCore`, toggle → `SubTabBar`, Video/Chapters stay as focused specs | `ui/panes/queue.rs` | Queue tab live-check (Audio/Video/Chapters, merged box, esc-deselect, marks); **–~1–1.5k LOC** in queue.rs. |
 | 5 | Shared drawing widgets (marquee/wrap/button cluster) from controls/lyrics | `ui/panes/controls.rs`, `lyrics.rs`, `ui/widgets/` | Visual parity in live check; widgets reused by ≥2 call sites. |
 | 6 | Args expansion: pane-specific constants move into `PaneType`/config args | `src/config/tabs.rs`, panes | Adding a new browser tab = config block + adapter, no new pane file; sidecars migrate cleanly. |
@@ -507,7 +507,16 @@ explicit:
 3. **Docs + verification.** This section + §2.4 table + §4.3 updated;
    `cargo test --release` **1326/1326** (+8 vs Phase 2.1's 1318), warnings
    3 baseline, similarity guardrail unchanged at 60 excl-thin pairs,
-   commits `a5aac04` (3a) and `53b9e90` (3b+3c).
+   commits `a5aac04` (3a) and `53b9e90` (3b+3c). Measured on the
+   committed refs with `ui-metrics.py --ref` (the script's default
+   `loc_table` reads the file list from HEAD and contents from the
+   worktree — always diff committed refs). The −600–900 LOC target is not
+   met (−61): like Phase 1 (`song_list +955 vs panes −1134`) and Phase 2
+   (+51), the master-module pattern front-loads the shared core; the
+   duplication it removes is measurable (select↔torrent 134, list↔select
+   sections 126, decoders↔info 101 cloned lines + the 16-dispatch-arm
+   `SectionType::Select` + dead `zip_longest2`), and the consumer-side
+   paydown lands with the Phase-6 args/config end-state.
 
 ## 6. Definition of done (applies per phase)
 
