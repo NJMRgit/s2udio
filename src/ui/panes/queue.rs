@@ -538,7 +538,7 @@ impl QueuePane {
                         modal!(
                             ctx,
                             InfoListModal::builder()
-                                .items(&song)
+                                .rows(&song)
                                 .title("Song info")
                                 .column_widths(&[30, 70])
                                 .build()
@@ -2201,7 +2201,7 @@ impl Pane for QueuePane {
                         modal!(
                             ctx,
                             InfoListModal::builder()
-                                .items(selected_song)
+                                .rows(selected_song)
                                 .title("Song info")
                                 .column_widths(&[30, 70])
                                 .build()

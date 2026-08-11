@@ -1334,7 +1334,7 @@ impl Pane for PlaylistsPane {
                     InfoListModal::builder()
                         .column_widths(&[30, 70])
                         .title("Playlist info")
-                        .items(data)
+                        .rows(data)
                         .size((40, 20))
                         .build()
                 );
