@@ -119,7 +119,24 @@ Decision rule §3: do NOT merge; keep the three clusters in their panes.
 
 ### 5b4 — now-playing line templates: NOT merged
 
-(Same rule — see the close-out for the full comparison.)
+`controls.rs::artist_title_line` / `channel_line` (row-1/row-0 of the
+controls bar) and the lyrics info header (`render_mpv_info` + the
+`render_info` song/video box) both describe "what is playing", but the
+similarity stops at the semantics:
+
+| | Controls `artist_title_line` / `channel_line` | Lyrics info header |
+| --- | --- | --- |
+| Data resolution | mpv title / yt-stream title / mpd song tags via `multiple_tag_resolution_strategy` + `format_tag_separator`; missing tags omitted; `No Playback` fallback | Jellyfin `item` metadata (year prefix, episode S/E), `yt_stream_info_parts`, plain mpv title; channel/subs context |
+| Styles | theme-derived (`ControlsTheme`: artist/title/separator styles, blur-following) | explicit ANSI white title, yellow `preview_label_style` keys, bold `Time:` |
+| Layout | one centered line inside a region, carousel-marquee on overflow | fixed `year -- ` prefix + marquee window + right-aligned `Time:` + context row + wrapped description + pinned credits |
+
+The one genuinely shared piece — the marquee cycle — is already the
+5b1 `marquee.rs` widget (adopted by controls, lyrics **and** jellyfin).
+A shared line template would need args for the data-source resolution,
+the style palette, the prefix, the marquee behavior and the time/context
+rows — a fork, not an arg; forcing it would change visible rendering
+(styles, fallbacks, layout). Decision rule §3: do NOT merge; the
+templates stay pane-local, the cycle is shared.
 
 ## 4. Candidate inventory (measured @ `9fee28e`)
 
