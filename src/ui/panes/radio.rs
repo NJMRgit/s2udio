@@ -6,7 +6,7 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
+    widgets::{Block, Borders, List, ListItem, ListState},
 };
 
 use super::Pane;
@@ -31,12 +31,12 @@ use crate::{
     },
     ui::{
         UiEvent,
-        input::InputResultEvent,
         modals::{
             confirm_modal::{Action, ConfirmModal},
             input_modal::InputModal,
             menu::modal::MenuModal,
         },
+        tree_browser::{TreeBrowserCore, TreeRowView},
     },
 };
 
@@ -553,46 +553,11 @@ impl RadioPane {
 
     /// Toggle the selected tree row's expansion.
     /// Move the tree selection; keeps the right pane in sync.
-    fn move_region(&mut self, dir: i64, ctx: &Ctx) -> Result<()> {
-        if self.regions.is_empty() {
-            return Ok(());
-        }
-        let current = self.region_list.selected().unwrap_or(0) as i64;
-        let new_idx = (current + dir).clamp(0, self.regions.len() as i64 - 1) as usize;
-        if new_idx != current as usize {
-            self.region_list.select(Some(new_idx));
-            let kind = self.regions[new_idx].kind.clone();
-            self.select_region(&kind, ctx)?;
-        }
-        Ok(())
-    }
+
 
     /// Move the station selection (right pane).
-    fn move_station(&mut self, dir: i64, ctx: &Ctx) -> Result<()> {
-        if self.stations.is_empty() {
-            return Ok(());
-        }
-        let current = self.station_list.selected().unwrap_or(0) as i64;
-        let new_idx = (current + dir).clamp(0, self.stations.len() as i64 - 1) as usize;
-        if new_idx != current as usize {
-            self.station_list.select(Some(new_idx));
-            ctx.render()?;
-        }
-        Ok(())
-    }
 
-    fn selected_station(&self) -> Option<RadioStation> {
-        let idx = self.station_list.selected()?;
-        match self.stations.get(idx) {
-            Some(StationRow::Favourite(station)) => {
-                Some(RadioStation { name: station.name.clone(), url: station.url.clone() })
-            }
-            Some(StationRow::Directory(station)) => {
-                Some(RadioStation { name: station.name.clone(), url: station.url.clone() })
-            }
-            None => None,
-        }
-    }
+
 
     /// URL of the currently playing stream, if any.
     fn playing_url(ctx: &Ctx) -> Option<String> {
@@ -628,6 +593,29 @@ impl RadioPane {
         self.select_region(&row.kind, ctx)
     }
 
+    /// Move the tree selection (the shared core); keeps the right pane in
+    /// sync (each highlighted region shows its stations).
+    fn move_region(&mut self, dir: i64, ctx: &Ctx) -> Result<()> {
+        self.move_tree(dir, ctx)
+    }
+
+    /// Move the station selection (the shared core).
+    fn move_station(&mut self, dir: i64, ctx: &Ctx) -> Result<()> {
+        self.move_items(dir, ctx)
+    }
+
+    /// The highlighted station (a favourite or a directory station).
+    fn selected_station(&self) -> Option<RadioStation> {
+        self.selected_item().map(|row| match row {
+            StationRow::Favourite(station) => {
+                RadioStation { name: station.name.clone(), url: station.url.clone() }
+            }
+            StationRow::Directory(station) => {
+                RadioStation { name: station.name.clone(), url: station.url.clone() }
+            }
+        })
+    }
+
     /// `a`/`←`: back out one level. On the station list the cursor
     /// returns to the region tree; on the tree an expanded branch
     /// collapses in place, otherwise the cursor moves up to the parent
@@ -656,18 +644,7 @@ impl RadioPane {
     }
 
     /// Drop the temporary play song once playback has moved on.
-    fn cleanup_temp_play(&mut self, ctx: &Ctx) {
-        if let Some(temp) = self.temp_play_id
-            && ctx.status.songid != Some(temp)
-        {
-            self.temp_play_id = None;
-            ctx.temp_play_id.set(None);
-            ctx.command(move |client| {
-                client.delete_id(temp)?;
-                Ok(())
-            });
-        }
-    }
+
 
     /// Read the current favourites, apply `mutate`, write the file back and
     /// refresh the list.
@@ -924,165 +901,157 @@ impl RadioPane {
         );
     }
 
-    fn render_regions(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) {
-        let base = ctx.config.as_list_name_style();
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(ctx.config.as_border_style())
-            .title(" Regions ");
-        let inner = block.inner(area);
-        let hover_idx = crate::ui::panes::hovered_item(
-            ctx.mouse_pos(),
-            inner,
-            self.region_list.offset(),
-            self.regions.len(),
-            1,
-        );
-        let hovered = ctx.config.theme.hovered_item_style;
-        let items: Vec<ListItem> = self
-            .regions
-            .iter()
-            .enumerate()
-            .map(|(idx, row)| {
-                let indent = "  ".repeat(usize::from(row.depth));
-                let arrow = if row.expandable {
-                    if row.expanded { "▼ " } else { "▶ " }
-                } else {
-                    ""
-                };
-                let line = format!("{indent}{arrow}{}", row.label);
-                let mut item = ListItem::new(Line::from(line));
-                if hover_idx == Some(idx) {
-                    item = item.style(hovered);
-                }
-                item
-            })
-            .collect();
 
-        ratatui::widgets::StatefulWidget::render(
-            List::new(items)
-                .highlight_style(if hover_idx == self.region_list.selected()
-                    || self.focus == PaneFocus::Regions
-                {
-                    // The row under the mouse, or the keyboard cursor when
-                    // this pane is the one being navigated.
-                    ctx.config.theme.hovered_item_style
-                } else {
-                    ctx.config.theme.current_item_style
-                })
-                .style(base),
-            inner,
-            frame.buffer_mut(),
-            &mut self.region_list,
-        );
-        ratatui::widgets::Widget::render(block, area, frame.buffer_mut());
-        self.regions_area = inner;
+
+}
+
+impl TreeBrowserCore for RadioPane {
+    type Item = StationRow;
+
+    // ── tree ───────────────────────────────────────────────────────────
+
+    fn tree_rows(&self) -> Vec<TreeRowView> {
+        self.regions
+            .iter()
+            .map(|row| TreeRowView {
+                label: row.label.clone(),
+                depth: row.depth,
+                expandable: row.expandable,
+                expanded: row.expanded,
+                root: false,
+            })
+            .collect()
     }
 
-    fn render_stations(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) {
+    fn tree_selected(&self) -> usize {
+        self.region_list.selected().unwrap_or(0)
+    }
+
+    fn tree_list(&self) -> &ListState {
+        &self.region_list
+    }
+
+    fn tree_list_mut(&mut self) -> &mut ListState {
+        &mut self.region_list
+    }
+
+    fn tree_area(&self) -> Rect {
+        self.regions_area
+    }
+
+    fn set_tree_area(&mut self, area: Rect) {
+        self.regions_area = area;
+    }
+
+    fn set_expanded_idx(&mut self, idx: usize, expanded: bool, ctx: &Ctx) -> Result<()> {
+        let Some(row) = self.regions.get(idx).cloned() else { return Ok(()) };
+        self.set_region_expanded(&row.kind, expanded, ctx)
+    }
+
+    // ── items ──────────────────────────────────────────────────────────
+
+    fn items_len(&self) -> usize {
+        self.stations.len()
+    }
+
+    fn items_list(&self) -> &ListState {
+        &self.station_list
+    }
+
+    fn items_list_mut(&mut self) -> &mut ListState {
+        &mut self.station_list
+    }
+
+    fn items_area(&self) -> Rect {
+        self.stations_area
+    }
+
+    fn set_items_area(&mut self, area: Rect) {
+        self.stations_area = area;
+    }
+
+    fn item_at(&self, idx: usize) -> Option<Self::Item> {
+        self.stations.get(idx).cloned()
+    }
+
+    fn item_row_height(&self) -> u16 {
+        2
+    }
+
+    fn item_row(&self, idx: usize, hovered: bool, ctx: &Ctx) -> ListItem<'static> {
         let playing_url = Self::playing_url(ctx);
         let base = ctx.config.as_list_name_style();
         let dim = ctx.config.as_list_text_style();
-        let title = match &self.selected {
-            Some(RegionKind::Favourites) => " Favourites ".to_owned(),
-            Some(RegionKind::Local) => " Local — closest ".to_owned(),
-            Some(RegionKind::Country(name)) => format!(" {name} "),
-            Some(RegionKind::State { state, .. }) => format!(" {state} "),
-            None => " Stations ".to_owned(),
+        let style = if hovered {
+            ctx.config.theme.hovered_item_style
+        } else {
+            Style::new()
         };
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(ctx.config.as_border_style())
-            .title(format!("{title}({}) ", self.stations.len()));
-        let inner = block.inner(area);
-        // Station rows are two lines tall (name + subline): the hover row
-        // maps both lines to the same item.
-        let hover_idx = crate::ui::panes::hovered_item(
-            ctx.mouse_pos(),
-            inner,
-            self.station_list.offset(),
-            self.stations.len(),
-            2,
-        );
-        let hovered = ctx.config.theme.hovered_item_style;
-
-        let items: Vec<ListItem> = self
-            .stations
-            .iter()
-            .enumerate()
-            .map(|(idx, row)| {
-                let style = if hover_idx == Some(idx) { hovered } else { Style::new() };
-                match row {
-                    StationRow::Favourite(station) => {
-                        let is_playing = playing_url.as_deref() == Some(station.url.as_str());
-                        let prefix = if is_playing { "▶ " } else { "  " };
-                        let name_style = if is_playing { base.add_modifier(Modifier::BOLD) } else { base };
-                        ListItem::new(vec![
-                            Line::from(Span::styled(format!("{prefix}{}", station.name), name_style)),
-                            Line::from(Span::styled(format!("  {}", station.url), dim)),
-                        ])
-                        .style(style)
-                    }
-                    StationRow::Directory(station) => {
-                        let is_playing = playing_url.as_deref() == Some(station.url.as_str());
-                        let prefix = if is_playing { "▶ " } else { "  " };
-                        let name_style = if is_playing { base.add_modifier(Modifier::BOLD) } else { base };
-                        ListItem::new(vec![
-                            Line::from(Span::styled(format!("{prefix}{}", station.name), name_style)),
-                            Line::from(Span::styled(format!("  {}", station_subline(station)), dim)),
-                        ])
-                        .style(style)
-                    }
-                }
-            })
-            .collect();
-
-        ratatui::widgets::StatefulWidget::render(
-            List::new(items)
-                .highlight_style(if hover_idx == self.station_list.selected()
-                    || self.focus == PaneFocus::Stations
-                {
-                    // The row under the mouse, or the keyboard cursor when
-                    // this pane is the one being navigated.
-                    ctx.config.theme.hovered_item_style
+        match &self.stations[idx] {
+            StationRow::Favourite(station) => {
+                let is_playing = playing_url.as_deref() == Some(station.url.as_str());
+                let prefix = if is_playing { "▶ " } else { "  " };
+                let name_style = if is_playing {
+                    base.add_modifier(Modifier::BOLD)
                 } else {
-                    ctx.config.theme.current_item_style
-                })
-                .style(base),
-            inner,
-            frame.buffer_mut(),
-            &mut self.station_list,
-        );
-        ratatui::widgets::Widget::render(block, area, frame.buffer_mut());
-        self.stations_area = inner;
+                    base
+                };
+                ListItem::new(vec![
+                    Line::from(Span::styled(format!("{prefix}{}", station.name), name_style)),
+                    Line::from(Span::styled(format!("  {}", station.url), dim)),
+                ])
+                .style(style)
+            }
+            StationRow::Directory(station) => {
+                let is_playing = playing_url.as_deref() == Some(station.url.as_str());
+                let prefix = if is_playing { "▶ " } else { "  " };
+                let name_style = if is_playing {
+                    base.add_modifier(Modifier::BOLD)
+                } else {
+                    base
+                };
+                ListItem::new(vec![
+                    Line::from(Span::styled(format!("{prefix}{}", station.name), name_style)),
+                    Line::from(Span::styled(
+                        format!("  {}", station_subline(station)),
+                        dim,
+                    )),
+                ])
+                .style(style)
+            }
+        }
     }
 
+    // ── behavior hooks ─────────────────────────────────────────────────
+
+    /// Highlight a tree row and show its region's stations (the region
+    /// tree and the right pane share the selection).
+    fn highlight_tree_node(&mut self, idx: usize, ctx: &Ctx) -> Result<()> {
+        let Some(row) = self.regions.get(idx).cloned() else { return Ok(()) };
+        self.region_list.select(Some(idx));
+        self.select_region(&row.kind, ctx)
+    }
+
+    fn select_parent(&mut self, ctx: &Ctx) -> Result<()> {
+        self.back_out(ctx)
+    }
+
+    fn activate_selected(&mut self, ctx: &Ctx) -> Result<()> {
+        if self.focus == PaneFocus::Stations {
+            self.play_selected(ctx)
+        } else {
+            self.open_region(ctx)
+        }
+    }
+
+    fn open_context_menu(&mut self, ctx: &Ctx) -> Result<()> {
+        self.open_menu(ctx)
+    }
+
+    
     /// Keybinding hints, one line each, in the strip between the station list
     /// and the info panel (same spot as the Directories/Playlists tabs).
-    fn render_tips(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) {
-        let base = ctx.config.as_list_name_style();
-        let dim = ctx.config.as_list_text_style();
-        let tips = vec![
-            Line::from(vec![
-                Span::styled("w/s · ↑/↓", base),
-                Span::styled("  move list", dim),
-            ]),
-            Line::from(vec![
-                Span::styled("d / →", base),
-                Span::styled("  open region · play station", dim),
-            ]),
-            Line::from(vec![
-                Span::styled("a / ←", base),
-                Span::styled("  back out", dim),
-                Span::styled("Enter", base),
-                Span::styled("  context menu", dim),
-            ]),
-        ];
-        frame.render_widget(
-            Paragraph::new(tips).style(dim),
-            area.inner(ratatui::layout::Margin { horizontal: 1, vertical: 0 }),
-        );
-    }
+
 
     fn render_info(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) {
         let key = ctx.config.theme.preview_label_style;
@@ -1279,28 +1248,113 @@ impl RadioPane {
         );
         self.info_area = inner;
     }
-}
 
-impl Pane for RadioPane {
-    fn render(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) -> Result<()> {
-        // Directories-style: region tree left, station list + info right.
+    fn temp_play_id(&self) -> Option<u32> {
+        self.temp_play_id
+    }
+
+    fn set_temp_play_id(&mut self, id: Option<u32>) {
+        self.temp_play_id = id;
+    }
+
+    // ── rendering hooks ────────────────────────────────────────────────
+
+    fn tree_title(&self) -> &'static str {
+        " Regions "
+    }
+
+    fn items_title(&self) -> String {
+        match &self.selected {
+            Some(RegionKind::Favourites) => "Favourites".to_owned(),
+            Some(RegionKind::Local) => "Local — closest".to_owned(),
+            Some(RegionKind::Country(name)) => name.clone(),
+            Some(RegionKind::State { state, .. }) => state.clone(),
+            None => "Stations".to_owned(),
+        }
+    }
+
+    fn tips_lines(&self, ctx: &Ctx) -> Vec<Line<'static>> {
+        let base = ctx.config.as_list_name_style();
+        let dim = ctx.config.as_list_text_style();
+        vec![
+            Line::from(vec![
+                Span::styled("w/s · ↑/↓", base),
+                Span::styled("  move list", dim),
+            ]),
+            Line::from(vec![
+                Span::styled("d / →", base),
+                Span::styled("  open region · play station", dim),
+            ]),
+            Line::from(vec![
+                Span::styled("a / ←", base),
+                Span::styled("  back out", dim),
+                Span::styled("Enter", base),
+                Span::styled("  context menu", dim),
+            ]),
+        ]
+    }
+
+    /// The radio tips strip is inset by one column.
+    fn tips_area(&self, area: Rect) -> Rect {
+        area.inner(ratatui::layout::Margin { horizontal: 1, vertical: 0 })
+    }
+
+    /// The radio region tree always takes its 30% share (no narrow-TUI
+    /// collapse).
+    fn split_tree(&self, area: Rect) -> (Rect, Rect) {
         let [regions_area, right] = Layout::horizontal([
             Constraint::Percentage(30),
             Constraint::Percentage(70),
         ])
         .areas(area);
-        let [stations_area, tips_area, info_area] = Layout::vertical([
-            Constraint::Percentage(60),
-            Constraint::Length(3),
-            Constraint::Percentage(33),
-        ])
-        .areas(right);
+        (regions_area, right)
+    }
 
-        self.render_regions(frame, regions_area, ctx);
-        self.render_stations(frame, stations_area, ctx);
-        self.render_tips(frame, tips_area, ctx);
-        self.render_info(frame, info_area, ctx);
+    // ── defaulted hook overrides ───────────────────────────────────────
+
+    /// The station cursor never moves the region-tree highlight.
+    fn on_items_cursor_moved(&mut self, ctx: &Ctx) -> Result<()> {
+        ctx.render()?;
         Ok(())
+    }
+
+    fn on_tree_focus(&mut self) {
+        self.focus = PaneFocus::Regions;
+    }
+
+    fn on_items_focus(&mut self) {
+        self.focus = PaneFocus::Stations;
+    }
+
+    /// The row under the mouse, or the keyboard cursor when this pane is
+    /// the one being navigated.
+    fn tree_highlight(&self, hover_idx: Option<usize>, ctx: &Ctx) -> Style {
+        if hover_idx == self.tree_list().selected() || self.focus == PaneFocus::Regions {
+            ctx.config.theme.hovered_item_style
+        } else {
+            ctx.config.theme.current_item_style
+        }
+    }
+
+    fn items_highlight(&self, hover_idx: Option<usize>, ctx: &Ctx) -> Style {
+        if hover_idx == self.items_list().selected() || self.focus == PaneFocus::Stations {
+            ctx.config.theme.hovered_item_style
+        } else {
+            ctx.config.theme.current_item_style
+        }
+    }
+
+    fn on_reconnected(&mut self, ctx: &Ctx) -> Result<()> {
+        self.initialized = false;
+        self.temp_play_id = None;
+        self.before_show(ctx)?;
+        Ok(())
+    }
+}
+
+impl Pane for RadioPane {
+    fn render(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) -> Result<()> {
+        self.render_tree_browser(frame, area, ctx)
     }
 
     fn before_show(&mut self, ctx: &Ctx) -> Result<()> {
@@ -1319,46 +1373,15 @@ impl Pane for RadioPane {
         Ok(())
     }
 
-    fn on_event(&mut self, event: &mut UiEvent, _is_visible: bool, ctx: &Ctx) -> Result<()> {
+    fn on_event(&mut self, event: &mut UiEvent, is_visible: bool, ctx: &Ctx) -> Result<()> {
+        // The temp-play lifecycle (SongChanged / stop / reconnected) lives
+        // in the shared tree-browser core; the stored-playlist refresh is
+        // radio-specific.
+        if self.handle_tree_events(event, is_visible, ctx)? {
+            return Ok(());
+        }
         match event {
             UiEvent::StoredPlaylist => self.query_favourites(ctx, REINIT),
-            UiEvent::SongChanged => self.cleanup_temp_play(ctx),
-            // Fired after ctx.status is refreshed (unlike Player, which
-            // arrives while the status is still stale), so the Stop
-            // transition is reliably visible here.
-            UiEvent::PlaybackStateChanged => {
-                if ctx.status.state == State::Stop
-                    && let Some(temp) = self.temp_play_id
-                {
-                    self.temp_play_id = None;
-                    ctx.temp_play_id.set(None);
-                    ctx.command(move |client| {
-                        client.delete_id(temp)?;
-                        Ok(())
-                    });
-                }
-            }
-            UiEvent::Player => {
-                // Streams keep the same queue entry while playing, so
-                // SongChanged never fires. After stop, MPD still reports the
-                // last songid, so drop the temp entry on the state transition
-                // itself instead of waiting for a song change.
-                if ctx.status.state == State::Stop
-                    && let Some(temp) = self.temp_play_id
-                {
-                    self.temp_play_id = None;
-                    ctx.temp_play_id.set(None);
-                    ctx.command(move |client| {
-                        client.delete_id(temp)?;
-                        Ok(())
-                    });
-                }
-            }
-            UiEvent::Reconnected => {
-                self.initialized = false;
-                self.temp_play_id = None;
-                self.before_show(ctx)?;
-            }
             _ => {}
         }
         Ok(())
@@ -1425,12 +1448,6 @@ impl Pane for RadioPane {
             return Ok(());
         }
 
-        Ok(())
-    }
-
-    fn handle_insert_mode(&mut self, kind: InputResultEvent, ctx: &mut Ctx) -> Result<()> {
-        // Input modals manage their own buffers; nothing to do here.
-        let _ = (kind, ctx);
         Ok(())
     }
 
@@ -1654,19 +1671,12 @@ impl Pane for RadioPane {
                     }
                 }
             }
-            (PLAY, MpdQueryResult::Any(any)) => {
-                if let Ok(boxed) = any.downcast::<u32>() {
-                    self.temp_play_id = Some(*boxed);
-                }
-            }
+            (PLAY, MpdQueryResult::Any(any)) => self.handle_play_result(any, ctx)?,
             // Pasted/dropped files played via the paste popup: the Radio pane
             // owns the temporary entry lifecycle (hidden from the queue,
             // removed on song change / stop), so its result lands here.
             (crate::ui::modals::paste::PASTE_PLAY, MpdQueryResult::Any(any)) => {
-                if let Ok(boxed) = any.downcast::<u32>() {
-                    self.temp_play_id = Some(*boxed);
-                    ctx.temp_play_id.set(Some(*boxed));
-                }
+                self.handle_play_result(any, ctx)?;
             }
             _ => {}
         }

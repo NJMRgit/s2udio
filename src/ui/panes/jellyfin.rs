@@ -1749,6 +1749,12 @@ impl Pane for JellyfinPane {
     }
 
     fn on_event(&mut self, event: &mut UiEvent, is_visible: bool, ctx: &Ctx) -> Result<()> {
+        // The temp-play lifecycle (SongChanged / stop / reconnected) lives
+        // in the shared tree-browser core; the poster-overlay arms are
+        // jellyfin-specific.
+        if self.handle_tree_events(event, is_visible, ctx)? {
+            return Ok(());
+        }
         match event {
             // The poster overlay must not cover modals; redraw it when the
             // modal closes or the tab is shown again.
@@ -1768,11 +1774,7 @@ impl Pane for JellyfinPane {
             UiEvent::Hidden if !is_visible => {
                 self.poster.hide(ctx);
             }
-            // The temp-play lifecycle (SongChanged / stop / reconnected)
-            // lives in the shared tree-browser core.
-            _ => {
-                self.handle_tree_events(event, is_visible, ctx)?;
-            }
+            _ => {}
         }
         Ok(())
     }

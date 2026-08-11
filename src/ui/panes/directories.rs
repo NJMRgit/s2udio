@@ -1219,6 +1219,12 @@ impl Pane for DirectoriesPane {
     }
 
     fn on_event(&mut self, event: &mut UiEvent, is_visible: bool, ctx: &Ctx) -> Result<()> {
+        // The temp-play lifecycle (SongChanged / stop / reconnected) lives
+        // in the shared tree-browser core; the Database reset is
+        // directories-specific.
+        if self.handle_tree_events(event, is_visible, ctx)? {
+            return Ok(());
+        }
         match event {
             UiEvent::Database => {
                 self.loaded.clear();
@@ -1230,11 +1236,7 @@ impl Pane for DirectoriesPane {
                 self.initialized = false;
                 self.before_show(ctx)?;
             }
-            // The temp-play lifecycle (SongChanged / stop / reconnected)
-            // lives in the shared tree-browser core.
-            _ => {
-                self.handle_tree_events(event, is_visible, ctx)?;
-            }
+            _ => {}
         }
         Ok(())
     }
