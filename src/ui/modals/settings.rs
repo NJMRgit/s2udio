@@ -235,6 +235,10 @@ enum MpvRow {
     Header,
     AudioLang,
     Subtitles,
+    /// The "svp support" toggle: pass `--input-ipc-server=/tmp/mpvsocket`
+    /// so SVP4's manager can drive frame interpolation (and s2udio tracks
+    /// playback over the same socket).
+    Svp,
 }
 
 /// Which mpv preference the language picker is choosing for.
@@ -364,10 +368,11 @@ pub(crate) struct StagedSettings {
     /// Video playback mode chosen in the settings panel; applied + persisted
     /// to state.ron on Save.
     pub video_playback: crate::config::video::VideoPlaybackMode,
-    /// mpv audio language + subtitle preference chosen in the settings
-    /// panel; applied + persisted to state.ron on Save.
+    /// mpv audio language + subtitle preference + SVP support chosen in
+    /// the settings panel; applied + persisted to state.ron on Save.
     pub mpv_audio_lang: crate::config::mpv::MpvAudioLang,
     pub mpv_subtitles: crate::config::mpv::MpvSubtitleMode,
+    pub mpv_svp: bool,
     /// Jellyfin credentials from a successful sign-in; persisted to the
     /// jellyfin.ron sidecar on Save.
     pub jellyfin: Option<crate::config::jellyfin::JellyfinCredentialsFile>,
@@ -716,6 +721,10 @@ pub struct SettingsModal {
     mpv_subtitles_initial: crate::config::mpv::MpvSubtitleMode,
     /// Staged mpv subtitle mode (applied + persisted on Save).
     mpv_subtitles_pending: crate::config::mpv::MpvSubtitleMode,
+    /// SVP support when the panel opened.
+    mpv_svp_initial: bool,
+    /// Staged SVP support (applied + persisted on Save).
+    mpv_svp_pending: bool,
     /// The last custom language code picked in the language window (the
     /// fallback when the audio/subtitle cycle lands on "custom"); seeded
     /// from the current setting or the OS language.
@@ -781,6 +790,7 @@ impl SettingsModal {
         let video_initial = ctx.config.video.playback;
         let mpv_audio_initial = ctx.config.mpv.audio_lang.clone();
         let mpv_subtitles_initial = ctx.config.mpv.subtitles.clone();
+        let mpv_svp_initial = ctx.config.mpv.svp;
         let mpv_custom_lang = match (&mpv_audio_initial, &mpv_subtitles_initial) {
             (crate::config::mpv::MpvAudioLang::Custom { lang }, _)
             | (_, crate::config::mpv::MpvSubtitleMode::Custom { lang }) => lang.clone(),
@@ -812,6 +822,8 @@ impl SettingsModal {
             mpv_audio_pending: mpv_audio_initial,
             mpv_subtitles_initial: mpv_subtitles_initial.clone(),
             mpv_subtitles_pending: mpv_subtitles_initial,
+            mpv_svp_initial,
+            mpv_svp_pending: mpv_svp_initial,
             mpv_custom_lang,
             cava_pending: cava_initial.clone(),
             cava_initial,
@@ -902,6 +914,7 @@ impl SettingsModal {
                 ContentRow::Mpv(MpvRow::Header),
                 ContentRow::Mpv(MpvRow::AudioLang),
                 ContentRow::Mpv(MpvRow::Subtitles),
+                ContentRow::Mpv(MpvRow::Svp),
             ],
             Section::Mpd => vec![
                 ContentRow::Mpd(MpdRow::LibraryHeader),
@@ -1123,6 +1136,11 @@ impl SettingsModal {
                         1 => SystemLanguage,
                         _ => Custom { lang: self.mpv_custom_lang.clone() },
                     };
+                    ctx.render()?;
+                    Ok(())
+                }
+                MpvRow::Svp => {
+                    self.mpv_svp_pending = !self.mpv_svp_pending;
                     ctx.render()?;
                     Ok(())
                 }
@@ -1650,6 +1668,7 @@ impl SettingsModal {
             || self.video_pending != self.video_initial
             || self.mpv_audio_pending != self.mpv_audio_initial
             || self.mpv_subtitles_pending != self.mpv_subtitles_initial
+            || self.mpv_svp_pending != self.mpv_svp_initial
             || self.cava_pending != self.cava_initial
             || self
                 .appearance_pending
@@ -1669,6 +1688,7 @@ impl SettingsModal {
             video_playback: self.video_pending,
             mpv_audio_lang: self.mpv_audio_pending.clone(),
             mpv_subtitles: self.mpv_subtitles_pending.clone(),
+            mpv_svp: self.mpv_svp_pending,
             jellyfin: self.jellyfin_credentials.clone(),
         }
     }
@@ -1752,6 +1772,9 @@ impl SettingsModal {
                         Vec::new(),
                         Some(Click::Toggle),
                     )
+                }
+                MpvRow::Svp => {
+                    Self::toggle_row("svp support", self.mpv_svp_pending, style)
                 }
             },
             ContentRow::General(g) => match g {
@@ -3146,14 +3169,46 @@ mod tests {
         let modal = SettingsModal::new(&ctx);
         assert_eq!(modal.mpv_audio_pending, crate::config::mpv::MpvAudioLang::System);
         assert_eq!(modal.mpv_subtitles_pending, crate::config::mpv::MpvSubtitleMode::Hidden);
+        assert!(!modal.mpv_svp_pending, "svp support defaults off");
 
         // The config defaults match (system-language audio, signs subtitles).
         let mpv: crate::config::mpv::Mpv = crate::config::mpv::MpvFile::default().into();
         assert_eq!(mpv.audio_lang, crate::config::mpv::MpvAudioLang::System);
         assert_eq!(mpv.subtitles, crate::config::mpv::MpvSubtitleMode::Hidden);
+        assert!(!mpv.svp, "svp defaults off");
         // The subtitle chain is always "signs > <second>" — the persisted
         // default means forced tracks only.
         assert_eq!(mpv.subtitles.label(), "hidden");
+    }
+
+    #[test]
+    fn svp_support_toggle_flips_and_persists() {
+        let (app_tx, _app_rx) = crossbeam::channel::unbounded();
+        let mut ctx = crate::tests::fixtures::ctx(
+            (app_tx, _app_rx),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+        );
+        let mut modal = SettingsModal::new(&ctx);
+
+        // The mpv section includes the toggle row.
+        modal.rows = vec![ContentRow::Mpv(MpvRow::Svp)];
+        modal.selected = 0;
+        assert!(!modal.mpv_svp_pending);
+        modal.adjust(&mut ctx, 1).unwrap();
+        assert!(modal.mpv_svp_pending);
+        modal.adjust(&mut ctx, 1).unwrap();
+        assert!(!modal.mpv_svp_pending);
+
+        // A config file override resolves into the runtime config.
+        let file: crate::config::mpv::MpvFile = crate::config::mpv::MpvFile {
+            audio_lang: None,
+            subtitles: None,
+            bin: None,
+            svp: Some(true),
+        };
+        let mpv: crate::config::mpv::Mpv = file.into();
+        assert!(mpv.svp);
     }
 
     #[test]

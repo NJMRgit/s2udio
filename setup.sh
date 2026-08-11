@@ -25,7 +25,7 @@
 #   * support scripts            lyrics fetcher, mpv tracker daemon (which
 #                                starts the bundled s2udio-mpris bridge),
 #                                the s2u-mpdris2 shim (official mpDris2 +
-#                                stream art), mpvSockets.lua
+#                                stream art)
 #   * seeds config/theme         -> ~/.config/s2udio/ (if absent)
 #   * cava + MPD fifo output     (official cava; MPD fifo output)
 #   * MPD / mpDris2 user services (enable/start via scripts/s2u-svc; the
@@ -80,7 +80,6 @@ resolve_elevation() {
 BIN_DIR="$HOME/.local/bin"
 CFG_DIR="$HOME/.config/s2udio"
 MPD_CONF="${MPD_CONF:-$HOME/.config/mpd/mpd.conf}"
-MPV_SCRIPTS="$HOME/.config/mpv/scripts"
 
 # summary_step() reads these (set by each backend; Arch defaults below):
 SUMMARY_BIN="$BIN_DIR/s2udio"
@@ -134,8 +133,6 @@ install_support_scripts() {
     [[ -f scripts/s2u-mpv-tracker ]] && { install -Dm755 scripts/s2u-mpv-tracker "$BIN_DIR/s2u-mpv-tracker"; ok "mpv tracker daemon -> $BIN_DIR/s2u-mpv-tracker"; } || warn "scripts/s2u-mpv-tracker missing in this checkout"
     [[ -f scripts/s2udio-mpris ]] && { install -Dm755 scripts/s2udio-mpris "$BIN_DIR/s2udio-mpris"; ok "mpv MPRIS bridge -> $BIN_DIR/s2udio-mpris"; } || warn "scripts/s2udio-mpris missing in this checkout"
     [[ -f scripts/s2u-mpdris2 ]] && { install -Dm755 scripts/s2u-mpdris2 "$BIN_DIR/s2u-mpdris2"; ok "mpDris2 stream-art shim -> $BIN_DIR/s2u-mpdris2"; } || warn "scripts/s2u-mpdris2 missing in this checkout"
-    mkdir -p "$MPV_SCRIPTS"
-    [[ -f scripts/mpvSockets.lua ]] && { install -Dm644 scripts/mpvSockets.lua "$MPV_SCRIPTS/mpvSockets.lua"; ok "mpvSockets.lua -> $MPV_SCRIPTS"; } || warn "scripts/mpvSockets.lua missing in this checkout"
 }
 
 install_s2u_svc() { # every backend installs it (the tracker's mpDris2 stop/start routes through s2u-svc)
@@ -553,8 +550,9 @@ run_arch() {
     fi
 
     # mpv: mpv-full (recommended) or standard mpv. The video pipeline
-    # (mpvSockets, Jellyfin playback, thumbnails) is tuned for the
-    # full-featured build; plain mpv works for standard playback. mpv-full
+    # (the fixed IPC socket, Jellyfin playback, thumbnails) is tuned for
+    # the full-featured build; plain mpv works for standard playback.
+    # mpv-full
     # replaces the standard mpv package (same binary name) - the two are
     # mutually exclusive.
     # ---------------------------------------------------------------------------

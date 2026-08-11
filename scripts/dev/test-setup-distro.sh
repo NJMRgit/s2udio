@@ -183,7 +183,7 @@ esac
 # package while no mpdris2 unit exists yet.
 case "$KEY" in
     arch)
-        run_check S2 'test -x /root/.local/bin/rmpc-fetch-lyrics && test -x /root/.local/bin/s2u-mpv-tracker && test -x /root/.local/bin/s2u-mpdris2 && test -f /root/.config/mpv/scripts/mpvSockets.lua'
+        run_check S2 'test -x /root/.local/bin/rmpc-fetch-lyrics && test -x /root/.local/bin/s2u-mpv-tracker && test -x /root/.local/bin/s2u-mpdris2 && grep -q 'input-ipc-server=/tmp/mpvsocket' /root/.config/mpv/mpv.conf'
         run_check S3 'grep -q "mpd-cava.fifo" /root/.config/mpd/mpd.conf'
         run_check S4 'command -v yt-dlp >/dev/null && command -v cava >/dev/null && command -v mpd >/dev/null'
         run_check S5 'systemctl --user is-active mpd.service'
@@ -191,7 +191,7 @@ case "$KEY" in
         run_check S7 'test -f /root/.config/s2udio/config.ron && test -f /root/.config/s2udio/themes/default.ron'
         ;;
     *)
-        run_check S2 'test -x /root/.local/bin/rmpc-fetch-lyrics && test -x /root/.local/bin/s2u-mpv-tracker && test -x /root/.local/bin/s2u-mpdris2 && test -x /root/.local/bin/s2u-svc && test -f /root/.config/mpv/scripts/mpvSockets.lua'
+        run_check S2 'test -x /root/.local/bin/rmpc-fetch-lyrics && test -x /root/.local/bin/s2u-mpv-tracker && test -x /root/.local/bin/s2u-mpdris2 && test -x /root/.local/bin/s2u-svc && grep -q 'input-ipc-server=/tmp/mpvsocket' /root/.config/mpv/mpv.conf'
         run_check S3 'grep -q "mpd-cava.fifo" /root/.config/mpd/mpd.conf'
         run_check S4 'command -v mpv >/dev/null && command -v yt-dlp >/dev/null && command -v cava >/dev/null && command -v mpd >/dev/null'
         run_check S5 '/root/.local/bin/s2u-svc is-active mpd'
