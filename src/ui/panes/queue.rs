@@ -76,6 +76,10 @@ pub struct QueuePane {
     column_formats: Vec<Property<SongProperty>>,
     areas: EnumMap<Areas, Rect>,
     should_center_cursor_on_current: bool,
+    /// The app-start jump is one-shot: the first `before_show` lands the
+    /// highlight on the currently playing song (scrolled to the top of the
+    /// visible list); later shows keep the user's selection.
+    startup_jump_done: bool,
     /// Scroll state of the chapter list (Chapters mode).
     chapters_state: ListState,
     chapters_items_len: usize,
@@ -275,6 +279,7 @@ impl QueuePane {
                 _ => Rect::default(),
             },
             should_center_cursor_on_current: ctx.config.center_current_song_on_change,
+            startup_jump_done: false,
             chapters_state: ListState::default(),
             chapters_items_len: 0,
             video_state: ListState::default(),
@@ -634,7 +639,17 @@ impl Pane for QueuePane {
             self.areas[Areas::Table].height as usize,
         );
 
-        if self.should_center_cursor_on_current {
+        // App start: the queue opens on the currently playing song, scrolled
+        // as close to the top of the visible list as possible (`Dir::new`
+        // leaves the selection at index 0). One-shot: later shows keep the
+        // user's selection.
+        if !self.startup_jump_done {
+            self.startup_jump_done = true;
+            self.should_center_cursor_on_current = false;
+            let to_select =
+                ctx.find_current_song_in_queue().map(|(idx, _)| idx).unwrap_or(0);
+            self.queue.select_at_top(to_select);
+        } else if self.should_center_cursor_on_current {
             let to_select = ctx
                 .find_current_song_in_queue()
                 .or(self.queue.selected_with_idx())
@@ -1719,7 +1734,7 @@ mod stream_filter_tests {
     use super::{Areas, Pane, QueuePane};
     use crate::{
         ctx::Ctx,
-        mpd::commands::Song,
+        mpd::commands::{Song, State},
         shared::mouse_event::{MouseEvent, MouseEventKind},
         tests::fixtures::ctx,
     };
@@ -1775,6 +1790,42 @@ mod stream_filter_tests {
             ctx,
         )
         .unwrap();
+    }
+
+    /// At app start the queue must open on the currently playing song,
+    /// scrolled to the top of the visible list (not on index 0, which
+    /// `Dir::new` leaves selected).
+    #[test]
+    fn first_show_jumps_to_the_playing_song_at_the_top() {
+        let (app_tx, _app_rx) = crossbeam::channel::unbounded();
+        let mut ctx = crate::tests::fixtures::ctx(
+            (app_tx, _app_rx),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+        );
+        ctx.queue = songs(20);
+        ctx.status.state = State::Play;
+        ctx.status.songid = Some(12);
+        let mut pane = QueuePane::new(&ctx);
+        pane.areas[Areas::Table] = Rect::new(0, 0, 80, 5);
+
+        pane.before_show(&ctx).unwrap();
+
+        assert_eq!(
+            pane.queue.state.get_selected(),
+            Some(12),
+            "the playing song is selected at start"
+        );
+        assert_eq!(pane.queue.state.offset(), 12, "the playing song is the first visible row");
+        assert!(
+            pane.startup_jump_done,
+            "the startup jump is one-shot"
+        );
+
+        // A later show keeps the user's selection instead of re-jumping.
+        pane.queue.select_idx(3, 0);
+        pane.before_show(&ctx).unwrap();
+        assert_eq!(pane.queue.state.get_selected(), Some(3), "later shows keep the selection");
     }
 
     #[test]
