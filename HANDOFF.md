@@ -397,8 +397,33 @@ Status (2026-08-10):
   drops the temp entry, jellyfin Stop clears `ctx.temp_play_id`, radio
   `PLAY` sets `ctx.temp_play_id` — one regression test each);
   (3) 1318/1318 green, warnings 3 baseline, guardrail unchanged at 60.
-- **Next: Phase 3** — modal consolidation onto `ListModal`/`InfoListModal`
-  + the `menu/select_section` merge.
+- **Phase 3 ✅** (`a5aac04` + `53b9e90`): modal consolidation onto the
+  two master modules + the section merge. `ListModal<'a, V>`
+  (`src/ui/modals/list_modal.rs`) implements the options-list +
+  scrollbar (+ drag) + `ButtonGroup` + List↔Buttons focus cycle +
+  Confirm/Close/wheel/click/double-click handling once, parameterized
+  by args (`row_fn`/`size_fn`, `buttons`/`confirm_buttons`,
+  `multi_select`+`mark_id`, `bottom_title`, `list_right_padding`,
+  `wheel_moves_selection`, `scrollbar_drag`); `SelectModal` (317 → 90)
+  and `TorrentFilePicker` (501 → 141) are thin adapters with unchanged
+  public builders (all 15 call sites + the paste picker tests
+  untouched). `menu/select_section.rs` merged into `list_section.rs`
+  (select items = `MenuItem` + section-level `action` callback);
+  `SectionType::Select` + its 16 dispatch arms deleted; the
+  `select_section` builder method is gone (3 call sites use
+  `list_section` + `add_select_item`). `InfoListModal` generalized to
+  N columns + a `header` arg and absorbs `DecodersModal` (248 → 67);
+  `zip_longest2` (dead) removed from `shared/ext.rs`. **1326/1326**
+  green (+8: 4 ListModal + 4 InfoListModal behavior pins incl. the
+  unified click-row mapping — the legacy SelectModal's extra `-1` is
+  fixed, see outline §5.2), warnings 3 baseline, guardrail unchanged at
+  60. Net LOC: **src/ui −824** (56,923 → 56,099), tree −873. Kept
+  standalone (not list-shaped, rationale in outline §5.2):
+  `OutputsModal`, `InfoModal`, `DownloadsModal`, `LanguageModal`,
+  `TabHelpModal`, `AddRandomModal`.
+- **Next: Phase 4** — QueuePane decomposition (Audio list →
+  `SongListCore`, toggle row → `SubTabBar`, Video/Chapters stay
+  focused specs).
 
 Toolchain env (container): `export PATH="$HOME/.cargo/bin:$PATH"`
 `export RUSTUP_HOME="$HOME/.rustup" CARGO_HOME="$HOME/.cargo"`.

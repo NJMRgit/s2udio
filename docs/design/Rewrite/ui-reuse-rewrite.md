@@ -178,7 +178,7 @@ ref). Key numbers and audited files:
 
 - **`src/ui` total: 56,704 LOC** (82 files) — 59.2% of the 95,811 total `.rs`
   LOC (includes `build.rs`).
-- Audited pane/browser files:
+- Audited pane/browser/modal files:
 
 | File | LOC (baseline `24bd883` → now) |
 | --- | --- |
@@ -196,8 +196,18 @@ ref). Key numbers and audited files:
 | `src/ui/panes/lyrics.rs` | 2543 → 2543 |
 | `src/ui/song_list.rs` | — → 955 (Phase 1 core) |
 | `src/ui/tree_browser.rs` | — → 602 (Phase 2 core; +4 Phase 2.1) |
-| **src/ui total** | **56,704 → 56,923** |
-| **tree total .rs** | **95,811 → 96,030** |
+| `src/ui/modals/list_modal.rs` | — → 763 (Phase 3 core; +tests) |
+| `src/ui/modals/select_modal.rs` | 317 → 90 (Phase 3 thin adapter) |
+| `src/ui/modals/torrent_file_picker.rs` | 501 → 141 (Phase 3 thin adapter) |
+| `src/ui/modals/info_list_modal.rs` | 330 → 453 (Phase 3 core; +tests) |
+| `src/ui/modals/decoders.rs` | 248 → 67 (Phase 3 thin adapter) |
+| `src/ui/modals/menu/list_section.rs` | 296 → 349 (select_section merged in) |
+| `src/ui/modals/menu/select_section.rs` | 210 → deleted (merged into list_section) |
+| `src/ui/modals/menu/mod.rs` | 649 → 638 (Select dispatch arms gone) |
+| `src/ui/modals/menu/modal.rs` | 615 → 601 (select_section builder → list_section) |
+| `src/ui/modals/outputs.rs` | 258 → 258 (kept — see §5.2) |
+| **src/ui total** | **56,704 → 56,099** |
+| **tree total .rs** | **95,811 → 95,157** |
 
 Similarity guardrail baseline: **83 same-named function pairs with ratio > 0.5**
 across `src/ui` (full list: `python3 scripts/dev/ui-metrics.py --pairs`).
@@ -374,6 +384,24 @@ masters:
 - `menu/list_section` and `menu/select_section` (126 cloned lines) merge
   into one section implementation with an args flag.
 
+> **Implemented (Phase 3, 2026-08-10)** as one concrete master per shape
+> with args, not generics: `ListModal<'a, V>` (`src/ui/modals/list_modal.rs`)
+> holds the options list + `DirState` + scrollbar (incl. drag) +
+> `ButtonGroup` + the List↔Buttons focus cycle + Confirm/Close/wheel/
+> click/double-click handling once, parameterized by `row_fn`, `size_fn`,
+> `buttons`/`confirm_buttons`, `multi_select`+`mark_id`,
+> `bottom_title`, `list_right_padding`, `wheel_moves_selection` and
+> `scrollbar_drag`. `SelectModal` (317 → 90 LOC) and `TorrentFilePicker`
+> (501 → 141 LOC) are thin adapters over it (the Phase-1/2 lesson: trait or
+> args, never a fork), keeping their public builders so the 14 + 1 call
+> sites were untouched. `InfoListModal` (`src/ui/modals/info_list_modal.rs`)
+> generalizes to N columns + a `header` arg and absorbs `DecodersModal`
+> (248 → 67 LOC); `OutputsModal` stays standalone (fixed-size, in-table
+> header, live refresh + toggle — a different shape, see §5.2). The
+> `menu/select_section.rs` module was merged into `list_section.rs`
+> (select items = `MenuItem` + a section-level `action` callback); the
+> `SectionType::Select` variant and its 16 dispatch arms are gone.
+
 ### 4.4 `SubTabBar` widget
 
 The queue’s `● Audio ○ Video ○ Chapters` toggle row becomes a widget
@@ -390,8 +418,8 @@ now-playing line templates — one implementation, args for style/content.
 ## 5. Phased plan
 
 Each phase lands on `rewrite` as its own commit(s), keeps
-`cargo test --release` green (current suite: **1318 tests** — 1312 at the
-`24bd883` baseline, +6 from Phase 2.1), and ends
+`cargo test --release` green (current suite: **1326 tests** — 1312 at the
+`24bd883` baseline, +14 from Phases 2.1+3), and ends
 with a behavior-parity live check of the affected tabs.
 
 | Phase | Work | Primary targets | Exit criteria |
@@ -399,7 +427,7 @@ with a behavior-parity live check of the affected tabs.
 | 0 | Baselines & guardrails | — | ✅ (2026-08-10, commit `24bd883`+): branched from `working` at `12d8c6c`; LOC + similarity baseline recorded (§2.4) via committed `scripts/dev/ui-metrics.py`; `cargo test --release` green **1312/1312** (rustc 1.97.1; host may re-run). |
 | 1 | Extract `SongListCore<T>` from `BrowserPane`; adopt in queue Audio + search results | `ui/browser.rs`, `ui/panes/queue.rs`, `ui/panes/search/mod.rs` | ✅ (2026-08-10, commits `cd103ac`+`cd10c75`+`113d7e7`): `SongListCore<T, S>` trait (hooks + shared default methods) in `src/ui/song_list.rs`; `BrowserPane` is a thin dir-stack adapter (1041 → 232 LOC); queue Audio (`Dir<Song, TableState>`) + search results (`Dir<Song, ListState>`) implement it and delegate all non-specific `CommonAction` arms. Browser panes behavior unchanged; queue/search identical (1312/1312 green incl. all 61 queue/search tests; live check pending host). Net LOC: **src/ui −179** (queue −208, search −236, browser −809, song_list +955, pane adapters +118); the `CommonAction` arms exist once. |
 | 2 | `TreeBrowserCore` unifies directories / jellyfin / radio | `ui/tree_browser.rs`, `ui/panes/directories.rs`, `jellyfin.rs`, `radio.rs` | ✅ (2026-08-10, commits `f5c2ac4`+`948c85c`+`26e9834`): `TreeBrowserCore` trait (hooks + shared defaults, the Phase-1 `SongListCore` pattern) in `src/ui/tree_browser.rs`; all three panes implement it and delegate `render`/`handle_action`/`handle_mouse_event`/`on_event` + the temp-play lifecycle to the shared core. 1312/1312 green (21 directories + 15 jellyfin + 31 radio tests). The §2.2 clone pairs are gone or reduced to shared call sites: `cleanup_temp_play` (×3), `selected_item`, `move_items`, `render`, `render_tips`, `handle_action`, `on_event` (jellyfin↔radio) all deleted from the panes (live in the core); residual >0.5 pairs are thin Pane-delegator shells (`render`/`handle_action`/`handle_mouse_event`/`on_event` routing to the core — same category the baseline already carried) plus pre-existing non-tree pairs. Net LOC: **src/ui +51 vs the Phase-0 table** (pane files −369: directories −187, jellyfin −192, radio +10; core `tree_browser.rs` +598) — the trait-with-hooks pattern trades raw LOC for guaranteed one-implementation (same tradeoff as Phase 1: song_list +955 vs panes −1134); the args/config end-state that shrinks panes further is Phase 6. |
-| 3 | Modal consolidation onto `ListModal`/`InfoListModal` + section merge | `ui/modals/*` | Each converted modal passes its behavior checks; `menu/select_section` merged; **–~600–900 LOC**. |
+| 3 | Modal consolidation onto `ListModal`/`InfoListModal` + section merge | `ui/modals/*` | ✅ (2026-08-10, commits `a5aac04`+`53b9e90`): `ListModal<'a, V>` master in `src/ui/modals/list_modal.rs` (args: row/size fns, buttons/confirm_buttons, multi-select + mark_id, bottom title, padding, wheel mode, scrollbar drag); `SelectModal` (317 → 90) + `TorrentFilePicker` (501 → 141) are thin adapters with unchanged public builders — all 15 call sites + the paste picker tests untouched. `menu/select_section.rs` merged into `list_section.rs` (value items + section-level `action`), `SectionType::Select` + 16 dispatch arms deleted. `InfoListModal` generalized to N columns + `header` arg and absorbs `DecodersModal` (248 → 67). 1326/1326 green (+8: 4 ListModal + 4 InfoListModal behavior pins incl. the unified click-row mapping); warnings 3 baseline; similarity guardrail unchanged (60 excl-thin — modals are not in `PANE_FILES`). Net LOC: **src/ui −824** (56,923 → 56,099), tree total .rs **−873** (96,030 → 95,157) — the −600–900 target. Deliberate delta + kept-modals rationale in §5.2. |
 | 4 | QueuePane decomposition: Audio list → `SongListCore`, toggle → `SubTabBar`, Video/Chapters stay as focused specs | `ui/panes/queue.rs` | Queue tab live-check (Audio/Video/Chapters, merged box, esc-deselect, marks); **–~1–1.5k LOC** in queue.rs. |
 | 5 | Shared drawing widgets (marquee/wrap/button cluster) from controls/lyrics | `ui/panes/controls.rs`, `lyrics.rs`, `ui/widgets/` | Visual parity in live check; widgets reused by ≥2 call sites. |
 | 6 | Args expansion: pane-specific constants move into `PaneType`/config args | `src/config/tabs.rs`, panes | Adding a new browser tab = config block + adapter, no new pane file; sidecars migrate cleanly. |
@@ -452,6 +480,34 @@ identical pair set vs the Phase-2 close-out; the `items_title`
 directories↔radio pair dropped 0.61 → 0.37, now well under the
 threshold). Net LOC: **src/ui +168** (panes +155 tests/comments,
 tree_browser +4), tree total .rs **96,030** — see §2.4 table.
+
+### 5.2 Phase 3 — delta close-out ✅ (2026-08-10)
+
+Phase 3's consolidation changed one observable behavior and deliberately
+kept four modals standalone; both are documented so the parity DoD is
+explicit:
+
+1. **Unified click-row mapping (fix + pin).** The legacy `SelectModal`
+   mouse handler subtracted an extra row (`y - options_area.y - 1`), so
+   clicking the second or later option selected the row above it; the
+   torrent picker (round 17–22, user-validated) uses the correct
+   `y - options_area.y` mapping. The master implements the correct one and
+   `click_on_second_row_selects_second_option` pins it.
+2. **Kept standalone (not list-shaped).** `OutputsModal` (fixed 70x10
+   popup, in-table header, `column_spacing(0)`, live refresh via
+   `on_query_finished`/`on_event` + toggle-on-Confirm), `InfoModal`
+   (wrapped message box + OK button, no scroll), `DownloadsModal` (live
+   updates + per-row context menu), `LanguageModal` and `TabHelpModal`
+   (section headers + Enter-applies / Basic-Advanced toggle + Tab
+   switching) and `AddRandomModal` (input combobox) — folding them into
+   the masters would add size-mode/header-style/spacing/key-hook args
+   (a fork, not an arg). Their shared fragments are small
+   (language↔tab_help 51, add_random↔input 79 cloned lines) and Phase 5's
+   shared-drawing-widgets work is the right home for any further reuse.
+3. **Docs + verification.** This section + §2.4 table + §4.3 updated;
+   `cargo test --release` **1326/1326** (+8 vs Phase 2.1's 1318), warnings
+   3 baseline, similarity guardrail unchanged at 60 excl-thin pairs,
+   commits `a5aac04` (3a) and `53b9e90` (3b+3c).
 
 ## 6. Definition of done (applies per phase)
 
