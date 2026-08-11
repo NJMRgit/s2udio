@@ -31,10 +31,10 @@ import argparse, difflib, json, os, re, subprocess, sys
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# Methods of the shared SongListCore / BrowserPane traits: same-named
-# pairs of these are the intended thin adapters / shared call sites, not
-# duplication (Phase 1+ consolidation). Excluded from the > 0.5 guardrail
-# report; --pairs still shows them.
+# Methods of the shared SongListCore / BrowserPane / TreeBrowserCore
+# traits: same-named pairs of these are the intended thin adapters /
+# shared call sites, not duplication (Phase 1+ consolidation). Excluded
+# from the > 0.5 guardrail report; --pairs still shows them.
 THIN_ADAPTERS = {
     "list", "list_mut", "open", "leave", "enqueue", "fetch_data",
     "stack", "stack_mut", "browser_areas",
@@ -46,6 +46,23 @@ THIN_ADAPTERS = {
     "handle_insert_mode", "handle_scrollbar_interaction",
     "handle_list_mouse_action", "handle_mouse_action",
     "handle_stack_mouse_action", "open_context_menu",
+    # Phase-2 TreeBrowserCore hooks + accessors (directories/jellyfin/radio
+    # tree+items browsers): the shared tree/items/mouse/action machinery and
+    # the per-pane hooks that implement it.
+    "tree_rows", "tree_selected", "tree_list", "tree_list_mut",
+    "tree_area", "set_tree_area", "highlight_tree_node", "set_expanded",
+    "set_expanded_idx", "items_len", "items_list", "items_list_mut",
+    "items_area", "set_items_area", "item_at", "item_row",
+    "item_row_height", "selected_item", "select_items_item",
+    "sync_tree_to_items_cursor", "select_parent", "activate_selected",
+    "render_info", "temp_play_id", "set_temp_play_id", "tree_title",
+    "tree_arrow", "items_title", "items_highlight", "tree_highlight",
+    "tips_lines", "tips_area", "split_tree", "layout_vertical",
+    "on_items_cursor_moved", "on_tree_focus", "on_items_focus",
+    "on_reconnected", "on_tree_hidden", "tree_context_menu",
+    "on_tree_double_click", "handle_items_left_click", "on_confirm",
+    "on_select_range", "on_close", "move_tree", "move_items",
+    "render_tree", "render_items", "render_tips", "cleanup_temp_play",
 }
 
 PANE_FILES = [
