@@ -8,7 +8,7 @@ description: >
   audit of shared vs bespoke UI code, the master-module-with-args target
   architecture, and the phased consolidation plan.
 status: "active"
-phase_status: "0: complete (2026-08-10); 1: complete (2026-08-10); 2: complete (2026-08-10); 2.1: complete (2026-08-10); 3: next"
+phase_status: "0: complete (2026-08-10); 1: complete (2026-08-10); 2: complete (2026-08-10); 2.1: complete (2026-08-10); 3: complete (2026-08-10)"
 updated: "2026-08-10"
 source_files:
   - src/ui/browser.rs
