@@ -113,6 +113,27 @@ impl<T: ScrollingState> DirState<T> {
         }
     }
 
+    /// Select `idx` and scroll it to the first visible row — as close to
+    /// the top as the viewport allows (the offset clamps so the list never
+    /// scrolls past its end). Used at app start to land the queue on the
+    /// currently playing song, instead of `select`'s keep-visible or
+    /// center behavior.
+    pub fn select_at_top(&mut self, idx: usize) {
+        let Some(content_len) = self.content_len else {
+            return;
+        };
+        if content_len == 0 {
+            self.inner.select_scrolling(None);
+            self.scrollbar_state = self.scrollbar_state.position(0);
+            return;
+        }
+        let idx = idx.min(content_len.saturating_sub(1));
+        self.inner.select_scrolling(Some(idx));
+        let max_offset = content_len.saturating_sub(self.viewport_len.unwrap_or_default());
+        self.inner.set_offset(idx.min(max_offset));
+        self.scrollbar_state = self.scrollbar_state.position(self.offset());
+    }
+
     pub fn next(&mut self, scrolloff: usize, wrap: bool) {
         if wrap {
             self.next_wrapping(scrolloff);
@@ -494,6 +515,40 @@ mod tests {
     use ratatui::widgets::ListState;
 
     use super::DirState;
+
+    #[test]
+    fn select_at_top_scrolls_the_selection_to_the_first_row() {
+        let mut subject: DirState<ListState> = DirState::default();
+        subject.set_content_len(Some(20));
+        subject.set_viewport_len(Some(5));
+        subject.set_offset(0);
+
+        // Mid-list: the selection becomes the first visible row.
+        subject.select_at_top(5);
+        assert_eq!(subject.get_selected(), Some(5));
+        assert_eq!(subject.offset(), 5);
+
+        // Near the end: the offset clamps so the viewport never overruns.
+        subject.select_at_top(18);
+        assert_eq!(subject.get_selected(), Some(18));
+        assert_eq!(subject.offset(), 15, "clamped to content_len - viewport_len");
+    }
+
+    #[test]
+    fn select_at_top_handles_empty_content() {
+        let mut subject: DirState<ListState> = DirState::default();
+        subject.set_content_len(Some(0));
+        subject.set_viewport_len(Some(5));
+
+        subject.select_at_top(3);
+        assert_eq!(subject.get_selected(), None);
+        assert_eq!(subject.offset(), 0);
+
+        // No content length known yet: no-op.
+        let mut subject: DirState<ListState> = DirState::default();
+        subject.select_at_top(3);
+        assert_eq!(subject.get_selected(), None);
+    }
 
     #[test]
     fn viewport_len_sets_properties() {
