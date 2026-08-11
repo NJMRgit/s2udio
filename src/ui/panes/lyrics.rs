@@ -21,7 +21,7 @@ use crate::{
         mouse_event::{MouseEvent, MouseEventKind},
         mpd_query::run_status_update,
     },
-    ui::UiEvent,
+    ui::{UiEvent, widgets::wrap::{wrap_spans, wrap_to_width}},
 };
 
 #[derive(Debug)]
@@ -1360,67 +1360,6 @@ pub(crate) fn format_clock(secs: u64) -> String {
     }
 }
 
-/// Wrap a paragraph into lines of at most `width` cells, breaking on
-/// whitespace (display-width aware, so CJK text doesn't overflow).
-pub(crate) fn wrap_to_width(text: &str, width: usize) -> Vec<String> {
-    use unicode_width::UnicodeWidthStr;
-
-    let mut lines = Vec::new();
-    for paragraph in text.split('\n') {
-        let mut current = String::new();
-        let mut current_w = 0usize;
-        for word in paragraph.split_whitespace() {
-            let word_w = word.width();
-            let sep = usize::from(!current.is_empty());
-            if current_w + sep + word_w > width && !current.is_empty() {
-                lines.push(std::mem::take(&mut current));
-                current_w = 0;
-            }
-            if !current.is_empty() {
-                current.push(' ');
-                current_w += 1;
-            }
-            current.push_str(word);
-            current_w += word_w;
-        }
-        if !current.is_empty() {
-            lines.push(current);
-        }
-    }
-    if lines.is_empty() {
-        lines.push(String::new());
-    }
-    lines
-}
-
-/// Wrap a sequence of spans into rows of at most `width` columns, joining
-/// words with single spaces and centering each row.
-fn wrap_spans(spans: &[Span], width: u16) -> Vec<Line<'static>> {
-    if spans.is_empty() {
-        return Vec::new();
-    }
-    let mut rows: Vec<Line<'static>> = Vec::new();
-    let mut row: Vec<Span<'static>> = Vec::new();
-    let mut row_w: usize = 0;
-    for span in spans {
-        let w = span.width();
-        let space_w = usize::from(!row.is_empty());
-        if !row.is_empty() && row_w + space_w + w > usize::from(width) {
-            rows.push(Line::from(std::mem::take(&mut row)).alignment(Alignment::Center));
-            row_w = 0;
-        }
-        if !row.is_empty() {
-            row.push(Span::styled(" ", Style::default()));
-            row_w += 1;
-        }
-        row.push(Span::styled(span.content.clone().into_owned(), span.style));
-        row_w += w;
-    }
-    if !row.is_empty() {
-        rows.push(Line::from(row).alignment(Alignment::Center));
-    }
-    rows
-}
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
@@ -1430,7 +1369,7 @@ mod tests {
     use ratatui::prelude::Rect;
     use ratatui::style::{Color, Modifier, Style};
 
-    use super::{LINK_BLUE, LyricsBtn, LyricsPane, Pane, format_clock, wrap_to_width};
+    use super::{LINK_BLUE, LyricsBtn, LyricsPane, Pane, format_clock};
     use crate::{
         mpd::commands::{Song, State},
         shared::mouse_event::{MouseEvent, MouseEventKind},
@@ -2439,13 +2378,6 @@ mod tests {
     }
 
     #[test]
-    fn wrap_to_width_breaks_on_words_and_keeps_paragraphs() {
-        assert_eq!(wrap_to_width("one two three", 8), vec!["one two", "three"]);
-        assert_eq!(wrap_to_width("short", 20), vec!["short"]);
-        assert_eq!(wrap_to_width("a\nb", 5), vec!["a", "b"]);
-    }
-
-    #[test]
     fn find_url_finds_schemes_and_trims_trailing_punctuation() {
         use super::find_url;
         // Plain https/http schemes.
@@ -2516,7 +2448,7 @@ mod tests {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod schedule_tests {
-    use super::{LyricsPane, Pane, wrap_to_width};
+    use super::{LyricsPane, Pane};
     use crate::{tests::fixtures::ctx, ui::UiEvent};
 
     #[test]
