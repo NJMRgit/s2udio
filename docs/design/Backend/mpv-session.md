@@ -7,11 +7,12 @@ description: >
   The mpv video session: launch, IPC socket discovery, the 100 ms poll,
   item switching, reattach, preference chains and the caretaker daemon.
 status: "current"
-updated: "2026-08-07"
+updated: "2026-08-11"
 source_files:
   - src/core/mpv.rs
   - src/core/event_loop.rs
   - src/ui/panes/queue.rs
+  - src/ui/panes/queue/video.rs (video queue entries / follow_playing_video; moved out of queue.rs in Phase 4b)
   - scripts/s2u-mpv-tracker (installed to ~/.local/bin)
   - tests/tracker/test_tracker.py
 related:

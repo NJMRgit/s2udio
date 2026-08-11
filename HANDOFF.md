@@ -350,7 +350,7 @@ build/run the TUI. `assets/example_config.ron` + `assets/default.jpg` are
 compiled in — never delete. Old history is preserved at the local
 `pre-restructure` tag.
 
-## UI reuse rewrite (branch `rewrite` — in progress)
+## UI reuse rewrite (branch `rewrite` — COMPLETE 2026-08-11)
 
 The **UI reuse rewrite** (`docs/design/Rewrite/ui-reuse-rewrite.md`, branch
 `rewrite` of `NJMRgit/s2udio-working`) consolidates `src/ui` around master
@@ -484,8 +484,38 @@ Status (2026-08-11):
   block + thin adapter over the shared cores, never a new core; the four
   adapters stay per-backend (radio focus/regions tree, jellyfin shared
   selection/poster, playlists list-shaped pane, directories Downloads —
-  a backend enum would fork, §3 rule). **Next: 7 — close-out; phase-4/5/6
-  host live-checks pending (plan §8 of each).**
+  a backend enum would fork, §3 rule). **Next: 7 — close-out (done
+  2026-08-11, see below).**
+- **Phase 7 ✅ (rewrite CLOSE-OUT, 2026-08-11, `4512fbf` + 7.2 + 7.3,
+  docs/metrics only, zero code edits):** FINAL LOC comparison
+  `24bd883` vs `HEAD` (outline §2.4 + §5.6 per-phase table: src/ui
+  56,704 → 57,318 **+614**, tree 95,811 → 96,797 **+986** — LOC-positive
+  overall, reported plainly; the user priority is extensibility +
+  predictable behavior, LOC is a proxy not a gate); docs/design
+  `source_files`/`related` sweep (stale paths fixed, `updated:` bumped —
+  queue submodules, marquee/wrap/sub_tab_bar widgets, `select_section.rs`
+  gone, README index); HANDOFF → final (this section); notes.md
+  rewrite-complete block; `docs/design/Rewrite/REVIEW.md` (new — branch
+  state, review recipe, remaining host live-checks, caveats); session log
+  entry. 1337/1337, warnings 3 baseline, guardrail 60 excl-thin after
+  every commit. **Next → none: the rewrite is complete; `master`
+  untouched; the host pushes `rewrite` (user rule: agent never pushes).**
+
+**Remaining host live-checks (rewrite, from plan §8 of phases 4b/5/6 —
+see REVIEW.md):** queue tab Audio/Video/Chapters behavior, marks, context
+menus, toggle row, scrollbars (4b); controls carousel cycle, lyrics
+header cluster + info marquee + wrap, jellyfin overview wrap, property
+scrolling line (5); the four browser tabs at ~70 vs wide widths, info
+boxes ≈ 15 rows, a config override `tree_min_width: 60` /
+`info_box_cap: None` followed by a restart, the round-23 config needing
+NO edits (6).
+
+**Known caveat (recorded):** `src/config/tabs.rs` uses
+`serde::__private228` (the versioned hidden module the derive uses;
+Cargo.lock pins serde 1.0.228) for the manual `PaneTypeFile`
+Deserialize. A future `cargo update` past 1.0.228 needs the suffix
+bumped — a one-line change (`__private228` → the new version), pinned by
+`bare_browser_panes_parse_with_default_tree_args`.
 
 Toolchain env (container): `export PATH="$HOME/.cargo/bin:$PATH"`
 `export RUSTUP_HOME="$HOME/.rustup" CARGO_HOME="$HOME/.cargo"`.

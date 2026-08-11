@@ -7,12 +7,13 @@ description: >
   Chapter marker sources, keying, the queue's Chapters view and seek
   routing to MPD or mpv.
 status: "current"
-updated: "2026-08-05"
+updated: "2026-08-11"
 source_files:
   - src/shared/ytdlp/stream.rs
   - src/jellyfin/mod.rs
   - src/core/mpv.rs
   - src/ui/panes/queue.rs
+  - src/ui/panes/queue/chapters.rs (Chapters view + seek routing; moved out of queue.rs in Phase 4b)
 related:
   - backend/ytdlp-resolution
   - tabs/queue-tab

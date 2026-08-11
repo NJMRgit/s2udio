@@ -7,7 +7,7 @@ description: >
   Entry point for the s2udio design documentation hierarchy: Backend flow
   references, shared Frontend design constraints and per-tab specs.
 status: "current"
-updated: "2026-08-05"
+updated: "2026-08-11"
 tags: [index, design, s2udio]
 ---
 
@@ -58,9 +58,13 @@ docs/design/
 │   ├── mpris-validation.md       ← MPRIS & art: timeline/art/track-info across every source
 │   └── distro-support.md         ← distro support: podman test harness, target matrix, gates, roadmap
 ├── Rewrite/                      ← the UI reuse rewrite (branch `rewrite` in s2udio-working)
-│   ├── ui-reuse-rewrite.md       ← project outline: audit, master-module architecture, phases
+│   ├── ui-reuse-rewrite.md       ← project outline: audit, master-module architecture, phases, close-outs
+│   ├── REVIEW.md                 ← branch-state review: phase table, review recipe, live-checks, caveats
 │   ├── new-browser-tab.md        ← construction pattern: config block + adapter, no new pane file
-│   └── phase6-args-expansion.md  ← phase-6 handoff plan (args expansion)
+│   ├── phase4b-queue-decomposition.md  ← phase-4b handoff plan (queue split; done)
+│   ├── phase5-drawing-widgets.md ← phase-5 handoff plan (marquee/wrap widgets; done)
+│   ├── phase6-args-expansion.md  ← phase-6 handoff plan (args expansion; done)
+│   └── phase7-closeout.md        ← phase-7 close-out plan (docs + metrics; done)
 └── Sessions/                     ← session work logs (one file per session)
     └── 2026-08-05.md             ← the session log (create/maintain per HANDOFF)
 ```

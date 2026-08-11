@@ -10,7 +10,7 @@ description: >
   s2udio-downloads folder and how a downloaded file replaces the stream
   it came from.
 status: "current"
-updated: "2026-08-08"
+updated: "2026-08-11"
 source_files:
   - src/ui/panes/controls.rs
   - src/ui/modals/paste.rs
@@ -21,6 +21,8 @@ source_files:
   - src/shared/mpd_client_ext.rs
   - src/ui/panes/directories.rs
   - src/ui/panes/queue.rs
+  - src/ui/panes/queue/video.rs (video-queue Download; moved out of queue.rs in Phase 4b)
+  - src/ui/panes/queue/context_menus.rs (right-click Download item; moved out of queue.rs in Phase 4b)
   - src/ui/panes/playlists.rs
 related:
   - backend/ytdlp-resolution

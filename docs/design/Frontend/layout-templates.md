@@ -8,7 +8,7 @@ description: >
   lyrics/info combo, the video info box, the browser template, the
   now-playing bar and the modal templates.
 status: "current"
-updated: "2026-08-07"
+updated: "2026-08-11"
 source_files:
   - src/config/theme/mod.rs
   - src/ui/tab_screen.rs
@@ -20,6 +20,9 @@ source_files:
   - src/ui/panes/radio.rs
   - src/ui/panes/jellyfin.rs
   - src/ui/modals/settings.rs
+  - src/ui/widgets/marquee.rs (now-playing marquee/carousel cycle; extracted in Phase 5)
+  - src/ui/widgets/wrap.rs (description wrapping; extracted in Phase 5)
+  - src/ui/widgets/sub_tab_bar.rs (the `● Audio ○ Video ○ Chapters` spacer row; extracted in Phase 4a)
 related:
   - frontend/colors-typography
   - frontend/glyphs
