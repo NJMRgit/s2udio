@@ -9,7 +9,7 @@ description: >
   back-out, wheel scrolling, modal key consumption and the mouse-over
   (hover) effects.
 status: "current"
-updated: "2026-08-10"
+updated: "2026-08-11"
 source_files:
   - src/core/input.rs
   - src/config/keys/mod.rs
@@ -20,6 +20,9 @@ source_files:
   - src/ui/modals/confirm_modal.rs
   - src/ui/modals/settings.rs
   - src/ui/panes/queue.rs
+  - src/ui/panes/queue/video.rs (video-list interaction; moved out of queue.rs in Phase 4b)
+  - src/ui/panes/queue/chapters.rs (chapters-list interaction; moved out of queue.rs in Phase 4b)
+  - src/ui/panes/queue/context_menus.rs (Enter/right-click context menus; moved out of queue.rs in Phase 4b)
   - src/ui/panes/directories.rs
   - src/ui/panes/playlists.rs
   - src/ui/panes/radio.rs
@@ -30,8 +33,7 @@ source_files:
   - src/ui/panes/queue_header.rs
   - src/ui/panes/progress_bar.rs
   - src/ui/widgets/button.rs
-  - src/ui/modals/menu/list_section.rs
-  - src/ui/modals/menu/select_section.rs
+  - src/ui/modals/menu/list_section.rs (select_section merged here in Phase 3)
   - src/ui/modals/menu/multi_action_section.rs
   - src/ui/modals/menu/input_section.rs
   - src/ui/panes/jellyfin.rs

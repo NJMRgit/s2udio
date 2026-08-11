@@ -1,3 +1,31 @@
+# Notes for the container agent — REWRITE MERGED to main (2026-08-11)
+
+## REWRITE MERGED to main (2026-08-11) — host push
+
+The UI-reuse rewrite (phases 0-7) is now **the production `master`**
+(`NJMRgit/s2udio` @ `bcf742c`, clean buildable subset — a merge commit
+carrying both the old release `a5cd24d` and the rewrite lineage, full
+history preserved). The full tree lives on this private repo's `working`
+branch @ `05a3e94` (rewrite phases 0-7 on top of the round-23..27
+lineage); the separate `rewrite` branch was folded into `working` and
+deleted on 2026-08-11. Prior master release preserved at
+tag `master-20260811-pre-rewrite` (`a5cd24d`).
+
+Host final assessment (2026-08-11): gate reproduced exactly — **1337/1337
+tests, 3 warnings (release build), similarity guardrail 60 excl-thin,
+src/ui 56,704 → 57,318 / tree 95,811 → 96,797** vs `24bd883`; all pending
+live-checks (phases 4b/5/6) passed: queue sub-tabs/context menu/marks,
+controls carousel marquee (scroll + 5-col-gap wrap), lyrics pane +
+`● hide lyrics | ● fetch lyrics` cluster, jellyfin video info marquee +
+`Description ↴` wrap, the four browser tabs at 70/150 cols, and the
+`tree_min_width: 60` / `info_box_cap: None` config override (restored
+after). Round-23 config parsed with no edits.
+
+**Next: nothing on `rewrite`; no new rewrite work. Master is the rewrite.**
+Known caveat carried over: `serde::__private228` in `src/config/tabs.rs`
+needs a one-line suffix bump on any `cargo update` past serde 1.0.228.
+
+---
 # Notes for the container agent — round 23 CLOSED (host)
 
 ## REPO LAYOUT (2026-08-09 restructure — READ BEFORE PUSHING)
@@ -22,6 +50,42 @@ branch on the public/distribution repo anymore.
 - The pre-restructure history is preserved locally at the
   `pre-restructure` tag.
 
+---
+Date: 2026-08-11 · Branch: `rewrite`
+
+## UI REUSE REWRITE — COMPLETE (Phases 0–7, close-out 2026-08-11)
+
+The UI-reuse rewrite (`docs/design/Rewrite/ui-reuse-rewrite.md`) is
+**done** on branch `rewrite` (private `NJMRgit/s2udio-working` only;
+distribution `master` untouched). Working tree is clean at HEAD; the
+branch is **ahead 38 of `origin/rewrite` (which sits at the Phase-0
+baseline `24bd883`) — UNPUSHED by design (user rule: the agent never
+pushes; the host pushes separately).**
+
+- **Phases 0–7 all ✅** — one implementation per shape via the shared
+  cores: `SongListCore` (Phase 1), `TreeBrowserCore` (Phase 2), `ListModal`/
+  `InfoListModal` masters (Phase 3), `SubTabBar` (4a), queue.rs split into
+  `queue/{context_menus,video,chapters}.rs` (4b), marquee/wrap widgets
+  (Phase 5), `TreeBrowserArgs` config args (Phase 6), close-out docs +
+  metrics (Phase 7). Full commit list + numbers: REVIEW.md.
+- **Gate at HEAD: 1337/1337 tests** (baseline 1312), warnings 3 baseline,
+  similarity guardrail **60 excl-thin pairs**. No code changed in Phase 7.
+- **LOC is LOC-positive overall, reported plainly**: src/ui 56,704 →
+  57,318 (+614), tree 95,811 → 96,797 (+986) vs the `24bd883` baseline —
+  the master-module pattern front-loads the shared cores; the user
+  priority is extensibility + predictable behavior (LOC is a proxy, not
+  a gate). Per-phase ref-to-ref table: outline §5.6.
+- **Host live-checks still pending** (phases 4b/5/6 — queue tab
+  behaviors; controls/lyrics/jellyfin marquee+wrap; the four browser
+  tabs' tree args at ~70 vs wide widths + a config override + the
+  round-23 config parsing with NO edits). List: REVIEW.md.
+- **Serde caveat**: `src/config/tabs.rs` uses `serde::__private228`
+  (lockfile pins serde 1.0.228); a future `cargo update` past 1.0.228
+  needs the suffix bumped (one line).
+- **Next: nothing on `rewrite`.** The host reviews (REVIEW.md), runs the
+  live-checks, then pushes. Do NOT start new rewrite work; do NOT push.
+
+---
 Date: 2026-08-10 · Branch: `working`
 
 ## RELEASED to main (2026-08-10) — rounds 23-27 on NJMRgit/s2udio master (`a5cd24d`)

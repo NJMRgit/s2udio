@@ -8,11 +8,15 @@ description: >
   merged queue box, the playing marker, album sorting and the video
   playlist.
 status: "current"
-updated: "2026-08-05"
+updated: "2026-08-11"
 source_files:
   - src/ui/panes/queue.rs
+  - src/ui/panes/queue/context_menus.rs (context menus; moved out of queue.rs in Phase 4b)
+  - src/ui/panes/queue/video.rs (Video sub-tab; moved out of queue.rs in Phase 4b)
+  - src/ui/panes/queue/chapters.rs (Chapters sub-tab; moved out of queue.rs in Phase 4b)
   - src/ui/panes/queue_header.rs
   - src/ui/tab_screen.rs
+  - src/ui/widgets/sub_tab_bar.rs (the `● Audio ○ Video ○ Chapters` toggle row; extracted in Phase 4a)
 related:
   - backend/mpd-playback
   - backend/mpv-session

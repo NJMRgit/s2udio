@@ -7,7 +7,7 @@ description: >
   The glyph inventory the UI relies on, with the one-cell constraint every
   symbol must satisfy in the user's terminal font.
 status: "current"
-updated: "2026-08-05"
+updated: "2026-08-11"
 source_files:
   - src/ui/panes/queue.rs
   - src/ui/panes/queue_header.rs
@@ -15,6 +15,7 @@ source_files:
   - src/ui/panes/album_art.rs
   - src/ui/modals/settings.rs
   - src/config/theme/mod.rs
+  - src/ui/widgets/sub_tab_bar.rs (the `● Audio ○ Video ○ Chapters` toggle row; extracted in Phase 4a)
 related:
   - frontend/colors-typography
   - frontend/layout-templates

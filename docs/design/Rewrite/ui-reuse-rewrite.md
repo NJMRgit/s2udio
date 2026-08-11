@@ -8,12 +8,15 @@ description: >
   audit of shared vs bespoke UI code, the master-module-with-args target
   architecture, and the phased consolidation plan.
 status: "active"
-phase_status: "0: complete (2026-08-10); 1: complete (2026-08-10); 2: complete (2026-08-10); 2.1: complete (2026-08-10); 3: complete (2026-08-10)"
-updated: "2026-08-10"
+phase_status: "0: complete (2026-08-10); 1: complete (2026-08-10); 2: complete (2026-08-10); 2.1: complete (2026-08-10); 3: complete (2026-08-10); 4a: complete (2026-08-11); 4b: complete (2026-08-11); 5: complete (2026-08-11); 6: complete (2026-08-11); 7: complete (2026-08-11)"
+updated: "2026-08-11"
 source_files:
   - src/ui/browser.rs
   - src/ui/panes/mod.rs
   - src/ui/panes/queue.rs
+  - src/ui/panes/queue/context_menus.rs
+  - src/ui/panes/queue/video.rs
+  - src/ui/panes/queue/chapters.rs
   - src/ui/panes/directories.rs
   - src/ui/panes/jellyfin.rs
   - src/ui/panes/radio.rs
@@ -21,11 +24,22 @@ source_files:
   - src/ui/panes/playlists.rs
   - src/ui/panes/tag_browser.rs
   - src/ui/panes/albums.rs
+  - src/ui/panes/controls.rs
+  - src/ui/panes/lyrics.rs
+  - src/ui/song_list.rs
   - src/ui/tree_browser.rs
+  - src/ui/widgets/marquee.rs
+  - src/ui/widgets/wrap.rs
+  - src/ui/widgets/sub_tab_bar.rs
   - src/ui/modals/*
   - src/config/tabs.rs
+  - scripts/dev/ui-metrics.py
 related:
   - rewrite/phase4b
+  - rewrite/phase5
+  - rewrite/phase6
+  - rewrite/phase7
+  - rewrite/new-browser-tab
   - frontend/layout-templates
   - frontend/interaction
   - tabs/queue-tab
@@ -177,17 +191,23 @@ directories items, picker modals) re-implemented the same mechanics.
 Each new feature then gets bolted onto whichever copy is nearest — which
 is exactly the drift the user wants to end.
 
-### 2.4 Phase-0 LOC baseline (measured 2026-08-10 @ `24bd883`)
+### 2.4 Phase-0 LOC baseline and FINAL comparison (measured `24bd883` vs `HEAD`)
 
 Full per-file LOC for `src/ui` is regenerable any time with
 `python3 scripts/dev/ui-metrics.py` (reads the working tree; `--ref <git>` for a
-ref). Key numbers and audited files:
+ref — the file list AND the contents come from the ref, so always diff
+committed refs). The Phase-0 baseline was measured 2026-08-10 at `24bd883`;
+the final comparison (Phase 7, 2026-08-11) is `24bd883` vs `HEAD`. Key
+numbers and audited files:
 
-- **`src/ui` total: 56,704 LOC** (82 files) — 59.2% of the 95,811 total `.rs`
-  LOC (includes `build.rs`).
+- **`src/ui` total: 56,704 → 57,318 LOC** (82 → 90 files) — 59.2% of the
+  95,811 total `.rs` LOC at baseline (includes `build.rs`); **+614 LOC
+  overall** (see the per-phase table in §5.6).
+- **tree total `.rs`: 95,811 → 96,797 (+986)** — includes `src/config`
+  (the Phase-6 `TreeBrowserArgs` serde machinery, `tabs.rs` 1277 → 1672).
 - Audited pane/browser/modal files:
 
-| File | LOC (baseline `24bd883` → now) |
+| File | LOC (baseline `24bd883` → `HEAD`, final) |
 | --- | --- |
 | `src/ui/browser.rs` | 1041 → 232 |
 | `src/ui/panes/mod.rs` | 3100 → 3100 |
@@ -195,18 +215,18 @@ ref). Key numbers and audited files:
 | `src/ui/panes/queue/context_menus.rs` | — → 347 (4b submodule) |
 | `src/ui/panes/queue/video.rs` | — → 373 (4b submodule) |
 | `src/ui/panes/queue/chapters.rs` | — → 325 (4b submodule) |
-| `src/ui/panes/directories.rs` | 2259 → 2121 |
-| `src/ui/panes/jellyfin.rs` | 2845 → 2703 |
-| `src/ui/panes/radio.rs` | 2356 → 2431 |
+| `src/ui/panes/directories.rs` | 2259 → 2155 |
+| `src/ui/panes/jellyfin.rs` | 2845 → 2736 |
+| `src/ui/panes/radio.rs` | 2356 → 2467 |
 | `src/ui/panes/search/mod.rs` | 2039 → 1803 |
-| `src/ui/panes/playlists.rs` | 1716 → 1755 |
+| `src/ui/panes/playlists.rs` | 1716 → 1759 |
 | `src/ui/panes/tag_browser.rs` | 588 → 628 |
 | `src/ui/panes/albums.rs` | 190 → 229 |
 | `src/ui/panes/controls.rs` | 1516 → 1319 |
 | `src/ui/panes/lyrics.rs` | 2543 → 2475 |
 | `src/ui/song_list.rs` | — → 955 (Phase 1 core) |
-| `src/ui/tree_browser.rs` | — → 602 (Phase 2 core; +4 Phase 2.1) |
-| `src/ui/modals/list_modal.rs` | — → 763 (Phase 3 core; +tests) |
+| `src/ui/tree_browser.rs` | — → 610 (Phase 2 core; +8 Phase 2.1/6) |
+| `src/ui/modals/list_modal.rs` | — → 765 (Phase 3 core; +tests) |
 | `src/ui/modals/select_modal.rs` | 317 → 90 (Phase 3 thin adapter) |
 | `src/ui/modals/torrent_file_picker.rs` | 501 → 141 (Phase 3 thin adapter) |
 | `src/ui/modals/info_list_modal.rs` | 330 → 453 (Phase 3 core; +tests) |
@@ -218,29 +238,38 @@ ref). Key numbers and audited files:
 | `src/ui/modals/outputs.rs` | 258 → 258 (kept — see §5.2) |
 | `src/ui/widgets/marquee.rs` | — → 282 (Phase 5 core: carousel cycle + marquee) |
 | `src/ui/widgets/wrap.rs` | — → 84 (Phase 5 core: wrap helpers) |
-| **src/ui total** | **56,704 → 57,173** |
-| **tree total .rs** | **95,811 → 96,231** |
+| `src/ui/widgets/sub_tab_bar.rs` | — → 149 (Phase 4a core: `● Audio ○ Video ○ Chapters`) |
+| `src/config/tabs.rs` | 1277 → 1672 (Phase 6: `TreeBrowserArgs` + manual serde; see §5.5) |
+| **src/ui total** | **56,704 → 57,318 (+614)** |
+| **tree total .rs** | **95,811 → 96,797 (+986)** |
 
-Similarity guardrail baseline: **83 same-named function pairs with ratio > 0.5**
-across `src/ui` (full list: `python3 scripts/dev/ui-metrics.py --pairs`).
-Since Phase 1 the script excludes the *thin-adapter* method names (the
+Similarity guardrail (FINAL, measured with the current
+`scripts/dev/ui-metrics.py` at both refs): **83 same-named function pairs
+with ratio > 0.5** across `src/ui` at baseline `24bd883` (incl. thin
+adapters; full list: `python3 scripts/dev/ui-metrics.py --pairs`). The
+script excludes the *thin-adapter* method names (the
 `SongListCore`/`BrowserPane`/`TreeBrowserCore` hooks + accessors + shared
-defaults — those are the intended shared call sites, not duplication): **51
-non-thin pairs > 0.5** at baseline `24bd883`, still **51 after Phase 1** (the
-9 new pairs — `stack`/`stack_mut`/`browser_areas` in browser.rs ↔ panes — are
-the thin accessors; zero new real duplication). After Phase 2 the count is
-**60**: the 9 heavy tree-family pairs (`cleanup_temp_play` ×2, `handle_action`
-directories↔jellyfin, `move_items`, `render` ×2, `render_tips` ×2,
-`selected_item`) and the `on_event` jellyfin↔radio temp-play pair are gone
-(moved into `tree_browser.rs`); the ~18 added pairs are thin Pane-delegator
-shells (`render`/`handle_action`/`handle_mouse_event`/`on_event` routing to
-the core — the same category the baseline already carried, e.g. `handle_action`
-mod.rs↔lyrics 1.00). Phase 2 targets the heavy duplicated pairs
-(`render_tree`, `render_items`, `render_tips`, `move_*`, `populate_items`, …)
-from §2.2 — all deleted from the panes. After Phase 2.1 the count is
-**unchanged at 60** (identical pair set; the `items_title`
-directories↔radio pair dropped 0.61 → 0.37 — the pre-padded titles are
-shorter/less alike now).
+defaults — the intended shared call sites, not duplication; the list grew
+with the phases: Phase 1 added the SongListCore/BrowserPane hooks, Phase 2
+the TreeBrowserCore hooks, Phase 6 `tree_args`). **Final counts: 42
+non-thin pairs > 0.5 at baseline `24bd883`, 60 at `HEAD`** — the historical
+"51 at baseline / 51 after Phase 1" figures in the phase-1 close-out were
+measured with the then-current (smaller) thin list; with the FINAL list the
+same baseline measures 42 (the five additional excluded names are the
+Phase-2 tree-family names `cleanup_temp_play`, `move_items`, `render_tips`,
+`select_items_item`, `selected_item` — now shared-core hooks, 9 pairs).
+After Phase 2 the count is **60**: the heavy tree-family pairs
+(`cleanup_temp_play` ×2, `handle_action` directories↔jellyfin, `move_items`,
+`render` ×2, `render_tips` ×2, `selected_item`) and the `on_event`
+jellyfin↔radio temp-play pair are gone (moved into `tree_browser.rs`); the
+~18 added pairs are thin Pane-delegator shells (`render`/`handle_action`/
+`handle_mouse_event`/`on_event` routing to the core — the same category the
+baseline already carried, e.g. `handle_action` mod.rs↔lyrics 1.00). The
+count is **unchanged at 60 after every later phase** (2.1, 3, 4a, 4b, 5, 6,
+7 — identical pair set through HEAD; the Phase-2.1 `items_title`
+directories↔radio pair dropped 0.61 → 0.37, and Phase 4b's moved functions
+keep unique names so the split adds no new pairs). Final gate: **60
+excl-thin pairs at HEAD**.
 
 ## 3. Target architecture — master modules + args
 
@@ -442,8 +471,8 @@ with a behavior-parity live check of the affected tabs.
 | 3 | Modal consolidation onto `ListModal`/`InfoListModal` + section merge | `ui/modals/*` | ✅ (2026-08-10, commits `a5aac04`+`53b9e90`): `ListModal<'a, V>` master in `src/ui/modals/list_modal.rs` (args: row/size fns, buttons/confirm_buttons, multi-select + mark_id, bottom title, padding, wheel mode, scrollbar drag); `SelectModal` (317 → 90) + `TorrentFilePicker` (501 → 141) are thin adapters with unchanged public builders — all 15 call sites + the paste picker tests untouched. `menu/select_section.rs` merged into `list_section.rs` (value items + section-level `action`), `SectionType::Select` + 16 dispatch arms deleted. `InfoListModal` generalized to N columns + `header` arg and absorbs `DecodersModal` (248 → 67). 1326/1326 green (+8: 4 ListModal + 4 InfoListModal behavior pins incl. the unified click-row mapping); warnings 3 baseline; similarity guardrail unchanged (60 excl-thin — modals are not in `PANE_FILES`). Net LOC: **src/ui −61** (56,923 → 56,862), tree −110 (96,030 → 95,920) — short of the −600–900 target for the same reason Phase 2 was (+51): the master modules (+763 list_modal, +123 info_list incl. tests) cost more than the thinned consumers saved (select −227, torrent −360, decoders −181, select_section −210); the phase trades raw LOC for one-implementation-by-construction, and the args/config end-state that actually shrinks consumers is Phase 6. Deliberate delta + kept-modals rationale in §5.2. |
 | 4 | QueuePane decomposition: Audio list → `SongListCore`, toggle → `SubTabBar`, Video/Chapters stay as focused specs | `ui/panes/queue.rs` | Queue tab live-check (Audio/Video/Chapters, merged box, esc-deselect, marks); **–~1–1.5k LOC** in queue.rs. **4a ✅ (`9b46f54`): `SubTabBar` widget. 4b ✅ (`5bf5a18`+`80b4844`+`c81cb2f`+4b4 close-out): queue.rs decomposed into the module root + `queue/context_menus.rs` + `queue/video.rs` + `queue/chapters.rs` (4447 → 3485, production −962; zero test edits, 1328/1328) — close-out §5.3. Host live-check (§8 of the 4b plan) pending.** |
 | 5 | Shared drawing widgets (marquee/wrap/button cluster) from controls/lyrics | `ui/panes/controls.rs`, `lyrics.rs`, `ui/widgets/` | ✅ (2026-08-11, `483a73c`+`490c62e`+`2fcb10c`+`ef4863f`+5b5 close-out): `MarqueeLine` (`ui/widgets/marquee.rs`, 282) + wrap helpers (`ui/widgets/wrap.rs`, 84) extracted with the carousel cycle math untouched; controls (2 render sites) + lyrics + jellyfin adopt the marquee widget, lyrics + jellyfin adopt wrap — ≥2 call sites each. Button cluster + now-playing templates: **documented decisions NOT to merge** (§3 — three cluster shapes / two line-template shapes, see §5.4). 1328/1328 after each commit, warnings 3 baseline, guardrail 60 excl-thin identical pair set. Live check (§8 of the plan) pending. |
-| 6 | Args expansion: pane-specific constants move into `PaneType`/config args | `src/config/tabs.rs`, panes | Adding a new browser tab = config block + adapter, no new pane file; sidecars migrate cleanly. |
-| 7 | Close-out | — | Final LOC comparison vs baseline; docs (`docs/design/`) `source_files` updated; HANDOFF/notes updated; `rewrite` branch state documented for review. |
+| 6 | Args expansion: pane-specific constants move into `PaneType`/config args | `src/config/tabs.rs`, panes | ✅ (2026-08-11, `4a5b054`+`a1caf6b`+`9abb201`+6.4 close-out): `TreeBrowserArgs` (50/120/Some(15) serde defaults) on the four browser variants (both enums; custom `Deserialize` keeps bare `Directories` parsing — see §5.5); the four panes + `TreeBrowserCore` read the args (tree min width / hide threshold / info cap; defaults = today's constants); construction pattern documented in `docs/design/Rewrite/new-browser-tab.md` (config block + thin adapter, never a new core; the four adapters stay per-backend — §5.5 decision). 1337/1337, warnings 3, guardrail 60 excl-thin. |
+| 7 | Close-out | — | ✅ (2026-08-11, commits 7.1–7.3): FINAL LOC comparison `24bd883` vs `HEAD` (§2.4 + §5.6 per-phase table); docs/design `source_files` sweep; HANDOFF/notes final state; `REVIEW.md` branch-state writeup; session log. 1337/1337, warnings 3, guardrail 60 excl-thin. |
 
 Rough order of business for isodev: **Phase 1 first** (highest leverage,
 smallest blast radius), then 2 and 3 in either order, then 4–6. Phases 1–3
@@ -680,6 +709,154 @@ so new files are only counted once committed):**
 **Remaining:** the phase-5 host live-check (plan §8 — controls carousel
 cycle, lyrics header cluster + info marquee + wrap, jellyfin overview
 wrap, property scrolling line); then Phase 6 (args expansion).
+
+### 5.5 Phase 6 — args expansion close-out ✅ (2026-08-11)
+
+Phase 6 moved the pane-specific browser constants into `PaneType`/config
+args per the handoff plan `docs/design/Rewrite/phase6-args-expansion.md`,
+in four commits on `rewrite` (each independently green, **1337/1337** at
+the close — 1328 baseline + 9 new tests — warnings 3 baseline unchanged,
+similarity guardrail **60 excl-thin pairs with an identical pair set**
+before/after; `tree_args` was added to the script's thin-adapter list, the
+same category as the Phase-1/2 hook accessors):
+
+| Commit | Work | 
+| --- | --- |
+| `4a5b054` (6.1) | `TreeBrowserArgs` (serde + explicit `Default`: 50 / 120 / Some(15)) + the four variant fields on both `PaneTypeFile` and `PaneType`; manual `Deserialize` for `PaneTypeFile` (see below); the TryFrom conversion + every exhaustive match the compiler flagged (`{ .. }`); tests: bare-`Directories` parse with default args, explicit-args round-trip, defaults = today's constants |
+| `a1caf6b` (6.2) | the four browser panes + `TreeBrowserCore` read the args: `TreeBrowserArgs::tree_width`/`info_box_height` (defaults = today's `tree_width()` / `.min(15)`), `Config::tree_browser_args` (first occurrence), a `tree_args` hook on `TreeBrowserCore` driving the shared `split_tree`, per-pane `layout_vertical`/render; the tree-width + info-cap parity tests stay green UNCHANGED; one new test per pane (directories + playlists + jellyfin: non-default args change the layout; radio: args plumb in, the 30% regions tree keeps its shape) |
+| `9abb201` (6.3) | construction pattern: **documented decision** — recipe `docs/design/Rewrite/new-browser-tab.md` (config block + thin adapter over `TreeBrowserCore`/`BrowserPane`, never a new core) + a config→args bridge test; see the decision below |
+| 6.4 (close-out) | docs + metrics (this section, §2.4, HANDOFF, plan flipped done, session log) |
+
+**Backward compatibility (the load-bearing requirement).** A config.ron in
+today's syntax — bare `Directories` / `Playlists` / `Jellyfin` / `Radio`
+— parses with the default args; the round-23 config needs no edits. The
+plan's §3 assumption that `#[serde(default)]` alone gives this "for free"
+is **not** true for RON: a struct variant cannot be deserialized from its
+unit form, so `PaneTypeFile`'s `Deserialize` is manual — it captures the
+value with serde's Content (`serde::__private228`, the versioned hidden
+module the derive itself uses; pinned by the lockfile), dispatches bare
+unit names to the variant with default args, rewrites the captured
+`{Variant: ()}` zero-tuple shape into the replay form `{Variant: Seq([])}`
+(required because RON's value capture encodes every parenthesized variant
+as a map, while serde's tuple-variant replay needs a sequence), and
+replays the rest into a derived mirror enum (`PaneTypeFileArgs`, the same
+shapes with `#[serde(default)] tree`) before converting. Pinned by
+`bare_browser_panes_parse_with_default_tree_args` (all four panes) +
+`explicit_tree_args_round_trip` + `default_args_are_today_s_constants`;
+the example config/theme (with `Pane(Radio)`, `Pane(Empty())`,
+`Property(Status(InputBuffer()))` …) parse unchanged.
+
+**§6.3 decision (Phase-5 §3 rule — do NOT unify the four adapters).** The
+outline's exit criterion — "adding a new browser tab = config block +
+adapter, no new pane file" — is met by construction: the four browser
+panes are already thin adapters over `TreeBrowserCore` (directories /
+jellyfin / radio) and `BrowserPane`+`SongListCore` (playlists); a new
+backend implements the ~15 tree hooks / 4 browser hooks + data fetch, adds
+a `PaneType` block with `tree: TreeBrowserArgs`, and the shared core
+provides render/mouse/actions. The recipe is `docs/design/Rewrite/
+new-browser-tab.md` (plus a config→args bridge test
+`config_tree_browser_args_read_the_first_occurrence_args`). Unifying the
+four panes into ONE config-driven backend enum was attempted and rejected:
+it would change observable behavior in four pinned places — radio's
+focus-aware back-out + always-visible 30% regions tree (its own
+`split_tree`, never collapsed), jellyfin's shared tree/items selection +
+poster/info overlay + season expansion, playlists' list-shaped left pane
+(`BrowserPane`, ♪/▶ kind prefixes — not a collapsible tree), and
+directories' disk-backed never-cached Downloads folder. A backend enum
+would need per-backend special cases for all four — a fork, not an arg
+(the §2.3 root cause this rewrite exists to end). The cores stay one
+implementation per shape; the panes stay thin per-backend adapters.
+
+**Real numbers (ref-to-ref, `ui-metrics.py --ref 5a2ce9d` vs `--ref HEAD`
+— the script's default reads the file list from HEAD and contents from
+the worktree, so both sides must be committed refs):**
+
+- `src/config/tabs.rs` 1277 → 1672 (+395: `TreeBrowserArgs` + the manual
+  `Deserialize` machinery + the mirror enum + 4 tests); `config/mod.rs`
+  1050 → 1076 (+26: `Config::tree_browser_args`).
+- `src/ui/tree_browser.rs` 602 → 610 (+8: the `tree_args` hook);
+  `directories.rs` 2121 → 2155, `jellyfin.rs` 2703 → 2736,
+  `radio.rs` 2431 → 2467 (args field + constructor lookup + hook override
+  + per-pane tests), `playlists.rs` 1755 → 1759 (+ render reads the args),
+  `playlists/tests.rs` 1524 → 1554 (+2 layout tests).
+- Match-churn files (panes/mod.rs, tab_help.rs, ui/mod.rs, paste.rs,
+  event_loop.rs, work.rs) are line-count-neutral (pure `{ .. }` / args
+  construction churn).
+- Net LOC: **src/ui +145** (57,173 → 57,318), tree total .rs **+566**
+  (96,231 → 96,797) — the phase front-loads the args/plumbing side (the
+  serde machinery alone is +300 LOC of the tabs.rs delta; the
+  backward-compat mechanism is the price of the load-bearing guarantee).
+  Consumer paydown is the phase-7 close-out comparison.
+- Tests **1328 → 1337** (+9: 3 config/args pins in 6.1, 5 per-pane layout
+  tests in 6.2, 1 config→args bridge in 6.3); the tree-width +
+  info-box-cap parity tests are byte-unchanged.
+- Similarity guardrail **60 excl-thin before and after** (thin-adapter
+  count 140 → 143 — the three `tree_args` overrides are thin accessors).
+
+**Remaining:** the phase-6 host live-check (plan §8 — the four browser
+tabs at ~70 vs wide widths, info boxes ≈ 15 rows, a config override
+`tree_min_width: 60` / `info_box_cap: None` followed by a restart, and the
+round-23 config needing NO edits); then Phase 7 (close-out).
+
+### 5.6 Phase 7 — rewrite close-out ✅ (2026-08-11)
+
+Phase 7 closed the rewrite: FINAL metrics, the docs/design `source_files`
+sweep, HANDOFF/notes final state, the branch-state writeup and the session
+log — docs/metrics only, **zero code edits**. Three commits on `rewrite`,
+each independently green (**1337/1337**, warnings 3 baseline unchanged,
+similarity guardrail **60 excl-thin** after every commit):
+
+| Commit | Contents |
+| --- | --- |
+| 7.1 (docs) | FINAL LOC comparison `24bd883` vs `HEAD`; §2.4 table → final; this §5.6 per-phase table |
+| 7.2 (docs) | docs/design `source_files`/`related` sweep (stale paths fixed, `updated:` bumped); HANDOFF rewrite section → final; notes.md rewrite-complete block; `docs/design/Rewrite/REVIEW.md` (new, branch-state review) |
+| 7.3 (docs) | session log Phase 7 entry (`docs/design/Sessions/2026-08-11.md`); final self-review (sweep grep + full gate) |
+
+**The rewrite is LOC-positive overall — reported plainly, no spin.** From
+the Phase-0 baseline `24bd883` to `HEAD` the tree is **+986 `.rs` LOC**
+(src/ui **+614**): the master-module pattern front-loads the shared cores
+(`song_list.rs` +955, `tree_browser.rs` +610, `list_modal.rs` +765,
+`marquee.rs` +282, `sub_tab_bar.rs` +149, the Phase-6 serde machinery
++395 in `tabs.rs`) while the consumers shrank (browser.rs 1041 → 232,
+queue.rs 4686 → 3485, controls.rs 1516 → 1319, search −236, select/torrent/
+decoders −227/−360/−181) — and the user priority is extensibility +
+predictable behavior: one implementation per shape, bought at the price of
+args/plumbing LOC; **LOC is a proxy, not a gate** (§1). The per-phase
+ref-to-ref numbers (each phase's boundary commit, `ui-metrics.py --ref`):
+
+| Phase | Boundary ref | src/ui | Δ src/ui | tree .rs | Δ tree | cumulative Δ vs baseline (src/ui / tree) |
+| --- | --- | --- | --- | --- | --- | --- |
+| 0 — baseline | `24bd883` | 56,704 | — | 95,811 | — | — |
+| 1 — SongListCore | `6af6f07` | 56,525 | −179 | 95,632 | −179 | −179 / −179 |
+| 2 — TreeBrowserCore | `eb401ce` | 56,755 | +230 | 95,862 | +230 | +51 / +51 |
+| 2.1 — delta close-out | `3e667ed` | 56,923 | +168 | 96,030 | +168 | +219 / +219 |
+| 3 — modal masters | `15f9707` | 56,868 | −55 | 95,926 | −104 | +164 / +115 |
+| 4a — SubTabBar | `9b46f54` | 56,987 | +119 | 96,045 | +119 | +283 / +234 |
+| 4b — queue split | `9fee28e` | 57,070 | +83 | 96,128 | +83 | +366 / +317 |
+| 5 — drawing widgets | `671bc91` | 57,173 | +103 | 96,231 | +103 | +469 / +420 |
+| 6 — args expansion | `1e2aa1d` | 57,318 | +145 | 96,797 | +566 | +614 / +986 |
+| 7 — close-out (docs) | `HEAD` | 57,318 | +0 | 96,797 | +0 | +614 / +986 |
+
+> Phase deltas are measured on the phase's last commit (the boundary refs
+> above). Two notes on consistency with the per-phase close-outs: Phase 3's
+> close-out text says −61/−110 — that was measured at `53b9e90`; the fmt
+> wrap commit `48004f1` (+6) landed inside the phase, so the FINAL Phase-3
+> delta is −55/−104 at `15f9707`. Phase 4a's +119 is `sub_tab_bar.rs` (149
+> incl. 2 tests) minus the queue toggle extraction; it was not recorded in
+> the 4a close-out, this table is the authoritative number. Everything else
+> matches the per-phase close-outs exactly.
+
+**Guardrail (final):** 42 excl-thin pairs > 0.5 at baseline `24bd883` and
+**60 at HEAD** with the current thin-adapter list (the historical 51-at-
+baseline figure used the Phase-1-era list; see §2.4). **Tests:** 1312 at
+baseline → **1337/1337 at HEAD** (warnings 3 baseline unchanged).
+**Docs:** HANDOFF rewrite section is FINAL (next → none); `notes.md` has
+the rewrite-complete block; `REVIEW.md` is the review entry point (branch
+state, review recipe, remaining host live-checks, known caveats).
+
+**Remaining:** the host live-checks from phases 4b/5/6 (REVIEW.md lists
+them), then the host pushes `rewrite` (user rule: the agent never pushes).
+The rewrite itself is complete: `master` untouched, test count unchanged.
 
 ## 6. Definition of done (applies per phase)
 
