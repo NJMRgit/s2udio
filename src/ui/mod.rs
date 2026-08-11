@@ -900,7 +900,7 @@ impl Ui {
                         modal!(
                             ctx,
                             InfoListModal::builder()
-                                .items(current_song)
+                                .rows(current_song)
                                 .title("Song info")
                                 .column_widths(&[30, 70])
                                 .build()
