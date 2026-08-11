@@ -84,6 +84,43 @@ and **wrap** land as real widgets with ≥2 call sites each (their shapes
 are already shared — see the cross-pane calls in §4). `button_cluster`
 and `now_playing` follow the decision rule.
 
+
+## 3a. Decision record (5b3 / 5b4)
+
+Executed per §3; each verdict below is a **documented decision not to
+merge** (a valid phase outcome — the shapes are genuinely different and
+unification would change observable behavior).
+
+### 5b3 — button cluster: NOT merged
+
+The lyrics header cluster (`LyricsBtn` + `button_line`,
+`src/ui/panes/lyrics.rs`) and the controls row-0 clusters
+(`mpv_button_layout` / `transport_zones`, `src/ui/panes/controls.rs`)
+are **three different shapes**, not one shape with args:
+
+| | Lyrics header | Controls mpv row-0 | Transport row |
+| --- | --- | --- | --- |
+| Buttons | `● hide lyrics` `● fetch lyrics` (glyph+label spans) | `⤓` `[Audio]` `[Sub]` (plain labels) | `◀◀` `▶`/`❙❙` `▶▶` `■` (fixed slots) |
+| Separator | space-padded ` | ` | 1-col gap (no separator) | literal pipes (`|`) in the row text |
+| Collapse | 2 tiers + hidden by width | none (the title region shrinks) | none (fixed 25-col geometry) |
+| Hover | **label text only** — glyph + leading space + separator keep the base style (pinned cell-by-cell by `hover_highlights_only_the_label_text`) | whole label lightened (`set_string` of the label with `hover_style`) | whole slot lightened |
+| Pressed state | per-button `●`/`⭘` marker while held | none | none |
+| Click zones | `Rect` stored in pane fields | `(x1, x2)` ranges | fixed `transport_zones` offsets |
+| Write primitive | `buf.set_line` (clipped) | `buf.set_string` | `put` |
+
+Unifying them would require a per-button hover-scope enum, separator
+style enum, collapse-tier table, optional pressed-glyph callback, and a
+zone-output shape — a configuration surface as large as the code it
+replaces, and any single hover mode changes one side's visible behavior
+(a whole-label hover on the lyrics cluster highlights the `●`/space,
+breaking the pinned test; a label-only hover on the mpv cluster drops
+the hover entirely for `⤓`/`[Audio]`, which contain no space to split).
+Decision rule §3: do NOT merge; keep the three clusters in their panes.
+
+### 5b4 — now-playing line templates: NOT merged
+
+(Same rule — see the close-out for the full comparison.)
+
 ## 4. Candidate inventory (measured @ `9fee28e`)
 
 ### 4a — marquee / carousel (MUST extract)
