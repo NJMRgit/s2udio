@@ -42,13 +42,12 @@ else
     warn "fell back to the nixpkgs ELF mpDris2 (shim source-patching will fail)"
 fi
 
-info "nix: config/theme/mpvSockets seed"
+info "nix: config/theme seed"
 mkdir -p "$HOME/.config/s2udio/themes" "$HOME/.config/s2udio/lyrics" \
          "$HOME/.config/mpv/scripts" "$HOME/.config/mpd" "$HOME/.config/cava" \
          "$HOME/.cache/mpd/playlists" "$HOME/media" "$HOME/.local/bin"
 cp -n /root/.nix-profile/share/s2udio/example_config.ron "$HOME/.config/s2udio/config.ron" || true
 cp -n /root/.nix-profile/share/s2udio/example_theme.ron "$HOME/.config/s2udio/themes/default.ron" || true
-cp /root/.nix-profile/share/s2udio/mpvSockets.lua "$HOME/.config/mpv/scripts/mpvSockets.lua"
 
 info "nix: MPD config (user-level, fifo for cava)"
 cat > "$HOME/.config/mpd/mpd.conf" <<'EOF'

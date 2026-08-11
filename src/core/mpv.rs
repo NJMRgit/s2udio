@@ -51,7 +51,9 @@ impl MpvPlaylistEntry {
 #[derive(Debug, Clone, Default)]
 pub struct MpvSession {
     pub active: bool,
-    /// IPC socket of the running mpv (mpvSockets.lua: /tmp/mpvSockets/<pid>).
+    /// IPC socket of the running mpv — the fixed `/tmp/mpvsocket` that
+    /// SVP4's manager also connects to (s2udio tracks playback over the
+    /// same socket mpv exposes for SVP).
     pub socket: Option<PathBuf>,
     /// Jellyfin item id when the video is a Jellyfin stream (else None).
     pub item_id: Option<String>,
@@ -84,8 +86,13 @@ pub struct MpvSession {
     pub playlist_pos: std::cell::Cell<Option<usize>>,
 }
 
-/// mpv IPC socket used to pause mpv when MPD playback starts.
-pub const MPV_SOCKET: &str = "/tmp/s2u-mpv.sock";
+/// The fixed mpv IPC socket. s2udio launches mpv with
+/// `--input-ipc-server=/tmp/mpvsocket` and tracks playback over it — the
+/// same socket SVP4's manager connects to for frame interpolation, so one
+/// mpv has one socket and both clients talk to it. (Legacy setups without
+/// SVP: mpvSockets.lua's per-instance `/tmp/mpvSockets/<pid>` sockets are
+/// still discovered as a fallback.)
+pub const MPV_SOCKET: &str = "/tmp/mpvsocket";
 
 /// Whether s2udio launched mpv and it is still running.
 pub static MPV_RUNNING: std::sync::atomic::AtomicBool =
@@ -212,37 +219,156 @@ fn detect_mpv_session_at(ctx: &mut Ctx, socket: std::path::PathBuf) -> bool {
     true
 }
 
-/// Discover the running mpv's IPC socket: mpvSockets.lua creates one per
-/// instance at `/tmp/mpvSockets/<pid>`; fall back to [`MPV_SOCKET`] for
-/// setups without that script.
+/// Discover the running mpv's IPC socket.
+///
+/// Priority:
+/// 1. the fixed [`MPV_SOCKET`] socket (`/tmp/mpvsocket`) when it is live —
+///    the socket s2udio passes on launch and SVP4's manager connects to;
+/// 2. the newest per-instance socket under `/tmp/mpvSockets` (legacy
+///    mpvSockets.lua setups, or an externally launched mpv without the
+///    fixed socket);
+/// 3. the fixed path even when stale, so callers can detect the dead
+///    socket (a stale file outlives a crashed mpv).
 pub fn mpv_socket() -> Option<PathBuf> {
-    let dir = Path::new("/tmp/mpvSockets");
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let Ok(modified) = entry.metadata().and_then(|m| m.modified()) else {
-                continue;
-            };
-            if newest.as_ref().is_none_or(|(t, _)| modified > *t) {
-                newest = Some((modified, path));
-            }
-        }
-        if let Some((_, path)) = newest {
-            return Some(path);
+    mpv_socket_in(Path::new(MPV_SOCKET), Path::new("/tmp/mpvSockets"))
+}
+
+/// [`mpv_socket`] with explicit paths, split out for tests.
+fn mpv_socket_in(fixed: &Path, sockets_dir: &Path) -> Option<PathBuf> {
+    if is_live_socket(fixed) {
+        return Some(fixed.to_path_buf());
+    }
+    newest_mpv_sockets_socket(sockets_dir)
+        .or_else(|| fixed.exists().then(|| fixed.to_path_buf()))
+}
+
+/// A Unix socket that accepts connections (mpv's IPC is live when
+/// connecting succeeds; a stale file left by a crashed mpv is refused, and
+/// a stuck listener times out instead of hanging the caller).
+fn is_live_socket(path: &Path) -> bool {
+    connect_socket(path, Duration::from_millis(300)).is_ok()
+}
+
+/// Newest socket under `sockets_dir` (mpvSockets.lua creates one per
+/// instance at `/tmp/mpvSockets/<pid>`).
+fn newest_mpv_sockets_socket(sockets_dir: &Path) -> Option<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(sockets_dir) else {
+        return None;
+    };
+    let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(modified) = entry.metadata().and_then(|m| m.modified()) else {
+            continue;
+        };
+        if newest.as_ref().is_none_or(|(t, _)| modified > *t) {
+            newest = Some((modified, path));
         }
     }
-    let fallback = Path::new(MPV_SOCKET);
-    fallback.exists().then(|| fallback.to_path_buf())
+    newest.map(|(_, path)| path)
+}
+
+/// Connect to a Unix socket with a `timeout`. A plain blocking connect can
+/// hang forever when the socket file is held by a stuck listener (e.g. a
+/// thumbfast thumbnailer that inherited a crashed mpv's IPC socket with a
+/// full backlog) — that would freeze the app's event loop at startup.
+/// Returns the stream in blocking mode (the caller's read timeouts work as
+/// before).
+fn connect_socket(
+    path: &Path,
+    timeout: Duration,
+) -> std::io::Result<std::os::unix::net::UnixStream> {
+    use std::{ffi::CString, os::fd::FromRawFd};
+
+    let cpath = CString::new(path.as_os_str().as_encoded_bytes())
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "socket path has a NUL byte"))?;
+    let bytes = cpath.as_bytes();
+    if bytes.len() >= std::mem::size_of_val(&unsafe { std::mem::zeroed::<libc::sockaddr_un>() }.sun_path) {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "socket path too long"));
+    }
+
+    let rc = unsafe {
+        let fd = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC, 0);
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let mut addr: libc::sockaddr_un = std::mem::zeroed();
+        addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), addr.sun_path.as_mut_ptr() as *mut u8, bytes.len());
+        let connect_rc = libc::connect(
+            fd,
+            &addr as *const libc::sockaddr_un as *const libc::sockaddr,
+            std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t,
+        );
+        if connect_rc == 0 {
+            // Connected immediately; clear O_NONBLOCK and hand back.
+            let flags = libc::fcntl(fd, libc::F_GETFL);
+            if flags >= 0 {
+                libc::fcntl(fd, libc::F_SETFL, flags & !libc::O_NONBLOCK);
+            }
+            return Ok(std::os::unix::net::UnixStream::from_raw_fd(fd));
+        }
+        let err = std::io::Error::last_os_error();
+        match err.raw_os_error() {
+            // EAGAIN: the connect could not even begin (e.g. the listener's
+            // backlog is full) — fail now instead of polling forever; the
+            // caller treats this as "socket dead".
+            Some(libc::EAGAIN) => {
+                libc::close(fd);
+                return Err(err);
+            }
+            Some(libc::EINPROGRESS) => {}
+            _ => {
+                libc::close(fd);
+                return Err(err);
+            }
+        }
+        // EINPROGRESS only: wait for the connection to complete (or fail)
+        // up to `timeout`.
+        let mut pfd = libc::pollfd { fd, events: libc::POLLOUT, revents: 0 };
+        let polled = libc::poll(&mut pfd, 1, timeout.as_millis().min(i32::MAX as u128) as libc::c_int);
+        if polled <= 0 {
+            libc::close(fd);
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("connect to {} timed out", path.display()),
+            ));
+        }
+        // Distinguish a completed connection from an error via SO_ERROR.
+        let mut err_code: libc::c_int = 0;
+        let mut err_len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+        if libc::getsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_ERROR,
+            &mut err_code as *mut _ as *mut libc::c_void,
+            &mut err_len,
+        ) != 0
+        {
+            let e = std::io::Error::last_os_error();
+            libc::close(fd);
+            return Err(e);
+        }
+        if err_code != 0 {
+            libc::close(fd);
+            return Err(std::io::Error::from_raw_os_error(err_code));
+        }
+        let flags = libc::fcntl(fd, libc::F_GETFL);
+        if flags >= 0 {
+            libc::fcntl(fd, libc::F_SETFL, flags & !libc::O_NONBLOCK);
+        }
+        Ok(std::os::unix::net::UnixStream::from_raw_fd(fd))
+    };
+    rc
 }
 
 /// Send a command to mpv's IPC socket and read up to `max_lines` response
 /// lines. A fresh connection is used per call so responses cannot be
 /// confused with another client's. `None` when mpv cannot be reached at all
-/// (no socket, connection refused) — callers must not treat that as a
-/// successful read of empty data.
+/// (no socket, connection refused, timeout) — callers must not treat that
+/// as a successful read of empty data.
 fn mpv_exchange(socket: &Path, command: &str, max_lines: usize) -> Option<Vec<String>> {
-    let Ok(stream) = std::os::unix::net::UnixStream::connect(socket) else {
+    let Ok(stream) = connect_socket(socket, Duration::from_millis(300)) else {
         return None;
     };
     let _ = stream.set_read_timeout(Some(Duration::from_millis(150)));
@@ -823,14 +949,26 @@ pub fn run_mpv_playlist(
     // `signs > {hidden | system language | chosen}`.
     let audio_lang = ctx.config.mpv.audio_lang.clone();
     let subtitles = ctx.config.mpv.subtitles.clone();
+    // The mpv binary (config.ron `mpv.bin`, default "mpv"): SVP4's bundled
+    // mpv brings its own VapourSynth + Python 3.12, which the SVPflow
+    // plugins are built against (the distro VapourSynth 77 + Python 3.14
+    // crashed them).
+    let mpv_bin = ctx.config.mpv.bin.clone();
+    // SVP support (Settings -> mpv -> "svp support"): pass the fixed IPC
+    // socket at /tmp/mpvsocket — SVP4's manager connects to it to drive
+    // frame interpolation, and s2udio tracks playback over the same
+    // socket (one mpv, one socket, both clients). Off leaves the socket
+    // to the user's own mpv.conf / scripts (mpvSockets.lua per-instance
+    // sockets are still discovered as a fallback).
+    let svp = ctx.config.mpv.svp;
     let client_sender = ctx.client_request_sender.clone();
     let event_sender = ctx.app_event_sender.clone();
-    log::debug!(urls:?, start_index; "Launching mpv for video playback");
+    log::debug!(urls:?, start_index, mpv_bin:?, svp; "Launching mpv for video playback");
     std::thread::spawn(move || {
-        let mut cmd = std::process::Command::new("mpv");
-        // No `--input-ipc-server`: the user's mpvSockets.lua already provides
-        // a per-instance socket under /tmp/mpvSockets/<pid> (passing the flag
-        // made mpv exit immediately with the user's setup).
+        let mut cmd = std::process::Command::new(&mpv_bin);
+        if svp {
+            cmd.arg(format!("--input-ipc-server={MPV_SOCKET}"));
+        }
         cmd.arg("--no-terminal");
         cmd.arg(format!("--volume={volume}"));
         if let Some(start) = start_index {
@@ -1613,6 +1751,122 @@ mod tests {
             None,
         ));
         assert!(!super::session_playlist_shown(&ctx), "non-torrent session uses the queue");
+    }
+
+    #[test]
+    fn mpv_socket_prefers_live_fixed_socket_then_per_instance_then_stale() {
+        use std::io::{BufRead as _, Write as _};
+
+        // One temp dir per scenario so listener lifetimes stay obvious.
+        let base =
+            std::env::temp_dir().join(format!("mpv-socket-test-{}", std::process::id()));
+
+        // 1. No sockets at all -> None.
+        let dir = base.join("none");
+        std::fs::create_dir_all(dir.join("mpvSockets")).unwrap();
+        assert_eq!(super::mpv_socket_in(&dir.join("mpvsocket"), &dir.join("mpvSockets")), None);
+
+        // 2. A stale fixed socket file (no listener) plus a live per-instance
+        //    socket -> the live per-instance socket wins.
+        let dir = base.join("per-instance");
+        std::fs::create_dir_all(dir.join("mpvSockets")).unwrap();
+        let fixed = dir.join("mpvsocket");
+        let per = dir.join("mpvSockets");
+        std::fs::write(&fixed, b"stale").unwrap();
+        let per_sock = per.join("100");
+        let listener = UnixListener::bind(&per_sock).unwrap();
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut line = String::new();
+                let _ = std::io::BufReader::new(&stream).read_line(&mut line);
+                let _ = writeln!(stream, r#"{{"error":"success"}}"#);
+            }
+        });
+        assert_eq!(super::mpv_socket_in(&fixed, &per).as_deref(), Some(per_sock.as_path()));
+
+        // 3. The fixed socket live -> it wins even over a newer per-instance
+        //    entry (the fixed socket is the SVP4 one and must be used).
+        let dir = base.join("fixed-live");
+        std::fs::create_dir_all(dir.join("mpvSockets")).unwrap();
+        let fixed = dir.join("mpvsocket");
+        let per = dir.join("mpvSockets");
+        let fixed_listener = UnixListener::bind(&fixed).unwrap();
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = fixed_listener.accept() {
+                let mut line = String::new();
+                let _ = std::io::BufReader::new(&stream).read_line(&mut line);
+                let _ = writeln!(stream, r#"{{"error":"success"}}"#);
+            }
+        });
+        let newer = per.join("101");
+        std::fs::write(&newer, b"x").unwrap();
+        assert_eq!(super::mpv_socket_in(&fixed, &per).as_deref(), Some(fixed.as_path()));
+
+        // 4. Fixed stale, no per-instance sockets -> the stale fixed path is
+        //    returned so callers can detect the dead socket (old fallback).
+        let dir = base.join("stale-only");
+        std::fs::create_dir_all(dir.join("mpvSockets")).unwrap();
+        let fixed = dir.join("mpvsocket");
+        std::fs::write(&fixed, b"stale").unwrap();
+        assert_eq!(super::mpv_socket_in(&fixed, &dir.join("mpvSockets")).as_deref(), Some(fixed.as_path()));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn connect_socket_times_out_on_a_stuck_listener() {
+        use std::time::{Duration, Instant};
+
+        // A listener with a zero backlog that never accepts: the one
+        // allowed pending connection fills the slot, so the next connect
+        // gets EAGAIN — a blocking connect would wait forever (a leftover
+        // thumbfast thumbnailer once held /tmp/mpvsocket like this and
+        // froze the whole app at startup). connect_socket must give up.
+        let dir = std::env::temp_dir().join(format!("mpv-connect-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let socket = dir.join("stuck.sock");
+        let _ = std::fs::remove_file(&socket);
+
+        let fd = unsafe {
+            let fd = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0);
+            assert!(fd >= 0, "socket: {}", std::io::Error::last_os_error());
+            let path_c =
+                std::ffi::CString::new(socket.as_os_str().as_encoded_bytes()).expect("no NUL");
+            let mut addr: libc::sockaddr_un = std::mem::zeroed();
+            addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
+            std::ptr::copy_nonoverlapping(
+                path_c.as_bytes().as_ptr(),
+                addr.sun_path.as_mut_ptr() as *mut u8,
+                path_c.as_bytes().len(),
+            );
+            let len = std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t;
+            assert_eq!(
+                libc::bind(fd, &addr as *const libc::sockaddr_un as *const libc::sockaddr, len),
+                0,
+                "bind: {}",
+                std::io::Error::last_os_error()
+            );
+            assert_eq!(libc::listen(fd, 0), 0, "listen: {}", std::io::Error::last_os_error());
+            fd
+        };
+        // Occupy the single backlog slot (keep it open until the end).
+        let _slot = std::os::unix::net::UnixStream::connect(&socket).expect("first connect is allowed");
+
+        let start = Instant::now();
+        let result = super::connect_socket(&socket, Duration::from_millis(200));
+        let elapsed = start.elapsed();
+        assert!(result.is_err(), "a stuck listener must not connect: {result:?}");
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "connect must give up fast, took {elapsed:?}"
+        );
+
+        drop(_slot);
+        unsafe {
+            libc::close(fd);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
 }

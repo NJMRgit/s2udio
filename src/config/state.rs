@@ -29,6 +29,10 @@ pub struct AppStateFile {
     /// mpv subtitle preference ("signs" / "off") chosen in the settings
     /// panel; overrides the config default when present.
     pub mpv_subtitles: Option<String>,
+    /// The "svp support" toggle (Settings -> mpv): mpv gets
+    /// `--input-ipc-server=/tmp/mpvsocket`; overrides the config default
+    /// when present.
+    pub mpv_svp: Option<bool>,
     /// The settings panel's UI toggles (album art / lyrics / cava / radio /
     /// jellyfin tabs + auto-chapters): runtime-only in the config schema,
     /// persisted here so a restart keeps them.

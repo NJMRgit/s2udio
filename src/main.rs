@@ -392,6 +392,9 @@ fn main() -> Result<()> {
             {
                 config.mpv.subtitles = subs;
             }
+            if let Some(svp) = state.mpv_svp {
+                config.mpv.svp = svp;
+            }
             // The settings panel's UI toggles (incl. auto chapters) and
             // appearance colors: persisted to state.ron on Save, restored
             // here so a restart keeps them. When a blur mode is scheduled

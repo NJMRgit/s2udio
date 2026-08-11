@@ -76,8 +76,8 @@ CACHE = _cache_dir()
 STATE = os.path.join(CACHE, "mpv-mpris.json")
 POSTER = os.path.join(CACHE, "mpris-mpv-art")
 PID_FILE = os.path.join(CACHE, "mpv-tracker.pid")
-FIXED_SOCKET = "/tmp/s2u-mpv.sock"
-MPV_SOCKETS_DIR = "/tmp/mpvSockets"
+FIXED_SOCKET = "/tmp/mpvsocket"  # SVP4's socket; s2udio launches mpv with it
+MPV_SOCKETS_DIR = "/tmp/mpvSockets"  # legacy mpvSockets.lua per-instance sockets
 
 POLL_S = float(os.environ.get("S2U_POLL_S") or 1.0)
 PROGRESS_EVERY_S = 10.0
@@ -118,12 +118,31 @@ def s2u_running():
     return False
 
 
+def _socket_live(path):
+    """True when a Unix socket accepts connections (mpv's IPC is live).
+    A stale file left by a crashed mpv is refused, so this is the check
+    that keeps the fixed /tmp/mpvsocket (SVP4's socket) authoritative."""
+    try:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(0.5)
+        s.connect(path)
+        s.close()
+        return True
+    except OSError:
+        return False
+
+
 def mpv_socket():
-    """Newest socket under /tmp/mpvSockets (mpvSockets.lua), else the fixed
-    fallback. Mirrors s2udio's `mpv_socket()`."""
+    """The fixed /tmp/mpvsocket when live (SVP4's socket, and the one
+    s2udio passes on launch); else the newest socket under
+    /tmp/mpvSockets (legacy mpvSockets.lua); else the fixed path even when
+    stale so callers can detect the dead socket. Mirrors s2udio's
+    `mpv_socket()`."""
     override = os.environ.get("S2U_MPV_SOCKET")
     if override:
         return override if os.path.exists(override) else None
+    if _socket_live(FIXED_SOCKET):
+        return FIXED_SOCKET
     best = None
     try:
         for name in os.listdir(MPV_SOCKETS_DIR):

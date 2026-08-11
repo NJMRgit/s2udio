@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # deploy-common.sh — sourced by scripts/dev/containers/<key>/deploy.sh.
 # Mirrors setup.sh's steps for non-Arch targets (plan §5/§6.2): support
-# scripts, config/theme seed, mpvSockets.lua, MPD fifo, cava config,
+# scripts, config/theme seed, MPD fifo, cava config,
 # user-level MPD + mpDris2 services via the systemd-user backend of
 # s2u-svc, and test media for the gates. mpv-full stays an Arch-only
 # branch (setup.sh); every other target installs plain mpv (done in
@@ -22,8 +22,6 @@ for s in rmpc-fetch-lyrics s2u-mpv-tracker s2udio-mpris s2u-mpdris2 s2u-svc; do
     install -Dm755 "/s2udio/scripts/$s" "$BIN_DIR/$s"
     ok "script -> $BIN_DIR/$s"
 done
-install -Dm644 /s2udio/scripts/mpvSockets.lua "$HOME/.config/mpv/scripts/mpvSockets.lua"
-ok "mpvSockets.lua -> ~/.config/mpv/scripts/"
 
 info "deploy: install the built binary (target/release/s2u -> ~/.local/bin/s2udio)"
 if [[ -x /s2udio/target/release/s2u ]]; then

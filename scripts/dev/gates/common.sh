@@ -111,7 +111,11 @@ gate_g1_install() {
     for s in s2u-mpv-tracker s2udio-mpris s2u-mpdris2 rmpc-fetch-lyrics s2u-svc; do
         command -v "$s" >/dev/null 2>&1 || missing+=("$s")
     done
-    [[ -f "$HOME_DIR/.config/mpv/scripts/mpvSockets.lua" ]] || missing+=(mpvSockets.lua)
+    # The mpv IPC socket contract: s2udio launches mpv with the fixed
+    # /tmp/mpvsocket (the socket SVP4's manager also uses); an mpv.conf
+    # line is what makes a manually launched mpv expose it too.
+    grep -q 'input-ipc-server=/tmp/mpvsocket' "$HOME_DIR/.config/mpv/mpv.conf" 2>/dev/null \
+        || missing+=(mpv.conf:input-ipc-server=/tmp/mpvsocket)
     [[ -f "$HOME_DIR/.config/s2udio/config.ron" ]]  || missing+=(config.ron)
     [[ -f "$HOME_DIR/.config/s2udio/themes/default.ron" ]] || missing+=(theme)
     if [[ "$("$SVC_BIN" backend 2>/dev/null)" == "systemd-user" ]]; then
@@ -222,16 +226,17 @@ gate_g8_mpv_headless() {
     # stop MPD audio first: the tracker's mpv<->MPD mutual exclusion pauses a
     # playing video while MPD plays (HANDOFF) — the video gates need mpv free
     mpd_raw "stop" >/dev/null 2>&1 || true
-    rm -rf /tmp/mpvSockets "$HOME/.cache/s2udio/mpv-mpris.json"
-    setsid mpv --vo=null --ao=null --really-quiet /root/media/test.mp4 \
-        >/tmp/mpv-g8.log 2>&1 &
+    rm -rf /tmp/mpvsocket /tmp/mpvSockets "$HOME/.cache/s2udio/mpv-mpris.json"
+    # s2udio launches mpv with --input-ipc-server=/tmp/mpvsocket (the
+    # socket SVP4's manager connects to and s2udio tracks over).
+    setsid mpv --vo=null --ao=null --really-quiet --input-ipc-server=/tmp/mpvsocket \
+        /root/media/test.mp4 >/tmp/mpv-g8.log 2>&1 &
     local sock=""
     for _ in $(seq 1 20); do
-        sock="$(find /tmp/mpvSockets -type s 2>/dev/null | head -1)"
-        [[ -n "$sock" ]] && break
+        [[ -S /tmp/mpvsocket ]] && { sock=/tmp/mpvsocket; break; }
         sleep 0.5
     done
-    [[ -n "$sock" ]] || { write_gate G8 fail "mpvSockets.lua socket never appeared ($(cat /tmp/mpv-g8.log 2>/dev/null | head -3 | tr '\n' ' '))"; return 1; }
+    [[ -n "$sock" ]] || { write_gate G8 fail "mpv IPC socket /tmp/mpvsocket never appeared ($(cat /tmp/mpv-g8.log 2>/dev/null | head -3 | tr '\n' ' '))"; return 1; }
     # tracker caretaker writes the MPRIS state file (and spawns s2udio-mpris)
     local tracker_bin; tracker_bin="$(command -v s2u-mpv-tracker 2>/dev/null || echo "$HOME_DIR/.local/bin/s2u-mpv-tracker")"
     S2U_FORCE_CARETAKER=1 S2U_CACHE_DIR="$HOME/.cache/s2udio" \

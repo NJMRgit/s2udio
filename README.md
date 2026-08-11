@@ -34,6 +34,10 @@ Right: RMPC ootb
 - copy + paste and drag n' drop support for audio and video files/links/.magnet/torrent
 - play videos as audio
 - download stream/torrent
+- SVP4 (SmoothVideo Project) support — a Settings -> mpv "svp support"
+  toggle wires playback to SVP's fixed IPC socket (`/tmp/mpvsocket`), and
+  `mpv.bin` can point at SVP's bundled mpv (its own VapourSynth + Python
+  3.12) so SVPflow/RIFE frame interpolation runs without crashing mpv
 - full mouse controls
 - sensible and intuitive key binds
    

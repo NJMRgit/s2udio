@@ -1150,13 +1150,16 @@ impl Ui {
 
                 // Video playback mode: apply + persist to state.ron.
                 config.video.playback = staged.video_playback;
-                // mpv audio language + subtitle preference: apply + persist.
+                // mpv audio language + subtitle preference + SVP support:
+                // apply + persist.
                 config.mpv.audio_lang = staged.mpv_audio_lang.clone();
                 config.mpv.subtitles = staged.mpv_subtitles.clone();
+                config.mpv.svp = staged.mpv_svp;
                 let mut state = crate::config::state::AppStateFile::load();
                 state.video_playback = Some(staged.video_playback.as_str().to_owned());
                 state.mpv_audio_lang = Some(staged.mpv_audio_lang.as_str().to_owned());
                 state.mpv_subtitles = Some(staged.mpv_subtitles.as_str());
+                state.mpv_svp = Some(staged.mpv_svp);
                 // The UI toggles (incl. auto chapters) and the appearance
                 // colors are runtime-only in the config schema; persist them
                 // here so a restart keeps them.

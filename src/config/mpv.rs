@@ -145,6 +145,17 @@ impl MpvSubtitleMode {
 pub struct Mpv {
     pub audio_lang: MpvAudioLang,
     pub subtitles: MpvSubtitleMode,
+    /// The mpv binary launched for video playback — a path or a name
+    /// resolved via PATH (default `"mpv"`). Point it at SVP4's bundled
+    /// mpv (e.g. `~/.local/bin/SVP4/mpv/mpv`) to use SVP's own portable
+    /// VapourSynth + Python 3.12 stack instead of the distro's.
+    pub bin: String,
+    /// SVP4 (SmoothVideo Project) support: when on, mpv is launched with
+    /// `--input-ipc-server=/tmp/mpvsocket` — the fixed socket SVP4's
+    /// manager connects to for frame interpolation, and the socket
+    /// s2udio tracks playback over. Off (default) leaves mpv's IPC socket
+    /// to the user's own mpv.conf / scripts.
+    pub svp: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -152,6 +163,11 @@ pub struct Mpv {
 pub struct MpvFile {
     pub audio_lang: Option<MpvAudioLang>,
     pub subtitles: Option<MpvSubtitleMode>,
+    /// Override for [`Mpv::bin`]; `~` is expanded.
+    pub bin: Option<String>,
+    /// Override for [`Mpv::svp`] (the Settings panel's "svp support"
+    /// toggle; persisted to state.ron).
+    pub svp: Option<bool>,
 }
 
 
@@ -160,6 +176,51 @@ impl From<MpvFile> for Mpv {
         Self {
             audio_lang: value.audio_lang.unwrap_or_default(),
             subtitles: value.subtitles.unwrap_or_default(),
+            bin: value
+                .bin
+                .filter(|b| !b.trim().is_empty())
+                .map(|b| crate::config::utils::tilde_expand(&b).into_owned())
+                .unwrap_or_else(|| "mpv".to_owned()),
+            svp: value.svp.unwrap_or(false),
         }
+    }
+}
+
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::{Mpv, MpvFile};
+
+    #[test]
+    fn mpv_bin_defaults_to_mpv_and_expands_tilde() {
+        // The tilde expansion reads the shared test ENV; the lock keeps
+        // other HOME-reading tests from racing this one.
+        let _home_guard = crate::tests::fixtures::HOME_LOCK.lock().unwrap();
+        use crate::shared::env::ENV;
+
+        let default: Mpv = MpvFile::default().into();
+        assert_eq!(default.bin, "mpv");
+        assert!(!default.svp, "svp support defaults off");
+
+        ENV.set("HOME".to_owned(), "/home/tester".to_owned());
+        let explicit: Mpv = MpvFile {
+            audio_lang: None,
+            subtitles: None,
+            bin: Some("~/somewhere/mpv".to_owned()),
+            svp: None,
+        }
+        .into();
+        assert_eq!(explicit.bin, "/home/tester/somewhere/mpv");
+
+        let blank: Mpv = MpvFile {
+            audio_lang: None,
+            subtitles: None,
+            bin: Some("   ".to_owned()),
+            svp: Some(true),
+        }
+        .into();
+        assert_eq!(blank.bin, "mpv", "blank bin falls back to mpv");
+        assert!(blank.svp, "explicit svp override survives");
     }
 }
