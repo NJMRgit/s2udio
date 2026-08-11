@@ -61,7 +61,65 @@ struct PwNode {
     is_virtual: bool,
 }
 
-fn pipewire_sinks() -> Vec<PwNode> {
+/// Every capture target for the cava device row: pactl's source list
+/// (sink monitors + mics + virtual sources) when available, falling back to
+/// the wpctl sink list (offered as `X.monitor`) on systems without
+/// pipewire-pulse. `wpctl status` alone is not enough: it only lists sinks
+/// (and omits their monitors), while cava must capture a sink's *monitor*
+/// to visualize what it plays.
+fn pipewire_sources() -> Vec<PwNode> {
+    if let Some(mut nodes) = pipewire_sources_pactl() {
+        // Real (hardware) captures first, then the virtual ones (the
+        // Desktop/Games/Media/Discord split sinks, Easy Effects).
+        nodes.sort_by(|a, b| (a.is_virtual, &a.name).cmp(&(b.is_virtual, &b.name)));
+        return nodes;
+    }
+    pipewire_sinks_wpctl()
+}
+
+/// `pactl list sources`: lists *every* source — including the `X.monitor`
+/// monitors of sinks, which are exactly the cava `source` values wanted.
+/// `None` when pactl (pipewire-pulse) is not installed or the server is
+/// unreachable.
+fn pipewire_sources_pactl() -> Option<Vec<PwNode>> {
+    let out = Command::new("pactl").arg("list").arg("sources").output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(parse_pactl_sources(&String::from_utf8_lossy(&out.stdout)))
+}
+
+/// Parse `pactl list sources`: each `Source #N` block's `Name:` (the cava
+/// `source` value, e.g. `Media.monitor`), `Description:` (human-readable)
+/// and the `node.virtual` property.
+fn parse_pactl_sources(stdout: &str) -> Vec<PwNode> {
+    let mut result = Vec::new();
+    for block in stdout.split("Source #").skip(1) {
+        let mut name = None;
+        let mut description = None;
+        let mut is_virtual = false;
+        for line in block.lines() {
+            let line = line.trim();
+            if let Some(v) = line.strip_prefix("Name:") {
+                name = Some(v.trim().to_string());
+            } else if let Some(v) = line.strip_prefix("Description:") {
+                description = Some(v.trim().to_string());
+            } else if line.contains("node.virtual = \"true\"") {
+                is_virtual = true;
+            }
+        }
+        if let (Some(name), Some(description)) = (name, description) {
+            result.push(PwNode { name, description, is_virtual });
+        }
+    }
+    result
+}
+
+/// Fallback when pactl is unavailable: the wpctl sink list, offered as
+/// `X.monitor` capture sources (the form cava needs to visualize a sink —
+/// a raw sink name makes cava use `target.object`, which PipeWire does not
+/// feed on every setup).
+fn pipewire_sinks_wpctl() -> Vec<PwNode> {
     let mut result = Vec::new();
     let Ok(out) = Command::new("wpctl").arg("status").output() else {
         return result;
@@ -71,7 +129,11 @@ fn pipewire_sinks() -> Vec<PwNode> {
     }
     for (id, description) in parse_wpctl_status(&String::from_utf8_lossy(&out.stdout)) {
         let Some((name, is_virtual)) = inspect_sink(id) else { continue };
-        result.push(PwNode { name, description, is_virtual });
+        result.push(PwNode {
+            name: format!("{name}.monitor"),
+            description: format!("Monitor of {description}"),
+            is_virtual,
+        });
     }
     result
 }
@@ -690,7 +752,8 @@ pub struct SettingsModal {
     /// move the highlight, d/→/Enter toggle, a/← back to the sidebar).
     /// Matches the tab-pane navigation scheme (browser panes).
     focus: SettingsFocus,
-    /// PipeWire sinks (with an "auto" pseudo-node first) for the device row.
+    /// PipeWire capture sources (sink monitors + mics + virtual sources,
+    /// with an "auto" pseudo-node first) for the device row.
     nodes: Vec<PwNode>,
     show_virtual: bool,
     /// MPD update/rescan scope path (persisted in state.ron).
@@ -847,7 +910,8 @@ impl SettingsModal {
         modal
     }
 
-    /// Refresh the PipeWire sink list (with the "auto" entry first).
+    /// Refresh the PipeWire capture-source list (with the "auto" entry
+    /// first): sink monitors (`X.monitor`) plus mics/virtual sources.
     fn refresh_nodes(&mut self) {
         let mut nodes = Vec::new();
         if self.method() == CavaInputMethod::Pipewire {
@@ -856,7 +920,7 @@ impl SettingsModal {
                 description: "auto (default output)".to_string(),
                 is_virtual: false,
             });
-            nodes.extend(pipewire_sinks());
+            nodes.extend(pipewire_sources());
         }
         self.nodes = nodes;
     }
@@ -991,11 +1055,15 @@ impl SettingsModal {
         self.cava_pending.waves
     }
 
-    /// The nodes currently offered to the device row (virtual filtered).
+    /// The nodes currently offered to the device row. Sink monitors
+    /// (`X.monitor`) are the visualizer's bread and butter — capturing what
+    /// a sink plays — so they are always offered; the "show virtual
+    /// devices" toggle only gates non-monitor virtual sources (Easy
+    /// Effects' processing source).
     fn visible_nodes(&self) -> Vec<PwNode> {
         self.nodes
             .iter()
-            .filter(|n| self.show_virtual || !n.is_virtual)
+            .filter(|n| self.show_virtual || !n.is_virtual || n.name.ends_with(".monitor"))
             .cloned()
             .collect()
     }
@@ -2931,6 +2999,93 @@ mod tests {
                 (156, "Easy Effects Sink".to_string()),
             ]
         );
+    }
+
+    const PACTL_SOURCES: &str = r#"Source #45
+	State: IDLE
+	Name: Desktop.monitor
+	Description: Monitor of Desktop
+	Properties:
+		node.virtual = "true"
+Source #51
+	State: RUNNING
+	Name: Media.monitor
+	Description: Monitor of Media
+	Properties:
+		node.virtual = "true"
+Source #83
+	State: RUNNING
+	Name: alsa_output.usb-FiiO_FiiO_KA3_FiiO_KA3-00.analog-stereo.monitor
+	Description: Monitor of FiiO KA3 Analog Stereo
+	Properties:
+		node.name = "alsa_output.usb-FiiO_FiiO_KA3_FiiO_KA3-00.analog-stereo"
+Source #85
+	State: IDLE
+	Name: alsa_input.usb-BurrBrown_from_Texas_Instruments_USB_AUDIO_CODEC-00.analog-stereo
+	Description: M-Audio Duo Mic
+Source #165
+	State: IDLE
+	Name: easyeffects_source
+	Description: Easy Effects Source
+	Properties:
+		node.virtual = "true"
+"#;
+
+    /// The cava device row must offer *sink monitors* (`X.monitor` — the
+    /// capture sources cava can actually visualize) plus mics and virtual
+    /// sources, with the virtual flag parsed from `node.virtual`.
+    #[test]
+    fn pactl_sources_parse_monitors_and_virtual_flag() {
+        let nodes = parse_pactl_sources(PACTL_SOURCES);
+        assert_eq!(nodes.len(), 5);
+        assert_eq!(nodes[0].name, "Desktop.monitor");
+        assert!(nodes[0].is_virtual, "the split-app sinks are virtual");
+        assert_eq!(nodes[1].name, "Media.monitor");
+        assert!(nodes[1].is_virtual);
+        assert_eq!(
+            nodes[2].name,
+            "alsa_output.usb-FiiO_FiiO_KA3_FiiO_KA3-00.analog-stereo.monitor"
+        );
+        assert!(!nodes[2].is_virtual, "a hardware sink monitor is real");
+        assert_eq!(nodes[3].name, "alsa_input.usb-BurrBrown_from_Texas_Instruments_USB_AUDIO_CODEC-00.analog-stereo");
+        assert!(!nodes[3].is_virtual);
+        assert_eq!(nodes[4].name, "easyeffects_source");
+        assert!(nodes[4].is_virtual);
+    }
+
+    /// Sink monitors are always offered (capturing what a sink plays is the
+    /// visualizer's job); the "show virtual devices" toggle only gates
+    /// non-monitor virtual sources.
+    #[test]
+    fn virtual_monitors_are_always_offered() {
+        let ctx = crate::tests::fixtures::ctx(
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+        );
+        let mut modal = SettingsModal::new(&ctx);
+        modal.nodes = vec![
+            PwNode { name: "auto".to_string(), description: "auto".to_string(), is_virtual: false },
+            PwNode {
+                name: "Media.monitor".to_string(),
+                description: "Monitor of Media".to_string(),
+                is_virtual: true,
+            },
+            PwNode {
+                name: "easyeffects_source".to_string(),
+                description: "Easy Effects Source".to_string(),
+                is_virtual: true,
+            },
+        ];
+        modal.show_virtual = false;
+        let visible: Vec<String> =
+            modal.visible_nodes().into_iter().map(|n| n.name).collect();
+        assert_eq!(visible, vec!["auto", "Media.monitor"], "monitors stay offered");
+
+        modal.show_virtual = true;
+        let visible: Vec<String> =
+            modal.visible_nodes().into_iter().map(|n| n.name).collect();
+        assert_eq!(visible, vec!["auto", "Media.monitor", "easyeffects_source"]);
     }
 
     #[test]
