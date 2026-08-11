@@ -340,7 +340,9 @@ impl<V: std::fmt::Debug> Modal for ListModal<'_, V> {
                         self.button_group_state.first();
                         ctx.render()?;
                     }
-                    FocusedComponent::Buttons if self.button_group_state.selected < self.confirm_buttons => {
+                    FocusedComponent::Buttons
+                        if self.button_group_state.selected < self.confirm_buttons =>
+                    {
                         self.confirm(ctx, self.button_group_state.selected)?;
                         ctx.render()?;
                     }
