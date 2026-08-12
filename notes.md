@@ -1,3 +1,23 @@
+# Notes for the container agent — round 28b IMPLEMENTED host-side (2026-08-12)
+
+## ROUND 28b — host live-check fix (2026-08-12) — committed on `working`
+
+**Host feedback after validating round 28 →
+[FEEDBACK-2026-08-12-1.md](FEEDBACK-2026-08-12-1.md).** The Library/
+Search toggle captured `Tab` (and `E`, both NextTab), making the MPD
+tab unreachable from the keyboard. User's correction: **ONLY
+`Shift+Tab` toggles Library/Search**; `Tab`/`E`/`Q` cycle tabs again.
+Host implemented this on `working` (round-28b commit): new global
+action `ToggleMpdMode` bound to `<S-Tab>` (defaults + the live
+config.ron + example_config.ron); the MPD pane claims it while focused
+and toggles — the round-28 NextTab claim is removed; elsewhere it is a
+no-op (queue `Shift+Tab` chapters toggle unaffected). **1361/1361**,
+warnings 3 baseline. Round 28 itself was host-validated (1360/1360,
+live-checked, Search tab removed from the live config.ron, binary
+installed). isodev: nothing to implement — pull `working` when ready.
+
+---
+
 # Notes for the container agent — round 28 IMPLEMENTED (isodev, 2026-08-12)
 
 ## ROUND 28 — IMPLEMENTED in the container (2026-08-12) — awaiting host validation

@@ -1370,12 +1370,13 @@ impl Pane for DirectoriesPane {
     }
 
     fn handle_action(&mut self, event: &mut ActionEvent, ctx: &mut Ctx) -> Result<()> {
-        // Round 28: `Tab` while the MPD tab is focused toggles the
-        // Library/Search mode (the feedback's leading suggestion) instead
-        // of cycling to the next tab. Any other global action falls
+        // Round 28b: ONLY Shift+Tab toggles the Library/Search mode while
+        // the MPD tab is focused (the `ToggleMpdMode` global). Tab / E / Q
+        // still cycle tabs (NextTab / PreviousTab), so the tab is always
+        // reachable from the keyboard. Any other global action falls
         // through to the mode's handler (or the global handler below).
         if let Some(action) = event.claim_global() {
-            if matches!(action, GlobalAction::NextTab) {
+            if matches!(action, GlobalAction::ToggleMpdMode) {
                 return self.toggle_mode(ctx);
             }
             event.abandon();
@@ -2358,20 +2359,37 @@ mod tests {
         assert_eq!(pane.mode, MpdTabMode::Library, "clicking Library switches back");
     }
 
-    /// `Tab` (the NextTab global) toggles the Library/Search mode instead
-    /// of cycling to the next tab.
+    /// `Shift+Tab` (the ToggleMpdMode global) toggles the Library/Search
+    /// mode — the ONLY key that does: Tab / E / Q (NextTab / PreviousTab)
+    /// fall through and still cycle tabs, so the MPD tab stays reachable.
     #[test]
-    fn tab_toggles_the_library_search_mode() {
+    fn shift_tab_toggles_the_library_search_mode() {
+        let mut ctx = test_ctx();
+        let mut pane = DirectoriesPane::new(&ctx);
+
+        let mut ev = action(vec![Actions::Global(GlobalAction::ToggleMpdMode)]);
+        pane.handle_action(&mut ev, &mut ctx).unwrap();
+        assert_eq!(pane.mode, MpdTabMode::Search, "Shift+Tab enters Search mode");
+
+        let mut ev = action(vec![Actions::Global(GlobalAction::ToggleMpdMode)]);
+        pane.handle_action(&mut ev, &mut ctx).unwrap();
+        assert_eq!(pane.mode, MpdTabMode::Library, "a second Shift+Tab returns to Library");
+    }
+
+    /// Tab (NextTab) and Q (PreviousTab) must NOT toggle the mode — they
+    /// are abandoned so the global handler cycles tabs as before.
+    #[test]
+    fn tab_and_q_do_not_toggle_the_mode() {
         let mut ctx = test_ctx();
         let mut pane = DirectoriesPane::new(&ctx);
 
         let mut ev = action(vec![Actions::Global(GlobalAction::NextTab)]);
         pane.handle_action(&mut ev, &mut ctx).unwrap();
-        assert_eq!(pane.mode, MpdTabMode::Search, "Tab enters Search mode");
+        assert_eq!(pane.mode, MpdTabMode::Library, "Tab still cycles tabs, never toggles");
 
-        let mut ev = action(vec![Actions::Global(GlobalAction::NextTab)]);
+        let mut ev = action(vec![Actions::Global(GlobalAction::PreviousTab)]);
         pane.handle_action(&mut ev, &mut ctx).unwrap();
-        assert_eq!(pane.mode, MpdTabMode::Library, "a second Tab returns to Library");
+        assert_eq!(pane.mode, MpdTabMode::Library, "Q still cycles tabs, never toggles");
     }
 
     /// In Search mode the tab renders the folded-in search UI (filters

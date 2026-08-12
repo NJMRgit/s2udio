@@ -50,8 +50,11 @@ tags: [keyboard, mouse, keybinds, interaction]
 `keybinds.clear: true` — only these defaults exist (config.ron +
 `keybinds.ron` overrides):
 
-- **global**: `Space` TogglePause, `Tab` NextTab, `>` NextTrack, `Q`/`q`
-  Quit, `Esc` ShowSettings.
+- **global**: `Space` TogglePause, `Tab` NextTab, `E` NextTab, `Q`
+  PreviousTab, `>` NextTrack, `q` Quit, `Esc` ShowSettings,
+  `<S-Tab>` ToggleMpdMode (**MPD tab only**: flips its Library/Search
+  mode; anywhere else it is a no-op — `Tab`/`E`/`Q` still cycle tabs,
+  and the queue's `<S-Tab>` chapters toggle keeps working).
 - **navigation**: `Esc` Close, `Enter` Confirm, `w`/`↑` Up, `s`/`↓` Down,
   `W`/`S`/`Shift+↑/↓` SelectUp/Down, `PageUp`/`PageDown`, `Del` Delete.
 - **directories** (drives Queue, Radio, Directories and Jellyfin):
