@@ -1463,27 +1463,6 @@ impl Default for TabsFile {
                     }],
                 },
             },
-            TabFile {
-                name: "Search".to_string(),
-                border_type: BorderTypeFile::None,
-                pane: PaneOrSplitFile::Split {
-                    borders: BordersFile::NONE,
-                    direction: DirectionFile::Vertical,
-                    panes: vec![SubPaneFile {
-
-                            collapse_below: None, shrink_below: None, window_sizes: Vec::new(),size: "100%".to_string(),
-                        background_color: None,
-                        borders: BordersFile::ALL,
-                        border_style: None,
-                        border_active_style: None,
-                        border_title: Vec::new(),
-                        border_title_position: BorderTitlePosition::Top,
-                        border_title_alignment: Alignment::Left,
-                        border_symbols: BorderSymbolsFile::Rounded,
-                        pane: PaneOrSplitFile::Pane(PaneTypeFile::Search),
-                    }],
-                },
-            },
         ])
     }
 }

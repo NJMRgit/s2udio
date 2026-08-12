@@ -9,10 +9,11 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, ListState},
 };
 
-use super::Pane;
+use super::{Pane, search::SearchPane};
 use crate::{
     MpdQueryResult,
     config::{
+        keys::GlobalAction,
         tabs::{PaneType, PaneTypeDiscriminants, TreeBrowserArgs},
     },
     ctx::Ctx,
@@ -24,19 +25,21 @@ use crate::{
     shared::{
         keys::ActionEvent,
         macros::modal,
-        mouse_event::MouseEvent,
+        mouse_event::{MouseEvent, MouseEventKind},
         mpd_client_ext::{Enqueue, MpdClientExt},
     },
     ui::{
         UiEvent,
         dir_or_song::DirOrSong,
         dirstack::{DirStackItem, MarkState, Path},
+        input::InputResultEvent,
         modals::{
             input_modal::InputModal,
             menu::modal::MenuModal,
             select_modal::SelectModal,
         },
         tree_browser::{TreeBrowserCore, TreeRowView},
+        widgets::sub_tab_bar::{Segment, SubTabBar},
     },
 };
 
@@ -296,6 +299,18 @@ impl DirTree {
     }
 }
 
+/// The mode of the MPD tab (round 28): the tab hosts the library browser
+/// (folders + items) and the search UI (the former top-level Search tab)
+/// under one toggle. The active mode is marked with the app's ●/⭘
+/// convention (`⭘ Library  ● Search`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MpdTabMode {
+    /// The folder tree + items browser (the pre-round-28 MPD tab).
+    Library,
+    /// The search filters + results UI (the folded-in Search tab).
+    Search,
+}
+
 /// The MPD tab: a jellyfin-style shared-selection browser. The left tree
 /// mirrors the folder hierarchy (the `Library ↴` root, always expanded),
 /// the right pane lists the **current node's children** — folders and
@@ -307,6 +322,13 @@ impl DirTree {
 /// left, `Enter` opens the context menu (like right-click, parity with
 /// the Playlists pane), and the tree highlight follows the right-pane
 /// cursor.
+///
+/// Round 28: the tab also hosts the search UI — a `⭘ Library  ● Search`
+/// toggle row at the top switches between the library browser and the
+/// folded-in search mode (the former top-level Search tab; still queries
+/// the user's MPD library). The search state lives for the session, so
+/// filters and results survive Library↔Search toggles; the mode resets to
+/// Library at startup.
 #[derive(Debug)]
 pub struct DirectoriesPane {
     /// Folder tree (Library root) built from `listall`.
@@ -334,6 +356,15 @@ pub struct DirectoriesPane {
     /// change / stop — mirrors the Radio pane.
     temp_play_id: Option<u32>,
     initialized: bool,
+    /// The active mode (Library or the folded-in Search). Reset to Library
+    /// at startup, kept for the session (round 28 defaults).
+    mode: MpdTabMode,
+    /// The search UI, alive for the session so filters/results survive
+    /// Library↔Search toggles.
+    search: SearchPane,
+    /// Click areas of the toggle row's two labels (Library, Search),
+    /// refreshed on every render.
+    toggle_areas: [Rect; 2],
 }
 
 impl DirectoriesPane {
@@ -352,6 +383,52 @@ impl DirectoriesPane {
             pending: HashSet::new(),
             temp_play_id: None,
             initialized: false,
+            mode: MpdTabMode::Library,
+            search: SearchPane::new(ctx),
+            toggle_areas: [Rect::default(); 2],
+        }
+    }
+
+    /// Switch the tab's mode (Library <-> Search), keeping the search
+    /// state alive for the session. No-op when already in the mode.
+    pub fn set_mode(&mut self, mode: MpdTabMode, ctx: &Ctx) -> Result<()> {
+        if self.mode == mode {
+            return Ok(());
+        }
+        self.mode = mode;
+        ctx.render()?;
+        Ok(())
+    }
+
+    /// Flip the Library/Search mode (bound to `Tab` while the MPD tab is
+    /// focused and to clicking the toggle labels).
+    pub fn toggle_mode(&mut self, ctx: &Ctx) -> Result<()> {
+        let next = match self.mode {
+            MpdTabMode::Library => MpdTabMode::Search,
+            MpdTabMode::Search => MpdTabMode::Library,
+        };
+        self.set_mode(next, ctx)
+    }
+
+    /// The `⭘ Library  ● Search` toggle row: left-aligned, one leading
+    /// space, the ●/⭘ marker convention with the active mode bold. Click
+    /// areas for the two labels are recorded for mouse routing; the row
+    /// renders in both modes (round 28).
+    fn render_toggle(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) {
+        self.toggle_areas = [Rect::default(); 2];
+        if area.height == 0 {
+            return;
+        }
+        let segments = [
+            Segment { label: "Library", active: self.mode == MpdTabMode::Library },
+            Segment { label: "Search", active: self.mode == MpdTabMode::Search },
+        ];
+        // One cell in from the left edge (the leading space).
+        let x = area.x.saturating_add(1);
+        let bar = SubTabBar::new(&segments, x, area.y, area.right().saturating_sub(1));
+        let areas = bar.render(frame, ctx);
+        for (idx, seg_area) in areas.into_iter().take(2).enumerate() {
+            self.toggle_areas[idx] = seg_area;
         }
     }
 
@@ -1208,7 +1285,18 @@ impl TreeBrowserCore for DirectoriesPane {
 
 impl Pane for DirectoriesPane {
     fn render(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) -> Result<()> {
-        self.render_tree_browser(frame, area, ctx)
+        // The toggle row sits at the top of the pane (inside the box,
+        // directly below the tab bar); the mode's content renders under it.
+        let [toggle_area, content] = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Min(0),
+        ])
+        .areas(area);
+        self.render_toggle(frame, toggle_area, ctx);
+        match self.mode {
+            MpdTabMode::Library => self.render_tree_browser(frame, content, ctx),
+            MpdTabMode::Search => self.search.render(frame, content, ctx),
+        }
     }
 
     fn before_show(&mut self, ctx: &Ctx) -> Result<()> {
@@ -1237,9 +1325,7 @@ impl Pane for DirectoriesPane {
         // The temp-play lifecycle (SongChanged / stop / reconnected) lives
         // in the shared tree-browser core; the Database reset is
         // directories-specific.
-        if self.handle_tree_events(event, is_visible, ctx)? {
-            return Ok(());
-        }
+        let _tree_handled = self.handle_tree_events(event, is_visible, ctx)?;
         match event {
             UiEvent::Database => {
                 self.loaded.clear();
@@ -1253,18 +1339,57 @@ impl Pane for DirectoriesPane {
             }
             _ => {}
         }
+        // The folded-in search keeps its own state (filters, results,
+        // phases) in sync with the same events it got as a top-level tab
+        // (Database / Reconnected / ConfigChanged reset it the same way).
+        self.search.on_event(event, is_visible, ctx)?;
         Ok(())
     }
 
     fn handle_mouse_event(&mut self, event: MouseEvent, ctx: &Ctx) -> Result<()> {
-        self.handle_tree_mouse_event(event, ctx)
+        // Clicking the toggle labels switches the mode (both modes).
+        if matches!(event.kind, MouseEventKind::LeftClick | MouseEventKind::DoubleClick) {
+            for (idx, area) in self.toggle_areas.iter().enumerate() {
+                if area.contains(event.into()) {
+                    let mode = if idx == 0 { MpdTabMode::Library } else { MpdTabMode::Search };
+                    return self.set_mode(mode, ctx);
+                }
+            }
+        }
+        match self.mode {
+            MpdTabMode::Library => self.handle_tree_mouse_event(event, ctx),
+            MpdTabMode::Search => self.search.handle_mouse_event(event, ctx),
+        }
+    }
+
+    fn handle_insert_mode(&mut self, kind: InputResultEvent, ctx: &mut Ctx) -> Result<()> {
+        match self.mode {
+            MpdTabMode::Library => Ok(()),
+            MpdTabMode::Search => self.search.handle_insert_mode(kind, ctx),
+        }
     }
 
     fn handle_action(&mut self, event: &mut ActionEvent, ctx: &mut Ctx) -> Result<()> {
-        // Shared tree-browser action arms: w/s/arrows move the right-pane
-        // list, `a`/`←` back out, `d`/`→` open/play, Enter/right-click the
-        // context menu, Shift+Up/Down range-select, Esc clears the marks.
-        self.handle_tree_action(event, ctx)?;
+        // Round 28: `Tab` while the MPD tab is focused toggles the
+        // Library/Search mode (the feedback's leading suggestion) instead
+        // of cycling to the next tab. Any other global action falls
+        // through to the mode's handler (or the global handler below).
+        if let Some(action) = event.claim_global() {
+            if matches!(action, GlobalAction::NextTab) {
+                return self.toggle_mode(ctx);
+            }
+            event.abandon();
+        }
+        match self.mode {
+            // Shared tree-browser action arms: w/s/arrows move the
+            // right-pane list, `a`/`←` back out, `d`/`→` open/play,
+            // Enter/right-click the context menu, Shift+Up/Down
+            // range-select, Esc clears the marks.
+            MpdTabMode::Library => {
+                self.handle_tree_action(event, ctx)?;
+            }
+            MpdTabMode::Search => self.search.handle_action(event, ctx)?,
+        }
         Ok(())
     }
 
@@ -1275,8 +1400,12 @@ impl Pane for DirectoriesPane {
         _is_visible: bool,
         ctx: &Ctx,
     ) -> Result<()> {
-        match (id, data) {
-            (FETCH_DATA, MpdQueryResult::DirOrSong { data, path }) => {
+        match id {
+            FETCH_DATA => {
+                let MpdQueryResult::DirOrSong { data, path } = data else {
+                    log::error!(id; "Unexpected result for the children fetch");
+                    return Ok(());
+                };
                 let Some(path) = path else {
                     log::error!(path:?; "Cannot insert data because path is not provided");
                     return Ok(());
@@ -1299,7 +1428,8 @@ impl Pane for DirectoriesPane {
                     ctx.render()?;
                 }
             }
-            (TREE, MpdQueryResult::Any(any)) => {
+            TREE => {
+                let MpdQueryResult::Any(any) = data else { return Ok(()) };
                 if let Ok(dirs) = any.downcast::<Vec<String>>() {
                     self.tree = DirTree::build(dirs.into_iter());
                     // The downloads folder (~/Downloads/s2udio-downloads,
@@ -1320,7 +1450,8 @@ impl Pane for DirectoriesPane {
                     ctx.render()?;
                 }
             }
-            (PLAY_FILE, MpdQueryResult::Any(any)) => {
+            PLAY_FILE => {
+                let MpdQueryResult::Any(any) = data else { return Ok(()) };
                 if let Ok(id) = any.downcast::<u32>() {
                     self.temp_play_id = Some(*id);
                     // Expose the id so the Queue pane can hide the
@@ -1328,7 +1459,9 @@ impl Pane for DirectoriesPane {
                     ctx.temp_play_id.set(Some(*id));
                 }
             }
-            _ => {}
+            // Everything else (the folded-in search's `SEARCH` results and
+            // any modal-targeted queries) goes to the search UI.
+            _ => self.search.on_query_finished(id, data, _is_visible, ctx)?,
         }
         Ok(())
     }
@@ -1945,14 +2078,16 @@ mod tests {
         // cursor sits on (row 0) keeps the List's accent highlight, and a
         // plain row keeps the list style.
         // x=27 sits inside the items list (right pane, past its border).
+        // The toggle row (round 28) occupies pane row 0, so the items list
+        // starts one row lower than before the fold.
         let row_bg = |y: u16| buffer[(27, y)].style().bg;
         // The marked rows render with the marked highlight; the row the
         // cursor sits on (row 1, the shift+down target) keeps the List's
         // accent highlight; the plain row keeps the list background.
-        assert_eq!(row_bg(1), marked_style.bg, "row 0 is marked");
-        assert_eq!(row_bg(2), ctx.config.theme.current_item_style.bg, "cursor row keeps the accent");
+        assert_eq!(row_bg(2), marked_style.bg, "row 0 is marked");
+        assert_eq!(row_bg(3), ctx.config.theme.current_item_style.bg, "cursor row keeps the accent");
         assert!(
-            !matches!(row_bg(3), Some(ratatui::style::Color::Rgb(92, 92, 92)) | Some(ratatui::style::Color::Rgb(71, 71, 71))),
+            !matches!(row_bg(4), Some(ratatui::style::Color::Rgb(92, 92, 92)) | Some(ratatui::style::Color::Rgb(71, 71, 71))),
             "row 2 keeps the plain list background"
         );
     }
@@ -2151,5 +2286,198 @@ mod tests {
         pane.handle_action(&mut ev, &mut ctx).unwrap();
         assert_eq!(pane.item_list.selected(), Some(2));
         assert_eq!(pane.marked.iter().collect::<Vec<_>>(), vec![1, 2]);
+    }
+
+    // ── Round 28: the Search tab folded into the MPD tab ──────────────
+
+    /// The toggle row marks the active mode with the app's ●/⭘ convention
+    /// and the tab starts in Library mode.
+    #[test]
+    fn toggle_row_marks_the_active_mode() {
+        let mut ctx = test_ctx();
+        let mut pane = DirectoriesPane::new(&ctx);
+        assert_eq!(pane.mode, MpdTabMode::Library, "the MPD tab starts in Library mode");
+
+        let render_toggle_line = |pane: &mut DirectoriesPane| -> String {
+            let backend = ratatui::backend::TestBackend::new(80, 20);
+            let mut terminal = ratatui::Terminal::new(backend).unwrap();
+            terminal
+                .draw(|frame| pane.render(frame, Rect::new(0, 0, 80, 20), &ctx).unwrap())
+                .unwrap();
+            let buf = terminal.backend().buffer();
+            (0..80u16).map(|x| buf[(x, 0)].symbol().to_string()).collect()
+        };
+
+        let line = render_toggle_line(&mut pane);
+        assert!(line.contains("● Library"), "Library mode: {line}");
+        assert!(line.contains("⭘ Search"), "Library mode: {line}");
+        assert!(!line.contains("⭘ Library"), "Library is active: {line}");
+        assert!(!line.contains("● Search"), "Search is inactive: {line}");
+
+        pane.set_mode(MpdTabMode::Search, &ctx).unwrap();
+        let line = render_toggle_line(&mut pane);
+        assert!(line.contains("⭘ Library"), "Search mode: {line}");
+        assert!(line.contains("● Search"), "Search mode: {line}");
+    }
+
+    /// Clicking the toggle labels switches the MPD tab's mode.
+    #[test]
+    fn clicking_the_toggle_labels_switches_the_mode() {
+        let mut ctx = test_ctx();
+        let mut pane = DirectoriesPane::new(&ctx);
+        let backend = ratatui::backend::TestBackend::new(80, 20);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| pane.render(frame, Rect::new(0, 0, 80, 20), &ctx).unwrap())
+            .unwrap();
+        let [library_area, search_area] = pane.toggle_areas;
+        assert!(search_area.width > 0, "the toggle labels are clickable");
+
+        pane.handle_mouse_event(
+            MouseEvent {
+                x: search_area.x + 1,
+                y: search_area.y,
+                kind: MouseEventKind::LeftClick,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            },
+            &ctx,
+        )
+        .unwrap();
+        assert_eq!(pane.mode, MpdTabMode::Search, "clicking Search switches to it");
+
+        pane.handle_mouse_event(
+            MouseEvent {
+                x: library_area.x + 1,
+                y: library_area.y,
+                kind: MouseEventKind::LeftClick,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            },
+            &ctx,
+        )
+        .unwrap();
+        assert_eq!(pane.mode, MpdTabMode::Library, "clicking Library switches back");
+    }
+
+    /// `Tab` (the NextTab global) toggles the Library/Search mode instead
+    /// of cycling to the next tab.
+    #[test]
+    fn tab_toggles_the_library_search_mode() {
+        let mut ctx = test_ctx();
+        let mut pane = DirectoriesPane::new(&ctx);
+
+        let mut ev = action(vec![Actions::Global(GlobalAction::NextTab)]);
+        pane.handle_action(&mut ev, &mut ctx).unwrap();
+        assert_eq!(pane.mode, MpdTabMode::Search, "Tab enters Search mode");
+
+        let mut ev = action(vec![Actions::Global(GlobalAction::NextTab)]);
+        pane.handle_action(&mut ev, &mut ctx).unwrap();
+        assert_eq!(pane.mode, MpdTabMode::Library, "a second Tab returns to Library");
+    }
+
+    /// In Search mode the tab renders the folded-in search UI (filters
+    /// pane, results list, info box) and search results delivered to the
+    /// Directories pane reach the embedded search.
+    #[test]
+    fn search_mode_renders_the_folded_in_search_ui() {
+        let mut ctx = test_ctx();
+        let mut pane = DirectoriesPane::new(&ctx);
+        pane.set_mode(MpdTabMode::Search, &ctx).unwrap();
+
+        pane.on_query_finished(
+            crate::ui::panes::search::SEARCH,
+            MpdQueryResult::SearchResult {
+                data: vec![crate::mpd::commands::Song {
+                    file: "/mnt/music/ambient.flac".to_owned(),
+                    ..Default::default()
+                }],
+            },
+            true,
+            &ctx,
+        )
+        .unwrap();
+
+        let backend = ratatui::backend::TestBackend::new(100, 30);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| pane.render(frame, Rect::new(0, 0, 100, 30), &ctx).unwrap())
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let text: String = (0..30u16)
+            .map(|y| (0..100u16).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains(" Search "), "the filter pane title shows: {text}");
+        assert!(text.contains(" Results "), "the results title shows: {text}");
+        assert!(text.contains(" Info "), "the info box shows: {text}");
+        assert!(text.contains("ambient.flac"), "the delivered result renders: {text}");
+    }
+
+    /// The search filters live for the session: a Library↔Search toggle
+    /// keeps the typed filter values.
+    #[test]
+    fn search_filters_survive_a_library_search_toggle() {
+        let mut ctx = test_ctx();
+        let mut pane = DirectoriesPane::new(&ctx);
+        pane.set_mode(MpdTabMode::Search, &ctx).unwrap();
+
+        // Type into the first filter textbox (its buffer lives on Ctx).
+        let buffer_id = pane
+            .search
+            .first_filter_buffer_id()
+            .expect("the search filters create textbox buffers");
+        ctx.input.set_buffer("Aphex Twin".to_owned(), buffer_id);
+        assert_eq!(ctx.input.value(buffer_id), "Aphex Twin");
+
+        // Toggle to Library and back: the search state is untouched.
+        pane.set_mode(MpdTabMode::Library, &ctx).unwrap();
+        pane.set_mode(MpdTabMode::Search, &ctx).unwrap();
+        assert_eq!(
+            ctx.input.value(buffer_id),
+            "Aphex Twin",
+            "the filters survive the Library↔Search toggle"
+        );
+    }
+
+    /// Esc with an active search selection clears the marks and consumes
+    /// the keypress through the embedded search (round-24 parity); with
+    /// nothing selected it leaves the keypress for the settings panel.
+    #[test]
+    fn esc_in_search_mode_clears_the_selection_and_consumes_the_keypress() {
+        let mut ctx = test_ctx();
+        let mut pane = DirectoriesPane::new(&ctx);
+        pane.set_mode(MpdTabMode::Search, &ctx).unwrap();
+        pane.on_query_finished(
+            crate::ui::panes::search::SEARCH,
+            MpdQueryResult::SearchResult {
+                data: (0..3)
+                    .map(|i| crate::mpd::commands::Song {
+                        id: i,
+                        file: format!("/mnt/music/{i}.flac"),
+                        ..Default::default()
+                    })
+                    .collect(),
+            },
+            true,
+            &ctx,
+        )
+        .unwrap();
+
+        // `d` moves into the results list (BrowseResults phase).
+        let mut ev = action(vec![Actions::Directories(DirectoriesActions::FolderExpand)]);
+        pane.handle_action(&mut ev, &mut ctx).unwrap();
+
+        // Shift+Down marks rows 0..=1.
+        let mut ev = action(vec![Actions::Common(CommonAction::SelectDown)]);
+        pane.handle_action(&mut ev, &mut ctx).unwrap();
+
+        let mut ev = action(vec![Actions::Common(CommonAction::Close)]);
+        pane.handle_action(&mut ev, &mut ctx).unwrap();
+        assert!(ev.is_consumed(), "the first Esc clears the search marks");
+
+        // Nothing is selected now: the keypress is not consumed, so the
+        // settings panel opens (the ui-level ShowSettings half).
+        let mut ev = action(vec![Actions::Common(CommonAction::Close)]);
+        pane.handle_action(&mut ev, &mut ctx).unwrap();
+        assert!(!ev.is_consumed(), "a second Esc with nothing selected opens settings");
     }
 }
