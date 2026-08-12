@@ -361,6 +361,10 @@ struct StagedCava {
     noise_reduction: u8,
     monstercat: bool,
     waves: bool,
+    /// Round 29: the configured PipeWire node name for the cava stream.
+    /// Not editable from the panel (set it in `cava.ron`), but carried
+    /// through so a panel Save never drops it.
+    node_name: Option<String>,
 }
 
 impl StagedCava {
@@ -377,6 +381,7 @@ impl StagedCava {
             noise_reduction: config.cava.smoothing.noise_reduction,
             monstercat: config.cava.smoothing.monstercat,
             waves: config.cava.smoothing.waves,
+            node_name: config.cava.input.node_name.clone(),
         }
     }
 
@@ -394,6 +399,7 @@ impl StagedCava {
             noise_reduction: Some(self.noise_reduction),
             monstercat: Some(self.monstercat),
             waves: Some(self.waves),
+            node_name: self.node_name.clone(),
         }
     }
 }
@@ -3113,6 +3119,7 @@ Source #165
             noise_reduction: Some(77),
             monstercat: Some(true),
             waves: Some(false),
+            node_name: None,
         };
         let content =
             ron::ser::to_string_pretty(&overrides, ron::ser::PrettyConfig::default()).unwrap();

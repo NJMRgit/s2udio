@@ -1,3 +1,24 @@
+# Notes for the container agent — round 29 IMPLEMENTED host-side (2026-08-12)
+
+## ROUND 29 — cava node_name (host live-check feature, 2026-08-12) — committed on `working`
+
+**User request (2026-08-12) →
+[FEEDBACK-2026-08-12-2.md](FEEDBACK-2026-08-12-2.md).** Name the cava
+PipeWire node s2udio spawns. Investigation: cava hardcodes
+`node.name = "cava"` (`pw_stream_new_simple(..., "cava", ...)`), no cava
+config/env option exists, and WirePlumber 0.5 cannot rename an app-set
+node.name from outside. Host implemented on `working` (round-29 commit):
+new `node_name` option (main config + `cava.ron` sidecar; settings panel
+preserves it), plus a tiny LD_PRELOAD shim (`scripts/cava-node-name.c`,
+built by setup.sh → `~/.local/share/s2udio/libcavaname.so`) that injects
+node.name/media.name from `CAVA_NODE_NAME`; `spawn_cava` sets the env
+when `node_name` is configured. **1364/1364**, warnings 3 baseline.
+Live-verified: s2udio's cava now shows as **`s2udio-cava`** in pw-dump
+(plasma's two cavas stay "cava"). isodev: nothing to implement — pull
+`working` when ready.
+
+---
+
 # Notes for the container agent — rounds 28 + 28b MERGED to main (2026-08-12)
 
 ## ROUNDS 28 + 28b MERGED to main (2026-08-12) — host push

@@ -81,3 +81,12 @@ writes only **changed columns** (bounded terminal write volume). The
 thread receives Start/Stop/Pause/ConfigChanged commands; `run()` is a
 no-op while a modal is open. The FIFO tap's sample format is synced from
 MPD's fifo output (`backend/mpd-playback`).
+
+With the PipeWire input, cava's stream node is named **`cava`** (cava
+hardcodes `pw_stream_new_simple(..., "cava", ...)` — `node.name` and
+`media.name`). Round 29: when `cava.ron` sets `node_name`, s2udio spawns
+cava through the `libcavaname.so` LD_PRELOAD shim (built by `setup.sh`
+from `scripts/cava-node-name.c`) with `CAVA_NODE_NAME=<name>`, so the
+node shows up as e.g. **`s2udio-cava`** in `pw-dump` / `pw-cli ls Node` /
+pavucontrol / Easy Effects while other cava instances keep their own
+names. See `backend/config-sidecars` for the config surface.

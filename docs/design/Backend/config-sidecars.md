@@ -85,7 +85,17 @@ locations.
 
 - Fields: `framerate`, `autosens`, `sensitivity`, `lower_cutoff_freq`,
   `higher_cutoff_freq`, `channels`, `method`, `source`,
-  `noise_reduction`, `monstercat`, `waves`.
+  `noise_reduction`, `monstercat`, `waves`, `node_name`.
+- **`node_name` (round 29)**: names the PipeWire node cava creates
+  (`node.name`/`media.name` in pw-dump/pavucontrol/Easy Effects). cava
+  hardcodes `"cava"`; s2udio renames it via the LD_PRELOAD shim built by
+  `setup.sh` from `scripts/cava-node-name.c` into
+  `~/.local/share/s2udio/libcavaname.so` (`S2UDIO_CAVA_NAME_SHIM`
+  overrides the path) — the spawn sets `CAVA_NODE_NAME=<name>`. `None`
+  (default) keeps cava's own name; `Some("")` explicitly disables
+  renaming. The settings panel does not edit it but preserves it across
+  Save. Only the s2udio-spawned cava carries the env, so other cava
+  instances on the system keep their names.
 - **No sample rate / bit depth**: a FIFO tap's format is synced from
   MPD's fifo output at spawn time (see `backend/mpd-playback`).
 - Merged by `apply_cava_override`; the visualizer re-arms via

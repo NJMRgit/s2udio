@@ -123,9 +123,17 @@ the user's decisions win. Locked in across sessions (details in the docs):
   (`06b90f7` cava pipewire restart fix, `96fc4cb` round 28,
   `2c04bcf` round 28b); host-validated **1361/1361**, warnings 3
   baseline.
-- **Branch**: `working` (tracks `s2udio-working/working`), at `5537ad1` —
-  **round-28b committed on top** (host live-check fix; **1361/1361**
+- **Branch**: `working` (tracks `s2udio-working/working`), at `5537ad1` +
+  **round 29 committed on top** (host-implemented feature; **1364/1364**
   host-validated 2026-08-12, warnings 3 baseline, binary build clean).
+  **Round 29 (2026-08-12, host-implemented)**: name the cava PipeWire
+  node — new `node_name` option (`cava.ron` / main config; preserved by
+  the settings panel) + LD_PRELOAD shim (`scripts/cava-node-name.c`,
+  built by setup.sh → `~/.local/share/s2udio/libcavaname.so`,
+  `S2UDIO_CAVA_NAME_SHIM` overrides) that injects node.name/media.name
+  from `CAVA_NODE_NAME`; `spawn_cava` sets the env when configured.
+  Live-verified: s2udio's cava is now **`s2udio-cava`** in pw-dump.
+  See [FEEDBACK-2026-08-12-2.md](FEEDBACK-2026-08-12-2.md).
   **Round 28b (2026-08-12, host-implemented)**: ONLY `Shift+Tab`
   toggles the MPD tab's Library/Search mode (new global `ToggleMpdMode`,
   bound to `<S-Tab>` in the defaults + the live config.ron +
@@ -548,6 +556,13 @@ Toolchain env (container): `export PATH="$HOME/.cargo/bin:$PATH"`
 
 ## Pending
 
+- **Round 29 (2026-08-12 user request) — IMPLEMENTED host-side,
+  VALIDATED 1364/1364, binary installed + live-checked (see
+  FEEDBACK-2026-08-12-2.md).** Name the cava PipeWire node via a new
+  `node_name` option + LD_PRELOAD shim; s2udio's cava now shows as
+  `s2udio-cava` in pw-dump. When merged to main, the shim source
+  (`scripts/cava-node-name.c`) + setup.sh build step ship in the clean
+  subset.
 - **Round 28b (2026-08-12 host live-check fix) — IMPLEMENTED host-side,
   VALIDATED 1361/1361, binary installed (see
   FEEDBACK-2026-08-12-1.md).** ONLY `Shift+Tab` toggles the MPD tab's
