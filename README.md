@@ -14,11 +14,8 @@ a fully featured media center TUI built on rmpc that adds support for video via 
 
 Built with the help of Deepseek v4 Flash, pi, and prime-agent
 
-<img width="2065" height="924" alt="image" src="https://github.com/user-attachments/assets/9da9686c-52f3-4b3c-8ef7-cfffe20a7270" />
-<img width="1400" height="163" alt="image" src="https://github.com/user-attachments/assets/e4fc184f-61f7-4f23-8f32-0e15ba493362" />
-Left: S2udio ootb
+[output.webm](https://github.com/user-attachments/assets/4da44002-b1d2-489d-b6c7-2943edadd4f4)
 
-Right: RMPC ootb
 
 
 ## Added Features:
@@ -45,8 +42,6 @@ Right: RMPC ootb
 ## Showcase
 ### Jellyfin
 https://github.com/user-attachments/assets/ecb84436-4ce9-45d0-9dbf-a34cc159e31d
-### Automatic theming (STTM only for now)
-[Screencast_20260809_202700.webm](https://github.com/user-attachments/assets/9ed0e9b8-ecac-4f69-90aa-e39b247a3aa6)
 ### ctrl+click / alt+click / shift + up|down
 [Screencast_20260809_202813.webm](https://github.com/user-attachments/assets/f4e21da4-28a9-4487-9e5f-19bc564d46bd)
 ### youtube audio streams with chapters
