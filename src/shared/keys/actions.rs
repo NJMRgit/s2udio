@@ -73,9 +73,7 @@ impl Actions {
     pub fn steps_once(&self) -> bool {
         matches!(
             self,
-            Actions::Global(
-                GlobalAction::NextTab | GlobalAction::PreviousTab | GlobalAction::ToggleMpdMode
-            )
+            Actions::Global(GlobalAction::NextTab | GlobalAction::PreviousTab)
         )
     }
 }

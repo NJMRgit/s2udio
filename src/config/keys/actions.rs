@@ -51,10 +51,6 @@ pub enum GlobalAction {
     CommandMode,
     NextTab,
     PreviousTab,
-    /// Round 28b: toggle the MPD tab's Library/Search mode (bound to
-    /// Shift+Tab while the MPD tab is focused; a no-op anywhere else —
-    /// Tab/E/Q cycle tabs as before, so the tab is always reachable).
-    ToggleMpdMode,
     #[strum(to_string = "SwitchToTab({0})")]
     SwitchToTab(TabName),
     Command {
@@ -103,7 +99,6 @@ pub enum GlobalActionFile {
     Rescan,
     NextTab,
     PreviousTab,
-    ToggleMpdMode,
     SwitchToTab(String),
     QueueTab,
     DirectoriesTab,
@@ -155,7 +150,6 @@ impl From<GlobalActionFile> for GlobalAction {
             GlobalActionFile::CrossfadeUp => GlobalAction::CrossfadeUp,
             GlobalActionFile::PreviousTab => GlobalAction::PreviousTab,
             GlobalActionFile::NextTab => GlobalAction::NextTab,
-            GlobalActionFile::ToggleMpdMode => GlobalAction::ToggleMpdMode,
             GlobalActionFile::ToggleConsume => GlobalAction::ToggleConsume,
             GlobalActionFile::SwitchToTab(name) => GlobalAction::SwitchToTab(name.into()),
             GlobalActionFile::QueueTab => GlobalAction::SwitchToTab("Queue".into()),
@@ -218,7 +212,6 @@ impl From<GlobalAction> for GlobalActionFile {
             GlobalAction::CommandMode => GlobalActionFile::CommandMode,
             GlobalAction::NextTab => GlobalActionFile::NextTab,
             GlobalAction::PreviousTab => GlobalActionFile::PreviousTab,
-            GlobalAction::ToggleMpdMode => GlobalActionFile::ToggleMpdMode,
             GlobalAction::SwitchToTab(tab) => GlobalActionFile::SwitchToTab(tab.to_string()),
             GlobalAction::Command { command, description } => {
                 GlobalActionFile::Command { command, description }
@@ -264,7 +257,6 @@ impl ToDescription for GlobalAction {
             GlobalAction::Rescan => "Rescan music library (incl. unmodified files)".into(),
             GlobalAction::NextTab => "Switch to next tab".into(),
             GlobalAction::PreviousTab => "Switch to previous tab".into(),
-            GlobalAction::ToggleMpdMode => "Toggle the MPD tab's Library/Search mode".into(),
             GlobalAction::SwitchToTab(name) => Cow::Owned(format!("Switch directly to {name} tab")),
             GlobalAction::CommandMode => "Enter command mode".into(),
             GlobalAction::Command { description: None, .. } => "Execute a command".into(),
