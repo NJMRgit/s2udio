@@ -26,7 +26,7 @@ use crate::{
     config::{
         Config,
         UiSettings,
-        cava::{CavaInputMethod, CavaOverridesFile},
+        cava::CavaOverridesFile,
         keys::{Key, KeyConfig, KeySequence},
         scale_color,
         state::AppStateFile,
@@ -283,7 +283,6 @@ enum GeneralRow {
     FreqMin,
     FreqMax,
     Channels,
-    Method,
     Device,
     VirtualDevices,
     NoiseReduction,
@@ -356,7 +355,6 @@ struct StagedCava {
     lower_cutoff_freq: u16,
     higher_cutoff_freq: u32,
     channels: u32,
-    method: CavaInputMethod,
     source: String,
     noise_reduction: u8,
     monstercat: bool,
@@ -376,7 +374,6 @@ impl StagedCava {
             lower_cutoff_freq: config.cava.lower_cutoff_freq.unwrap_or(DEFAULT_FREQ_MIN),
             higher_cutoff_freq: config.cava.higher_cutoff_freq.unwrap_or(DEFAULT_FREQ_MAX),
             channels: config.cava.input.channels.unwrap_or(2),
-            method: config.cava.input.method.clone(),
             source: config.cava.input.source.clone(),
             noise_reduction: config.cava.smoothing.noise_reduction,
             monstercat: config.cava.smoothing.monstercat,
@@ -394,7 +391,6 @@ impl StagedCava {
             lower_cutoff_freq: Some(self.lower_cutoff_freq),
             higher_cutoff_freq: Some(self.higher_cutoff_freq),
             channels: Some(self.channels),
-            method: Some(self.method.clone()),
             source: Some(self.source.clone()),
             noise_reduction: Some(self.noise_reduction),
             monstercat: Some(self.monstercat),
@@ -761,7 +757,6 @@ pub struct SettingsModal {
     /// PipeWire capture sources (sink monitors + mics + virtual sources,
     /// with an "auto" pseudo-node first) for the device row.
     nodes: Vec<PwNode>,
-    show_virtual: bool,
     /// MPD update/rescan scope path (persisted in state.ron).
     library_path: String,
     /// Jellyfin server credentials, staged until a successful sign-in.
@@ -874,7 +869,6 @@ impl SettingsModal {
             sidebar_selected: 0,
             focus: SettingsFocus::Sidebar,
             nodes: Vec::new(),
-            show_virtual: false,
             library_path: AppStateFile::load().mpd_library_path.unwrap_or_default(),
             jellyfin_url: jellyfin_current_url(ctx),
             jellyfin_username: String::new(),
@@ -918,16 +912,14 @@ impl SettingsModal {
 
     /// Refresh the PipeWire capture-source list (with the "auto" entry
     /// first): sink monitors (`X.monitor`) plus mics/virtual sources.
+    /// Round 30: cava is PipeWire-only, so the list is always shown.
     fn refresh_nodes(&mut self) {
-        let mut nodes = Vec::new();
-        if self.method() == CavaInputMethod::Pipewire {
-            nodes.push(PwNode {
-                name: "auto".to_string(),
-                description: "auto (default output)".to_string(),
-                is_virtual: false,
-            });
-            nodes.extend(pipewire_sources());
-        }
+        let mut nodes = vec![PwNode {
+            name: "auto".to_string(),
+            description: "auto (default output)".to_string(),
+            is_virtual: false,
+        }];
+        nodes.extend(pipewire_sources());
         self.nodes = nodes;
     }
 
@@ -951,12 +943,11 @@ impl SettingsModal {
                     ContentRow::General(GeneralRow::FreqMin),
                     ContentRow::General(GeneralRow::FreqMax),
                     ContentRow::General(GeneralRow::Channels),
-                    ContentRow::General(GeneralRow::Method),
                 ];
-                if self.method() == CavaInputMethod::Pipewire {
-                    rows.push(ContentRow::General(GeneralRow::Device));
-                    rows.push(ContentRow::General(GeneralRow::VirtualDevices));
-                }
+                // Round 30: cava is PipeWire-only — the device / virtual
+                // rows are always shown (the method toggle is gone).
+                rows.push(ContentRow::General(GeneralRow::Device));
+                rows.push(ContentRow::General(GeneralRow::VirtualDevices));
                 rows.push(ContentRow::General(GeneralRow::NoiseReduction));
                 rows.push(ContentRow::General(GeneralRow::Monstercat));
                 rows.push(ContentRow::General(GeneralRow::Waves));
@@ -1010,8 +1001,8 @@ impl SettingsModal {
         }
     }
 
-    /// Refresh the rows for the current section (device rows appear when
-    /// the method is PipeWire).
+    /// Refresh the rows for the current section (the PipeWire device rows
+    /// are always part of the cava block — round 30).
     fn refresh_rows(&mut self, ctx: &Ctx) {
         self.rows = self.build_rows(ctx);
         if self.selected >= self.rows.len() {
@@ -1020,10 +1011,6 @@ impl SettingsModal {
     }
 
     // ---------- current values (staged) ----------
-
-    fn method(&self) -> CavaInputMethod {
-        self.cava_pending.method.clone()
-    }
 
     fn source(&self) -> String {
         self.cava_pending.source.clone()
@@ -1061,15 +1048,16 @@ impl SettingsModal {
         self.cava_pending.waves
     }
 
-    /// The nodes currently offered to the device row. Sink monitors
-    /// (`X.monitor`) are the visualizer's bread and butter — capturing what
-    /// a sink plays — so they are always offered; the "show virtual
-    /// devices" toggle only gates non-monitor virtual sources (Easy
-    /// Effects' processing source).
+    /// The nodes currently offered to the device row. The "show virtual
+    /// devices" toggle gates every virtual PipeWire node — the KDE
+    /// split-sink monitors (`Media.monitor` etc.) and Easy Effects (sink
+    /// monitor + processing source) — so off offers only real hardware
+    /// capture points (plus "auto"); on offers everything. Non-virtual
+    /// nodes are always offered.
     fn visible_nodes(&self) -> Vec<PwNode> {
         self.nodes
             .iter()
-            .filter(|n| self.show_virtual || !n.is_virtual || n.name.ends_with(".monitor"))
+            .filter(|n| self.ui_pending.show_virtual_devices || !n.is_virtual)
             .cloned()
             .collect()
     }
@@ -1145,22 +1133,9 @@ impl SettingsModal {
                     let v = if self.channels() == 2 { 1 } else { 2 };
                     self.set_cava(ctx, |c| c.channels = v)
                 }
-                GeneralRow::Method => {
-                    let switch_to_pipewire = self.method() != CavaInputMethod::Pipewire;
-                    self.set_cava(ctx, |c| {
-                        if switch_to_pipewire {
-                            c.method = CavaInputMethod::Pipewire;
-                            if c.source.is_empty() || c.source.ends_with(".fifo") {
-                                c.source = "auto".to_string();
-                            }
-                        } else {
-                            c.method = CavaInputMethod::Fifo;
-                        }
-                    })
-                }
                 GeneralRow::Device => self.cycle_device(ctx, delta),
                 GeneralRow::VirtualDevices => {
-                    self.show_virtual = !self.show_virtual;
+                    self.ui_pending.show_virtual_devices = !self.ui_pending.show_virtual_devices;
                     ctx.render()?;
                     Ok(())
                 }
@@ -1430,7 +1405,9 @@ impl SettingsModal {
     }
 
     /// The [-] [+] stepper rows whose controls can be focused with
-    /// Space/Enter (a/← and d/→ then adjust, Esc cancels).
+    /// Space/Enter (a/← and d/→ then adjust, Esc cancels). The cava
+    /// device row joins them: Enter (or d/→) focuses its [<] [>] cycle
+    /// controls, then a/← and d/→ walk the PipeWire capture list.
     fn is_stepper_row(&self, idx: usize) -> bool {
         matches!(
             self.rows.get(idx),
@@ -1440,6 +1417,7 @@ impl SettingsModal {
                 | GeneralRow::FreqMin
                 | GeneralRow::FreqMax
                 | GeneralRow::NoiseReduction
+                | GeneralRow::Device
             )) | Some(ContentRow::Mpd(MpdRow::Crossfade))
         )
     }
@@ -1500,7 +1478,6 @@ impl SettingsModal {
                 | GeneralRow::FreqMin
                 | GeneralRow::FreqMax
                 | GeneralRow::Channels
-                | GeneralRow::Method
                 | GeneralRow::Device
                 | GeneralRow::VirtualDevices
                 | GeneralRow::NoiseReduction
@@ -1875,7 +1852,9 @@ impl SettingsModal {
                             self.ui_pending.auto_show_chapters,
                         ),
                         GeneralRow::AutoSens => ("auto-sens", self.cava_pending.autosens),
-                        GeneralRow::VirtualDevices => ("show virtual devices", self.show_virtual),
+                        GeneralRow::VirtualDevices => {
+                            ("show virtual devices", self.ui_pending.show_virtual_devices)
+                        }
                         GeneralRow::Monstercat => ("monstercat smoothing", self.monstercat()),
                         GeneralRow::Waves => ("waves smoothing", self.waves()),
                         _ => unreachable!(),
@@ -1936,15 +1915,6 @@ impl SettingsModal {
                         style,
                         dim,
                         &[("1", current == 1), ("2", current == 2)],
-                    )
-                }
-                GeneralRow::Method => {
-                    let pipewire = self.method() == CavaInputMethod::Pipewire;
-                    Self::option_row(
-                        "cava sample method",
-                        style,
-                        dim,
-                        &[("FIFO", !pipewire), ("pipewire", pipewire)],
                     )
                 }
                 GeneralRow::Device => {
@@ -2856,13 +2826,21 @@ impl Modal for SettingsModal {
                 if key.modifiers.is_empty() || matches!(key.code, KeyCode::Right) =>
             {
                 // d / →: open the sidebar's highlighted section, or toggle
-                // the content row under the highlight.
+                // the content row under the highlight. On a [-] [+] (or
+                // device) row it acts like Enter: focus the controls so
+                // a/← and d/→ adjust (Esc cancels).
                 match self.focus {
                     SettingsFocus::Sidebar => {
                         self.populate(ctx);
                         self.focus = SettingsFocus::Content;
                     }
-                    SettingsFocus::Content => self.activate(ctx)?,
+                    SettingsFocus::Content => {
+                        if self.is_stepper_row(self.selected) {
+                            self.start_adjust(ctx)?;
+                        } else {
+                            self.activate(ctx)?;
+                        }
+                    }
                 }
             }
             KeyCode::Enter | KeyCode::Char(' ') if key.modifiers == KeyModifiers::NONE => {
@@ -3063,7 +3041,7 @@ Source #165
     /// visualizer's job); the "show virtual devices" toggle only gates
     /// non-monitor virtual sources.
     #[test]
-    fn virtual_monitors_are_always_offered() {
+    fn virtual_devices_toggle_gates_every_virtual_node() {
         let ctx = crate::tests::fixtures::ctx(
             (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
             (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
@@ -3083,15 +3061,23 @@ Source #165
                 is_virtual: true,
             },
         ];
-        modal.show_virtual = false;
+        modal.ui_pending.show_virtual_devices = false;
         let visible: Vec<String> =
             modal.visible_nodes().into_iter().map(|n| n.name).collect();
-        assert_eq!(visible, vec!["auto", "Media.monitor"], "monitors stay offered");
+        assert_eq!(
+            visible,
+            vec!["auto"],
+            "off offers only real (non-virtual) capture points"
+        );
 
-        modal.show_virtual = true;
+        modal.ui_pending.show_virtual_devices = true;
         let visible: Vec<String> =
             modal.visible_nodes().into_iter().map(|n| n.name).collect();
-        assert_eq!(visible, vec!["auto", "Media.monitor", "easyeffects_source"]);
+        assert_eq!(
+            visible,
+            vec!["auto", "Media.monitor", "easyeffects_source"],
+            "on offers the virtual sink monitor and source too"
+        );
     }
 
     #[test]
@@ -3114,7 +3100,6 @@ Source #165
             lower_cutoff_freq: Some(20),
             higher_cutoff_freq: Some(15000),
             channels: Some(2),
-            method: Some(CavaInputMethod::Pipewire),
             source: Some("auto".to_string()),
             noise_reduction: Some(77),
             monstercat: Some(true),
@@ -3132,7 +3117,7 @@ Source #165
     }
 
     #[test]
-    fn general_fifo_section_has_all_rows() {
+    fn general_pipewire_section_has_device_rows() {
         let ctx = crate::tests::fixtures::ctx(
             (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
             (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
@@ -3140,8 +3125,11 @@ Source #165
         );
         let mut modal = SettingsModal::new(&ctx);
         assert_eq!(modal.section, Section::General);
-        // Fifo: no device / virtual rows.
-        assert!(!modal.rows.iter().any(|r| matches!(r, ContentRow::General(GeneralRow::Device))));
+        // Round 30: cava is PipeWire-only — the device + virtual-device rows
+        // are always part of the cava block (the FIFO/pipewire method
+        // toggle is gone).
+        assert!(modal.rows.iter().any(|r| matches!(r, ContentRow::General(GeneralRow::Device))));
+        assert!(modal.rows.iter().any(|r| matches!(r, ContentRow::General(GeneralRow::VirtualDevices))));
         assert!(modal.rows.iter().any(|r| matches!(r, ContentRow::General(GeneralRow::Fps))));
         // Render so the click targets are computed; the FPS stepper has both.
         let backend = ratatui::backend::TestBackend::new(110, 30);
@@ -3227,8 +3215,9 @@ Source #165
             (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
         );
         let modal = SettingsModal::new(&ctx);
-        // The sample rate / bit depth rows are gone (a FIFO tap's format is
-        // synced from MPD's fifo output); the cava block keeps channels.
+        // Round 30: cava is PipeWire-only — the method toggle and the
+        // sample rate / bit depth rows are gone; the cava block keeps
+        // channels (and always shows the PipeWire device rows).
         assert!(modal
             .rows
             .iter()
@@ -3240,7 +3229,8 @@ Source #165
             GeneralRow::FreqMin,
             GeneralRow::FreqMax,
             GeneralRow::Channels,
-            GeneralRow::Method,
+            GeneralRow::Device,
+            GeneralRow::VirtualDevices,
             GeneralRow::NoiseReduction,
             GeneralRow::Monstercat,
             GeneralRow::Waves,
@@ -3604,6 +3594,73 @@ mod nav_tests {
         assert_eq!(modal.sensitivity(), sens_before, "Esc reverts the adjustment");
     }
 
+    /// The cava device row is a stepper row: Enter/Space (and d/→) focus
+    /// its [<] [>] cycle controls, a/← and d/→ walk the capture list,
+    /// Space/Enter commits, Esc cancels and reverts the staged source.
+    #[test]
+    fn device_row_enters_adjust_mode_and_cycles_like_other_steppers() {
+        let (mut modal, mut ctx) = fixture();
+        select_general_row(&mut modal, &mut ctx, &|r| matches!(r, ContentRow::General(GeneralRow::Device)));
+        let source_before = modal.source();
+
+        // Enter enters adjust mode without changing the source.
+        modal.handle_raw_key(key(KeyCode::Enter), &mut ctx).unwrap();
+        assert_eq!(modal.adjusting, Some(modal.selected), "Enter focuses the device controls");
+        assert_eq!(modal.source(), source_before, "entering adjust mode must not change the source");
+
+        // d/→ walks the capture list while focused. The list is refreshed
+        // from the live PipeWire session after each step, so compute the
+        // expected next source the same way the app does (with the
+        // virtual-devices toggle off, only non-virtual nodes are offered).
+        let expected_next = {
+            let mut visible: Vec<String> = vec!["auto".to_string()];
+            visible.extend(
+                pipewire_sources()
+                    .iter()
+                    .filter(|n| !n.is_virtual)
+                    .map(|n| n.name.clone()),
+            );
+            visible.get(1).cloned().unwrap_or_else(|| "auto".to_string())
+        };
+        modal.handle_raw_key(key(KeyCode::Char('d')), &mut ctx).unwrap();
+        assert_eq!(modal.source(), expected_next, "d/→ steps the device forward");
+        modal.handle_raw_key(key(KeyCode::Left), &mut ctx).unwrap();
+        assert_eq!(modal.source(), source_before, "a/← steps the device back");
+
+        // Space/Enter commits: focus returns to the list, value kept.
+        modal.handle_raw_key(key(KeyCode::Char(' ')), &mut ctx).unwrap();
+        assert_eq!(modal.adjusting, None);
+        assert_eq!(modal.source(), source_before);
+
+        // Esc cancels the whole session and reverts the staged source.
+        modal.handle_raw_key(key(KeyCode::Enter), &mut ctx).unwrap();
+        modal.handle_raw_key(key(KeyCode::Char('d')), &mut ctx).unwrap();
+        assert_ne!(modal.source(), source_before, "the device moved while adjusting");
+        modal.handle_raw_key(key(KeyCode::Esc), &mut ctx).unwrap();
+        assert_eq!(modal.adjusting, None);
+        assert_eq!(modal.source(), source_before, "Esc reverts the device selection");
+    }
+
+    /// d/→ on a stepper row acts like Enter (focus the controls) instead of
+    /// stepping immediately — same entry point for both keys.
+    #[test]
+    fn right_on_a_stepper_row_enters_adjust_mode() {
+        let (mut modal, mut ctx) = fixture();
+        select_general_row(&mut modal, &mut ctx, &|r| matches!(r, ContentRow::General(GeneralRow::Fps)));
+        let fps_before = modal.fps();
+
+        // d on the row: enters adjust mode, does not step yet.
+        modal.handle_raw_key(key(KeyCode::Char('d')), &mut ctx).unwrap();
+        assert_eq!(modal.adjusting, Some(modal.selected), "d/→ focuses the stepper controls");
+        assert_eq!(modal.fps(), fps_before, "entering adjust mode must not change the value");
+
+        // then d adjusts (and Esc still reverts).
+        modal.handle_raw_key(key(KeyCode::Char('d')), &mut ctx).unwrap();
+        assert_eq!(modal.fps(), fps_before + 5);
+        modal.handle_raw_key(key(KeyCode::Esc), &mut ctx).unwrap();
+        assert_eq!(modal.fps(), fps_before, "Esc reverts");
+    }
+
     #[test]
     fn space_on_a_toggle_row_still_toggles() {
         let (mut modal, mut ctx) = fixture();
@@ -3730,6 +3787,10 @@ mod nav_tests {
         // Adjust the FPS stepper (content pane owns the keyboard).
         select_row(&mut modal, |r| matches!(r, ContentRow::General(GeneralRow::Fps)));
         modal.focus = SettingsFocus::Content;
+        // d/→ on a stepper row enters adjust mode without stepping yet.
+        modal.handle_raw_key(key(KeyCode::Right), &mut ctx).unwrap();
+        assert_eq!(modal.adjusting, Some(modal.selected), "d/→ focuses the stepper controls");
+        assert_eq!(modal.cava_pending.framerate, fps_before, "entering adjust mode must not step yet");
         modal.handle_raw_key(key(KeyCode::Right), &mut ctx).unwrap();
         assert_eq!(modal.cava_pending.framerate, fps_before + 5);
         assert_eq!(
@@ -3887,6 +3948,34 @@ mod nav_tests {
         );
     }
 
+    /// A state.ron written before the virtual-devices toggle existed still
+    /// parses: the new field defaults to `false` (the old transient view
+    /// filter's default) instead of failing the whole state file.
+    #[test]
+    fn legacy_state_ui_without_virtual_devices_field_still_parses() {
+        let legacy = r#"(
+            last_tab: Some("Queue"),
+            mpd_library_path: None,
+            video_playback: None,
+            mpv_audio_lang: None,
+            mpv_subtitles: None,
+            mpv_svp: None,
+            ui: Some((
+                show_album_art: true,
+                show_lyrics: true,
+                show_cava: true,
+                show_radio_tab: true,
+                show_jellyfin_tab: true,
+                auto_show_chapters: true,
+            )),
+            appearance: None,
+        )"#;
+        let state: crate::config::state::AppStateFile =
+            ron::de::from_str(legacy).expect("legacy state parses");
+        let ui = state.ui.expect("ui record present");
+        assert!(!ui.show_virtual_devices, "missing field defaults to off");
+    }
+
     /// The settings-panel UI toggles + appearance colors survive a restart:
     /// state.ron round-trips them, and the appearance values re-apply to a
     /// fresh config.
@@ -3898,6 +3987,7 @@ mod nav_tests {
             show_album_art: false,
             show_cava: false,
             auto_show_chapters: false,
+            show_virtual_devices: true,
             ..Default::default()
         });
         let content = ron::ser::to_string_pretty(&state, ron::ser::PrettyConfig::default())
@@ -3908,6 +3998,7 @@ mod nav_tests {
         assert!(!ui.show_album_art);
         assert!(!ui.show_cava);
         assert!(!ui.auto_show_chapters);
+        assert!(ui.show_virtual_devices, "the virtual-devices toggle round-trips");
 
         // Appearance colors: persist the resolved theme values and apply
         // them to a fresh config.

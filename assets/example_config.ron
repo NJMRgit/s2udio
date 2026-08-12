@@ -19,14 +19,14 @@
         lower_cutoff_freq: 20,
         higher_cutoff_freq: 15000,
         input: (
-            method: Fifo,
-            source: "/tmp/mpd-cava.fifo",
-            sample_rate: 44100,
-            sample_bits: 16,
-            channels: 2,
-            // Round 29: with method: Pipewire, name the node s2udio creates
-            // (node.name/media.name in pw-dump/pavucontrol). Requires the
-            // cava node-name shim built by setup.sh.
+            // Round 30: cava is PipeWire-only — capture the default output
+            // ("auto") or a specific sink monitor / virtual source. A
+            // legacy `method: Fifo` in an old config is ignored.
+            method: Pipewire,
+            source: "auto",
+            // Round 29: name the node s2udio creates (node.name/media.name
+            // in pw-dump/pavucontrol). Requires the cava node-name shim
+            // built by setup.sh.
             // node_name: Some("s2udio-cava"),
         ),
     ),

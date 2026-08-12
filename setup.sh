@@ -27,7 +27,8 @@
 #                                the s2u-mpdris2 shim (official mpDris2 +
 #                                stream art)
 #   * seeds config/theme         -> ~/.config/s2udio/ (if absent)
-#   * cava + MPD fifo output     (official cava; MPD fifo output)
+#   * cava (PipeWire input)      (official cava; s2udio drives it through
+#                                PipeWire only — no MPD fifo output)
 #   * MPD / mpDris2 user services (enable/start via scripts/s2u-svc; the
 #                                Arch path keeps its direct systemctl --user)
 #
@@ -128,7 +129,7 @@ version_ge() {
 # Shared step functions (used by every backend; Arch output byte-identical).
 
 install_support_scripts() {
-    info "4/9  Support scripts"
+    info "4/8  Support scripts"
     [[ -f scripts/rmpc-fetch-lyrics ]] && { install -Dm755 scripts/rmpc-fetch-lyrics "$BIN_DIR/rmpc-fetch-lyrics"; ok "lyrics fetcher -> $BIN_DIR/rmpc-fetch-lyrics"; } || warn "scripts/rmpc-fetch-lyrics missing in this checkout"
     [[ -f scripts/s2u-mpv-tracker ]] && { install -Dm755 scripts/s2u-mpv-tracker "$BIN_DIR/s2u-mpv-tracker"; ok "mpv tracker daemon -> $BIN_DIR/s2u-mpv-tracker"; } || warn "scripts/s2u-mpv-tracker missing in this checkout"
     [[ -f scripts/s2udio-mpris ]] && { install -Dm755 scripts/s2udio-mpris "$BIN_DIR/s2udio-mpris"; ok "mpv MPRIS bridge -> $BIN_DIR/s2udio-mpris"; } || warn "scripts/s2udio-mpris missing in this checkout"
@@ -159,7 +160,7 @@ install_cava_name_shim() { # round 29: rename cava's PipeWire node (optional)
 }
 
 seed_config_theme() {
-    info "5/9  Seed config + theme (only if absent; embedded defaults otherwise)"
+    info "5/8  Seed config + theme (only if absent; embedded defaults otherwise)"
     mkdir -p "$CFG_DIR/themes"
     # Round 23: every s2udio config lives in ~/.config/s2udio — nothing in
     # ~/.config/rmpc anymore. A legacy ~/.config/rmpc/config.ron is migrated
@@ -171,6 +172,16 @@ seed_config_theme() {
         cp assets/example_theme.ron "$CFG_DIR/themes/default.ron" && ok "theme -> $CFG_DIR/themes/default.ron"
     fi
     mkdir -p "$CFG_DIR/lyrics"  # s2udio's own .lrc library (round 23)
+    # The mpv IPC socket contract (SVP4 round): s2udio launches mpv with
+    # --input-ipc-server=/tmp/mpvsocket itself, but a manually launched mpv
+    # needs the mpv.conf line to expose the same socket. Seed it when absent
+    # (never overwrite a user's mpv.conf).
+    if [[ ! -f "$HOME/.config/mpv/mpv.conf" ]] \
+        || ! grep -q 'input-ipc-server=/tmp/mpvsocket' "$HOME/.config/mpv/mpv.conf" 2>/dev/null; then
+        mkdir -p "$HOME/.config/mpv"
+        printf 'input-ipc-server=/tmp/mpvsocket\n' >> "$HOME/.config/mpv/mpv.conf"
+        ok "mpv.conf: input-ipc-server=/tmp/mpvsocket seeded"
+    fi
     migrate_radio_favourites
 }
 
@@ -212,7 +223,7 @@ migrate_radio_favourites() {
 }
 
 build_binary() { # $1 = cargo-missing hint
-    info "2/9  Build the s2udio binary"
+    info "2/8  Build the s2udio binary"
     if ! command -v cargo >/dev/null 2>&1; then
         warn "cargo not found - $1"
     else
@@ -224,7 +235,7 @@ build_binary() { # $1 = cargo-missing hint
 }
 
 ytdlp_step() { # $1 = keep-current hint line; $2 = too-old hint ("" = none); $3 = missing hint
-    info "3/9  yt-dlp (official python-yt-dlp)"
+    info "3/8  yt-dlp (official python-yt-dlp)"
     if command -v yt-dlp >/dev/null 2>&1; then
         local ver; ver="$(yt-dlp --version 2>/dev/null || echo '?')"
         ok "yt-dlp $ver"
@@ -241,7 +252,7 @@ ytdlp_step() { # $1 = keep-current hint line; $2 = too-old hint ("" = none); $3 
 }
 
 cava_step() { # $1 = version fallback command ("" = none); $2 = missing hint
-    info "6/9  cava"
+    info "6/8  cava"
     if command -v cava >/dev/null 2>&1; then
         if [[ -n "$1" ]]; then
             ok "cava $(cava -v 2>/dev/null | head -1 || $1)"
@@ -274,38 +285,14 @@ follow_outside_symlinks "yes"
 follow_inside_symlinks "yes"
 auto_update "yes"
 EOF
-        ok "mpd.conf created at $MPD_CONF (user-level instance; fifo appended next)"
-    else
-        warn "no MPD config at $MPD_CONF - set MPD_CONF=/path/to/mpd.conf and re-run"
-    fi
-}
-
-mpd_fifo_append() { # "$@" = restart command (Arch: systemctl --user restart mpd; others: "$BIN_DIR/s2u-svc" restart mpd)
-    info "7/9  MPD fifo output (for cava via s2udio)"
-    if [[ -f "$MPD_CONF" ]]; then
-        if grep -q "mpd-cava.fifo" "$MPD_CONF"; then
-            ok "fifo output already configured in $MPD_CONF"
-        else
-            cat >> "$MPD_CONF" <<'EOF'
-
-# cava (via s2udio) - bypasses all audio devices and PipeWire entirely.
-audio_output {
-    type    "fifo"
-    name    "cava"
-    path    "/tmp/mpd-cava.fifo"
-    format  "44100:16:2"
-}
-EOF
-            ok "fifo output appended to $MPD_CONF"
-            if "$@" 2>/dev/null; then ok "mpd restarted"; else warn "restart mpd manually"; fi
-        fi
+        ok "mpd.conf created at $MPD_CONF (user-level instance)"
     else
         warn "no MPD config at $MPD_CONF - set MPD_CONF=/path/to/mpd.conf and re-run"
     fi
 }
 
 summary_step() {
-    info "9/9  Summary"
+    info "8/8  Summary"
     if [[ -x "$SUMMARY_BIN" ]]; then
         "$SUMMARY_BIN" version 2>/dev/null | head -1 | sed 's/^/  s2udio: /'
     else
@@ -365,7 +352,7 @@ ensure_rust_toolchain() {
 # ships one (Debian/Ubuntu do — plan §12.2), write user units when the
 # package has none, and enable/start through s2u-svc (systemd-user backend).
 services_step_systemd() {
-    info "8/9  MPD + mpDris2 user services (s2u-svc, systemd-user)"
+    info "7/8  MPD + mpDris2 user services (s2u-svc, systemd-user)"
     if systemctl list-unit-files 2>/dev/null | grep -q '^mpd.service'; then
         systemctl stop mpd.service >/dev/null 2>&1 || true
         systemctl disable mpd.service >/dev/null 2>&1 || true
@@ -437,7 +424,7 @@ EOF
 # launcher targets (apk/nix): no systemd — s2u-svc's launcher backend runs
 # mpd + the s2u-mpdris2 shim as plain user processes (plan §6.1).
 services_step_launcher() {
-    info "8/9  MPD + mpDris2 user services (s2u-svc launcher backend)"
+    info "7/8  MPD + mpDris2 user services (s2u-svc launcher backend)"
     "$BIN_DIR/s2u-svc" start mpd || true
     sleep 2
     "$BIN_DIR/s2u-svc" is-active mpd && ok "mpd active (launcher)" || warn "mpd not active"
@@ -449,12 +436,11 @@ services_step_launcher() {
 # runit target (xbps/Void): per-user runsvdir under ~/.config/runit + sv(1)
 # through s2u-svc's runit-user backend (plan §12 / Phase 3).
 services_step_runit() {
-    info "8/9  MPD + mpDris2 user services (s2u-svc runit-user)"
-    # step 7's fifo restart started mpd through the launcher backend (the
-    # runit dirs do not exist yet) — stop that instance BEFORE the runit
-    # dirs appear, or the runit-supervised mpd cannot bind port 6600. On a
-    # re-run the dirs already exist and s2u-svc stops via sv instead; both
-    # paths leave a clean slate for runsvdir to take over.
+    info "7/8  MPD + mpDris2 user services (s2u-svc runit-user)"
+    # Stop any running mpd BEFORE the runit dirs appear, or the
+    # runit-supervised mpd cannot bind port 6600. On a re-run the dirs
+    # already exist and s2u-svc stops via sv instead; both paths leave a
+    # clean slate for runsvdir to take over.
     "$BIN_DIR/s2u-svc" stop mpd 2>/dev/null || true
     "$BIN_DIR/s2u-svc" stop mpDris2 2>/dev/null || true
     mkdir -p "$HOME/.config/runit/mpd" "$HOME/.config/runit/mpDris2"
@@ -528,7 +514,7 @@ run_arch() {
     PACMAN_NOCONFIRM=()
     [[ $ASSUME_YES -eq 1 ]] && PACMAN_NOCONFIRM=(--noconfirm)
     # ---------------------------------------------------------------------------
-    info "1/9  System packages (mpd ffmpeg cava yt-dlp)"
+    info "1/8  System packages (mpd ffmpeg cava yt-dlp)"
     PACMAN_PKGS=(mpd ffmpeg cava yt-dlp)
     MISSING=()
     for p in "${PACMAN_PKGS[@]}"; do
@@ -647,10 +633,7 @@ run_arch() {
     cava_step "pacman -Q cava" "install it (sudo pacman -S cava)"
 
     # ---------------------------------------------------------------------------
-    mpd_fifo_append systemctl --user restart mpd
-
-    # ---------------------------------------------------------------------------
-    info "8/9  MPD + mpDris2 user services"
+    info "7/8  MPD + mpDris2 user services"
     UNITS=$(systemctl --user list-unit-files 2>/dev/null || true)
     if grep -q '^mpd.service' <<<"$UNITS"; then
         systemctl --user is-enabled mpd.service >/dev/null 2>&1 \
@@ -697,7 +680,7 @@ EOF
 run_dnf5() {
     resolve_elevation
     info "Detected distro: ${DISTRO_ID:-?}${DISTRO_ID_LIKE:+ (ID_LIKE=$DISTRO_ID_LIKE)} -> dnf5 backend (Fedora; RPM Fusion free provides mpd/ffmpeg/mpv, plan §12.1)"
-    info "1/9  System packages (mpd mpdris2 cava yt-dlp mpv ffmpeg python3-dbus python3-gobject python3-mutagen + toolchain)"
+    info "1/8  System packages (mpd mpdris2 cava yt-dlp mpv ffmpeg python3-dbus python3-gobject python3-mutagen + toolchain)"
     # Fedora's official repos dropped the `mpd` server — RPM Fusion free is
     # the Fedora analogue of Arch's AUR usage for mpdris2-git (plan §12.1).
     if ! rpm -q rpmfusion-free-release >/dev/null 2>&1; then
@@ -739,7 +722,6 @@ run_dnf5() {
     seed_config_theme
     cava_step "" "install it (sudo dnf5 install cava)"
     ensure_mpd_conf
-    mpd_fifo_append "$BIN_DIR/s2u-svc" restart mpd
     services_step_systemd
     mpv_plain_note
     summary_step
@@ -749,7 +731,7 @@ run_dnf5() {
 run_apt() {
     resolve_elevation
     info "Detected distro: ${DISTRO_ID:-?}${DISTRO_ID_LIKE:+ (ID_LIKE=$DISTRO_ID_LIKE)} -> apt backend (Debian/Ubuntu/Devuan)"
-    info "1/9  System packages (mpd mpdris2 cava yt-dlp mpv ffmpeg python3-dbus python3-gi python3-mutagen + toolchain)"
+    info "1/8  System packages (mpd mpdris2 cava yt-dlp mpv ffmpeg python3-dbus python3-gi python3-mutagen + toolchain)"
     APT_PKGS=(mpd mpdris2 cava yt-dlp mpv ffmpeg python3-dbus python3-gi python3-mutagen build-essential git curl)
     MISSING=()
     for p in "${APT_PKGS[@]}"; do
@@ -779,7 +761,6 @@ run_apt() {
     seed_config_theme
     cava_step "" "install it (sudo apt-get install cava)"
     ensure_mpd_conf
-    mpd_fifo_append "$BIN_DIR/s2u-svc" restart mpd
     services_step_systemd
     mpv_plain_note
     summary_step
@@ -789,7 +770,7 @@ run_apt() {
 run_apk() {
     resolve_elevation
     info "Detected distro: ${DISTRO_ID:-?}${DISTRO_ID_LIKE:+ (ID_LIKE=$DISTRO_ID_LIKE)} -> apk backend (Alpine)"
-    info "1/9  System packages (mpd mpv yt-dlp ffmpeg python3 py3-dbus py3-gobject3 + toolchain; cava from source)"
+    info "1/8  System packages (mpd mpv yt-dlp ffmpeg python3 py3-dbus py3-gobject3 + toolchain; cava from source)"
     APK_PKGS=(mpd mpv yt-dlp ffmpeg python3 py3-dbus py3-gobject3 py3-mutagen py3-pip build-base git curl fftw-dev iniparser-dev ncurses-dev sdl2-dev autoconf automake libtool ncurses-terminfo-base)
     MISSING=()
     for p in "${APK_PKGS[@]}"; do
@@ -838,7 +819,6 @@ run_apk() {
     seed_config_theme
     cava_step "" "install it or rebuild from source (see step 1)"
     ensure_mpd_conf
-    mpd_fifo_append "$BIN_DIR/s2u-svc" restart mpd
     services_step_launcher
     mpv_plain_note
     summary_step
@@ -848,7 +828,7 @@ run_apk() {
 run_xbps() {
     resolve_elevation
     info "Detected distro: ${DISTRO_ID:-?}${DISTRO_ID_LIKE:+ (ID_LIKE=$DISTRO_ID_LIKE)} -> xbps backend (Void)"
-    info "1/9  System packages (mpd mpv yt-dlp cava ffmpeg mpDris2 python3-dbus python3-gobject + toolchain)"
+    info "1/8  System packages (mpd mpv yt-dlp cava ffmpeg mpDris2 python3-dbus python3-gobject + toolchain)"
     # runit-user backend prerequisites: sv + runsvdir. No-op on real Void
     # hosts (runit is the init system, already installed); without it the
     # service step silently degrades to the launcher backend (seen in the
@@ -889,7 +869,6 @@ run_xbps() {
     seed_config_theme
     cava_step "" "install it (sudo xbps-install -S cava)"
     ensure_mpd_conf
-    mpd_fifo_append "$BIN_DIR/s2u-svc" restart mpd
     services_step_runit
     mpv_plain_note
     summary_step
@@ -908,7 +887,7 @@ run_nix() {
     }
     ensure_nix_flakes
 
-    info "1/9  nix profile install (flake.nix: s2udio + bridgePython + runtime deps)"
+    info "1/8  nix profile install (flake.nix: s2udio + bridgePython + runtime deps)"
     NIX_RUNTIME_DEPS="nixpkgs#mpd nixpkgs#mpv nixpkgs#yt-dlp nixpkgs#cava nixpkgs#mpdris2 nixpkgs#ffmpeg nixpkgs#tmux nixpkgs#dbus nixpkgs#procps nixpkgs#systemd nixpkgs#gnused nixpkgs#gawk nixpkgs#util-linux nixpkgs#rustc nixpkgs#cargo nixpkgs#gcc nixpkgs#gnumake"
     if confirm "Install s2udio + runtime deps via 'nix profile install' (flake.nix; needs network)?"; then
         # remove stale same-name entries first (nix profile install refuses
@@ -924,7 +903,7 @@ run_nix() {
 
     # the flake package builds the binary (build.rs/vergen handled inside the
     # nix sandbox) — no local cargo build needed
-    info "2/9  Build the s2udio binary"
+    info "2/8  Build the s2udio binary"
     # grep -q would exit at the first match and SIGPIPE nix (nix exits 1 on a
     # closed stdout) -> the pipefail pipeline fails even when s2udio IS in the
     # profile. Read the full list so nix exits cleanly; match on the full
@@ -942,7 +921,6 @@ run_nix() {
     seed_config_theme
     cava_step "" "install it (nix profile install nixpkgs#cava)"
     ensure_mpd_conf
-    mpd_fifo_append "$BIN_DIR/s2u-svc" restart mpd
 
     # nixpkgs ships mpDris2 as a compiled ELF the s2u-mpdris2 shim cannot
     # patch (plan §5 decision point) -> upstream python source at /usr/bin.

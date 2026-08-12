@@ -4,7 +4,7 @@
 # Real in-container validation of the NEW setup.sh distro dispatcher (plan
 # docs/design/Validation/distro-support.md §6.2): run `setup.sh -y` inside the
 # ephemeral harness container for the target and assert the end state
-# (binary, support scripts, services via s2u-svc, mpd.conf fifo, per-distro
+# (binary, support scripts, services via s2u-svc, mpd.conf, per-distro
 # deltas). Same ephemerality discipline as test-distro.sh (--rm, EXIT trap,
 # start-of-run sweep, end-of-run G12 assertion).
 #
@@ -137,14 +137,14 @@ if [[ "$KEY" == "alpine-320" ]]; then
 fi
 
 # ---- 4c. arch: seed the minimal user mpd.conf run_arch expects ----
-# run_arch appends the fifo to an EXISTING ~/.config/mpd/mpd.conf and warns
-# ("no MPD config at ...") when there is none — a fresh Arch host has no user
-# config; same assumption the mock's arch fixture homes make (the no-config
-# warn path stays covered by the mock). Music dir seeded so mpd's first start
-# has a library root.
+# run_arch uses an EXISTING ~/.config/mpd/mpd.conf and warns ("no MPD config
+# at ...") when there is none — a fresh Arch host has no user config; same
+# assumption the mock's arch fixture homes make (the no-config warn path
+# stays covered by the mock). Music dir seeded so mpd's first start has a
+# library root.
 if [[ "$KEY" == "arch" ]]; then
     podman exec "$CID" bash -c 'mkdir -p /root/.config/mpd /root/.cache/mpd/playlists /root/Music && printf "%s\n" "music_directory \"/root/Music\"" "bind_to_address \"127.0.0.1\"" "port \"6600\"" "db_file \"/root/.cache/mpd/database\"" "state_file \"/root/.cache/mpd/state\"" "sticker_file \"/root/.cache/mpd/sticker.sql\"" "playlist_directory \"/root/.cache/mpd/playlists\"" "follow_outside_symlinks \"yes\"" "follow_inside_symlinks \"yes\"" "auto_update \"yes\"" > /root/.config/mpd/mpd.conf'
-    ok "arch: seeded minimal user mpd.conf (run_arch fifo-append target; mock-matching assumption)"
+    ok "arch: seeded minimal user mpd.conf (run_arch target; mock-matching assumption)"
 fi
 
 # ---- 5+6. user session + run setup.sh -y (same exec: the session env must
@@ -184,7 +184,7 @@ esac
 case "$KEY" in
     arch)
         run_check S2 'test -x /root/.local/bin/rmpc-fetch-lyrics && test -x /root/.local/bin/s2u-mpv-tracker && test -x /root/.local/bin/s2u-mpdris2 && grep -q 'input-ipc-server=/tmp/mpvsocket' /root/.config/mpv/mpv.conf'
-        run_check S3 'grep -q "mpd-cava.fifo" /root/.config/mpd/mpd.conf'
+        run_check S3 'test -f /root/.config/mpd/mpd.conf && ! grep -q "mpd-cava.fifo" /root/.config/mpd/mpd.conf'
         run_check S4 'command -v yt-dlp >/dev/null && command -v cava >/dev/null && command -v mpd >/dev/null'
         run_check S5 'systemctl --user is-active mpd.service'
         run_check S6 'test -f /root/.config/systemd/user/mpDris2.service.d/s2udio.conf && grep -q "s2u-mpdris2" /root/.config/systemd/user/mpDris2.service.d/s2udio.conf && ! systemctl --user list-unit-files | grep -qi mpdris2'
@@ -192,7 +192,7 @@ case "$KEY" in
         ;;
     *)
         run_check S2 'test -x /root/.local/bin/rmpc-fetch-lyrics && test -x /root/.local/bin/s2u-mpv-tracker && test -x /root/.local/bin/s2u-mpdris2 && test -x /root/.local/bin/s2u-svc && grep -q 'input-ipc-server=/tmp/mpvsocket' /root/.config/mpv/mpv.conf'
-        run_check S3 'grep -q "mpd-cava.fifo" /root/.config/mpd/mpd.conf'
+        run_check S3 'test -f /root/.config/mpd/mpd.conf && ! grep -q "mpd-cava.fifo" /root/.config/mpd/mpd.conf'
         run_check S4 'command -v mpv >/dev/null && command -v yt-dlp >/dev/null && command -v cava >/dev/null && command -v mpd >/dev/null'
         run_check S5 '/root/.local/bin/s2u-svc is-active mpd'
         run_check S6 '/root/.local/bin/s2u-svc is-active mpDris2'
@@ -210,7 +210,9 @@ case "$KEY" in
     void-glibc)
         run_check S8 'test -x /root/.config/runit/mpd/run && test -x /root/.config/runit/mpDris2/run' ;;
     arch)
-        run_check S9 'test -p /tmp/mpd-cava.fifo'   # running user mpd created the cava fifo
+        # Round 30: no cava fifo — S9 checks the user mpd instance is up and
+        # the config carries no leftover fifo output.
+        run_check S9 'systemctl --user is-active mpd.service && ! grep -q "mpd-cava.fifo" /root/.config/mpd/mpd.conf'
         # S8 (host-side): the run log must show the REAL pacman install with
         # the fixed yt-dlp name (T6a, dc96a4d) + the no-AUR-helper warn
         # paths, and mpv must be absent (mpv-full AUR-only, deferred).
@@ -232,8 +234,8 @@ esac
 # all AUR-only on stock Arch (mpdris2-git, mpv-full) with no AUR helper in
 # the container; the AUR branch is explicitly deferred to the hermetic mock
 # (scripts/dev/test-setup-mock.py). The arch end-state (detection + real
-# pacman install + build + scripts + systemd-user services + fifo) is
-# asserted by the S1..S9 checks above.
+# pacman install + build + scripts + systemd-user services) is asserted
+# by the S1..S9 checks above.
 RUN_FEATURE_GATES=1
 case "$KEY" in
     arch) RUN_FEATURE_GATES=0 ;;
@@ -301,11 +303,8 @@ cat > "$HOME/.config/cava/config" <<EOF
 [general]
 bars = 24
 [input]
-method = fifo
-source = /tmp/mpd-cava.fifo
-sample_rate = 44100
-sample_bits = 16
-channels = 2
+method = pipewire
+source = auto
 [output]
 method = raw
 EOF
@@ -321,7 +320,7 @@ WantedBy=default.target
 EOF
 systemctl --user daemon-reload >/dev/null 2>&1 || true
 # NO mpd restart (see above): trigger a database scan so G5 add test.mp3
-# resolves, then confirm the cava fifo is still there
+# resolves (round 30: no cava fifo to confirm anymore)
 python3 - <<PYEOF
 import socket, time
 for _ in range(30):
@@ -342,7 +341,6 @@ f.write(b"update\n"); f.flush()
 s.close()
 time.sleep(3)
 PYEOF
-for _ in $(seq 1 30); do [[ -p /tmp/mpd-cava.fifo ]] && break; sleep 0.5; done
 ls -la "$MUSIC_DIR" "$HOME/media"
 '; then
     ok "gate-prep done (tooling + media + cava config + G11 unit)"

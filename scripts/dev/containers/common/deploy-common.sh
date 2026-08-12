@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # deploy-common.sh — sourced by scripts/dev/containers/<key>/deploy.sh.
 # Mirrors setup.sh's steps for non-Arch targets (plan §5/§6.2): support
-# scripts, config/theme seed, MPD fifo, cava config,
+# scripts, config/theme seed, cava config (PipeWire input — round 30),
 # user-level MPD + mpDris2 services via the systemd-user backend of
 # s2u-svc, and test media for the gates. mpv-full stays an Arch-only
 # branch (setup.sh); every other target installs plain mpv (done in
@@ -17,6 +17,13 @@ MPD_CONF="$HOME/.config/mpd/mpd.conf"
 mkdir -p "$BIN_DIR" "$CFG_DIR/themes" "$CFG_DIR/lyrics" \
          "$HOME/.config/mpv/scripts" "$HOME/.config/mpd" "$HOME/.config/cava" \
          "$HOME/.config/systemd/user/mpDris2.service.d" "$HOME/media"
+# The mpv IPC socket contract (SVP4 round): seed mpv.conf when absent so a
+# manually launched mpv exposes /tmp/mpvsocket too (G1 checks this).
+if [[ ! -f "$HOME/.config/mpv/mpv.conf" ]] \
+    || ! grep -q 'input-ipc-server=/tmp/mpvsocket' "$HOME/.config/mpv/mpv.conf" 2>/dev/null; then
+    printf 'input-ipc-server=/tmp/mpvsocket\n' >> "$HOME/.config/mpv/mpv.conf"
+    ok "mpv.conf: input-ipc-server=/tmp/mpvsocket seeded"
+fi
 
 for s in rmpc-fetch-lyrics s2u-mpv-tracker s2udio-mpris s2u-mpdris2 s2u-svc; do
     install -Dm755 "/s2udio/scripts/$s" "$BIN_DIR/$s"
@@ -39,19 +46,8 @@ if [[ ! -f "$CFG_DIR/themes/default.ron" ]]; then
     cp /s2udio/assets/example_theme.ron "$CFG_DIR/themes/default.ron"; ok "theme -> ~/.config/s2udio/themes/default.ron"
 fi
 
-info "deploy: MPD config (user-level, fifo output for cava)"
-if [[ -f "$MPD_CONF" ]]; then
-    grep -q "mpd-cava.fifo" "$MPD_CONF" || cat >> "$MPD_CONF" <<'EOF'
-
-# cava (via s2udio) — bypasses all audio devices (container/headless-safe).
-audio_output {
-    type    "fifo"
-    name    "cava"
-    path    "/tmp/mpd-cava.fifo"
-    format  "44100:16:2"
-}
-EOF
-else
+info "deploy: MPD config (user-level; round 30: no cava fifo output — cava captures PipeWire)"
+if [[ ! -f "$MPD_CONF" ]]; then
     mkdir -p "$HOME/.cache/mpd"
     cat > "$MPD_CONF" <<'EOF'
 music_directory "/root/media"
@@ -64,26 +60,17 @@ playlist_directory "/root/.cache/mpd/playlists"
 follow_outside_symlinks "yes"
 follow_inside_symlinks "yes"
 auto_update "yes"
-audio_output {
-    type    "fifo"
-    name    "cava"
-    path    "/tmp/mpd-cava.fifo"
-    format  "44100:16:2"
-}
 EOF
 fi
-ok "mpd.conf ready (fifo -> /tmp/mpd-cava.fifo)"
+ok "mpd.conf ready (user-level instance)"
 
-info "deploy: cava config (fifo input)"
+info "deploy: cava config (PipeWire input)"
 cat > "$HOME/.config/cava/config" <<'EOF'
 [general]
 bars = 24
 [input]
-method = fifo
-source = /tmp/mpd-cava.fifo
-sample_rate = 44100
-sample_bits = 16
-channels = 2
+method = pipewire
+source = auto
 [output]
 method = raw
 EOF
