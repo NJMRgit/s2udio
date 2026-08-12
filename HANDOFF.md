@@ -118,7 +118,12 @@ the user's decisions win. Locked in across sessions (details in the docs):
 
 ## Current state (verified)
 
-- **Branch**: `working` (tracks `s2udio-working/working`), at `9a6eba5` +
+- **Master**: `NJMRgit/s2udio` **master @ `2c04bcf`** (clean buildable
+  subset) — rounds 28 + 28b merged 2026-08-12 on top of `898a5bb`
+  (`06b90f7` cava pipewire restart fix, `96fc4cb` round 28,
+  `2c04bcf` round 28b); host-validated **1361/1361**, warnings 3
+  baseline.
+- **Branch**: `working` (tracks `s2udio-working/working`), at `5537ad1` —
   **round-28b committed on top** (host live-check fix; **1361/1361**
   host-validated 2026-08-12, warnings 3 baseline, binary build clean).
   **Round 28b (2026-08-12, host-implemented)**: ONLY `Shift+Tab`

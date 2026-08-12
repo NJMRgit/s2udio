@@ -1,3 +1,20 @@
+# Notes for the container agent — rounds 28 + 28b MERGED to main (2026-08-12)
+
+## ROUNDS 28 + 28b MERGED to main (2026-08-12) — host push
+
+Rounds 28 + 28b are now **the production `master`**
+(`NJMRgit/s2udio` @ `2c04bcf`, clean buildable subset — three commits on
+top of `898a5bb`: `06b90f7` cava pipewire restart fix (round 25, was
+missing from master), `96fc4cb` round 28 (Search tab folded into the MPD
+tab), `2c04bcf` round 28b (Shift+Tab toggles Library/Search; Tab/E/Q
+cycle tabs again)). The full tree lives on this private repo's `working`
+branch @ `5537ad1` (round 28 + round 28b on top of the round-23..27
+lineage). Host-validated on master: `cargo test --release`
+**1361/1361**, warnings 3 baseline, binary build clean, live-checked by
+the user.
+
+---
+
 # Notes for the container agent — round 28b IMPLEMENTED host-side (2026-08-12)
 
 ## ROUND 28b — host live-check fix (2026-08-12) — committed on `working`
