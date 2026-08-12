@@ -1,3 +1,24 @@
+# Notes for the container agent — round 32 FILED (host)
+
+## ROUND 32 — FILED for isodev (2026-08-12) — do not implement host-side
+
+**User feedback (2026-08-12) →
+[FEEDBACK-2026-08-12-5.md](FEEDBACK-2026-08-12-5.md).** Two items:
+
+1. **Queue startup**: on first show, highlight the currently playing track
+   and position it as the FIRST visible row (scroll offset = playing index,
+   clamped at list end) via `DirState::select_at_top` — one-shot only, later
+   tab switches keep the user's selection/scroll.
+2. **Wheel scrolls the viewport, not the selection** — in Queue, Playlists,
+   MPD, Help and Radio (Settings keeps today's wheel behavior). Selection can
+   leave the visible area; offset clamps at list/info ends.
+
+Also on `working`: round-30 follow-up `b8552d4` (cava stepper test made
+environment-independent — no PipeWire = no-op). Host tree @ `b8552d4`;
+**filed only — no code changes host-side**. isodev: implement on `working`;
+host validates + live-checks.
+
+---
 # Notes for the container agent — round 31 IMPLEMENTED host-side (2026-08-12)
 
 ## ROUND 31 — multi-select: Ctrl+A, additive ctrl+click, bulk actions (2026-08-12) — committed on `working`
