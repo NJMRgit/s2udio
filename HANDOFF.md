@@ -140,11 +140,11 @@ the user's decisions win. Locked in across sessions (details in the docs):
   plain click / Esc still clear. **Bulk actions**: the playlists song
   menu and the search results menu act on every marked row (Add to
   queue / Replace queue / Create playlist / Add to playlist; playlists
-  also *Remove from playlist*); the audio queue menu gained *Add
-  selected to playlist* / *Create playlist from selected* for marked
-  rows, and *Create audio playlist* was renamed **Create playlist from
-  queue** (whole-queue semantics, next to the existing *Add queue to
-  playlist*). Tests: 1377/1377 (+13: MarkState add/mark_all, Ctrl+A per
+  also *Remove from playlist*); the audio queue menu's *Add to
+  playlist* / *Create playlist* act on the marked rows or the
+  highlighted song (single-song follow-up), and *Create audio playlist*
+  was renamed **Create playlist from queue** (whole-queue semantics,
+  next to the existing *Add queue to playlist*). Tests: 1377/1377 (+13: MarkState add/mark_all, Ctrl+A per
   pane incl. playlists-root no-op + filter-phase no-op, additive
   ctrl+click per pane, default `<C-a>` binding). See
   [FEEDBACK-2026-08-12-4.md](FEEDBACK-2026-08-12-4.md).

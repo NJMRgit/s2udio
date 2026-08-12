@@ -89,9 +89,10 @@ shifts the row.
 - ctrl/alt-click multi-selects; **ctrl+click is additive** (the row under
   the cursor joins the selection, clicks only grow the marked set); a
   plain click on another row clears the marks; **Ctrl+A** marks the whole
-  list; context-menu Remove deletes every marked song. With marks active
-  the audio menu adds *Add selected to playlist* / *Create playlist from
-  selected* (only the marked rows land in the playlist).
+  list; context-menu Remove deletes every marked song. The audio menu's
+  *Add to playlist* / *Create playlist* act on the marked rows when any
+  are marked, else on the highlighted song (a single selected song gets
+  them too).
 - The **Video list has the same multi-selection**: ctrl+click adds a
   mark (never removes), alt+click range-marks from the anchor,
   `W`/`S`/`Shift+↑/↓` range-select (each press replaces the previous
@@ -121,9 +122,9 @@ on screen:
   new MPD stored playlist; *Add queue to playlist* adds the same visible
   set to an existing playlist. The hidden temporary "play without adding
   to queue" entry and radio/stream rows are **never** saved — so a temp
-  entry can't leak into an existing playlist either. When rows are
-  marked, the menu additionally offers *Create playlist from selected*
-  and *Add selected to playlist*, which act on exactly the marked rows.
+  entry can't leak into an existing playlist either. *Add to playlist*
+  and *Create playlist* act on the selected tracks only (the marked rows
+  when any are marked, else the highlighted song).
 - The **video** context menu's *Create video playlist* saves the
   persistent video queue's URLs into a new MPD stored playlist (video
   entries carry stable original links and real titles; local paths get

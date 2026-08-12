@@ -20,8 +20,9 @@ on `working` (round-31 commit `d9fe076`):
 3. **Marked bulk actions**: playlists song menu acts on every marked
    song (Add/Replace queue, Create/Add playlist, Remove from playlist);
    search results menu gained marked *Add to queue* / *Replace queue*
-   (the "all" variants stay); the audio queue menu gained *Add selected
-   to playlist* / *Create playlist from selected* for marked rows and
+   (the "all" variants stay); the audio queue menu's *Add to playlist*
+   / *Create playlist* act on the marked rows or the highlighted song
+   (a single selected song gets them too — round-31 follow-up) and
    renamed *Create audio playlist* → **Create playlist from queue**
    (whole queue, next to the existing *Add queue to playlist*).
 
