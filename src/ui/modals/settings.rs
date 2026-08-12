@@ -757,7 +757,6 @@ pub struct SettingsModal {
     /// PipeWire capture sources (sink monitors + mics + virtual sources,
     /// with an "auto" pseudo-node first) for the device row.
     nodes: Vec<PwNode>,
-    show_virtual: bool,
     /// MPD update/rescan scope path (persisted in state.ron).
     library_path: String,
     /// Jellyfin server credentials, staged until a successful sign-in.
@@ -870,7 +869,6 @@ impl SettingsModal {
             sidebar_selected: 0,
             focus: SettingsFocus::Sidebar,
             nodes: Vec::new(),
-            show_virtual: false,
             library_path: AppStateFile::load().mpd_library_path.unwrap_or_default(),
             jellyfin_url: jellyfin_current_url(ctx),
             jellyfin_username: String::new(),
@@ -1058,7 +1056,9 @@ impl SettingsModal {
     fn visible_nodes(&self) -> Vec<PwNode> {
         self.nodes
             .iter()
-            .filter(|n| self.show_virtual || !n.is_virtual || n.name.ends_with(".monitor"))
+            .filter(|n| {
+                self.ui_pending.show_virtual_devices || !n.is_virtual || n.name.ends_with(".monitor")
+            })
             .cloned()
             .collect()
     }
@@ -1136,7 +1136,7 @@ impl SettingsModal {
                 }
                 GeneralRow::Device => self.cycle_device(ctx, delta),
                 GeneralRow::VirtualDevices => {
-                    self.show_virtual = !self.show_virtual;
+                    self.ui_pending.show_virtual_devices = !self.ui_pending.show_virtual_devices;
                     ctx.render()?;
                     Ok(())
                 }
@@ -1850,7 +1850,9 @@ impl SettingsModal {
                             self.ui_pending.auto_show_chapters,
                         ),
                         GeneralRow::AutoSens => ("auto-sens", self.cava_pending.autosens),
-                        GeneralRow::VirtualDevices => ("show virtual devices", self.show_virtual),
+                        GeneralRow::VirtualDevices => {
+                            ("show virtual devices", self.ui_pending.show_virtual_devices)
+                        }
                         GeneralRow::Monstercat => ("monstercat smoothing", self.monstercat()),
                         GeneralRow::Waves => ("waves smoothing", self.waves()),
                         _ => unreachable!(),
@@ -3049,12 +3051,12 @@ Source #165
                 is_virtual: true,
             },
         ];
-        modal.show_virtual = false;
+        modal.ui_pending.show_virtual_devices = false;
         let visible: Vec<String> =
             modal.visible_nodes().into_iter().map(|n| n.name).collect();
         assert_eq!(visible, vec!["auto", "Media.monitor"], "monitors stay offered");
 
-        modal.show_virtual = true;
+        modal.ui_pending.show_virtual_devices = true;
         let visible: Vec<String> =
             modal.visible_nodes().into_iter().map(|n| n.name).collect();
         assert_eq!(visible, vec!["auto", "Media.monitor", "easyeffects_source"]);
@@ -3857,6 +3859,34 @@ mod nav_tests {
         );
     }
 
+    /// A state.ron written before the virtual-devices toggle existed still
+    /// parses: the new field defaults to `false` (the old transient view
+    /// filter's default) instead of failing the whole state file.
+    #[test]
+    fn legacy_state_ui_without_virtual_devices_field_still_parses() {
+        let legacy = r#"(
+            last_tab: Some("Queue"),
+            mpd_library_path: None,
+            video_playback: None,
+            mpv_audio_lang: None,
+            mpv_subtitles: None,
+            mpv_svp: None,
+            ui: Some((
+                show_album_art: true,
+                show_lyrics: true,
+                show_cava: true,
+                show_radio_tab: true,
+                show_jellyfin_tab: true,
+                auto_show_chapters: true,
+            )),
+            appearance: None,
+        )"#;
+        let state: crate::config::state::AppStateFile =
+            ron::de::from_str(legacy).expect("legacy state parses");
+        let ui = state.ui.expect("ui record present");
+        assert!(!ui.show_virtual_devices, "missing field defaults to off");
+    }
+
     /// The settings-panel UI toggles + appearance colors survive a restart:
     /// state.ron round-trips them, and the appearance values re-apply to a
     /// fresh config.
@@ -3868,6 +3898,7 @@ mod nav_tests {
             show_album_art: false,
             show_cava: false,
             auto_show_chapters: false,
+            show_virtual_devices: true,
             ..Default::default()
         });
         let content = ron::ser::to_string_pretty(&state, ron::ser::PrettyConfig::default())
@@ -3878,6 +3909,7 @@ mod nav_tests {
         assert!(!ui.show_album_art);
         assert!(!ui.show_cava);
         assert!(!ui.auto_show_chapters);
+        assert!(ui.show_virtual_devices, "the virtual-devices toggle round-trips");
 
         // Appearance colors: persist the resolved theme values and apply
         // them to a fresh config.

@@ -58,6 +58,12 @@ pub struct UiSettings {
     /// Disabling it keeps the Audio/Video auto-switch but never lands on
     /// the Chapters list.
     pub auto_show_chapters: bool,
+    /// The settings panel's cava device row: also offer virtual
+    /// (non-monitor) PipeWire sources (Easy Effects etc.) when cycling the
+    /// capture device. Round 30 follow-up: staged + persisted like the
+    /// other UI toggles (was a transient panel-only view filter before).
+    #[serde(default)]
+    pub show_virtual_devices: bool,
 }
 
 impl Default for UiSettings {
@@ -69,6 +75,7 @@ impl Default for UiSettings {
             show_radio_tab: true,
             show_jellyfin_tab: true,
             auto_show_chapters: true,
+            show_virtual_devices: false,
         }
     }
 }
@@ -939,6 +946,7 @@ mod tests {
             show_radio_tab: false,
             show_jellyfin_tab: false,
             auto_show_chapters: true,
+            show_virtual_devices: false,
         };
         assert!(config.is_pane_hidden(&PaneType::AlbumArt));
         assert!(config.is_pane_hidden(&PaneType::Lyrics));
