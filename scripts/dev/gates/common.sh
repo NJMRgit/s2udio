@@ -128,7 +128,6 @@ gate_g1_install() {
         fi
         [[ -f "$HOME_DIR/.config/systemd/user/mpDris2.service.d/s2udio.conf" ]] || missing+=(mpdris2-dropin)
     fi
-    grep -q "mpd-cava.fifo" "$HOME_DIR/.config/mpd/mpd.conf" || missing+=(fifo-in-mpd.conf)
     if ((${#missing[@]})); then
         write_gate G1 fail "install incomplete — missing: ${missing[*]}"
         return 1
@@ -181,11 +180,10 @@ gate_g4_mpd_up() {
         *"state:"*) ;;
         *) write_gate G4 fail "MPD status did not answer (got: $(echo "$proto" | head -1))"; return 1 ;;
     esac
-    [[ -p /tmp/mpd-cava.fifo ]] || { write_gate G4 fail "MPD fifo /tmp/mpd-cava.fifo missing"; return 1; }
     if pgrep -f s2u-mpdris2 >/dev/null 2>&1; then
-        write_gate G4 pass "mpd.service active, protocol OK ($(echo "$proto" | head -1)), fifo present, shim process up"
+        write_gate G4 pass "mpd.service active, protocol OK ($(echo "$proto" | head -1)), shim process up"
     else
-        write_gate G4 pass "mpd.service active, protocol OK, fifo present (shim process NOT found — see G5)"
+        write_gate G4 pass "mpd.service active, protocol OK (shim process NOT found — see G5)"
     fi
 }
 
@@ -312,11 +310,14 @@ gate_g7_ytdlp_soft() {
 
 # ---------------------------------------------------------------- G9 -------
 gate_g9_cava() {
-    grep -q "mpd-cava.fifo" "$HOME_DIR/.config/mpd/mpd.conf" \
-        || { write_gate G9 fail "fifo not configured in mpd.conf"; return 1; }
-    [[ -p /tmp/mpd-cava.fifo ]] || { write_gate G9 fail "fifo /tmp/mpd-cava.fifo does not exist (MPD not writing?)"; return 1; }
-    # run cava exactly like the app does (raw stdout protocol, fifo input);
-    # background + kill -9 (a blocked fifo read can swallow SIGTERM/timeout).
+    # Round 30: cava is PipeWire-only — the deployed config must select the
+    # pipewire input (no MPD fifo tap anymore).
+    grep -q "method = pipewire" "$HOME_DIR/.config/cava/config" \
+        || { write_gate G9 fail "cava config is not PipeWire-only (want method = pipewire)"; return 1; }
+    grep -q "method = fifo" "$HOME_DIR/.config/cava/config" \
+        && { write_gate G9 fail "cava config still selects the removed fifo input"; return 1; }
+    # run cava exactly like the app does (raw stdout protocol, pipewire input);
+    # background + kill -9 (a blocked read can swallow SIGTERM/timeout).
     TERM=xterm-256color cava -p "$HOME_DIR/.config/cava/config" \
         > /tmp/cava-g9.out 2>&1 &
     local cpid=$!
@@ -327,11 +328,19 @@ gate_g9_cava() {
     wait "$cpid" 2>/dev/null || true
     local bytes; bytes="$(wc -c < /tmp/cava-g9.out 2>/dev/null || echo 0)"
     if [[ $alive -eq 1 && "$bytes" -gt 0 ]]; then
-        write_gate G9 pass "cava ran headless on the MPD fifo for 4s (raw output, $bytes bytes)"
+        write_gate G9 pass "cava ran headless on the PipeWire input for 4s (raw output, $bytes bytes)"
     elif [[ $alive -eq 1 ]]; then
-        write_gate G9 soft "cava ran 4s but produced no output (fifo silent?) — log: $(head -c 200 /tmp/cava-g9.out)"
+        write_gate G9 soft "cava ran 4s but produced no output (PipeWire silent?) — log: $(head -c 200 /tmp/cava-g9.out)"
     else
-        write_gate G9 soft "cava exited early — log: $(head -c 300 /tmp/cava-g9.out)"
+        # Headless containers have no PipeWire daemon (and several distro
+        # cavas ship without the pipewire input at all): the honest check is
+        # that cava FAILS FAST with a pipewire-related error instead of
+        # hanging on the removed fifo input.
+        if grep -qi "pipewire" /tmp/cava-g9.out; then
+            write_gate G9 soft "cava exited fast with a pipewire error (expected headless) — log: $(head -c 200 /tmp/cava-g9.out)"
+        else
+            write_gate G9 fail "cava exited early with an unexpected error — log: $(head -c 300 /tmp/cava-g9.out)"
+        fi
     fi
 }
 

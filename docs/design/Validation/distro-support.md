@@ -71,7 +71,7 @@ rootless podman containers that are removed when testing completes**.
 | Rust build | `cargo build --release` → `s2u` → `~/.local/bin/s2udio` | rust toolchain per distro |
 | Config/cache paths | `~/.config/s2udio`, `~/.cache/s2udio` (round 23) | already distro-agnostic ✓ |
 | mpv | `mpv-full` recommended (Arch-only concept); mpv.conf gets `input-ipc-server=/tmp/mpvsocket` | plain `mpv` everywhere else |
-| MPD | user-level MPD (`~/.config/mpd/mpd.conf`, user unit), fifo output appended | Debian/Ubuntu ship a *system* mpd — differs |
+| MPD | user-level MPD (`~/.config/mpd/mpd.conf`, user unit); no cava fifo output (round 30 — cava captures PipeWire) | Debian/Ubuntu ship a *system* mpd — differs |
 
 ## 3. Target matrix
 
@@ -232,9 +232,9 @@ avoid root).
   Artix), `dnf5` (Fedora), `apt` (Debian/Ubuntu/Devuan), `apk` (Alpine),
   `xbps` (Void), `nix` (nix profile).
 - A per-backend **package-name map** (§5) feeds the existing shared step
-  functions (scripts install, config/theme seed, MPD fifo append, mpv
-  choice — Arch branch keeps the mpv-full choice; other backends install
-  plain `mpv`).
+  functions (scripts install, config/theme seed, mpv choice — Arch branch
+  keeps the mpv-full choice; other backends install plain `mpv`; the
+  round-30 MPD fifo append is gone).
 - The Arch/CachyOS path stays byte-for-byte as today (regression risk
   zero); new backends are additive.
 - **MPD service handling (Debian/Ubuntu gotcha):** those distros ship mpd
@@ -261,8 +261,8 @@ avoid root).
 - App code (`src/`) — only the tracker's `systemctl` call and any other
   direct init calls get rewired to `s2u-svc`.
 - Config/cache paths, bridge scripts' logic, the mpv IPC socket contract
-  (`input-ipc-server=/tmp/mpvsocket`), cava fifo append, MPRIS state
-  schema.
+  (`input-ipc-server=/tmp/mpvsocket`), MPRIS state schema. (Round 30: the
+  cava fifo append is gone — cava is PipeWire-only.)
 
 ## 7. Validation gates (per target)
 
@@ -277,7 +277,7 @@ avoid root).
 | G6 | MPRIS video: `s2u-mpv-tracker` + `s2udio-mpris` up; `org.mpris.MediaPlayer2.s2udio` serves title/artist/art/position; Seek routes to the mpv socket |
 | G7 | yt-dlp resolves a real YouTube URL (recorded as soft gate — network) |
 | G8 | mpv headless play (`--vo=null --ao=null --input-ipc-server=/tmp/mpvsocket`) runs; `/tmp/mpvsocket` appears; state file written |
-| G9 | cava fifo configured; cava runs briefly headless |
+| G9 | cava config is PipeWire-only (round 30); cava attempts the pipewire input headless — passes when a PipeWire daemon exists, soft when it fails fast with a pipewire error (headless containers have no daemon; several distro cavas ship without the pipewire input) |
 | G10 | TUI smoke: tmux pty launch, `capture-pane` shows the Queue tab |
 | G11 | Service abstraction: `s2u-svc start/stop/is-active` round-trips on the target init |
 | G12 | **No `s2u-distro-*` container remains** (ephemerality assertion) |
@@ -375,8 +375,9 @@ per-gate JSON + gates.jsonl) live in `scripts/dev/artifacts/<key>/<ts>/`
    (`/lib/systemd/system/mpd.service`, mpd user, port 6600). Decision:
    **(a) user-level instance** — the deploy stops+disables the system
    unit and runs s2udio's user-level `mpd.service`
-   (`~/.config/mpd/mpd.conf` + fifo). Confirmed working in-container
-   (gates G4/G5 green). Ubuntu's mpd package behaves identically.
+   (`~/.config/mpd/mpd.conf`; round 30: no cava fifo append — cava
+   captures PipeWire). Confirmed working in-container (gates G4/G5 green).
+   Ubuntu's mpd package behaves identically.
 3. **Rust toolchain**: distro rustc is too old for edition-2024
    everywhere (Fedora 41 ~1.80, Debian 12 1.63, Ubuntu 24.04 1.75;
    Cargo.toml MSRV 1.88) → rustup minimal profile (stable 1.97.1 in
@@ -399,7 +400,7 @@ apt (Debian/Ubuntu/Devuan — system mpd stopped+disabled, user-level instance
 per §12.2, stale-yt-dlp pip hint per §12.7), apk (Alpine — cava from source
 per §12.5, upstream python mpDris2 per §12.6), xbps (Void — mpd `setcap -r`
 per §12.8) and nix (nix profile install, flake.nix). Shared step functions
-(support scripts, config/theme seed, MPD fifo) stay shared; mpv-full stays
+(support scripts, config/theme seed) stay shared; mpv-full stays
 Arch-only (other backends install plain mpv + informational note); service
 enable/start goes through `scripts/s2u-svc` (never raw `systemctl` outside
 the Arch path). Non-Arch backends auto-install rustup when the distro rustc
@@ -459,7 +460,8 @@ Phase-results restructure of this section (kept so `setup.sh` comments and
   Ubuntu (Devuan follows via ID_LIKE, mock-validated) ship `mpd` as an
   auto-started **system** service (port 6600). setup.sh stops+disables
   the system unit and runs a **user-level** instance (`~/.config/mpd/
-  mpd.conf` + user `mpd.service`, created when absent; cava fifo appended).
+  mpd.conf` + user `mpd.service`, created when absent; no cava fifo —
+  cava captures PipeWire, round 30).
 - **§12.3 — rustup**: distro rustc is too old for edition-2024 (MSRV 1.88)
   on Fedora 41 (~1.80), Debian 12 (1.63), Ubuntu 24.04 (1.75) and Alpine;
   non-Arch backends auto-install a current toolchain via rustup (minimal
@@ -571,7 +573,7 @@ state).
       Dockerfiles/flake and the gate runner)
 - [ ] `scripts/s2u-svc` (init abstraction) + tracker/setup rewiring
 - [x] `setup.sh` distro dispatcher + package-name maps (Phase 4, committed on `working`)
-  - per-backend package maps (§12) + shared step functions (scripts install, config/theme seed, MPD fifo)
+  - per-backend package maps (§12) + shared step functions (scripts install, config/theme seed)
   - Arch/CachyOS/Artix path output byte-identical (hermetic mock matrix: `scripts/dev/test-setup-mock.py`)
   - real in-container validation: fedora-41 (dnf5), debian-12 (apt), alpine-320 (apk) all green
     (`scripts/dev/test-setup-distro.sh <key>`)

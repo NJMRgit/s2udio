@@ -79,8 +79,8 @@ source on session start/end and tab entry.
 The bars are drawn by a dedicated thread that reads cava's raw output and
 writes only **changed columns** (bounded terminal write volume). The
 thread receives Start/Stop/Pause/ConfigChanged commands; `run()` is a
-no-op while a modal is open. The FIFO tap's sample format is synced from
-MPD's fifo output (`backend/mpd-playback`).
+no-op while a modal is open. cava is PipeWire-only (round 30) — the old
+MPD-fifo sample-format sync is gone (`backend/mpd-playback`).
 
 With the PipeWire input, cava's stream node is named **`cava`** (cava
 hardcodes `pw_stream_new_simple(..., "cava", ...)` — `node.name` and

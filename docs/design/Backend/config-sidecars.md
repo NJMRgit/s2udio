@@ -96,8 +96,9 @@ locations.
   renaming. The settings panel does not edit it but preserves it across
   Save. Only the s2udio-spawned cava carries the env, so other cava
   instances on the system keep their names.
-- **No sample rate / bit depth**: a FIFO tap's format is synced from
-  MPD's fifo output at spawn time (see `backend/mpd-playback`).
+- **No sample rate / bit depth**: cava is PipeWire-only (round 30), so
+  the raw-PCM format syncing for the old MPD fifo tap is gone; the
+  PipeWire input negotiates the format itself (see `backend/mpd-playback`).
 - Merged by `apply_cava_override`; the visualizer re-arms via
   `ConfigChanged`. Old sidecars with removed fields still parse (unknown
   fields are ignored).

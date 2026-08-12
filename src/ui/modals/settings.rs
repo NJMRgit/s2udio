@@ -26,7 +26,7 @@ use crate::{
     config::{
         Config,
         UiSettings,
-        cava::{CavaInputMethod, CavaOverridesFile},
+        cava::CavaOverridesFile,
         keys::{Key, KeyConfig, KeySequence},
         scale_color,
         state::AppStateFile,
@@ -283,7 +283,6 @@ enum GeneralRow {
     FreqMin,
     FreqMax,
     Channels,
-    Method,
     Device,
     VirtualDevices,
     NoiseReduction,
@@ -356,7 +355,6 @@ struct StagedCava {
     lower_cutoff_freq: u16,
     higher_cutoff_freq: u32,
     channels: u32,
-    method: CavaInputMethod,
     source: String,
     noise_reduction: u8,
     monstercat: bool,
@@ -376,7 +374,6 @@ impl StagedCava {
             lower_cutoff_freq: config.cava.lower_cutoff_freq.unwrap_or(DEFAULT_FREQ_MIN),
             higher_cutoff_freq: config.cava.higher_cutoff_freq.unwrap_or(DEFAULT_FREQ_MAX),
             channels: config.cava.input.channels.unwrap_or(2),
-            method: config.cava.input.method.clone(),
             source: config.cava.input.source.clone(),
             noise_reduction: config.cava.smoothing.noise_reduction,
             monstercat: config.cava.smoothing.monstercat,
@@ -394,7 +391,6 @@ impl StagedCava {
             lower_cutoff_freq: Some(self.lower_cutoff_freq),
             higher_cutoff_freq: Some(self.higher_cutoff_freq),
             channels: Some(self.channels),
-            method: Some(self.method.clone()),
             source: Some(self.source.clone()),
             noise_reduction: Some(self.noise_reduction),
             monstercat: Some(self.monstercat),
@@ -918,16 +914,14 @@ impl SettingsModal {
 
     /// Refresh the PipeWire capture-source list (with the "auto" entry
     /// first): sink monitors (`X.monitor`) plus mics/virtual sources.
+    /// Round 30: cava is PipeWire-only, so the list is always shown.
     fn refresh_nodes(&mut self) {
-        let mut nodes = Vec::new();
-        if self.method() == CavaInputMethod::Pipewire {
-            nodes.push(PwNode {
-                name: "auto".to_string(),
-                description: "auto (default output)".to_string(),
-                is_virtual: false,
-            });
-            nodes.extend(pipewire_sources());
-        }
+        let mut nodes = vec![PwNode {
+            name: "auto".to_string(),
+            description: "auto (default output)".to_string(),
+            is_virtual: false,
+        }];
+        nodes.extend(pipewire_sources());
         self.nodes = nodes;
     }
 
@@ -951,12 +945,11 @@ impl SettingsModal {
                     ContentRow::General(GeneralRow::FreqMin),
                     ContentRow::General(GeneralRow::FreqMax),
                     ContentRow::General(GeneralRow::Channels),
-                    ContentRow::General(GeneralRow::Method),
                 ];
-                if self.method() == CavaInputMethod::Pipewire {
-                    rows.push(ContentRow::General(GeneralRow::Device));
-                    rows.push(ContentRow::General(GeneralRow::VirtualDevices));
-                }
+                // Round 30: cava is PipeWire-only — the device / virtual
+                // rows are always shown (the method toggle is gone).
+                rows.push(ContentRow::General(GeneralRow::Device));
+                rows.push(ContentRow::General(GeneralRow::VirtualDevices));
                 rows.push(ContentRow::General(GeneralRow::NoiseReduction));
                 rows.push(ContentRow::General(GeneralRow::Monstercat));
                 rows.push(ContentRow::General(GeneralRow::Waves));
@@ -1010,8 +1003,8 @@ impl SettingsModal {
         }
     }
 
-    /// Refresh the rows for the current section (device rows appear when
-    /// the method is PipeWire).
+    /// Refresh the rows for the current section (the PipeWire device rows
+    /// are always part of the cava block — round 30).
     fn refresh_rows(&mut self, ctx: &Ctx) {
         self.rows = self.build_rows(ctx);
         if self.selected >= self.rows.len() {
@@ -1020,10 +1013,6 @@ impl SettingsModal {
     }
 
     // ---------- current values (staged) ----------
-
-    fn method(&self) -> CavaInputMethod {
-        self.cava_pending.method.clone()
-    }
 
     fn source(&self) -> String {
         self.cava_pending.source.clone()
@@ -1144,19 +1133,6 @@ impl SettingsModal {
                 GeneralRow::Channels => {
                     let v = if self.channels() == 2 { 1 } else { 2 };
                     self.set_cava(ctx, |c| c.channels = v)
-                }
-                GeneralRow::Method => {
-                    let switch_to_pipewire = self.method() != CavaInputMethod::Pipewire;
-                    self.set_cava(ctx, |c| {
-                        if switch_to_pipewire {
-                            c.method = CavaInputMethod::Pipewire;
-                            if c.source.is_empty() || c.source.ends_with(".fifo") {
-                                c.source = "auto".to_string();
-                            }
-                        } else {
-                            c.method = CavaInputMethod::Fifo;
-                        }
-                    })
                 }
                 GeneralRow::Device => self.cycle_device(ctx, delta),
                 GeneralRow::VirtualDevices => {
@@ -1500,7 +1476,6 @@ impl SettingsModal {
                 | GeneralRow::FreqMin
                 | GeneralRow::FreqMax
                 | GeneralRow::Channels
-                | GeneralRow::Method
                 | GeneralRow::Device
                 | GeneralRow::VirtualDevices
                 | GeneralRow::NoiseReduction
@@ -1936,15 +1911,6 @@ impl SettingsModal {
                         style,
                         dim,
                         &[("1", current == 1), ("2", current == 2)],
-                    )
-                }
-                GeneralRow::Method => {
-                    let pipewire = self.method() == CavaInputMethod::Pipewire;
-                    Self::option_row(
-                        "cava sample method",
-                        style,
-                        dim,
-                        &[("FIFO", !pipewire), ("pipewire", pipewire)],
                     )
                 }
                 GeneralRow::Device => {
@@ -3114,7 +3080,6 @@ Source #165
             lower_cutoff_freq: Some(20),
             higher_cutoff_freq: Some(15000),
             channels: Some(2),
-            method: Some(CavaInputMethod::Pipewire),
             source: Some("auto".to_string()),
             noise_reduction: Some(77),
             monstercat: Some(true),
@@ -3132,7 +3097,7 @@ Source #165
     }
 
     #[test]
-    fn general_fifo_section_has_all_rows() {
+    fn general_pipewire_section_has_device_rows() {
         let ctx = crate::tests::fixtures::ctx(
             (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
             (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
@@ -3140,8 +3105,11 @@ Source #165
         );
         let mut modal = SettingsModal::new(&ctx);
         assert_eq!(modal.section, Section::General);
-        // Fifo: no device / virtual rows.
-        assert!(!modal.rows.iter().any(|r| matches!(r, ContentRow::General(GeneralRow::Device))));
+        // Round 30: cava is PipeWire-only — the device + virtual-device rows
+        // are always part of the cava block (the FIFO/pipewire method
+        // toggle is gone).
+        assert!(modal.rows.iter().any(|r| matches!(r, ContentRow::General(GeneralRow::Device))));
+        assert!(modal.rows.iter().any(|r| matches!(r, ContentRow::General(GeneralRow::VirtualDevices))));
         assert!(modal.rows.iter().any(|r| matches!(r, ContentRow::General(GeneralRow::Fps))));
         // Render so the click targets are computed; the FPS stepper has both.
         let backend = ratatui::backend::TestBackend::new(110, 30);
@@ -3227,8 +3195,9 @@ Source #165
             (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
         );
         let modal = SettingsModal::new(&ctx);
-        // The sample rate / bit depth rows are gone (a FIFO tap's format is
-        // synced from MPD's fifo output); the cava block keeps channels.
+        // Round 30: cava is PipeWire-only — the method toggle and the
+        // sample rate / bit depth rows are gone; the cava block keeps
+        // channels (and always shows the PipeWire device rows).
         assert!(modal
             .rows
             .iter()
@@ -3240,7 +3209,8 @@ Source #165
             GeneralRow::FreqMin,
             GeneralRow::FreqMax,
             GeneralRow::Channels,
-            GeneralRow::Method,
+            GeneralRow::Device,
+            GeneralRow::VirtualDevices,
             GeneralRow::NoiseReduction,
             GeneralRow::Monstercat,
             GeneralRow::Waves,

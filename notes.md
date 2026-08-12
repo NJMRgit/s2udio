@@ -1,3 +1,26 @@
+# Notes for the container agent — round 30 IMPLEMENTED host-side (2026-08-12)
+
+## ROUND 30 — remove the cava FIFO input (PipeWire only) (2026-08-12) — committed on `working`
+
+**User request (2026-08-12) →
+[FEEDBACK-2026-08-12-3.md](FEEDBACK-2026-08-12-3.md).** Remove FIFO from
+s2udio's cava — **PipeWire only**. Host implemented on `working`
+(round-30 commit): the `CavaInputMethod` enum and the settings panel's
+FIFO/PipeWire "cava sample method" toggle are deleted (the generated
+cava config always writes `method = pipewire`); the MPD-fifo
+sample-format sync (`paste::mpd_fifo_format`) is removed; `setup.sh`
+drops the MPD fifo `audio_output` step (renumbered 1/8..8/8); the
+container deploy scripts + gates G1/G4/G9 stop requiring the fifo (G9
+now checks the deployed config is PipeWire-only and that cava either
+runs on the PipeWire input or fails fast with a pipewire error —
+headless containers have no PipeWire daemon and Debian/Ubuntu/Fedora
+ship cavas without the pipewire input). Old configs still load
+(`method: Fifo` ignored, a fifo `source` falls back to `auto`).
+**1364/1364**, warnings 3 baseline, mock 62/62, debian-12 container
+gates G1/G4/G9 re-validated. isodev: nothing to implement — pull
+`working` when ready.
+
+---
 # Notes for the container agent — round 29 MERGED to main (2026-08-12)
 
 ## ROUND 29 MERGED to main (2026-08-12) — host push

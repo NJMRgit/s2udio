@@ -27,7 +27,7 @@ housekeeping); the spec lives in the per-subsystem design docs (start at
 | Queue tab (Audio/Video/Chapters, merged box, album sort, app-open) | `docs/design/Tabs/queue-tab.md` |
 | Settings panel (layout, sections, staging, appearance) | `docs/design/Tabs/settings.md` |
 | MPD / Radio / Jellyfin / Playlists / Search tabs | `docs/design/Tabs/*` |
-| MPD playback, temp entries, MPRIS tagging, FIFO tap | `docs/design/Backend/mpd-playback.md` |
+| MPD playback, temp entries, MPRIS tagging, cava PipeWire capture | `docs/design/Backend/mpd-playback.md` |
 | mpv session: poll, playlist, reattach, preference chains, tracker | `docs/design/Backend/mpv-session.md` |
 | Radio directory: endpoints, caching, lazy loads | `docs/design/Backend/radio-directory.md` |
 | Jellyfin API: endpoints, `JfItem` parsing, progress reporting | `docs/design/Backend/jellyfin-api.md` |
@@ -122,10 +122,21 @@ the user's decisions win. Locked in across sessions (details in the docs):
   subset) — rounds 28 + 28b + **round 29 merged 2026-08-12** on top of
   `898a5bb` (`06b90f7` cava pipewire restart fix, `96fc4cb` round 28,
   `2c04bcf` round 28b, `fe9f078` round 29 cava node_name); validated
-  **1364/1364**, warnings 3 baseline.
-- **Branch**: `working` (tracks `s2udio-working/working`), at `5537ad1` +
-  **round 29 committed on top** (host-implemented feature; **1364/1364**
+  **1364/1364**, warnings 3 baseline. Round 30 (cava PipeWire-only) is
+  committed on `working` and not yet merged to master.
+- **Branch**: `working` (tracks `s2udio-working/working`), at `5802ef1` +
+  **round 30 committed on top** (host-implemented; **1364/1364**
   host-validated 2026-08-12, warnings 3 baseline, binary build clean).
+  **Round 30 (2026-08-12, host-implemented)**: remove the cava FIFO input —
+  cava is **PipeWire-only**. The `CavaInputMethod` enum and the settings
+  panel's FIFO/PipeWire method toggle are gone (generated config always
+  writes `method = pipewire`); the MPD-fifo sample-format sync
+  (`paste::mpd_fifo_format`) is deleted; `setup.sh` and the container
+  deploy scripts no longer append a fifo `audio_output` to mpd.conf; the
+  gates G1/G4/G9 no longer require the fifo. Old configs (`method: Fifo`,
+  a fifo `source` path) still parse — the method is ignored and the source
+  falls back to `auto`. See
+  [FEEDBACK-2026-08-12-3.md](FEEDBACK-2026-08-12-3.md).
   **Round 29 (2026-08-12, host-implemented)**: name the cava PipeWire
   node — new `node_name` option (`cava.ron` / main config; preserved by
   the settings panel) + LD_PRELOAD shim (`scripts/cava-node-name.c`,

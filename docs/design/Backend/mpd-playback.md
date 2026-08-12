@@ -131,15 +131,16 @@ MPD's `playlistadd`/`delete`/`save` **drop** `#EXTINF` names, so
 favourites mutations (radio `radio.m3u`, EXTINF format) rewrite the `.m3u`
 file directly; MPD hot-reloads it via inotify (no idle event fires).
 
-## The cava FIFO tap
+## The cava PipeWire capture (round 30)
 
-MPD writes raw PCM to a fifo `audio_output` (e.g. `format "44100:16:2"`
-for the visualizer). The cava config's `[input]` must match that format
-**exactly** — mismatched sample bits/rate garble the bars. The settings
-panel no longer exposes sample rate / bit depth; `CavaPane::spawn_cava`
-parses the fifo output's `format` from mpd.conf
-(`paste::mpd_fifo_format`, `backend/image-overlays`) and overrides the
-cava `[input]` with it (rate, bits and channels).
+cava is **PipeWire-only**: its `[input]` is always `method = pipewire`
+(`Cava::to_cava_config_file`), capturing the default output's monitor
+(`source = auto`) or a configured sink monitor / virtual source. There is
+no MPD fifo tap anymore — `setup.sh` and the container deploy scripts no
+longer append a fifo `audio_output` to mpd.conf, and `paste` no longer
+parses mpd.conf for a fifo format. A leftover config with
+`method: Fifo` / a fifo `source` path is ignored and falls back to
+`auto` (`sanitize_pipewire_source`).
 
 ## Key events
 

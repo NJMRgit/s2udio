@@ -388,66 +388,6 @@ pub fn music_directory() -> Option<String> {
     None
 }
 
-/// The FIFO tap's raw PCM format (`sample_rate : sample_bits : channels`),
-/// read from the fifo `audio_output`'s `format` line in mpd.conf. Cava
-/// reads this stream, so its `[input]` must match exactly.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MpdFifoFormat {
-    pub sample_rate: u32,
-    pub sample_bits: u32,
-    pub channels: u32,
-}
-
-pub fn mpd_fifo_format() -> Option<MpdFifoFormat> {
-    for candidate in [
-        "~/.config/mpd/mpd.conf",
-        "/etc/mpd.conf",
-        "/var/lib/mpd/mpd.conf",
-        "/usr/local/etc/mpd.conf",
-    ] {
-        let content = std::fs::read_to_string(tilde_expand(candidate).as_ref()).ok()?;
-        if let Some(fmt) = parse_fifo_format(&content) {
-            return Some(fmt);
-        }
-    }
-    None
-}
-
-/// Extract the fifo `audio_output`'s `format "rate:bits:channels"` from an
-/// mpd.conf body.
-fn parse_fifo_format(content: &str) -> Option<MpdFifoFormat> {
-    let mut in_fifo = false;
-    for line in content.lines() {
-        let line = line.split('#').next().unwrap_or("").trim();
-        if line.starts_with("audio_output") || line == "}" {
-            in_fifo = false;
-        }
-        if line == "type" || line.starts_with("type ") {
-            if line.contains("fifo") {
-                in_fifo = true;
-            }
-        }
-        if in_fifo
-            && let Some(rest) = line.strip_prefix("format")
-        {
-            let rest = rest.trim().trim_start_matches('=').trim();
-            if let Some(fmt) = rest.strip_prefix('"').and_then(|s| s.strip_suffix('"')) {
-                let mut parts = fmt.split(':');
-                let sample_rate = parts.next()?.trim().parse().ok()?;
-                let sample_bits = parts.next()?.trim().parse().ok()?;
-                // "*" (follow the source's channel count) falls back to
-                // stereo, the common fifo setup.
-                let channels = match parts.next()?.trim() {
-                    "*" => 2,
-                    n => n.parse().ok()?,
-                };
-                return Some(MpdFifoFormat { sample_rate, sample_bits, channels });
-            }
-        }
-    }
-    None
-}
-
 /// Convert an absolute local path to the MPD-relative path when it lives
 /// under the music directory (MPD refuses absolute local paths over TCP).
 /// Returns the path unchanged when it cannot be relativized.
@@ -2277,51 +2217,6 @@ mod tests {
         assert!(at("[Video]") < at2("Add to playlist"));
         assert!(at2("Add to playlist") < at2("Create Playlist"));
         assert!(at2("Create Playlist") < at("Cancel"));
-    }
-
-    #[test]
-    fn fifo_format_is_parsed_from_the_fifo_output_block() {
-        let conf = r#"
-audio_output {
-    type    "pulse"
-    name    "My Pulse Output"
-}
-audio_output {
-    type    "fifo"
-    name    "cava"
-    path    "/tmp/mpd-cava.fifo"
-    format  "44100:16:2"
-}
-"#;
-        assert_eq!(
-            parse_fifo_format(conf),
-            Some(MpdFifoFormat { sample_rate: 44100, sample_bits: 16, channels: 2 })
-        );
-    }
-
-    #[test]
-    fn fifo_format_wildcard_channels_fall_back_to_stereo() {
-        let conf = r#"
-audio_output {
-    type    "fifo"
-    format  "48000:24:*"
-}
-"#;
-        assert_eq!(
-            parse_fifo_format(conf),
-            Some(MpdFifoFormat { sample_rate: 48000, sample_bits: 24, channels: 2 })
-        );
-    }
-
-    #[test]
-    fn fifo_format_ignores_non_fifo_outputs() {
-        let conf = r#"
-audio_output {
-    type    "alsa"
-    format  "44100:16:2"
-}
-"#;
-        assert_eq!(parse_fifo_format(conf), None);
     }
 
     use crate::{

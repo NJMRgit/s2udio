@@ -36,7 +36,7 @@ if [[ -s /tmp/mpDris2.in.py ]]; then
     ok "upstream mpDris2 source -> /usr/bin/mpDris2 ($(wc -l < /usr/bin/mpDris2) lines)"
 fi
 
-info "alpine: MPD config (user-level, fifo for cava)"
+info "alpine: MPD config (user-level; round 30: no cava fifo output — cava captures PipeWire)"
 cat > "$HOME/.config/mpd/mpd.conf" <<'EOF'
 music_directory "/root/media"
 bind_to_address "127.0.0.1"
@@ -48,24 +48,15 @@ playlist_directory "/root/.cache/mpd/playlists"
 follow_outside_symlinks "yes"
 follow_inside_symlinks "yes"
 auto_update "yes"
-audio_output {
-    type    "fifo"
-    name    "cava"
-    path    "/tmp/mpd-cava.fifo"
-    format  "44100:16:2"
-}
 EOF
 
-info "alpine: cava config (fifo input, raw output)"
+info "alpine: cava config (PipeWire input, raw output)"
 cat > "$HOME/.config/cava/config" <<'EOF'
 [general]
 bars = 24
 [input]
-method = fifo
-source = /tmp/mpd-cava.fifo
-sample_rate = 44100
-sample_bits = 16
-channels = 2
+method = pipewire
+source = auto
 [output]
 method = raw
 EOF

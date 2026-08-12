@@ -57,9 +57,10 @@ terminals so controls are never cut off.
   / jellyfin tab toggles, `reload radio stations` `[Reload]`, `Jellyfin
   media playback preference ask | mpv | mpd`, `If media contains chapters
   open to chapters list`) + cava block (auto-sens, sensitivity 1-500 step
-  5, frame rate 15-120, min/max sampling frequency, channels, method
-  FIFO/Pipewire, noise reduction, monstercat, waves — sample rate / bit
-  depth are gone, a FIFO tap syncs from MPD) + appearance block.
+  5, frame rate 15-120, min/max sampling frequency, channels, PipeWire
+  device/virtual source rows — always shown, noise reduction, monstercat,
+  waves; the FIFO/pipewire method toggle and the sample rate / bit depth
+  rows are gone, cava is PipeWire-only) + appearance block.
 - **keybinds**: inline remap table (Description | Action | Key); select an
   action, press the new key (Esc cancels); runtime keybinds update live,
   persisted on Save.
