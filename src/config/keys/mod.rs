@@ -75,6 +75,7 @@ impl Default for KeyConfigFile {
         let global = HashMap::from([
             (s().char(' '),                       G::TogglePause),
             (s().tab(),                           G::NextTab),
+            (s().tab().shift(),                   G::ToggleMpdMode),
             (s().char('E'),                       G::NextTab),
             (s().char('Q'),                       G::PreviousTab),
             (s().char('>'),                       G::NextTrack),

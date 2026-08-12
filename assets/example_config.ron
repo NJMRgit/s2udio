@@ -52,6 +52,7 @@
         global: {
             " ":          TogglePause,
             "<Tab>":      NextTab,
+            "<S-Tab>":    ToggleMpdMode,
             ">":          NextTrack,
             "Q":          Quit,
             "<Esc>":      ShowSettings,
