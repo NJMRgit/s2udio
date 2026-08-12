@@ -1,3 +1,37 @@
+# Notes for the container agent — round 31 IMPLEMENTED host-side (2026-08-12)
+
+## ROUND 31 — multi-select: Ctrl+A, additive ctrl+click, bulk actions (2026-08-12) — committed on `working`
+
+**User request (2026-08-12) →
+[FEEDBACK-2026-08-12-4.md](FEEDBACK-2026-08-12-4.md).** Host implemented
+on `working` (round-31 commit `d9fe076`):
+
+1. **Ctrl+A (`CommonAction::SelectAll`, new navigation binding
+   `<C-a>`) marks every item of the current list** — queue Audio/Video
+   lists, Playlists songs pane, MPD right (Library) pane, Search-mode
+   results list. No-op in Jellyfin/Radio/Help/Settings, the MPD folder
+   tree, the playlists root list and the search filter column (Esc
+   still clears; a second Ctrl+A keeps everything marked).
+2. **Ctrl+click is additive** in all five multi-select lists: the row
+   under the cursor joins the marks (the initially selected item is
+   never dropped) and clicking an already-marked row keeps it — no
+   toggle-off (`MarkState::toggle` replaced by `add`/`mark_all`). Plain
+   click on another row / Esc still clear.
+3. **Marked bulk actions**: playlists song menu acts on every marked
+   song (Add/Replace queue, Create/Add playlist, Remove from playlist);
+   search results menu gained marked *Add to queue* / *Replace queue*
+   (the "all" variants stay); the audio queue menu gained *Add selected
+   to playlist* / *Create playlist from selected* for marked rows and
+   renamed *Create audio playlist* → **Create playlist from queue**
+   (whole queue, next to the existing *Add queue to playlist*).
+
+The live `~/.config/s2udio/config.ron` navigation table got
+`"<C-a>": SelectAll` (the user config has `keybinds: clear: true`, so
+the file binding is required). **1378/1378**, warnings 3 baseline,
+binary installed (md5 `56617491`) and running in a color kitty (agent
+launches must `env -u NO_COLOR` — see the NO_COLOR memory). isodev:
+nothing to implement — pull `working` when ready.
+
 # Notes for the container agent — round 30 MERGED to main (2026-08-12)
 
 ## ROUND 30 MERGED to main (2026-08-12) — host push
