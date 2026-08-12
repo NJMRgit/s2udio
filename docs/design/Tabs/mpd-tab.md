@@ -8,17 +8,19 @@ description: >
   navigation — the right pane lists the current node's children, the root
   lists the top-level directories, and the tree collapses as you back out.
   Left pane: min 50 cols, hidden on TUIs ≤ 120 cols; `Enter` opens the
-  context menu (parity with the Playlists pane).
+  context menu (parity with the Playlists pane). Round 28: hosts the
+  folded-in Search tab under a `⭘ Library  ● Search` toggle.
 status: "current"
-updated: "2026-08-07"
+updated: "2026-08-12"
 source_files:
   - src/ui/panes/directories.rs
 related:
+  - tabs/search-tab
   - tabs/jellyfin-tab
   - frontend/interaction
   - frontend/layout-templates
   - backend/stream-downloads
-tags: [tab, directories, mpd, tree]
+tags: [tab, directories, mpd, tree, search]
 ---
 
 # MPD Tab (Directories)
@@ -28,6 +30,28 @@ tags: [tab, directories, mpd, tree]
 The library tab named `MPD`. It shares the Jellyfin tab's navigation
 model — **folder tree left**, **items right**, **info box below** — with
 the Library root kept as a fixed (never collapsible) row: `Library ↴`.
+
+## Library / Search toggle (round 28)
+
+The former top-level **Search tab folded into the MPD tab**: a
+`⭘ Library  ● Search` row sits at the top of the tab (left-aligned, one
+leading space) and switches between **Library mode** — this tab exactly
+as described below — and **Search mode** — the former Search tab's UI
+(filter inputs left, ` Results ` + tips + ` Info ` right; still queries
+the user's MPD library; rounds 24–27 parity: mouse multi-select,
+marked/hover rendering, `a`/`d`/`←`/`→` filter↔results navigation,
+Esc-deselect). The active mode is marked with the app's ●/⭘ convention
+(● = active, bold; ⭘ = inactive, dim), and the labels are clickable
+(mouse) and hover-lighten like the queue's sub-tab row.
+
+- **Keyboard**: `Tab` while the MPD tab is focused toggles the mode
+  (the feedback's leading suggestion; it replaces the global
+  next-tab binding *on this tab only* — `Tab` still cycles tabs
+  everywhere else).
+- **Startup default**: Library (the mode resets on every launch).
+- **Session lifetime**: the search state (filters, results, phase)
+  lives for the session, so a Library↔Search toggle never loses the
+  typed filters or the results list.
 
 ## Pane layout
 

@@ -1,30 +1,40 @@
 ---
-title: "Search Tab"
+title: "Search (MPD tab mode)"
 section: tabs
 doc_type: spec
 id: "tabs/search-tab"
 description: >
-  The re-laid-out search: filter inputs in a left pane, results list,
-  tips strip and info box — the same structure as the other browsers.
+  The search UI: filter inputs in a left pane, results list, tips strip
+  and info box — the same structure as the other browsers. Round 28:
+  no longer a top-level tab — it folded into the MPD tab under the
+  `⭘ Library  ● Search` toggle (still searches the user's MPD library).
 status: "current"
-updated: "2026-08-10"
+updated: "2026-08-12"
 source_files:
   - src/ui/panes/search/mod.rs
   - src/ui/panes/search/inputs.rs
 related:
+  - tabs/mpd-tab
   - backend/mpd-playback
   - frontend/layout-templates
 tags: [tab, search, filters]
 ---
 
-# Search Tab
+# Search (MPD tab mode)
 
 ## Identity
 
-Re-laid out to match the other browser tabs: the filter inputs live in a
-left ` Search ` pane (**always visible**), with the ` Results ` list, a
-3-line tips strip and a ` Info ` box (yellow group labels) stacked on the
-right — the same structure as Directories / Radio / Jellyfin.
+Round 28 (2026-08-12): the Search **tab** folded into the MPD tab — the
+top-level tab bar is `Queue │ Playlists │ MPD • Jellyfin • Radio` and the
+search UI lives under the MPD tab's `⭘ Library  ● Search` toggle (a
+leftover "Search" tab entry in the config is hidden from the bar and the
+tab cycle). The mode's UI is unchanged from the browser layout: filter
+inputs in a left ` Search ` pane (**always visible**), with the
+` Results ` list, a 3-line tips strip and a ` Info ` box (yellow group
+labels) stacked on the right — the same structure as Directories / Radio
+/ Jellyfin. Searches still query the user's MPD library; the search
+state (filters, results, phase) lives for the session, surviving
+Library↔Search toggles, and resets with the app (Library at startup).
 
 ## Functionality
 
@@ -32,7 +42,7 @@ All search functionality is unchanged from the browser: filters
 (case/diacritics options), rating/liked stickers, search modes, custom
 query, results filtering, multi-select, context menus, enqueue/play.
 
-## Interaction
+## Interaction (unchanged from the standalone tab)
 
 - Clicking the results selects a row and moves keyboard focus there.
 - Clicking a filter row focuses that input.

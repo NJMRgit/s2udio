@@ -118,10 +118,23 @@ the user's decisions win. Locked in across sessions (details in the docs):
 
 ## Current state (verified)
 
-- **Branch**: `working` (tracks `origin/working`), at `efeb87e` — the
-  round-24 feedback filing; **container implementation UNCOMMITTED in
-  the working tree (needs host `cargo test --release` validation —
-  expected 1293 + 11 new = 1304, warnings ≤ 3 baseline)**. **Round 24
+- **Branch**: `working` (tracks `origin/working`), at `e8e854b` +
+  **round-28 implementation committed on top** (see the Pending entry;
+  needs host `cargo test --release` validation — **1360/1360** in the
+  container, warnings 3 baseline, binary build clean).
+  **Round 28 (2026-08-12, isodev implementing)**: the Search tab folded
+  into the MPD tab — default tabs drop the Search entry (a leftover
+  "Search" config tab is hidden from the bar/cycle via `is_tab_hidden`);
+  the MPD tab gained a `⭘ Library  ● Search` toggle row (● = active;
+  mouse-clickable labels; `Tab` on the MPD tab toggles, `E` still cycles
+  tabs); Library mode = the unchanged MPD browser; Search mode = the
+  folded-in search UI (rounds 24–27 parity intact, still queries the MPD
+  library), session-lifetime state, Library at startup. Search queries
+  now target the Directories pane and the MPD pane forwards the results
+  to its embedded search. **1360/1360** (+7 tests: 6 MPD-tab + 1
+  leftover-Search-tab bar), warnings 3 baseline. See
+  [FEEDBACK-2026-08-12-0.md](FEEDBACK-2026-08-12-0.md).
+  **Round 24
   (2026-08-10, isodev implementing)**: Esc-deselect everywhere
   multi-select exists (queue video list + MPD tab Close arms + `MarkState::
   clear_anchor`, 6 new pane tests) + search tab full
@@ -522,16 +535,22 @@ Toolchain env (container): `export PATH="$HOME/.cargo/bin:$PATH"`
 
 ## Pending
 
-- **Round 28 (2026-08-12 user feedback) — FILED for isodev, see
-  [FEEDBACK-2026-08-12-0.md](FEEDBACK-2026-08-12-0.md).** Fold the Search
-  tab into the MPD tab with a Library/Search toggle
-  (`⭘ Library  ● Search` row below the tab bar); remove the top-level
-  Search tab (tab bar → `Queue │ Playlists │ MPD • Jellyfin • Radio`).
-  Library mode = current MPD tab unchanged (tree min-width/hide,
-  Esc-deselect); Search mode = current Search UI moved in with rounds
-  24–27 parity intact (still searches the MPD library). Open questions
-  flagged in the feedback: toggle keybinding (suggest `Tab`), startup
-  default = Library, search-filter state preserved across toggles.
+- **Round 28 (2026-08-12 user feedback) — IMPLEMENTED in the container
+  (see FEEDBACK-2026-08-12-0.md), awaiting host validation.** The Search
+  tab folded into the MPD tab: default tabs drop the Search entry and any
+  leftover "Search" config tab is hidden from the bar/cycle
+  (`is_tab_hidden`); the MPD tab renders a `⭘ Library  ● Search` toggle
+  row at the top (● = active; clickable labels; hover-lightens). Open
+  questions resolved as suggested: **`Tab`** toggles while the MPD tab is
+  focused (`E`/Shift+Tab still cycle tabs — note: `Tab` no longer cycles
+  tabs *from the MPD tab*), startup default = **Library** (not persisted),
+  search-filter state **preserved across toggles** (the search pane lives
+  inside the MPD pane for the session). Search queries now target the
+  Directories pane; the MPD pane forwards `SEARCH` results to its
+  embedded search. **1360/1360** in-container, warnings 3 baseline. Host:
+  validate, remove the Search tab from the live config.ron, install, live
+  check (toggle row, Tab, both modes, search still finds MPD-library
+  results).
 - **Phase 2.1 — delta close-out: DONE (2026-08-10, see
   outline §5.1).** (1) Items-box title parity restored: `items_title`
   returns the pre-padded title (directories `" Library"` / `" Downloads"` /

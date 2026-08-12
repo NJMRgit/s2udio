@@ -9,7 +9,7 @@ description: >
   back-out, wheel scrolling, modal key consumption and the mouse-over
   (hover) effects.
 status: "current"
-updated: "2026-08-11"
+updated: "2026-08-12"
 source_files:
   - src/core/input.rs
   - src/config/keys/mod.rs
@@ -120,15 +120,15 @@ tags: [keyboard, mouse, keybinds, interaction]
     underline is disabled instead (`url_style none` in kitty.conf).
   - **List rows** (queue Audio/Video/Chapters, MPD tree + items, Playlists,
     Radio regions + stations, Jellyfin tree + items, Search results) and
-    the **Search tab's filter inputs/spinner/button rows** (clickable
-    fields) render
+    the **MPD tab's Search-mode filter inputs/spinner/button rows**
+    (clickable fields) render
     with the selection highlight effect **slightly brighter** — accent ×
     0.58 vs the selection's 0.50 — but **dimmer than multi-selected
     (marked) rows** (0.65). Marked rows keep their marked highlight on
     hover.
   - Hovering the keyboard-selected row shows the hover highlight (the
     list's highlight style switches to the hover style for that row).
-  - **Radio, Playlists and Search tabs**: the pane that holds the keyboard
+  - **Radio, Playlists and the MPD tab's Search mode**: the pane that holds the keyboard
     cursor renders its selection with the hover highlight even without the
     mouse, so navigation shows which pane is active — the region tree vs
     the station list (Radio `focus`), the playlists list at the root vs
@@ -161,7 +161,7 @@ tags: [keyboard, mouse, keybinds, interaction]
   selection style). A plain click on any other row clears the whole
   multi-selection. Available in the **queue's Audio and Video lists**, the
   **MPD pane's right pane**, the **Playlists tab's songs pane** and the
-  **Search tab's results list**; `W`/`S`/`Shift+↑/↓` range-select from the
+  **MPD tab's Search-mode results list**; `W`/`S`/`Shift+↑/↓` range-select from the
   click anchor in the same lists.
 - Two-line list rows map clicks via `row / 2`.
 

@@ -35,9 +35,10 @@ tags: [layout, template, panes]
 
 ## Top bar
 
-Tabs left (`Queue │ Playlists │ MPD • Jellyfin • Radio • Search`), the
-`Help | Settings` buttons right-aligned. Separators shrink to single space
-on narrow terminals; the bullet separators follow MPD/Jellyfin/Radio.
+Tabs left (`Queue │ Playlists │ MPD • Jellyfin • Radio` — round 28 folded
+the Search tab into the MPD tab), the `Help | Settings` buttons
+right-aligned. Separators shrink to single space on narrow terminals; the
+bullet separators follow MPD/Jellyfin/Radio.
 
 ## Queue box (merged)
 
@@ -106,13 +107,14 @@ auto/blur accent) + bold right-aligned `Time: HH:MM`.
   the list text color and scrubs emoji; mouse-scrollable.
 - Jellyfin credits pinned below (`Director: / Writer: / Starring:`).
 
-## Browser template (Directories / Radio / Jellyfin / Search)
+## Browser template (Directories / Radio / Jellyfin; the MPD tab's Search mode)
 
 Three zones: a **tree/region list left**, the **items list right**, the
 **info box below** (yellow group labels). Left pane width ~20 columns;
-the info box reuses the yellow-label format. Search reuses the same
-template: filter inputs in a left ` Search ` pane, ` Results ` + tips +
-` Info ` right.
+the info box reuses the yellow-label format. The MPD tab's Search mode
+(round 28 — the former Search tab, folded in under a `⭘ Library  ● Search`
+toggle) reuses the same template: filter inputs in a left ` Search `
+pane, ` Results ` + tips + ` Info ` right.
 
 ### Browser panes override (MPD / Playlists / Jellyfin)
 

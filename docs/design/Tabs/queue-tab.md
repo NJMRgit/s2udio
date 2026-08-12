@@ -30,7 +30,7 @@ tags: [tab, queue, video, chapters]
 ## Position & identity
 
 First tab, renamed from "Local": `Queue │ Playlists │ MPD • Jellyfin •
-Radio • Search`. Opens on Queue for a playing YouTube stream (only true
+Radio`. Opens on Queue for a playing YouTube stream (only true
 radio streams open Radio), keeping the YouTube thumbnail visible as album
 art.
 

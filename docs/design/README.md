@@ -52,7 +52,7 @@ docs/design/
 │   ├── mpd-tab.md                ← MPD (Directories) browser
 │   ├── jellyfin-tab.md           ← Jellyfin browser + video playback
 │   ├── radio-tab.md              ← Radio browser
-│   ├── search-tab.md             ← Search
+│   ├── search-tab.md             ← Search (MPD tab mode, round 28)
 │   └── settings.md               ← Settings panel
 ├── Validation/                   ← validation plans (run per subsystem round)
 │   ├── mpris-validation.md       ← MPRIS & art: timeline/art/track-info across every source
