@@ -125,6 +125,17 @@ pub fn theme_paths(
     paths
 }
 
+/// Round 29: the LD_PRELOAD shim that renames cava's PipeWire node.
+/// Installed by `setup.sh` into `~/.local/share/s2udio/libcavaname.so`
+/// (built from `scripts/cava-node-name.c`); `S2UDIO_CAVA_NAME_SHIM`
+/// overrides the location. Returns `None` when the shim does not exist.
+pub fn cava_node_name_shim() -> Option<PathBuf> {
+    let path = std::env::var_os("S2UDIO_CAVA_NAME_SHIM")
+        .map(PathBuf::from)
+        .or_else(|| home_dir().map(|h| h.join(".local/share/s2udio/libcavaname.so")))?;
+    path.is_file().then_some(path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
