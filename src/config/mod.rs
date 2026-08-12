@@ -406,9 +406,14 @@ impl Config {
     /// Radio/Jellyfin tabs can be disabled from the Settings panel; they stay
     /// in the config so they can be re-enabled without losing their
     /// definitions.
+    ///
+    /// Round 28: the Search tab folded into the MPD tab (a Library/Search
+    /// toggle inside it), so any leftover config entry named "Search" is
+    /// hidden too — the tab bar never shows it again.
     pub fn is_tab_hidden(&self, tab: &TabName) -> bool {
         (!self.ui.show_radio_tab && tab.as_str().eq_ignore_ascii_case("Radio"))
             || (!self.ui.show_jellyfin_tab && tab.as_str().eq_ignore_ascii_case("Jellyfin"))
+            || tab.as_str().eq_ignore_ascii_case("Search")
     }
 
     /// Merge key remaps persisted by the Settings panel (`keybinds.ron`

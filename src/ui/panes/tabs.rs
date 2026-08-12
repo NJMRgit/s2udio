@@ -357,15 +357,16 @@ mod tests {
             .collect()
     }
 
-    /// The user's tab set (Queue, Playlists, MPD, Radio, Search).
-    fn with_five_tabs(mut ctx: Ctx) -> Ctx {
+    /// The user's tab set (Queue, Playlists, MPD, Radio). Round 28: the
+    /// Search tab folded into the MPD tab, so it is never in the bar (a
+    /// leftover "Search" config entry is hidden by `is_tab_hidden`).
+    fn with_four_tabs(mut ctx: Ctx) -> Ctx {
         let mut config = ctx.config.as_ref().clone();
         config.tabs.names = vec![
             "Queue".into(),
             "Playlists".into(),
             "MPD".into(),
             "Radio".into(),
-            "Search".into(),
         ];
         ctx.config = std::sync::Arc::new(config);
         ctx
@@ -373,9 +374,10 @@ mod tests {
 
     #[rstest::rstest]
     fn wide_terminal_uses_double_space_separators(ctx: Ctx) {
-        let ctx = with_five_tabs(ctx);
+        let ctx = with_four_tabs(ctx);
         let line = bar_line(&ctx, 110);
-        assert!(line.contains("Queue  │  Playlists  │  MPD  •  Radio  •  Search"));
+        assert!(line.contains("Queue  │  Playlists  │  MPD  •  Radio"));
+        assert!(!line.contains("Search"), "the Search tab never renders in the bar");
         assert!(line.contains("Help | Settings"));
         // Right group is right-aligned: Settings ends near the right border.
         assert!(line.trim_end().ends_with("Settings"));
@@ -383,27 +385,40 @@ mod tests {
 
     #[rstest::rstest]
     fn narrow_terminal_shrinks_separators_but_keeps_buttons(ctx: Ctx) {
-        let ctx = with_five_tabs(ctx);
+        let ctx = with_four_tabs(ctx);
         let line = bar_line(&ctx, 70);
         assert!(line.contains("Queue"));
-        assert!(line.contains("Search"));
+        assert!(line.contains("Radio"));
         assert!(line.contains("Help | Settings"));
         assert!(line.contains("Settings"));
     }
 
     #[rstest::rstest]
     fn narrow_terminal_falls_back_to_single_space_separators(ctx: Ctx) {
-        let ctx = with_five_tabs(ctx);
-        let line = bar_line(&ctx, 60);
+        let ctx = with_four_tabs(ctx);
+        let line = bar_line(&ctx, 55);
         // Double-space separators would overlap the buttons, so the tight
         // single-space look is used.
         assert!(line.contains("Queue │ Playlists"));
         assert!(!line.contains("Queue  │  Playlists"));
     }
 
+    /// A leftover "Search" tab entry in the config is hidden from the bar
+    /// (round 28 — the tab folded into the MPD tab).
+    #[rstest::rstest]
+    fn leftover_search_tab_is_omitted(ctx: Ctx) {
+        let mut ctx = with_four_tabs(ctx);
+        let mut config = ctx.config.as_ref().clone();
+        config.tabs.names.push("Search".into());
+        ctx.config = std::sync::Arc::new(config);
+        let line = bar_line(&ctx, 110);
+        assert!(!line.contains("Search"), "a leftover Search tab never renders: {line}");
+        assert!(line.contains("Radio"));
+    }
+
     #[rstest::rstest]
     fn hidden_radio_tab_is_omitted(ctx: Ctx) {
-        let mut ctx = with_five_tabs(ctx);
+        let mut ctx = with_four_tabs(ctx);
         let mut config = ctx.config.as_ref().clone();
         config.ui.show_radio_tab = false;
         ctx.config = std::sync::Arc::new(config);
@@ -417,7 +432,7 @@ mod tests {
     /// otherwise the buttons are unclickable.
     #[rstest::rstest]
     fn click_areas_match_drawn_labels(ctx: Ctx) {
-        let ctx = with_five_tabs(ctx);
+        let ctx = with_four_tabs(ctx);
         let backend = TestBackend::new(110, 3);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut pane = TabsPane::new(&ctx).unwrap();

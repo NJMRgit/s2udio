@@ -139,6 +139,7 @@ impl CavaPane {
             && self.area != self.sent_area
             && !self.is_modal_open
             && matches!(ctx.status.state, State::Play)
+            && !ctx.resizing.get()
         {
             self.sent_area = self.area;
             self.command(CavaCommand::Start { area: self.area }).ok();
@@ -264,6 +265,12 @@ impl CavaPane {
             config.input.sample_bits = Some(fmt.sample_bits);
             config.input.channels = Some(fmt.channels);
         }
+        if config.input.method == CavaInputMethod::Pipewire {
+            // A `source` that names a sink directly would make cava set
+            // `target.object`, which PipeWire does not feed on every setup
+            // (the bars come back flat). Capture the sink's monitor instead.
+            config.input.source = Self::normalize_pipewire_source(&config.input.source);
+        }
         let config = config.to_cava_config_file(bars)?;
         std::fs::write(&cfg_path, config)?;
 
@@ -278,6 +285,62 @@ impl CavaPane {
         })
     }
 
+    /// cava's pipewire `source` must name a *monitor* (`X.monitor`) to
+    /// capture what sink `X` plays: a raw sink name makes cava set
+    /// `target.object`, which PipeWire does not feed reliably on every setup
+    /// (the bars come back flat). Sink names are rewritten to their
+    /// `.monitor` form; `auto`, mics/virtual sources and existing monitors
+    /// are left untouched.
+    fn normalize_pipewire_source(source: &str) -> String {
+        let Ok(out) = std::process::Command::new("pactl")
+            .arg("list")
+            .arg("short")
+            .arg("sinks")
+            .output()
+        else {
+            return source.to_string();
+        };
+        let sinks = String::from_utf8_lossy(&out.stdout);
+        Self::normalize_pipewire_source_with(source, sinks.lines())
+    }
+
+    /// The pure core of [`normalize_pipewire_source`], split out for tests:
+    /// `sink_names` are the `pactl list short sinks` lines (the sink name is
+    /// the second tab-separated column; a bare name also matches).
+    fn normalize_pipewire_source_with<'a>(
+        source: &str,
+        mut sink_names: impl Iterator<Item = &'a str>,
+    ) -> String {
+        if source.is_empty() || source == "auto" || source == "auto_input"
+            || source.ends_with(".monitor")
+        {
+            return source.to_string();
+        }
+        let is_sink = sink_names.any(|line| line.split('\t').any(|col| col == source));
+        if is_sink {
+            format!("{source}.monitor")
+        } else {
+            source.to_string()
+        }
+    }
+
+    /// Whether a Start at the given geometry needs to (re)spawn the cava
+    /// process: when no process is running yet, when the bar count changed
+    /// (a resize crossing a bar-width boundary), or when the cava config
+    /// changed (Settings Save). Everything else — pause/resume, modal
+    /// open/close, tab switches, a resize keeping the same bar count —
+    /// reuses the running process: a respawn makes the audio DAC stop and
+    /// renegotiate its ALSA period (an audible dropout with the pipewire
+    /// input), so it must be avoided unless the visualizer really needs it.
+    fn needs_respawn(
+        process_running: bool,
+        spawned_bars: u16,
+        bars: u16,
+        config_dirty: bool,
+    ) -> bool {
+        !process_running || spawned_bars != bars || config_dirty
+    }
+
     fn run_cava_loop(
         receiver: &Receiver<CavaCommand>,
         writer: &TtyWriter,
@@ -287,7 +350,22 @@ impl CavaPane {
         let mut prev_command: Option<Result<CavaCommand, RecvError>> = None;
         let mut cava_config = cava_config;
         let mut cava_theme = cava_theme;
+        // Set by the first Start command; the geometry code below only runs
+        // after a Start has assigned it.
         let mut area: Rect;
+
+        // One cava process for the whole session: spawned on the first
+        // Start and respawned only when the bar count changes (a resize
+        // crossing a bar-width boundary) or the cava config changed
+        // (Settings Save). Everything else — pause/resume, modal open/close,
+        // tab switches, a resize keeping the same bar count — reuses the
+        // running process: with the pipewire/pulse input methods a respawn
+        // makes the USB DAC stop and renegotiate its ALSA period, which
+        // drops the audio for a moment. Only Stop (app exit) kills the
+        // process.
+        let mut process: Option<ProcessGuard> = None;
+        let mut spawned_bars: u16 = 0;
+        let mut config_dirty = true;
 
         'outer: loop {
             log::trace!(prev_command:?; "Waiting for command");
@@ -298,6 +376,11 @@ impl CavaPane {
                     area = new_area;
                 }
                 Ok(CavaCommand::Pause) => {
+                    // Keep the process (and its audio-graph connection) alive;
+                    // rendering resumes on the next Start. The UI has cleared
+                    // the area meanwhile, and cava simply blocks on its output
+                    // pipe until the bars are wanted again.
+                    log::debug!("Cava paused (process kept alive)");
                     continue 'outer;
                 }
                 Ok(CavaCommand::Stop) => {
@@ -307,6 +390,7 @@ impl CavaPane {
                     log::trace!("Cava config changed, updating");
                     cava_config = config;
                     cava_theme = theme;
+                    config_dirty = true;
                     continue 'outer;
                 }
                 Err(RecvError) => {
@@ -338,6 +422,33 @@ impl CavaPane {
                 continue 'outer;
             }
 
+            // Spawn only when there is no process yet, the bar count changed,
+            // or the cava config changed. A Start keeping the same bar count
+            // (a resize within the same bar-width slot, a re-show after a
+            // pause/modal/tab switch) just re-centers the bars at the new
+            // area with the existing process.
+            if Self::needs_respawn(process.is_some(), spawned_bars, bars, config_dirty) {
+                log::debug!(
+                    bars,
+                    previous_bars = spawned_bars,
+                    config_changed = config_dirty;
+                    "Cava (re)spawning the process"
+                );
+                // The replacement is spawned before the old guard is dropped
+                // (killing the old process), so the gap is as short as
+                // possible.
+                let new_process = Self::spawn_cava(bars, &cava_config)?;
+                process = Some(new_process);
+                spawned_bars = bars;
+                config_dirty = false;
+            }
+
+            let process = process.as_mut().expect("cava process spawned above");
+            let stdout =
+                process.handle.stdout.as_mut().context("Failed to spawn cava. No stdout.")?;
+            let stderr =
+                process.handle.stderr.as_mut().context("Failed to spawn cava. No stderr.")?;
+
             let total_bar_width = bars * bar_width;
             let total_spacing_width = (bars - 1) * bar_spacing;
             let total_width = total_bar_width + total_spacing_width;
@@ -346,12 +457,6 @@ impl CavaPane {
             let x_offset = (area.width - total_width) / 2;
 
             log::debug!(cava_theme:?; "theme");
-
-            let mut process = Self::spawn_cava(bars, &cava_config)?;
-            let stdout =
-                process.handle.stdout.as_mut().context("Failed to spawn cava. No stdout.")?;
-            let stderr =
-                process.handle.stderr.as_mut().context("Failed to spawn cava. No stderr.")?;
 
             let mut columns = vec![0_f32; bars as usize];
             let mut prev_columns = vec![0_f32; bars as usize];
@@ -670,6 +775,86 @@ mod tests {
         pane.maybe_start(&ctx).unwrap();
         assert!(!pane.pending_start, "maybe_start consumes the pending start");
         assert_eq!(pane.sent_area, pane.area, "bars start after the frame");
+    }
+
+    /// Respawns are the expensive (audio-graph-churning) part of the cava
+    /// visualizer: with the pipewire/pulse input methods killing and
+    /// respawning the process makes the USB DAC stop and renegotiate its
+    /// ALSA period, dropping the audio for a moment. The process must only
+    /// be (re)spawned when it is missing, when the bar count changed (a
+    /// resize crossing a bar-width boundary), or when the cava config
+    /// changed (Settings Save).
+    #[test]
+    fn respawns_only_when_necessary() {
+        // First Start with no process: spawn.
+        assert!(CavaPane::needs_respawn(false, 0, 20, false));
+        // Same bar count with a running process: reuse it (pause/resume,
+        // modal close, tab re-show, resize within the same bar-width slot).
+        assert!(!CavaPane::needs_respawn(true, 20, 20, false));
+        // Bar count changed: respawn (the bars cannot grow/shrink without
+        // a new cava config).
+        assert!(CavaPane::needs_respawn(true, 20, 21, false));
+        assert!(CavaPane::needs_respawn(true, 20, 19, false));
+        // Config changed (Settings Save): respawn even with the same bars.
+        assert!(CavaPane::needs_respawn(true, 20, 20, true));
+    }
+
+    /// While a terminal resize is in progress (the event loop's 500 ms
+    /// debounce window) the pane must not restart the visualizer on every
+    /// frame: each restart churns the audio graph and drops the audio for a
+    /// moment with the pipewire input. The settled resize that follows
+    /// re-initializes the bars.
+    #[test]
+    fn no_restart_while_resizing() {
+        let mut ctx = test_ctx();
+        let mut pane = CavaPane::new(&ctx);
+        pane.area = Rect::new(0, 0, 40, 12);
+        ctx.status.state = State::Play;
+        pane.sent_area = Rect::new(0, 0, 20, 12);
+
+        // Resize in progress: geometry changes are ignored.
+        ctx.resizing.set(true);
+        pane.calculate_areas(Rect::new(0, 0, 40, 12), &ctx).unwrap();
+        assert_eq!(
+            pane.sent_area,
+            Rect::new(0, 0, 20, 12),
+            "no restart while the resize is in progress"
+        );
+
+        // Resize settled: the new geometry is applied.
+        ctx.resizing.set(false);
+        pane.calculate_areas(Rect::new(0, 0, 40, 12), &ctx).unwrap();
+        assert_eq!(pane.sent_area, pane.area, "settled resize re-initializes the bars");
+    }
+
+    /// A pipewire `source` naming a sink is rewritten to its `.monitor`
+    /// form (the capture cava can actually visualize); sources, `auto` and
+    /// existing monitors are left alone.
+    #[test]
+    fn pipewire_source_normalizes_sink_names_to_monitors() {
+        // pactl short-sinks lines (name is the second tab column) and a
+        // bare name both match.
+        let sinks = [
+            "83\talsa_output.usb-FiiO_FiiO_KA3_FiiO_KA3-00.analog-stereo\tPipeWire",
+            "easyeffects_sink",
+        ];
+        let norm = |s: &str| CavaPane::normalize_pipewire_source_with(s, sinks.iter().copied());
+
+        // A sink name becomes its monitor form (cava capture.sink semantics).
+        assert_eq!(
+            norm("alsa_output.usb-FiiO_FiiO_KA3_FiiO_KA3-00.analog-stereo"),
+            "alsa_output.usb-FiiO_FiiO_KA3_FiiO_KA3-00.analog-stereo.monitor"
+        );
+        assert_eq!(norm("easyeffects_sink"), "easyeffects_sink.monitor");
+        // Already a monitor / auto / empty: untouched.
+        assert_eq!(norm("Media.monitor"), "Media.monitor");
+        assert_eq!(norm("auto"), "auto");
+        assert_eq!(norm(""), "");
+        // A mic source that is not a sink: untouched.
+        assert_eq!(
+            norm("alsa_input.usb-BurrBrown_from_Texas_Instruments_USB_AUDIO_CODEC-00.analog-stereo"),
+            "alsa_input.usb-BurrBrown_from_Texas_Instruments_USB_AUDIO_CODEC-00.analog-stereo"
+        );
     }
 
     /// A deferred start while paused (or with a modal open) is dropped

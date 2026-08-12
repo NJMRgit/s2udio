@@ -84,6 +84,7 @@ pub fn ctx(
         client_request_sender: client_request_channel.0.clone(),
         supported_commands: HashSet::new(),
         needs_render: Cell::new(false),
+        resizing: Cell::new(false),
         stickers_to_fetch: RefCell::new(HashSet::new()),
         lrc_index: LrcIndex::default(),
         stickers_supported: StickersSupport::Unsupported,
