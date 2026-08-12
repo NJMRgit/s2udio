@@ -874,6 +874,7 @@ pub enum CommonActionFile {
     NextResult,
     PreviousResult,
     Select,
+    SelectAll,
     InvertSelection,
     SelectDown,
     SelectUp,
@@ -937,6 +938,7 @@ pub enum CommonAction {
     NextResult,
     PreviousResult,
     Select,
+    SelectAll,
     InvertSelection,
     SelectDown,
     SelectUp,
@@ -985,6 +987,9 @@ impl ToDescription for CommonAction {
             CommonAction::PreviousResult => "When a filter is active, jump to the previous result".into(),
             CommonAction::Select => {
                 "Mark current item as selected in the browser, useful for example when you want to add multiple songs to a playlist".into()
+            }
+            CommonAction::SelectAll => {
+                "Select all items in the current list".into()
             }
             CommonAction::InvertSelection => "Inverts the current selected items".into(),
             CommonAction::SelectDown => {
@@ -1168,6 +1173,7 @@ impl TryFrom<CommonActionFile> for CommonAction {
             CommonActionFile::NextResult => CommonAction::NextResult,
             CommonActionFile::PreviousResult => CommonAction::PreviousResult,
             CommonActionFile::Select => CommonAction::Select,
+            CommonActionFile::SelectAll => CommonAction::SelectAll,
             CommonActionFile::InvertSelection => CommonAction::InvertSelection,
             CommonActionFile::SelectDown => CommonAction::SelectDown,
             CommonActionFile::SelectUp => CommonAction::SelectUp,
@@ -1308,6 +1314,7 @@ impl From<CommonAction> for CommonActionFile {
             CommonAction::NextResult => CommonActionFile::NextResult,
             CommonAction::PreviousResult => CommonActionFile::PreviousResult,
             CommonAction::Select => CommonActionFile::Select,
+            CommonAction::SelectAll => CommonActionFile::SelectAll,
             CommonAction::InvertSelection => CommonActionFile::InvertSelection,
             CommonAction::SelectDown => CommonActionFile::SelectDown,
             CommonAction::SelectUp => CommonActionFile::SelectUp,

@@ -859,8 +859,17 @@ impl Pane for QueuePane {
                         let row = usize::from(position.y.saturating_sub(table.y));
                         let idx = self.video_state.offset() + row;
                         if idx < self.video_items_len {
+                            // Additive selection: the row under the cursor
+                            // joins the marks too (a ctrl+click must never
+                            // drop the initially selected item), and the
+                            // clicked row is added without toggling off.
+                            if self.video_marked.is_empty() {
+                                if let Some(sel) = self.video_state.selected() {
+                                    self.video_marked.add(sel);
+                                }
+                            }
+                            self.video_marked.add(idx);
                             self.video_state.select(Some(idx));
-                            self.video_marked.toggle(idx);
                             ctx.render()?;
                             return Ok(());
                         }
@@ -988,8 +997,17 @@ impl Pane for QueuePane {
             {
                 let clicked_row: usize = event.y.saturating_sub(self.areas[Areas::Table].y).into();
                 if let Some(idx) = self.queue.state.get_at_rendered_row(clicked_row) {
+                    // Additive selection: the row under the cursor joins
+                    // the marks too (a ctrl+click must never drop the
+                    // initially selected item), and the clicked row is
+                    // added without toggling off.
+                    if self.queue.state.marked.is_empty() {
+                        if let Some(sel) = self.queue.state.get_selected() {
+                            self.queue.state.mark(sel);
+                        }
+                    }
+                    self.queue.state.mark(idx);
                     self.queue.select_idx(idx, ctx.config.scrolloff);
-                    self.queue.state.toggle_mark(idx);
 
                     ctx.render()?;
                 }
@@ -1733,11 +1751,19 @@ mod stream_filter_tests {
 
     use super::{Areas, Pane, QueuePane};
     use crate::{
+        config::keys::CommonAction,
         ctx::Ctx,
         mpd::commands::{Song, State},
-        shared::mouse_event::{MouseEvent, MouseEventKind},
+        shared::{
+            keys::{ActionEvent, Actions},
+            mouse_event::{MouseEvent, MouseEventKind},
+        },
         tests::fixtures::ctx,
     };
+
+    fn action(actions: Vec<Actions>) -> ActionEvent {
+        ActionEvent::from(std::sync::Arc::new(actions))
+    }
 
     fn songs(n: u32) -> Vec<Song> {
         (0..n)
@@ -1869,6 +1895,63 @@ mod stream_filter_tests {
         click(&mut pane, 4, crossterm::event::KeyModifiers::CONTROL, &mut ctx);
         assert_eq!(pane.queue.state.marked.len(), 4);
         assert!(pane.queue.state.marked.contains(&4));
+    }
+
+    #[test]
+    fn ctrl_click_adds_to_the_initially_selected_row() {
+        let (app_tx, _app_rx) = crossbeam::channel::unbounded();
+        let mut ctx = crate::tests::fixtures::ctx(
+            (app_tx, _app_rx),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+        );
+        ctx.queue = songs(8);
+        let mut pane = QueuePane::new(&ctx);
+
+        let backend = ratatui::backend::TestBackend::new(100, 40);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|frame| pane.render(frame, Rect::new(0, 0, 100, 40), &ctx).unwrap()).unwrap();
+
+        // Plain click row 1 (initially selected item), then ctrl+click rows
+        // 3 and 5: the selection grows and row 1 stays marked.
+        click(&mut pane, 1, crossterm::event::KeyModifiers::NONE, &mut ctx);
+        click(&mut pane, 3, crossterm::event::KeyModifiers::CONTROL, &mut ctx);
+        click(&mut pane, 5, crossterm::event::KeyModifiers::CONTROL, &mut ctx);
+        assert_eq!(
+            pane.queue.state.marked.iter().copied().collect::<Vec<_>>(),
+            vec![1, 3, 5],
+            "ctrl+click keeps the initially selected row and adds the clicked rows"
+        );
+        // ctrl+click on an already-marked row keeps it (pure additive).
+        click(&mut pane, 3, crossterm::event::KeyModifiers::CONTROL, &mut ctx);
+        assert_eq!(pane.queue.state.marked.len(), 3);
+    }
+
+    #[test]
+    fn ctrl_a_marks_the_whole_audio_queue() {
+        let (app_tx, _app_rx) = crossbeam::channel::unbounded();
+        let mut ctx = crate::tests::fixtures::ctx(
+            (app_tx, _app_rx),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+        );
+        ctx.queue = songs(8);
+        let mut pane = QueuePane::new(&ctx);
+        let backend = ratatui::backend::TestBackend::new(100, 40);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|frame| pane.render(frame, Rect::new(0, 0, 100, 40), &ctx).unwrap()).unwrap();
+
+        let mut ev = action(vec![Actions::Common(CommonAction::SelectAll)]);
+        pane.handle_action(&mut ev, &mut ctx).unwrap();
+        assert_eq!(
+            pane.queue.state.marked.iter().copied().collect::<Vec<_>>(),
+            vec![0, 1, 2, 3, 4, 5, 6, 7]
+        );
+
+        // Ctrl+A again keeps everything marked.
+        let mut ev = action(vec![Actions::Common(CommonAction::SelectAll)]);
+        pane.handle_action(&mut ev, &mut ctx).unwrap();
+        assert_eq!(pane.queue.state.marked.len(), 8);
     }
 
     #[test]
@@ -3166,13 +3249,24 @@ mod video_mark_tests {
     }
 
     #[test]
-    fn ctrl_click_toggles_and_plain_click_clears() {
+    fn ctrl_click_adds_to_the_selection_and_plain_click_clears() {
         let (mut ctx, _tx) = queue_ctx();
         ctx.video_playlist.borrow_mut().extend(entries(6));
         let mut pane = video_pane(&mut ctx);
         let table = render(&mut pane, &ctx);
 
-        // ctrl+click rows 2 and 4: both marked.
+        // A plain click on row 1 highlights it; ctrl+click rows 2 and 4
+        // ADD to it (the initially selected row stays marked).
+        pane.handle_mouse_event(
+            MouseEvent {
+                x: table.x + 1,
+                y: table.y + 1,
+                kind: MouseEventKind::LeftClick,
+                modifiers: KeyModifiers::NONE,
+            },
+            &ctx,
+        )
+        .unwrap();
         for row in [2u16, 4] {
             pane.handle_mouse_event(
                 MouseEvent {
@@ -3185,10 +3279,14 @@ mod video_mark_tests {
             )
             .unwrap();
         }
-        assert_eq!(pane.video_marked.iter().collect::<Vec<_>>(), vec![2, 4]);
+        assert_eq!(
+            pane.video_marked.iter().collect::<Vec<_>>(),
+            vec![1, 2, 4],
+            "ctrl+click keeps the initially selected row and adds the clicked rows"
+        );
         assert_eq!(pane.video_state.selected(), Some(4));
 
-        // ctrl+click row 2 again: toggled off.
+        // ctrl+clicking an already-marked row keeps it (pure additive).
         pane.handle_mouse_event(
             MouseEvent {
                 x: table.x + 1,
@@ -3199,7 +3297,11 @@ mod video_mark_tests {
             &ctx,
         )
         .unwrap();
-        assert_eq!(pane.video_marked.iter().collect::<Vec<_>>(), vec![4]);
+        assert_eq!(
+            pane.video_marked.iter().collect::<Vec<_>>(),
+            vec![1, 2, 4],
+            "ctrl+click never removes a mark"
+        );
 
         // A plain click on a different row clears the marks.
         pane.handle_mouse_event(
@@ -3214,6 +3316,29 @@ mod video_mark_tests {
         .unwrap();
         assert!(pane.video_marked.is_empty());
         assert_eq!(pane.video_state.selected(), Some(1));
+    }
+
+    #[test]
+    fn ctrl_a_marks_the_whole_video_list() {
+        let (mut ctx, _tx) = queue_ctx();
+        ctx.video_playlist.borrow_mut().extend(entries(6));
+        let mut pane = video_pane(&mut ctx);
+        let table = render(&mut pane, &ctx);
+        assert!(pane.video_marked.is_empty());
+
+        // Ctrl+A (SelectAll) marks every row.
+        let mut ev = action(vec![Actions::Common(CommonAction::SelectAll)]);
+        pane.handle_action(&mut ev, &mut ctx).unwrap();
+        assert_eq!(
+            pane.video_marked.iter().collect::<Vec<_>>(),
+            vec![0, 1, 2, 3, 4, 5]
+        );
+
+        // Ctrl+A again keeps everything marked (no toggle-off).
+        let mut ev = action(vec![Actions::Common(CommonAction::SelectAll)]);
+        pane.handle_action(&mut ev, &mut ctx).unwrap();
+        assert_eq!(pane.video_marked.iter().count(), 6);
+        let _ = table;
     }
 
     #[test]

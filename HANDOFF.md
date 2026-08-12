@@ -118,15 +118,46 @@ the user's decisions win. Locked in across sessions (details in the docs):
 
 ## Current state (verified)
 
-- **Master**: `NJMRgit/s2udio` **master @ `fe9f078`** (clean buildable
-  subset) — rounds 28 + 28b + **round 29 merged 2026-08-12** on top of
-  `898a5bb` (`06b90f7` cava pipewire restart fix, `96fc4cb` round 28,
-  `2c04bcf` round 28b, `fe9f078` round 29 cava node_name); validated
-  **1364/1364**, warnings 3 baseline. Round 30 (cava PipeWire-only) is
-  committed on `working` and not yet merged to master.
-- **Branch**: `working` (tracks `s2udio-working/working`), at `5802ef1` +
-  **round 30 committed on top** (host-implemented; **1364/1364**
+- **Master**: `NJMRgit/s2udio` **master @ `bc6e69f`** (clean buildable
+  subset) — round 30 merged 2026-08-12 (rounds 28/28b/29 on top of
+  `898a5bb`); validated **1364/1364**, warnings 3 baseline. Round 31
+  (multi-select Ctrl+A / additive ctrl+click / bulk actions) is committed
+  on `working` and not yet merged to master.
+- **Branch**: `working` (tracks `s2udio-working/working`), at `c76fae2` +
+  **round 31 committed on top** (host-implemented; **1377/1377**
   host-validated 2026-08-12, warnings 3 baseline, binary build clean).
+  **Round 31 (2026-08-12, host-implemented)**: multi-select UX — new
+  `CommonAction::SelectAll` bound to **Ctrl+A** (navigation defaults +
+  `assets/example_config.ron` + the live `~/.config/s2udio/config.ron`)
+  marks every item of the current list: queue Audio/Video lists, the
+  Playlists songs pane, the MPD right (Library) pane and the Search-mode
+  results list; it does **not** apply to Jellyfin/Radio/Help/Settings,
+  the MPD folder tree or the search filter column (Esc still clears).
+  **Ctrl+click is now additive** in all five multi-select lists (queue
+  audio/video, MPD right pane, playlists songs, search results): the row
+  under the cursor joins the marks (the initially selected item is never
+  dropped) and clicking an already-marked row keeps it — no toggle-off;
+  plain click / Esc still clear. **Bulk actions**: the playlists song
+  menu and the search results menu act on every marked row (Add to
+  queue / Replace queue / Create playlist / Add to playlist; playlists
+  also *Remove from playlist*); the audio queue menu gained *Add
+  selected to playlist* / *Create playlist from selected* for marked
+  rows, and *Create audio playlist* was renamed **Create playlist from
+  queue** (whole-queue semantics, next to the existing *Add queue to
+  playlist*). Tests: 1377/1377 (+13: MarkState add/mark_all, Ctrl+A per
+  pane incl. playlists-root no-op + filter-phase no-op, additive
+  ctrl+click per pane, default `<C-a>` binding). See
+  [FEEDBACK-2026-08-12-4.md](FEEDBACK-2026-08-12-4.md).
+  **Round 30 (2026-08-12, host-implemented)**: remove the cava FIFO input —
+  cava is **PipeWire-only**. The `CavaInputMethod` enum and the settings
+  panel's FIFO/PipeWire method toggle are gone (generated config always
+  writes `method = pipewire`); the MPD-fifo sample-format sync
+  (`paste::mpd_fifo_format`) is deleted; `setup.sh` and the container
+  deploy scripts no longer append a fifo `audio_output` to mpd.conf; the
+  gates G1/G4/G9 no longer require the fifo. Old configs (`method: Fifo`,
+  a fifo `source` path) still parse — the method is ignored and the source
+  falls back to `auto`. See
+  [FEEDBACK-2026-08-12-3.md](FEEDBACK-2026-08-12-3.md).
   **Round 30 (2026-08-12, host-implemented)**: remove the cava FIFO input —
   cava is **PipeWire-only**. The `CavaInputMethod` enum and the settings
   panel's FIFO/PipeWire method toggle are gone (generated config always
@@ -239,8 +270,11 @@ the user's decisions win. Locked in across sessions (details in the docs):
   (lyrics/karaoke + rmpc install history):
   `~/HANDOFF.md` — its paths say `~/Projects/rmpc`; the repo is now
   `~/Projects/s2udio`.
-- **Tests**: `cargo test --release` → **1282/1282 passing**
-  (round 23: +2 over the round-22 1280/1280 — the round-23
+- **Tests**: `cargo test --release` → **1377/1377 passing**
+  (round 31: +13 — MarkState `add`/`mark_all`, Ctrl+A per pane (incl.
+  the playlists-root no-op and the search filter-phase no-op), additive
+  ctrl+click per pane, the default `<C-a>` binding test; earlier: round
+  23: +2 over the round-22 1280/1280 — the round-23
   `lyrics_lookup_prefers_user_library_then_s2udio_library_then_index`
   lookup-order test and the
   `migration_merges_legacy_base_and_overlay_into_s2udio_config`

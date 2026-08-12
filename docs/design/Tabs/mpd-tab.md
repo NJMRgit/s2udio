@@ -112,12 +112,14 @@ open, and files there play through **mpv** (MPD cannot play outside
 - Directory rows render with a **▶ prefix**, songs with **no prefix** —
   the D/S symbol markers are not used on this tab.
 - The right pane supports the queue tab's multi-selection: **ctrl+click**
-  toggles a mark, **alt+click** range-marks from the anchor,
+  is additive (the row under the cursor joins the selection, clicks only
+  grow the marked set), **alt+click** range-marks from the anchor,
   `W`/`S`/`Shift+↑/↓` range-select (each press replaces the previous
-  range), and a plain click on a different row clears the marks. Marked
-  rows render with the lighter `marked_item_style` (the cursor row keeps
-  the List's accent highlight). The marks reset whenever the children
-  list changes (open, back out, database update).
+  range), **Ctrl+A** marks every right-pane row, and a plain click on a
+  different row clears the marks. Marked rows render with the lighter
+  `marked_item_style` (the cursor row keeps the List's accent highlight).
+  The marks reset whenever the children list changes (open, back out,
+  database update).
 - The file context menu acts on **every marked song** when any are
   marked (Add to queue / Replace queue / Create playlist / Add to
   playlist); a folder's menu always operates on its whole subtree.

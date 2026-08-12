@@ -57,7 +57,9 @@ query, results filtering, multi-select, context menus, enqueue/play.
   existing `d`/`a`/`→`/`←` bindings apply.)
 - **Options menu** (round 27): **Enter** in the populated results opens
   the right-click options menu (Play for the marked/selected set, Add /
-  Replace queue, playlists, …); **Space** with a multi-selection (≥2
+  Replace queue, playlists, …); marked results get *Add to queue* and
+  *Replace queue* (exactly the selected rows); **Space** with a
+  multi-selection (≥2
   marked) also opens the menu instead of toggling playback — a single
   mark or none keeps Space on the transport.
 - **Filter label spacing** (round 27): with the pane expanded the colons
@@ -72,13 +74,15 @@ query, results filtering, multi-select, context menus, enqueue/play.
   narrow terminals, so the value column always keeps ≥ 10 cells (the
   settings-panel convention).
 - **Multi-select** (round 24): the results list supports the shared
-  selection interactions — ctrl+click toggles a row's mark, alt+click
-  range-marks from the anchor, a plain click on another row drops the
-  multi-selection and re-anchors, `W`/`S`/`Shift+↑/↓` range-select;
-  marked rows render with the marked highlight, the row under the mouse
-  with the hover highlight (marked rows keep their marked highlight on
-  hover), and Esc with an active selection clears it (a second Esc opens
-  settings).
+  selection interactions — ctrl+click is additive (the row under the
+  cursor joins the selection, clicks only grow the marked set),
+  alt+click range-marks from the anchor, a plain click on another row
+  drops the multi-selection and re-anchors, `W`/`S`/`Shift+↑/↓`
+  range-select, and **Ctrl+A** marks every result (the filter column is
+  excluded); marked rows render with the marked highlight, the row under
+  the mouse with the hover highlight (marked rows keep their marked
+  highlight on hover), and Esc with an active selection clears it (a
+  second Esc opens settings).
 - **Dual-pane focus** (round 24): the pane holding the keyboard cursor is
   visually obvious — in the Search phase the focused filter input renders
   with the hover highlight; in the BrowseResults phase the results

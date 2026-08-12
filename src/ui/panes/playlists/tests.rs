@@ -1305,21 +1305,66 @@ mod multi_select {
     }
 
     #[test]
-    fn ctrl_click_toggles_and_plain_click_clears_the_marks() {
+    fn ctrl_click_adds_to_the_selection_and_plain_click_clears() {
         let mut ctx = make_ctx();
         let mut pane = pane_in_playlist(&ctx);
         render_pane(&mut pane, &ctx);
-        // ctrl+click toggles marks on rows 0 and 2.
-        click(&mut pane, 0, crossterm::event::KeyModifiers::CONTROL, &mut ctx);
+        // A plain click highlights row 0; ctrl+click rows 2 and 3 ADD to
+        // it (the initially selected row stays marked).
+        click(&mut pane, 0, crossterm::event::KeyModifiers::NONE, &mut ctx);
         click(&mut pane, 2, crossterm::event::KeyModifiers::CONTROL, &mut ctx);
-        assert_eq!(marks(&pane), vec![0, 2]);
-        // ctrl+click on an already-marked row unmarks it.
+        click(&mut pane, 3, crossterm::event::KeyModifiers::CONTROL, &mut ctx);
+        assert_eq!(
+            marks(&pane),
+            vec![0, 2, 3],
+            "ctrl+click keeps the initially selected row and adds the clicked rows"
+        );
+        // ctrl+click on an already-marked row keeps it (pure additive).
         click(&mut pane, 0, crossterm::event::KeyModifiers::CONTROL, &mut ctx);
-        assert_eq!(marks(&pane), vec![2]);
+        assert_eq!(marks(&pane), vec![0, 2, 3]);
         // A plain click on a different row clears the whole selection.
         click(&mut pane, 3, crossterm::event::KeyModifiers::NONE, &mut ctx);
         assert!(marks(&pane).is_empty(), "plain click clears the marks");
         assert_eq!(pane.stack.current().state.get_selected(), Some(3));
+    }
+
+    #[test]
+    fn ctrl_a_marks_every_song_in_the_playlist() {
+        let mut ctx = make_ctx();
+        let mut pane = pane_in_playlist(&ctx);
+        render_pane(&mut pane, &ctx);
+        assert!(marks(&pane).is_empty());
+
+        act(&mut pane, &mut ctx, vec![Actions::Common(CommonAction::SelectAll)]);
+        let n = pane.stack.current().len();
+        assert_eq!(marks(&pane), (0..n).collect::<Vec<_>>());
+
+        // Ctrl+A again keeps everything marked.
+        act(&mut pane, &mut ctx, vec![Actions::Common(CommonAction::SelectAll)]);
+        assert_eq!(marks(&pane).len(), n);
+    }
+
+    #[test]
+    fn ctrl_a_at_the_root_is_a_no_op() {
+        let mut ctx = make_ctx();
+        let mut pane = PlaylistsPane::new(&ctx);
+        pane.on_query_finished(
+            super::super::INIT,
+            MpdQueryResult::DirOrSong {
+                data: vec![
+                    DirOrSong::playlist_name_only("mix".to_owned()),
+                    DirOrSong::playlist_name_only("other".to_owned()),
+                ],
+                path: None,
+            },
+            true,
+            &ctx,
+        )
+        .unwrap();
+        render_pane(&mut pane, &ctx);
+        act(&mut pane, &mut ctx, vec![Actions::Common(CommonAction::SelectAll)]);
+        // At the root the right pane lists playlists; nothing is marked.
+        assert!(pane.stack.root().marked().is_empty());
     }
 
     #[test]

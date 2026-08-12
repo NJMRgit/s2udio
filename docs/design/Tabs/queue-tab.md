@@ -86,15 +86,20 @@ shifts the row.
   list opens with highlighted); a **double click loads**.
 - Album header click cycles album track order: disc/track → album tracks
   a-z → album tracks z-a.
-- ctrl/alt-click multi-selects; a plain click on another row clears the
-  marks; context-menu Remove deletes every marked song.
-- The **Video list has the same multi-selection**: ctrl+click toggles a
-  mark, alt+click range-marks from the anchor, `W`/`S`/`Shift+↑/↓`
-  range-select (each press replaces the previous range), a plain click
-  on a different row clears the marks, and `Del` / the context menu's
-  Remove delete every marked entry (the selection shifts up past the
-  removed rows). Marked rows render with the lighter `marked_item_style`;
-  the Jellyfin session's live mpv playlist is never deletable.
+- ctrl/alt-click multi-selects; **ctrl+click is additive** (the row under
+  the cursor joins the selection, clicks only grow the marked set); a
+  plain click on another row clears the marks; **Ctrl+A** marks the whole
+  list; context-menu Remove deletes every marked song. With marks active
+  the audio menu adds *Add selected to playlist* / *Create playlist from
+  selected* (only the marked rows land in the playlist).
+- The **Video list has the same multi-selection**: ctrl+click adds a
+  mark (never removes), alt+click range-marks from the anchor,
+  `W`/`S`/`Shift+↑/↓` range-select (each press replaces the previous
+  range), **Ctrl+A** marks the whole list, a plain click on a different
+  row clears the marks, and `Del` / the context menu's Remove delete
+  every marked entry (the selection shifts up past the removed rows).
+  Marked rows render with the lighter `marked_item_style`; the Jellyfin
+  session's live mpv playlist is never deletable.
 
 ## Playlists from the queue
 
@@ -111,12 +116,14 @@ with the downloaded file(s) once complete (see
 Playlists are created **audio-only or video-only**, from the list that is
 on screen:
 
-- The **audio** context menu's *Create audio playlist* saves the visible
-  queue rows (local files, direct URLs, resolved streams) into a new MPD
-  stored playlist. The hidden temporary "play without adding to queue"
-  entry and radio/stream rows are **never** saved — *Add queue to
-  playlist* uses the same visible set, so a temp entry can't leak into an
-  existing playlist either.
+- The **audio** context menu's *Create playlist from queue* saves the
+  visible queue rows (local files, direct URLs, resolved streams) into a
+  new MPD stored playlist; *Add queue to playlist* adds the same visible
+  set to an existing playlist. The hidden temporary "play without adding
+  to queue" entry and radio/stream rows are **never** saved — so a temp
+  entry can't leak into an existing playlist either. When rows are
+  marked, the menu additionally offers *Create playlist from selected*
+  and *Add selected to playlist*, which act on exactly the marked rows.
 - The **video** context menu's *Create video playlist* saves the
   persistent video queue's URLs into a new MPD stored playlist (video
   entries carry stable original links and real titles; local paths get

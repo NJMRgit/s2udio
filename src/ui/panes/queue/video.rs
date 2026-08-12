@@ -296,6 +296,12 @@ impl QueuePane {
                         crate::core::mpv::mpv_toggle_pause(&socket);
                     }
                 }
+                CommonAction::SelectAll => {
+                    // Ctrl+A marks the whole video list (ctrl+a in the
+                    // Queue tab applies to the active Audio/Video list).
+                    self.video_marked.mark_all(self.video_items_len);
+                    ctx.render()?;
+                }
                 CommonAction::Close if !self.video_marked.is_empty() => {
                     self.video_marked.clear();
                     self.video_marked.clear_anchor();

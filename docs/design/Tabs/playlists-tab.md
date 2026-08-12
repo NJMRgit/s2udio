@@ -91,18 +91,22 @@ render with the **cached info** instead of a long random URL:
   list selects the same row (they share the selection); the right pane's
   rows double-click to open too.
 - The songs pane (right pane inside a playlist) has the same
-  multi-selection as the queue / MPD panes: ctrl+click toggles a mark,
-  alt+click range-marks from the anchor, `W`/`S`/`Shift+↑/↓`
-  range-select (each press replaces the previous range), a plain click on
-  a different row clears the marks, and the marked rows render with the
-  lighter `marked_item_style`. The song menu's *Remove from playlist*
-  removes the highlighted song.
+  multi-selection as the queue / MPD panes: ctrl+click is additive (the
+  row under the cursor joins the selection, clicks only grow the marked
+  set), alt+click range-marks from the anchor, `W`/`S`/`Shift+↑/↓`
+  range-select (each press replaces the previous range), **Ctrl+A** marks
+  every song in the playlist, a plain click on a different row clears the
+  marks, and the marked rows render with the lighter `marked_item_style`.
+  The song menu acts on **every marked song** when any are marked: *Add
+  to queue*, *Replace queue*, *Create playlist*, *Add to playlist* and
+  *Remove from playlist* all use the marked set (a single highlighted
+  song otherwise).
 - Context menus are scoped to the highlighted item (play, enqueue,
   delete, rename); right-click on a playlist or song opens them. The
-  song menu's **Remove from playlist** deletes the highlighted song
-  from the current playlist (with the narrow settings-style confirmation
-  dialog), keeping the playlist list and songs list in sync via the
-  usual refresh. A **stream** song (resolved YouTube-style URI) also
+  song menu's **Remove from playlist** deletes the highlighted song (or
+  every marked song) from the current playlist (with the narrow
+  settings-style confirmation dialog), keeping the playlist list and
+  songs list in sync via the usual refresh. A **stream** song (resolved YouTube-style URI) also
   offers **Download** — save into `s2udio-downloads` in `~/Downloads`
   (audio/video, per-chapter files when the media has chapters). The file
   lives outside the MPD library, so a stored playlist **keeps the stream

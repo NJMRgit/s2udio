@@ -161,11 +161,21 @@ tags: [keyboard, mouse, keybinds, interaction]
   moves whichever pane's highlight is under the cursor.
 - **Scrollbars**: click/drag targets.
 - **ctrl/alt-click**: multi-select (marked rows render with the lighter
-  selection style). A plain click on any other row clears the whole
-  multi-selection. Available in the **queue's Audio and Video lists**, the
-  **MPD pane's right pane**, the **Playlists tab's songs pane** and the
-  **MPD tab's Search-mode results list**; `W`/`S`/`Shift+↑/↓` range-select from the
-  click anchor in the same lists.
+  selection style). **ctrl+click is additive**: the row under the cursor
+  joins the selection too, so the initially selected item is never dropped
+  and every ctrl+click only grows the marked set (clicking an
+  already-marked row keeps it; a plain click on any other row clears the
+  whole multi-selection). alt+click range-marks from the anchor. Available
+  in the **queue's Audio and Video lists**, the **MPD pane's right pane**,
+  the **Playlists tab's songs pane** and the **MPD tab's Search-mode
+  results list**; `W`/`S`/`Shift+↑/↓` range-select from the click anchor in
+  the same lists.
+- **Ctrl+A** (`SelectAll`, navigation binding): marks every item of the
+  current list — the queue's Audio/Video lists, the Playlists songs pane,
+  the MPD right (Library) pane and the Search-mode results list. It does
+  NOT apply to the Jellyfin/Radio/Help/Settings panes, the MPD folder
+  tree, or the MPD search filter column. A second Ctrl+A keeps everything
+  marked (Esc clears).
 - Two-line list rows map clicks via `row / 2`.
 
 ## Contexts at a glance
