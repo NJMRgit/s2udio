@@ -91,6 +91,12 @@ pub struct CavaInputFile {
     channels: Option<u32>,
     #[serde(default)]
     autoconnect: Option<u32>,
+    /// Round 29: a name for the PipeWire node cava creates (cava hardcodes
+    /// `node.name = "cava"`; s2udio renames it via an LD_PRELOAD shim that
+    /// injects `node.name`/`media.name` from `CAVA_NODE_NAME`). `None` (the
+    /// default) leaves cava's own name alone.
+    #[serde(default)]
+    node_name: Option<String>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -101,6 +107,9 @@ pub struct CavaInput {
     pub sample_bits: Option<u32>,
     pub channels: Option<u32>,
     pub autoconnect: Option<u32>,
+    /// Round 29: the PipeWire node name for the cava stream, or `None` to
+    /// keep cava's own ("cava").
+    pub node_name: Option<String>,
 }
 
 impl From<CavaFile> for Cava {
@@ -118,6 +127,7 @@ impl From<CavaFile> for Cava {
                 sample_bits: value.input.sample_bits,
                 channels: value.input.channels,
                 autoconnect: value.input.autoconnect,
+                node_name: value.input.node_name,
             },
             smoothing: CavaSmoothing {
                 monstercat: value.smoothing.monstercat,
@@ -200,6 +210,10 @@ pub struct CavaOverridesFile {
     pub noise_reduction: Option<u8>,
     pub monstercat: Option<bool>,
     pub waves: Option<bool>,
+    /// Round 29: PipeWire node name for the cava stream. `Some(name)`
+    /// renames the node; `Some("")` explicitly disables renaming; `None`
+    /// leaves the configured value untouched (the usual sidecar semantic).
+    pub node_name: Option<String>,
 }
 
 pub const CAVA_OVERRIDE_FILE: &str = "cava.ron";
@@ -268,6 +282,10 @@ impl CavaOverridesFile {
         if let Some(v) = self.waves {
             cava.smoothing.waves = v;
         }
+        if let Some(v) = &self.node_name {
+            // Some("") = explicit disable; Some(name) = rename the node.
+            cava.input.node_name = (!v.is_empty()).then(|| v.clone());
+        }
     }
 
     /// Persist the overrides to the sidecar file.
@@ -287,6 +305,38 @@ impl CavaOverridesFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Round 29: the sidecar can set the cava node name (and explicitly
+    /// disable it with an empty string); `None` leaves it untouched.
+    #[test]
+    fn node_name_override_sets_and_disables() {
+        let mut cava = Cava::default();
+        assert_eq!(cava.input.node_name, None);
+
+        let set = CavaOverridesFile { node_name: Some("s2udio-cava".into()), ..Default::default() };
+        set.apply_to(&mut cava);
+        assert_eq!(cava.input.node_name.as_deref(), Some("s2udio-cava"));
+
+        // Some("") explicitly disables the rename.
+        let off = CavaOverridesFile { node_name: Some(String::new()), ..Default::default() };
+        off.apply_to(&mut cava);
+        assert_eq!(cava.input.node_name, None, "an empty node_name disables the rename");
+
+        // None leaves the resolved value alone.
+        cava.input.node_name = Some("keep-me".into());
+        let untouched = CavaOverridesFile::default();
+        untouched.apply_to(&mut cava);
+        assert_eq!(cava.input.node_name.as_deref(), Some("keep-me"));
+    }
+
+    /// The main config's cava.input accepts `node_name` (round 29).
+    #[test]
+    fn main_config_input_parses_node_name() {
+        let content = r#"(input: (method: Pipewire, source: "Media.monitor", node_name: Some("s2udio-cava")))"#;
+        let parsed: CavaFile = ron::de::from_str(content).unwrap();
+        let cava: Cava = parsed.into();
+        assert_eq!(cava.input.node_name.as_deref(), Some("s2udio-cava"));
+    }
 
     #[test]
     fn legacy_sidecar_with_removed_fields_still_parses() {

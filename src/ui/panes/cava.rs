@@ -271,18 +271,41 @@ impl CavaPane {
             // (the bars come back flat). Capture the sink's monitor instead.
             config.input.source = Self::normalize_pipewire_source(&config.input.source);
         }
+        // Round 29: the configured node name must be read before `config`
+        // becomes the generated conf text below.
+        let node_name = Self::node_name_rename_env(config.input.node_name.as_deref());
         let config = config.to_cava_config_file(bars)?;
         std::fs::write(&cfg_path, config)?;
 
-        Ok(ProcessGuard {
-            handle: std::process::Command::new("cava")
-                .arg("-p")
-                .arg(cfg_path)
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .stdin(Stdio::null())
-                .spawn()?,
-        })
+        let mut cmd = std::process::Command::new("cava");
+        cmd.arg("-p")
+            .arg(cfg_path)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .stdin(Stdio::null());
+        // Round 29: when a node name is configured, rename cava's PipeWire
+        // stream node (cava hardcodes `node.name = "cava"`) via the
+        // LD_PRELOAD shim that injects node.name/media.name from
+        // CAVA_NODE_NAME. Only the s2udio-spawned cava gets the env, so the
+        // other cava instances on the system keep their own names. A missing
+        // shim is not fatal — cava just runs with its own name.
+        if let Some(name) = node_name {
+            if let Some(shim) = crate::shared::paths::cava_node_name_shim() {
+                cmd.env("LD_PRELOAD", &shim).env("CAVA_NODE_NAME", name);
+            } else {
+                log::warn!(name;
+                    "cava node_name is configured but the name shim is missing — re-run setup.sh to build it (S2UDIO_CAVA_NAME_SHIM overrides the path)"
+                );
+            }
+        }
+
+        Ok(ProcessGuard { handle: cmd.spawn()? })
+    }
+
+    /// The `CAVA_NODE_NAME` value to use for a configured rename: a
+    /// non-empty configured name, or `None` to keep cava's own.
+    fn node_name_rename_env(node_name: Option<&str>) -> Option<&str> {
+        node_name.filter(|n| !n.is_empty())
     }
 
     /// cava's pipewire `source` must name a *monitor* (`X.monitor`) to
@@ -831,6 +854,15 @@ mod tests {
     /// form (the capture cava can actually visualize); sources, `auto` and
     /// existing monitors are left alone.
     #[test]
+    /// Round 29: only a configured, non-empty node name triggers the
+    /// LD_PRELOAD rename env (empty/absent = cava's own "cava" node).
+    #[test]
+    fn node_name_rename_env_filters_empty_names() {
+        assert_eq!(CavaPane::node_name_rename_env(None), None);
+        assert_eq!(CavaPane::node_name_rename_env(Some("")), None);
+        assert_eq!(CavaPane::node_name_rename_env(Some("s2udio-cava")), Some("s2udio-cava"));
+    }
+
     fn pipewire_source_normalizes_sink_names_to_monitors() {
         // pactl short-sinks lines (name is the second tab column) and a
         // bare name both match.

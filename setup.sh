@@ -133,10 +133,29 @@ install_support_scripts() {
     [[ -f scripts/s2u-mpv-tracker ]] && { install -Dm755 scripts/s2u-mpv-tracker "$BIN_DIR/s2u-mpv-tracker"; ok "mpv tracker daemon -> $BIN_DIR/s2u-mpv-tracker"; } || warn "scripts/s2u-mpv-tracker missing in this checkout"
     [[ -f scripts/s2udio-mpris ]] && { install -Dm755 scripts/s2udio-mpris "$BIN_DIR/s2udio-mpris"; ok "mpv MPRIS bridge -> $BIN_DIR/s2udio-mpris"; } || warn "scripts/s2udio-mpris missing in this checkout"
     [[ -f scripts/s2u-mpdris2 ]] && { install -Dm755 scripts/s2u-mpdris2 "$BIN_DIR/s2u-mpdris2"; ok "mpDris2 stream-art shim -> $BIN_DIR/s2u-mpdris2"; } || warn "scripts/s2u-mpdris2 missing in this checkout"
+    install_cava_name_shim
 }
 
 install_s2u_svc() { # every backend installs it (the tracker's mpDris2 stop/start routes through s2u-svc)
     [[ -f scripts/s2u-svc ]] && { install -Dm755 scripts/s2u-svc "$BIN_DIR/s2u-svc"; ok "s2u-svc -> $BIN_DIR/s2u-svc"; } || warn "scripts/s2u-svc missing in this checkout"
+}
+
+install_cava_name_shim() { # round 29: rename cava's PipeWire node (optional)
+    # Built from scripts/cava-node-name.c into ~/.local/share/s2udio/.
+    # Only needed when the user sets `node_name` in cava.ron (or the cava
+    # config section); non-fatal — cava runs with its own "cava" node name.
+    local shim="$HOME/.local/share/s2udio/libcavaname.so"
+    [[ -f scripts/cava-node-name.c ]] || { warn "scripts/cava-node-name.c missing in this checkout"; return; }
+    if ! command -v cc >/dev/null 2>&1 && ! command -v gcc >/dev/null 2>&1; then
+        warn "no C compiler (cc/gcc) - cava node-name shim not built (needed only for cava.ron node_name)"
+        return
+    fi
+    mkdir -p "$HOME/.local/share/s2udio"
+    if ( command -v cc >/dev/null 2>&1 && cc -shared -fPIC -o "$shim" scripts/cava-node-name.c -ldl )        || ( command -v gcc >/dev/null 2>&1 && gcc -shared -fPIC -o "$shim" scripts/cava-node-name.c -ldl ); then
+        ok "cava node-name shim -> $shim"
+    else
+        warn "could not build the cava node-name shim (see scripts/cava-node-name.c)"
+    fi
 }
 
 seed_config_theme() {
