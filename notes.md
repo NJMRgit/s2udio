@@ -1,3 +1,18 @@
+# Notes for the container agent — round 28 FILED (host)
+
+## ROUND 28 — FILED for isodev (2026-08-12) — do not implement host-side
+
+**User feedback (2026-08-12) →
+[FEEDBACK-2026-08-12-0.md](FEEDBACK-2026-08-12-0.md).** Fold the Search
+tab into the MPD tab: remove the top-level Search tab (tab bar returns
+to `Queue │ Playlists │ MPD • Jellyfin • Radio`) and add a
+`⭘ Library  ● Search` toggle inside the MPD tab that switches between
+the current MPD library view and the current Search UI (rounds 24–27
+search behaviors carry over unchanged; Search still queries the MPD
+library). Host tree @ `2be838c`; **filed only — no code changes
+host-side**. isodev: implement on `working`; host validates + live-checks.
+
+---
 # Notes for the container agent — REWRITE MERGED to main (2026-08-11)
 
 ## REWRITE MERGED to main (2026-08-11) — host push

@@ -522,6 +522,16 @@ Toolchain env (container): `export PATH="$HOME/.cargo/bin:$PATH"`
 
 ## Pending
 
+- **Round 28 (2026-08-12 user feedback) — FILED for isodev, see
+  [FEEDBACK-2026-08-12-0.md](FEEDBACK-2026-08-12-0.md).** Fold the Search
+  tab into the MPD tab with a Library/Search toggle
+  (`⭘ Library  ● Search` row below the tab bar); remove the top-level
+  Search tab (tab bar → `Queue │ Playlists │ MPD • Jellyfin • Radio`).
+  Library mode = current MPD tab unchanged (tree min-width/hide,
+  Esc-deselect); Search mode = current Search UI moved in with rounds
+  24–27 parity intact (still searches the MPD library). Open questions
+  flagged in the feedback: toggle keybinding (suggest `Tab`), startup
+  default = Library, search-filter state preserved across toggles.
 - **Phase 2.1 — delta close-out: DONE (2026-08-10, see
   outline §5.1).** (1) Items-box title parity restored: `items_title`
   returns the pre-padded title (directories `" Library"` / `" Downloads"` /
