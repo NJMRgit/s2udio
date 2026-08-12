@@ -236,6 +236,12 @@ pub(in crate::ui) trait TreeBrowserCore: Pane {
     fn on_select_range(&mut self, _dir: i64, _ctx: &mut Ctx) -> Result<bool> {
         Ok(false)
     }
+    /// Ctrl+A select-all (default: unhandled; the MPD browser marks every
+    /// row of the right items pane). Returns whether the action was
+    /// handled.
+    fn on_select_all(&mut self, _ctx: &mut Ctx) -> Result<bool> {
+        Ok(false)
+    }
     /// Esc with a selection (default: unhandled; the MPD browser clears the
     /// marks and consumes the keypress).
     fn on_close(&mut self, _ctx: &Ctx) -> Result<bool> {
@@ -572,6 +578,14 @@ pub(in crate::ui) trait TreeBrowserCore: Pane {
                 CommonAction::SelectUp | CommonAction::SelectDown => {
                     let dir = if matches!(action, CommonAction::SelectDown) { 1 } else { -1 };
                     if !self.on_select_range(dir, ctx)? {
+                        event.abandon();
+                    }
+                }
+                CommonAction::SelectAll => {
+                    // Ctrl+A marks every row of the right (items) pane —
+                    // the multi-selectable list of the MPD tab (the folder
+                    // tree on the left is not part of the selection).
+                    if !self.on_select_all(ctx)? {
                         event.abandon();
                     }
                 }

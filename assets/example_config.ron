@@ -73,6 +73,7 @@
             "S":          SelectDown,
             "<S-Up>":     SelectUp,
             "<S-Down>":   SelectDown,
+            "<C-a>":      SelectAll,
         },
 
         directories: {

@@ -139,6 +139,7 @@ pub(crate) fn remap_description(action: &Actions) -> String {
             CommonAction::NextResult => "Next result",
             CommonAction::PreviousResult => "Previous result",
             CommonAction::Select => "Select item",
+            CommonAction::SelectAll => "Select all items",
             CommonAction::InvertSelection => "Invert selection",
             CommonAction::SelectDown => "Select down",
             CommonAction::SelectUp => "Select up",

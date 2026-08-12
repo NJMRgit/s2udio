@@ -747,14 +747,28 @@ impl PlaylistsPane {
 
     /// Right-click / Enter menu for a song in the songs pane.
     fn open_song_menu(&mut self, ctx: &Ctx) -> Result<()> {
-        let Some(DirOrSong::Song(song)) =
+        let Some(DirOrSong::Song(highlighted)) =
             self.songs_dir_mut().and_then(|d| d.selected().cloned())
         else {
             return Ok(());
         };
-        let file = song.file.clone();
-        // Only the highlighted track is removed (marks are ignored).
-        let remove_paths: HashSet<String> = HashSet::from([file.clone()]);
+        let highlighted_file = highlighted.file.clone();
+        // The songs the menu acts on: every marked song when any are
+        // marked, else just the highlighted one.
+        let songs: Vec<Song> = match self.songs_dir_mut() {
+            Some(dir) if !dir.marked().is_empty() => dir
+                .marked_items()
+                .filter_map(|item| match item {
+                    DirOrSong::Song(song) => Some(song.clone()),
+                    _ => None,
+                })
+                .collect(),
+            _ => vec![highlighted],
+        };
+        let files: Vec<String> = songs.iter().map(|s| s.file.clone()).collect();
+        // Remove acts on the same set (marked tracks or the highlighted
+        // one): "remove tracks from playlist" with a multi-selection.
+        let remove_paths: HashSet<String> = files.iter().cloned().collect();
         // The playlist the songs pane is showing (the stack path is the
         // single playlist name inside a playlist).
         let playlist_name =
@@ -764,20 +778,30 @@ impl PlaylistsPane {
         // s2udio-downloads and replaces the entry in this playlist.
         let download_ctx = {
             let info = ctx.yt_info.borrow();
-            info.get(&file).cloned().or_else(|| {
-                info.values().find(|e| e.original_url == file).cloned()
+            info.get(&highlighted_file).cloned().or_else(|| {
+                info.values().find(|e| e.original_url == highlighted_file).cloned()
             })
         }
-        .map(|info| (info, playlist_name.clone(), file.clone()));
+        .map(|info| (info, playlist_name.clone(), highlighted_file.clone()));
         let menu = MenuModal::new(ctx)
             .list_section(ctx, |mut section| {
+                let files = files.clone();
                 section.add_item(
                     "Add to queue",
                     {
-                        let file = file.clone();
+                        let files = files.clone();
                         move |ctx| {
                             ctx.command(move |client| {
-                                client.add(&file, None)?;
+                                client.enqueue_multiple(
+                                    files
+                                        .iter()
+                                        .cloned()
+                                        .map(|f| Enqueue::File { path: f })
+                                        .collect_vec(),
+                                    None,
+                                    None,
+                                    false,
+                                )?;
                                 Ok(())
                             });
                             Ok(())
@@ -787,11 +811,19 @@ impl PlaylistsPane {
                 section.add_item(
                     "Replace queue",
                     {
-                        let file = file.clone();
+                        let files = files.clone();
                         move |ctx| {
                             ctx.command(move |client| {
-                                client.clear()?;
-                                client.add(&file, None)?;
+                                client.enqueue_multiple(
+                                    files
+                                        .iter()
+                                        .cloned()
+                                        .map(|f| Enqueue::File { path: f })
+                                        .collect_vec(),
+                                    None,
+                                    None,
+                                    true,
+                                )?;
                                 Ok(())
                             });
                             Ok(())
@@ -814,13 +846,18 @@ impl PlaylistsPane {
                 Some(section)
             })
             .list_section(ctx, |mut section| {
+                let files = files.clone();
                 section.add_item(
                     "Create playlist",
                     {
-                        let file = file.clone();
+                        let files = files.clone();
                         move |ctx| {
-                            let file = file.clone();
-                            let initial = file.rsplit('/').next().unwrap_or_default().to_owned();
+                            let files = files.clone();
+                            let initial = files
+                                .first()
+                                .and_then(|f| f.rsplit('/').next())
+                                .unwrap_or_default()
+                                .to_owned();
                             modal!(
                                 ctx,
                                 InputModal::new(ctx)
@@ -830,9 +867,9 @@ impl PlaylistsPane {
                                     .initial_value(initial)
                                     .on_confirm(move |ctx, value| {
                                         let value = value.to_owned();
-                                        let file = file.clone();
+                                        let files = files.clone();
                                         ctx.command(move |client| {
-                                            client.create_playlist(&value, vec![file])?;
+                                            client.create_playlist(&value, files)?;
                                             Ok(())
                                         });
                                         Ok(())
@@ -845,19 +882,19 @@ impl PlaylistsPane {
                 section.add_item(
                     "Add to playlist",
                     {
-                        let file = file.clone();
+                        let files = files.clone();
                         move |ctx| {
-                            let file = file.clone();
+                            let files = files.clone();
                             // The radio favourites playlist is Radio-tab-owned:
                             // it never appears as an add target.
                             let radio_playlist = ctx.config.radio.playlist.clone();
-                            let (file, playlists) = ctx.query_sync(move |client| {
+                            let (files, playlists) = ctx.query_sync(move |client| {
                                 let playlists = client
                                     .picker_playlists(&radio_playlist)?
                                     .into_iter()
                                     .map(|p| p.name)
                                     .collect_vec();
-                                Ok((file, playlists))
+                                Ok((files, playlists))
                             })?;
                             modal!(
                                 ctx,
@@ -867,12 +904,9 @@ impl PlaylistsPane {
                                     .confirm_label("Add")
                                     .title("Select a playlist")
                                     .on_confirm(move |ctx, selected, _idx| {
-                                        let file = file.clone();
+                                        let files = files.clone();
                                         ctx.command(move |client| {
-                                            client.add_to_playlist_multiple(
-                                                &selected,
-                                                vec![file],
-                                            )?;
+                                            client.add_to_playlist_multiple(&selected, files)?;
                                             Ok(())
                                         });
                                         Ok(())
@@ -909,7 +943,7 @@ impl PlaylistsPane {
         Ok(())
     }
 
-    fn open_selected_playlist(&mut self, ctx: &Ctx) -> Result<()> {
+fn open_selected_playlist(&mut self, ctx: &Ctx) -> Result<()> {
         self.stack_mut().enter();
         SongListCore::fetch_data_internal(self, ctx)?;
         ctx.render()?;
@@ -1148,8 +1182,17 @@ impl Pane for PlaylistsPane {
                 {
                     let row = usize::from(event.y.saturating_sub(self.songs_area.y));
                     self.select_song_at(row, |dir, idx| {
+                        // Additive selection: the row under the cursor
+                        // joins the marks too (a ctrl+click must never
+                        // drop the initially selected item), and the
+                        // clicked row is added without toggling off.
+                        if dir.state.marked.is_empty() {
+                            if let Some(sel) = dir.state.get_selected() {
+                                dir.state.mark(sel);
+                            }
+                        }
+                        dir.state.mark(idx);
                         dir.select_idx(idx, 0);
-                        dir.state.toggle_mark(idx);
                     });
                     ctx.render()?;
                 }
@@ -1295,6 +1338,20 @@ impl Pane for PlaylistsPane {
                 // `d`/`→` still open a playlist / play a song.
                 CommonAction::Confirm => return self.open_context_menu(ctx),
                 CommonAction::ContextMenu => return self.open_context_menu(ctx),
+                CommonAction::SelectAll => {
+                    // Ctrl+A selects all songs of the playlist currently
+                    // open in the songs pane. At the root the right pane
+                    // lists the playlists themselves (no multi-select
+                    // there) — a no-op.
+                    if !self.stack.path().is_empty()
+                        && let Some(dir) = self.songs_dir_mut()
+                        && dir.len() > 0
+                    {
+                        dir.state.mark_range(0, dir.len() - 1);
+                        ctx.render()?;
+                    }
+                    return Ok(());
+                }
                 _ => event.abandon(),
             }
         }

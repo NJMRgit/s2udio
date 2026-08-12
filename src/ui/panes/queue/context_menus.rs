@@ -244,6 +244,73 @@ impl QueuePane {
                 // "play without adding to queue" item, radio/stream rows)
                 // never leak into a playlist.
                 let items = self.queue.items.iter().map(|song| song.file.clone()).collect_vec();
+                // Marked rows (when a multi-selection is active): the
+                // selected-tracks playlist actions add exactly those.
+                let marked_items: Vec<String> = self
+                    .queue
+                    .marked()
+                    .iter()
+                    .filter_map(|idx| self.queue.items.get(*idx))
+                    .map(|song| song.file.clone())
+                    .collect();
+                let has_marks = !marked_items.is_empty();
+                let marked_items_add = marked_items.clone();
+                if has_marks {
+                    // "Add tracks to playlist" with a multi-selection: only
+                    // the selected tracks land in the target playlist.
+                    section.add_item("Add selected to playlist", move |ctx| {
+                        // The radio favourites playlist is Radio-tab-owned:
+                        // it never appears as an add target.
+                        let radio_playlist = ctx.config.radio.playlist.clone();
+                        let items = marked_items_add.clone();
+                        let playlists = ctx.query_sync(move |client| {
+                            Ok(client
+                                .picker_playlists(&radio_playlist)?
+                                .into_iter()
+                                .map(|p| p.name)
+                                .collect_vec())
+                        })?;
+
+                        modal!(
+                            ctx,
+                            SelectModal::builder()
+                                .ctx(ctx)
+                                .options(playlists)
+                                .confirm_label("Add")
+                                .title("Select a playlist")
+                                .on_confirm(move |ctx, selected, _idx| {
+                                    let items = items.clone();
+                                    ctx.command(move |client| {
+                                        client.add_to_playlist_multiple(&selected, items)?;
+                                        Ok(())
+                                    });
+                                    Ok(())
+                                })
+                                .build()
+                        );
+                        Ok(())
+                    });
+                    section.add_item("Create playlist from selected", move |ctx| {
+                        let items = marked_items.clone();
+                        modal!(
+                            ctx,
+                            InputModal::new(ctx)
+                                .title("Create new playlist")
+                                .confirm_label("Save")
+                                .input_label("Playlist name:")
+                                .on_confirm(move |ctx, value| {
+                                    let value = value.to_owned();
+                                    let items = items.clone();
+                                    ctx.command(move |client| {
+                                        client.create_playlist(&value, items)?;
+                                        Ok(())
+                                    });
+                                    Ok(())
+                                })
+                        );
+                        Ok(())
+                    });
+                }
                 let items_add = items.clone();
                 section.add_item("Add queue to playlist", move |ctx| {
                     // The radio favourites playlist is Radio-tab-owned: it
@@ -277,7 +344,7 @@ impl QueuePane {
                     );
                     Ok(())
                 });
-                section.add_item("Create audio playlist", move |ctx| {
+                section.add_item("Create playlist from queue", move |ctx| {
                     if items.is_empty() {
                         status_warn!("No songs in the queue to save");
                         return Ok(());
@@ -286,7 +353,7 @@ impl QueuePane {
                     modal!(
                         ctx,
                         InputModal::new(ctx)
-                            .title("Create audio playlist")
+                            .title("Create playlist from queue")
                             .confirm_label("Save")
                             .input_label("Playlist name:")
                             .on_confirm(move |ctx, value| {

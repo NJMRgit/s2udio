@@ -48,12 +48,20 @@ impl MarkState {
         self.marked.retain(|&i| i < len);
     }
 
-    pub fn toggle(&mut self, idx: usize) {
-        if self.marked.contains(&idx) {
-            self.marked.remove(&idx);
-        } else {
-            self.marked.insert(idx);
+    /// Add `idx` to the marked set without ever removing it (the ctrl+click
+    /// semantics: clicking more rows grows the selection, it never drops the
+    /// rows that are already marked).
+    pub fn add(&mut self, idx: usize) {
+        self.marked.insert(idx);
+    }
+
+    /// Mark every index in `0..len` (the whole list, ctrl+a).
+    pub fn mark_all(&mut self, len: usize) {
+        if len == 0 {
+            self.marked.clear();
+            return;
         }
+        self.mark_range(0, len - 1);
     }
 
     /// The anchor for alt-click / shift+arrow range selection; set by plain
@@ -114,13 +122,14 @@ mod tests {
     use super::MarkState;
 
     #[test]
-    fn toggle_marks_and_unmarks() {
+    fn add_marks_without_removing() {
         let mut s = MarkState::default();
-        s.toggle(2);
-        s.toggle(5);
+        s.add(2);
+        s.add(5);
         assert_eq!(s.iter().collect::<Vec<_>>(), vec![2, 5]);
-        s.toggle(2);
-        assert_eq!(s.iter().collect::<Vec<_>>(), vec![5]);
+        // Re-adding a marked index keeps it marked (no toggle-off).
+        s.add(2);
+        assert_eq!(s.iter().collect::<Vec<_>>(), vec![2, 5]);
     }
 
     #[test]
@@ -149,10 +158,32 @@ mod tests {
     }
 
     #[test]
+    fn add_never_removes() {
+        let mut s = MarkState::default();
+        s.add(2);
+        s.add(5);
+        assert_eq!(s.iter().collect::<Vec<_>>(), vec![2, 5]);
+        // Re-adding an already-marked index keeps it marked (no toggle-off).
+        s.add(2);
+        assert_eq!(s.iter().collect::<Vec<_>>(), vec![2, 5]);
+    }
+
+    #[test]
+    fn mark_all_marks_every_index() {
+        let mut s = MarkState::default();
+        s.add(1);
+        s.mark_all(6);
+        assert_eq!(s.iter().collect::<Vec<_>>(), vec![0, 1, 2, 3, 4, 5]);
+        // An empty list clears the marks instead of panicking.
+        s.mark_all(0);
+        assert!(s.is_empty());
+    }
+
+    #[test]
     fn clamp_drops_out_of_range_marks() {
         let mut s = MarkState::default();
         for i in [0, 2, 4, 7] {
-            s.toggle(i);
+            s.add(i);
         }
         s.clamp(5);
         assert_eq!(s.iter().collect::<Vec<_>>(), vec![0, 2, 4]);
@@ -164,7 +195,7 @@ mod tests {
     fn ranges_are_contiguous_runs() {
         let mut s = MarkState::default();
         for i in [0, 1, 2, 5, 6, 9] {
-            s.toggle(i);
+            s.add(i);
         }
         assert_eq!(s.iter().collect::<Vec<_>>(), vec![0, 1, 2, 5, 6, 9]);
     }

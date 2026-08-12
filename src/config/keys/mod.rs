@@ -92,6 +92,7 @@ impl Default for KeyConfigFile {
             (s().down(),                          C::Down),
             (s().char('W'),                       C::SelectUp),
             (s().char('S'),                       C::SelectDown),
+            (s().char('a').ctrl(),                C::SelectAll),
             (s().up().shift(),                    C::SelectUp),
             (s().down().shift(),                  C::SelectDown),
             (s().page_up(),                       C::PageUp),
@@ -362,6 +363,16 @@ mod tests {
         assert_eq!(
             default.directories.get(&k("s")),
             Some(&DirectoriesActionsFile::FolderDown)
+        );
+    }
+
+    #[test]
+    fn default_navigation_bindings_include_ctrl_a_select_all() {
+        let default = KeyConfigFile::default();
+        assert_eq!(
+            default.navigation.get(&KeySequence::new().char('a').ctrl()),
+            Some(&CommonActionFile::SelectAll),
+            "Ctrl+A selects all items of the current list"
         );
     }
 
