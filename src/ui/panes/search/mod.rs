@@ -20,7 +20,7 @@ use crate::{
             GlobalAction,
             actions::{AddKind, AutoplayKind, DeleteKind, Position, SaveKind},
         },
-        tabs::PaneType,
+        tabs::{PaneType, TreeBrowserArgs},
     },
     core::command::{create_env, run_external},
     ctx::{Ctx, LIKE_STICKER, RATING_STICKER},
@@ -68,7 +68,10 @@ pub struct SearchPane {
     column_areas: EnumMap<BrowserArea, Rect>,
 }
 
-const SEARCH: &str = "search";
+/// The query id of the search's MPD queries. `pub(crate)` so the MPD
+/// tab (which hosts the folded-in search since round 28) can forward
+/// the results to it.
+pub(crate) const SEARCH: &str = "search";
 
 impl SearchPane {
     pub fn new(ctx: &Ctx) -> Self {
@@ -99,6 +102,18 @@ impl SearchPane {
             inputs,
             column_areas: EnumMap::default(),
         }
+    }
+
+    /// The buffer id of the first textbox filter (test-only accessor:
+    /// the MPD tab's round-28 tests pin the session-lifetime filter state
+    /// across Library↔Search toggles through it).
+    #[cfg(test)]
+    pub(crate) fn first_filter_buffer_id(&self) -> Option<crate::ui::input::BufferId> {
+        self.inputs.inputs.iter().find_map(|input| match input {
+            crate::ui::panes::search::inputs::InputType::Textbox(t)
+            | crate::ui::panes::search::inputs::InputType::Numberbox(t) => Some(t.buffer_id),
+            _ => None,
+        })
     }
 
     fn items<'a>(&'a self, all: bool) -> Box<dyn Iterator<Item = (usize, &'a Song)> + 'a> {
@@ -263,7 +278,10 @@ impl SearchPane {
         {
             // Filters are empty, but rating filters are set - show all songs with the
             // wanted rating
-            ctx.query().id(SEARCH).replace_id(SEARCH).target(PaneType::Search).query(
+            // Round 28: the search UI folded into the MPD tab, so its
+            // queries target the Directories pane (the results land in the
+            // MPD tab's embedded search via `DirectoriesPane::on_query_finished`).
+            ctx.query().id(SEARCH).replace_id(SEARCH).target(PaneType::Directories { tree: TreeBrowserArgs::default() }).query(
                 move |client| {
                     // empty URI returns all songs with the sticker
                     let uris = match (rating_filter, liked_filter) {
@@ -317,7 +335,7 @@ impl SearchPane {
             let _ = std::mem::take(&mut self.songs_dir);
         } else {
             // Search normally
-            ctx.query().id(SEARCH).replace_id(SEARCH).target(PaneType::Search).query(
+            ctx.query().id(SEARCH).replace_id(SEARCH).target(PaneType::Directories { tree: TreeBrowserArgs::default() }).query(
                 move |client| {
                     let data = if fold_case {
                         client.search(&filter, strip_diacritics)
