@@ -44,10 +44,11 @@ Esc-deselect). The active mode is marked with the app's ●/⭘ convention
 (● = active, bold; ⭘ = inactive, dim), and the labels are clickable
 (mouse) and hover-lighten like the queue's sub-tab row.
 
-- **Keyboard**: `Tab` while the MPD tab is focused toggles the mode
-  (the feedback's leading suggestion; it replaces the global
-  next-tab binding *on this tab only* — `Tab` still cycles tabs
-  everywhere else).
+- **Keyboard**: `Shift+Tab` while the MPD tab is focused toggles the
+  mode (round 28b — the ONLY key that toggles; `Tab` / `E` / `Q`
+  still cycle tabs, so the tab is always reachable). The queue's
+  `Shift+Tab` chapters toggle is untouched — the MPD pane claims the
+  `ToggleMpdMode` global only while it is focused.
 - **Startup default**: Library (the mode resets on every launch).
 - **Session lifetime**: the search state (filters, results, phase)
   lives for the session, so a Library↔Search toggle never loses the

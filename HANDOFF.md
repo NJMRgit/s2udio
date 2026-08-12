@@ -118,22 +118,30 @@ the user's decisions win. Locked in across sessions (details in the docs):
 
 ## Current state (verified)
 
-- **Branch**: `working` (tracks `origin/working`), at `e8e854b` +
-  **round-28 implementation committed on top** (see the Pending entry;
-  needs host `cargo test --release` validation — **1360/1360** in the
-  container, warnings 3 baseline, binary build clean).
+- **Branch**: `working` (tracks `s2udio-working/working`), at `9a6eba5` +
+  **round-28b committed on top** (host live-check fix; **1361/1361**
+  host-validated 2026-08-12, warnings 3 baseline, binary build clean).
+  **Round 28b (2026-08-12, host-implemented)**: ONLY `Shift+Tab`
+  toggles the MPD tab's Library/Search mode (new global `ToggleMpdMode`,
+  bound to `<S-Tab>` in the defaults + the live config.ron +
+  example_config.ron; the MPD pane claims it while focused) — the
+  round-28 `Tab` (NextTab) toggle claim is removed, so `Tab`/`E`/`Q`
+  cycle tabs again and the MPD tab is always reachable from the
+  keyboard; elsewhere `ToggleMpdMode` is a no-op (the queue's `Shift+Tab`
+  chapters toggle is untouched). See
+  [FEEDBACK-2026-08-12-1.md](FEEDBACK-2026-08-12-1.md).
   **Round 28 (2026-08-12, isodev implementing)**: the Search tab folded
   into the MPD tab — default tabs drop the Search entry (a leftover
   "Search" config tab is hidden from the bar/cycle via `is_tab_hidden`);
   the MPD tab gained a `⭘ Library  ● Search` toggle row (● = active;
-  mouse-clickable labels; `Tab` on the MPD tab toggles, `E` still cycles
-  tabs); Library mode = the unchanged MPD browser; Search mode = the
-  folded-in search UI (rounds 24–27 parity intact, still queries the MPD
-  library), session-lifetime state, Library at startup. Search queries
-  now target the Directories pane and the MPD pane forwards the results
-  to its embedded search. **1360/1360** (+7 tests: 6 MPD-tab + 1
-  leftover-Search-tab bar), warnings 3 baseline. See
-  [FEEDBACK-2026-08-12-0.md](FEEDBACK-2026-08-12-0.md).
+  mouse-clickable labels; **round 28b: `Shift+Tab` toggles**, `Tab`/`E`/
+  `Q` cycle tabs); Library mode = the unchanged MPD browser; Search mode
+  = the folded-in search UI (rounds 24–27 parity intact, still queries
+  the MPD library), session-lifetime state, Library at startup. Search
+  queries now target the Directories pane and the MPD pane forwards the
+  results to its embedded search. **1360/1360** (+7 tests: 6 MPD-tab + 1
+  leftover-Search-tab bar) + round-28b's 2 tests, warnings 3 baseline.
+  See [FEEDBACK-2026-08-12-0.md](FEEDBACK-2026-08-12-0.md).
   **Round 24
   (2026-08-10, isodev implementing)**: Esc-deselect everywhere
   multi-select exists (queue video list + MPD tab Close arms + `MarkState::
@@ -535,22 +543,28 @@ Toolchain env (container): `export PATH="$HOME/.cargo/bin:$PATH"`
 
 ## Pending
 
-- **Round 28 (2026-08-12 user feedback) — IMPLEMENTED in the container
-  (see FEEDBACK-2026-08-12-0.md), awaiting host validation.** The Search
-  tab folded into the MPD tab: default tabs drop the Search entry and any
-  leftover "Search" config tab is hidden from the bar/cycle
-  (`is_tab_hidden`); the MPD tab renders a `⭘ Library  ● Search` toggle
-  row at the top (● = active; clickable labels; hover-lightens). Open
-  questions resolved as suggested: **`Tab`** toggles while the MPD tab is
-  focused (`E`/Shift+Tab still cycle tabs — note: `Tab` no longer cycles
-  tabs *from the MPD tab*), startup default = **Library** (not persisted),
-  search-filter state **preserved across toggles** (the search pane lives
-  inside the MPD pane for the session). Search queries now target the
-  Directories pane; the MPD pane forwards `SEARCH` results to its
-  embedded search. **1360/1360** in-container, warnings 3 baseline. Host:
-  validate, remove the Search tab from the live config.ron, install, live
-  check (toggle row, Tab, both modes, search still finds MPD-library
-  results).
+- **Round 28b (2026-08-12 host live-check fix) — IMPLEMENTED host-side,
+  VALIDATED 1361/1361, binary installed (see
+  FEEDBACK-2026-08-12-1.md).** ONLY `Shift+Tab` toggles the MPD tab's
+  Library/Search mode (new global `ToggleMpdMode` bound to `<S-Tab>` in
+  the defaults + the live config.ron + example_config.ron; the MPD pane
+  claims it while focused); the round-28 `Tab`/NextTab toggle claim is
+  removed, so `Tab`/`E`/`Q` cycle tabs again and the MPD tab is always
+  reachable from the keyboard; elsewhere `ToggleMpdMode` is a no-op (the
+  queue's `Shift+Tab` chapters toggle untouched).
+- **Round 28 (2026-08-12 user feedback) — IMPLEMENTED in the container,
+  HOST-VALIDATED (1360/1360) + live-checked 2026-08-12 (see
+  FEEDBACK-2026-08-12-0.md).** The Search tab folded into the MPD tab:
+  default tabs drop the Search entry and any leftover "Search" config tab
+  is hidden from the bar/cycle (`is_tab_hidden`); the MPD tab renders a
+  `⭘ Library  ● Search` toggle row at the top (● = active; clickable
+  labels; hover-lightens; keyboard = **`Shift+Tab`** per round 28b).
+  Startup default = **Library** (not persisted), search-filter state
+  **preserved across toggles** (the search pane lives inside the MPD pane
+  for the session). Search queries now target the Directories pane; the
+  MPD pane forwards `SEARCH` results to its embedded search. Search tab
+  removed from the live config.ron; **1360/1360** in-container, warnings
+  3 baseline.
 - **Phase 2.1 — delta close-out: DONE (2026-08-10, see
   outline §5.1).** (1) Items-box title parity restored: `items_title`
   returns the pre-padded title (directories `" Library"` / `" Downloads"` /
