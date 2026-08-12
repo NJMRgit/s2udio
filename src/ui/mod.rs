@@ -853,6 +853,10 @@ impl Ui {
                     self.change_tab(ctx.config.prev_screen(&ctx.active_tab), ctx)?;
                     ctx.render()?;
                 }
+                // Round 28b: Shift+Tab toggles the MPD tab's Library/Search
+                // mode — the Directories pane claims it while focused;
+                // anywhere else it is a no-op (Tab/E/Q cycle tabs).
+                GlobalAction::ToggleMpdMode => {}
                 GlobalAction::SwitchToTab(name) => {
                     if ctx.config.tabs.names.contains(name)
                         && !ctx.config.is_tab_hidden(name)

@@ -112,6 +112,7 @@ pub(crate) fn remap_description(action: &Actions) -> String {
             GlobalAction::CommandMode => "Command mode",
             GlobalAction::NextTab => "Next tab",
             GlobalAction::PreviousTab => "Previous tab",
+            GlobalAction::ToggleMpdMode => "Toggle Library/Search (MPD tab)",
             GlobalAction::SwitchToTab(name) => return format!("Go to {name}"),
             GlobalAction::Command { .. } => "Run command",
             GlobalAction::ExternalCommand { .. } => "External command",
