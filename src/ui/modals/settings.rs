@@ -1405,7 +1405,9 @@ impl SettingsModal {
     }
 
     /// The [-] [+] stepper rows whose controls can be focused with
-    /// Space/Enter (a/← and d/→ then adjust, Esc cancels).
+    /// Space/Enter (a/← and d/→ then adjust, Esc cancels). The cava
+    /// device row joins them: Enter (or d/→) focuses its [<] [>] cycle
+    /// controls, then a/← and d/→ walk the PipeWire capture list.
     fn is_stepper_row(&self, idx: usize) -> bool {
         matches!(
             self.rows.get(idx),
@@ -1415,6 +1417,7 @@ impl SettingsModal {
                 | GeneralRow::FreqMin
                 | GeneralRow::FreqMax
                 | GeneralRow::NoiseReduction
+                | GeneralRow::Device
             )) | Some(ContentRow::Mpd(MpdRow::Crossfade))
         )
     }
@@ -2823,13 +2826,21 @@ impl Modal for SettingsModal {
                 if key.modifiers.is_empty() || matches!(key.code, KeyCode::Right) =>
             {
                 // d / →: open the sidebar's highlighted section, or toggle
-                // the content row under the highlight.
+                // the content row under the highlight. On a [-] [+] (or
+                // device) row it acts like Enter: focus the controls so
+                // a/← and d/→ adjust (Esc cancels).
                 match self.focus {
                     SettingsFocus::Sidebar => {
                         self.populate(ctx);
                         self.focus = SettingsFocus::Content;
                     }
-                    SettingsFocus::Content => self.activate(ctx)?,
+                    SettingsFocus::Content => {
+                        if self.is_stepper_row(self.selected) {
+                            self.start_adjust(ctx)?;
+                        } else {
+                            self.activate(ctx)?;
+                        }
+                    }
                 }
             }
             KeyCode::Enter | KeyCode::Char(' ') if key.modifiers == KeyModifiers::NONE => {
@@ -3583,6 +3594,73 @@ mod nav_tests {
         assert_eq!(modal.sensitivity(), sens_before, "Esc reverts the adjustment");
     }
 
+    /// The cava device row is a stepper row: Enter/Space (and d/→) focus
+    /// its [<] [>] cycle controls, a/← and d/→ walk the capture list,
+    /// Space/Enter commits, Esc cancels and reverts the staged source.
+    #[test]
+    fn device_row_enters_adjust_mode_and_cycles_like_other_steppers() {
+        let (mut modal, mut ctx) = fixture();
+        select_general_row(&mut modal, &mut ctx, &|r| matches!(r, ContentRow::General(GeneralRow::Device)));
+        let source_before = modal.source();
+
+        // Enter enters adjust mode without changing the source.
+        modal.handle_raw_key(key(KeyCode::Enter), &mut ctx).unwrap();
+        assert_eq!(modal.adjusting, Some(modal.selected), "Enter focuses the device controls");
+        assert_eq!(modal.source(), source_before, "entering adjust mode must not change the source");
+
+        // d/→ walks the capture list while focused. The list is refreshed
+        // from the live PipeWire session after each step, so compute the
+        // expected next source the same way the app does (with the
+        // virtual-devices toggle off, only non-virtual nodes are offered).
+        let expected_next = {
+            let mut visible: Vec<String> = vec!["auto".to_string()];
+            visible.extend(
+                pipewire_sources()
+                    .iter()
+                    .filter(|n| !n.is_virtual)
+                    .map(|n| n.name.clone()),
+            );
+            visible.get(1).cloned().unwrap_or_else(|| "auto".to_string())
+        };
+        modal.handle_raw_key(key(KeyCode::Char('d')), &mut ctx).unwrap();
+        assert_eq!(modal.source(), expected_next, "d/→ steps the device forward");
+        modal.handle_raw_key(key(KeyCode::Left), &mut ctx).unwrap();
+        assert_eq!(modal.source(), source_before, "a/← steps the device back");
+
+        // Space/Enter commits: focus returns to the list, value kept.
+        modal.handle_raw_key(key(KeyCode::Char(' ')), &mut ctx).unwrap();
+        assert_eq!(modal.adjusting, None);
+        assert_eq!(modal.source(), source_before);
+
+        // Esc cancels the whole session and reverts the staged source.
+        modal.handle_raw_key(key(KeyCode::Enter), &mut ctx).unwrap();
+        modal.handle_raw_key(key(KeyCode::Char('d')), &mut ctx).unwrap();
+        assert_ne!(modal.source(), source_before, "the device moved while adjusting");
+        modal.handle_raw_key(key(KeyCode::Esc), &mut ctx).unwrap();
+        assert_eq!(modal.adjusting, None);
+        assert_eq!(modal.source(), source_before, "Esc reverts the device selection");
+    }
+
+    /// d/→ on a stepper row acts like Enter (focus the controls) instead of
+    /// stepping immediately — same entry point for both keys.
+    #[test]
+    fn right_on_a_stepper_row_enters_adjust_mode() {
+        let (mut modal, mut ctx) = fixture();
+        select_general_row(&mut modal, &mut ctx, &|r| matches!(r, ContentRow::General(GeneralRow::Fps)));
+        let fps_before = modal.fps();
+
+        // d on the row: enters adjust mode, does not step yet.
+        modal.handle_raw_key(key(KeyCode::Char('d')), &mut ctx).unwrap();
+        assert_eq!(modal.adjusting, Some(modal.selected), "d/→ focuses the stepper controls");
+        assert_eq!(modal.fps(), fps_before, "entering adjust mode must not change the value");
+
+        // then d adjusts (and Esc still reverts).
+        modal.handle_raw_key(key(KeyCode::Char('d')), &mut ctx).unwrap();
+        assert_eq!(modal.fps(), fps_before + 5);
+        modal.handle_raw_key(key(KeyCode::Esc), &mut ctx).unwrap();
+        assert_eq!(modal.fps(), fps_before, "Esc reverts");
+    }
+
     #[test]
     fn space_on_a_toggle_row_still_toggles() {
         let (mut modal, mut ctx) = fixture();
@@ -3709,6 +3787,10 @@ mod nav_tests {
         // Adjust the FPS stepper (content pane owns the keyboard).
         select_row(&mut modal, |r| matches!(r, ContentRow::General(GeneralRow::Fps)));
         modal.focus = SettingsFocus::Content;
+        // d/→ on a stepper row enters adjust mode without stepping yet.
+        modal.handle_raw_key(key(KeyCode::Right), &mut ctx).unwrap();
+        assert_eq!(modal.adjusting, Some(modal.selected), "d/→ focuses the stepper controls");
+        assert_eq!(modal.cava_pending.framerate, fps_before, "entering adjust mode must not step yet");
         modal.handle_raw_key(key(KeyCode::Right), &mut ctx).unwrap();
         assert_eq!(modal.cava_pending.framerate, fps_before + 5);
         assert_eq!(
