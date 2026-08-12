@@ -1,3 +1,19 @@
+# Notes for the container agent — round 29 MERGED to main (2026-08-12)
+
+## ROUND 29 MERGED to main (2026-08-12) — host push
+
+Round 29 (cava `node_name`) is now **the production `master`**
+(`NJMRgit/s2udio` @ `fe9f078`, clean buildable subset — one commit on
+top of `2c04bcf` carrying `src/config/cava.rs`, `src/shared/paths.rs`,
+`src/ui/modals/settings.rs`, `src/ui/panes/cava.rs`,
+`scripts/cava-node-name.c` (new), `setup.sh`, `assets/example_config.ron`).
+Host-validated on master: `cargo test --release` **1364/1364**, warnings
+3 baseline. The full tree lives on this private repo's `working` branch
+@ `f17c24b`. Live: s2udio's cava node shows as **`s2udio-cava`** in
+pw-dump.
+
+---
+
 # Notes for the container agent — round 29 IMPLEMENTED host-side (2026-08-12)
 
 ## ROUND 29 — cava node_name (host live-check feature, 2026-08-12) — committed on `working`
