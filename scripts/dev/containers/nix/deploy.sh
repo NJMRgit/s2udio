@@ -49,7 +49,7 @@ mkdir -p "$HOME/.config/s2udio/themes" "$HOME/.config/s2udio/lyrics" \
 cp -n /root/.nix-profile/share/s2udio/example_config.ron "$HOME/.config/s2udio/config.ron" || true
 cp -n /root/.nix-profile/share/s2udio/example_theme.ron "$HOME/.config/s2udio/themes/default.ron" || true
 
-info "nix: MPD config (user-level, fifo for cava)"
+info "nix: MPD config (user-level; round 30: no cava fifo output — cava captures PipeWire)"
 cat > "$HOME/.config/mpd/mpd.conf" <<'EOF'
 music_directory "/root/media"
 bind_to_address "127.0.0.1"
@@ -61,24 +61,15 @@ playlist_directory "/root/.cache/mpd/playlists"
 follow_outside_symlinks "yes"
 follow_inside_symlinks "yes"
 auto_update "yes"
-audio_output {
-    type    "fifo"
-    name    "cava"
-    path    "/tmp/mpd-cava.fifo"
-    format  "44100:16:2"
-}
 EOF
 
-info "nix: cava config (fifo input, raw output)"
+info "nix: cava config (PipeWire input, raw output)"
 cat > "$HOME/.config/cava/config" <<'EOF'
 [general]
 bars = 24
 [input]
-method = fifo
-source = /tmp/mpd-cava.fifo
-sample_rate = 44100
-sample_bits = 16
-channels = 2
+method = pipewire
+source = auto
 [output]
 method = raw
 EOF

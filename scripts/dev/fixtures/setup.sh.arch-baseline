@@ -39,7 +39,8 @@
 #                                the s2u-mpdris2 shim (official mpDris2 +
 #                                stream art)
 #   * seeds config/theme         -> ~/.config/s2udio/ (if absent)
-#   * cava + MPD fifo output     (official cava; MPD fifo output)
+#   * cava (PipeWire input)      (official cava; s2udio drives it through
+#                                PipeWire only — no MPD fifo output)
 #   * MPD / mpDris2 user services
 #
 # Idempotent: safe to re-run at any time. Never overwrites existing configs
@@ -75,7 +76,7 @@ for h in yay paru; do
 done
 
 # ---------------------------------------------------------------------------
-info "1/9  System packages (mpd ffmpeg cava yt-dlp)"
+info "1/8  System packages (mpd ffmpeg cava yt-dlp)"
 PACMAN_PKGS=(mpd ffmpeg cava yt-dlp)
 MISSING=()
 for p in "${PACMAN_PKGS[@]}"; do
@@ -169,7 +170,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-info "2/9  Build the s2udio binary"
+info "2/8  Build the s2udio binary"
 if ! command -v cargo >/dev/null 2>&1; then
     warn "cargo not found - install rustup/rust first (sudo pacman -S rust)"
 else
@@ -180,7 +181,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-info "3/9  yt-dlp (official python-yt-dlp)"
+info "3/8  yt-dlp (official python-yt-dlp)"
 if command -v yt-dlp >/dev/null 2>&1; then
     ok "yt-dlp $(yt-dlp --version 2>/dev/null || echo '?')"
     warn "official yt-dlp only - no yt-dlp-ejs / node JS runtime / cookie profile is set up."
@@ -192,15 +193,26 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-info "4/9  Support scripts"
+info "4/8  Support scripts"
 [[ -f scripts/rmpc-fetch-lyrics ]] && { install -Dm755 scripts/rmpc-fetch-lyrics "$BIN_DIR/rmpc-fetch-lyrics"; ok "lyrics fetcher -> $BIN_DIR/rmpc-fetch-lyrics"; } || warn "scripts/rmpc-fetch-lyrics missing in this checkout"
 [[ -f scripts/s2u-mpv-tracker ]] && { install -Dm755 scripts/s2u-mpv-tracker "$BIN_DIR/s2u-mpv-tracker"; ok "mpv tracker daemon -> $BIN_DIR/s2u-mpv-tracker"; } || warn "scripts/s2u-mpv-tracker missing in this checkout"
 [[ -f scripts/s2udio-mpris ]] && { install -Dm755 scripts/s2udio-mpris "$BIN_DIR/s2udio-mpris"; ok "mpv MPRIS bridge -> $BIN_DIR/s2udio-mpris"; } || warn "scripts/s2udio-mpris missing in this checkout"
 [[ -f scripts/s2u-mpdris2 ]] && { install -Dm755 scripts/s2u-mpdris2 "$BIN_DIR/s2u-mpdris2"; ok "mpDris2 stream-art shim -> $BIN_DIR/s2u-mpdris2"; } || warn "scripts/s2u-mpdris2 missing in this checkout"
+# round 29: rename cava's PipeWire node (optional; needs the cava-node-name shim)
+if [[ -f scripts/cava-node-name.c ]] && { command -v cc >/dev/null 2>&1 || command -v gcc >/dev/null 2>&1; }; then
+    mkdir -p "$HOME/.local/share/s2udio"
+    if ( command -v cc >/dev/null 2>&1 && cc -shared -fPIC -o "$HOME/.local/share/s2udio/libcavaname.so" scripts/cava-node-name.c -ldl )        || ( command -v gcc >/dev/null 2>&1 && gcc -shared -fPIC -o "$HOME/.local/share/s2udio/libcavaname.so" scripts/cava-node-name.c -ldl ); then
+        ok "cava node-name shim -> $HOME/.local/share/s2udio/libcavaname.so"
+    else
+        warn "could not build the cava node-name shim (see scripts/cava-node-name.c)"
+    fi
+else
+    warn "no C compiler (cc/gcc) - cava node-name shim not built (needed only for cava.ron node_name)"
+fi
 [[ -f scripts/s2u-svc ]] && { install -Dm755 scripts/s2u-svc "$BIN_DIR/s2u-svc"; ok "s2u-svc -> $BIN_DIR/s2u-svc"; } || warn "scripts/s2u-svc missing in this checkout"
 
 # ---------------------------------------------------------------------------
-info "5/9  Seed config + theme (only if absent; embedded defaults otherwise)"
+info "5/8  Seed config + theme (only if absent; embedded defaults otherwise)"
 mkdir -p "$CFG_DIR/themes"
 # Round 23: every s2udio config lives in ~/.config/s2udio — nothing in
 # ~/.config/rmpc anymore. A legacy ~/.config/rmpc/config.ron is migrated
@@ -212,9 +224,19 @@ if [[ ! -f "$CFG_DIR/themes/default.ron" ]]; then
     cp assets/example_theme.ron "$CFG_DIR/themes/default.ron" && ok "theme -> $CFG_DIR/themes/default.ron"
 fi
 mkdir -p "$CFG_DIR/lyrics"  # s2udio's own .lrc library (round 23)
+# The mpv IPC socket contract (SVP4 round): s2udio launches mpv with
+# --input-ipc-server=/tmp/mpvsocket itself, but a manually launched mpv
+# needs the mpv.conf line to expose the same socket. Seed it when absent
+# (never overwrite a user's mpv.conf).
+if [[ ! -f "$HOME/.config/mpv/mpv.conf" ]] \
+    || ! grep -q 'input-ipc-server=/tmp/mpvsocket' "$HOME/.config/mpv/mpv.conf" 2>/dev/null; then
+    mkdir -p "$HOME/.config/mpv"
+    printf 'input-ipc-server=/tmp/mpvsocket\n' >> "$HOME/.config/mpv/mpv.conf"
+    ok "mpv.conf: input-ipc-server=/tmp/mpvsocket seeded"
+fi
 
 # ---------------------------------------------------------------------------
-info "6/9  cava"
+info "6/8  cava"
 if command -v cava >/dev/null 2>&1; then
     ok "cava $(cava -v 2>/dev/null | head -1 || pacman -Q cava)"
 else
@@ -222,30 +244,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-info "7/9  MPD fifo output (for cava via s2udio)"
-if [[ -f "$MPD_CONF" ]]; then
-    if grep -q "mpd-cava.fifo" "$MPD_CONF"; then
-        ok "fifo output already configured in $MPD_CONF"
-    else
-        cat >> "$MPD_CONF" <<'EOF'
-
-# cava (via s2udio) - bypasses all audio devices and PipeWire entirely.
-audio_output {
-    type    "fifo"
-    name    "cava"
-    path    "/tmp/mpd-cava.fifo"
-    format  "44100:16:2"
-}
-EOF
-        ok "fifo output appended to $MPD_CONF"
-        systemctl --user restart mpd 2>/dev/null && ok "mpd restarted" || warn "restart mpd manually"
-    fi
-else
-    warn "no MPD config at $MPD_CONF - set MPD_CONF=/path/to/mpd.conf and re-run"
-fi
-
-# ---------------------------------------------------------------------------
-info "8/9  MPD + mpDris2 user services"
+info "7/8  MPD + mpDris2 user services"
 UNITS=$(systemctl --user list-unit-files 2>/dev/null || true)
 if grep -q '^mpd.service' <<<"$UNITS"; then
     systemctl --user is-enabled mpd.service >/dev/null 2>&1 \
@@ -285,7 +284,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-info "9/9  Summary"
+info "8/8  Summary"
 if [[ -x "$BIN_DIR/s2udio" ]]; then
     "$BIN_DIR/s2udio" version 2>/dev/null | head -1 | sed 's/^/  s2udio: /'
 else

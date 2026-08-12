@@ -97,8 +97,8 @@ overwrites existing configs.
 - **System vs user MPD (Debian/Ubuntu/Devuan)**: the distro ships `mpd` as an
   auto-started **system** service on port 6600. setup.sh stops+disables it
   and runs s2udio's **user-level** instance (`~/.config/mpd/mpd.conf` +
-  `mpd.service`, created when absent) — MPD + the cava fifo then live in your
-  session, not the system.
+  `mpd.service`, created when absent) — MPD then lives in your session, not
+  the system (cava captures PipeWire directly; there is no MPD fifo tap).
 - **cava from source (Alpine)**: cava is absent from the Alpine 3.20 repos;
   the apk backend clones and builds it (`autogen.sh && configure && make`,
   installed to `/usr/local/bin/cava`).

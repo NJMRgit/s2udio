@@ -29,7 +29,7 @@ const MAX_CAVA_BARS: u16 = 64;
 use super::Pane;
 use crate::{
     config::{
-        cava::{Cava, CavaInputMethod},
+        cava::Cava,
         theme::cava::{CavaTheme, Orientation},
     },
     ctx::Ctx,
@@ -254,23 +254,12 @@ impl CavaPane {
         let cfg_dir = std::env::temp_dir().join("rmpc");
         std::fs::create_dir_all(&cfg_dir)?;
         let cfg_path = cfg_dir.join(format!("cava-{}.conf", rustix::process::geteuid().as_raw()));
-        // A FIFO tap reads MPD's raw PCM, so its sample rate / bit depth /
-        // channels must match the fifo output's `format` exactly (the
-        // settings panel no longer edits these).
+        // Round 30: cava is PipeWire-only. A `source` that names a sink
+        // directly would make cava set `target.object`, which PipeWire does
+        // not feed on every setup (the bars come back flat). Capture the
+        // sink's monitor instead.
         let mut config = config.clone();
-        if config.input.method == CavaInputMethod::Fifo
-            && let Some(fmt) = crate::ui::modals::paste::mpd_fifo_format()
-        {
-            config.input.sample_rate = Some(fmt.sample_rate);
-            config.input.sample_bits = Some(fmt.sample_bits);
-            config.input.channels = Some(fmt.channels);
-        }
-        if config.input.method == CavaInputMethod::Pipewire {
-            // A `source` that names a sink directly would make cava set
-            // `target.object`, which PipeWire does not feed on every setup
-            // (the bars come back flat). Capture the sink's monitor instead.
-            config.input.source = Self::normalize_pipewire_source(&config.input.source);
-        }
+        config.input.source = Self::normalize_pipewire_source(&config.input.source);
         // Round 29: the configured node name must be read before `config`
         // becomes the generated conf text below.
         let node_name = Self::node_name_rename_env(config.input.node_name.as_deref());
@@ -334,6 +323,12 @@ impl CavaPane {
         source: &str,
         mut sink_names: impl Iterator<Item = &'a str>,
     ) -> String {
+        // Round 30: a leftover MPD-fifo path (configs written for the old
+        // fifo tap) is meaningless for the PipeWire input — use the default
+        // capture source.
+        if source.ends_with(".fifo") || source.contains('/') {
+            return "auto".to_string();
+        }
         if source.is_empty() || source == "auto" || source == "auto_input"
             || source.ends_with(".monitor")
         {
@@ -382,8 +377,8 @@ impl CavaPane {
         // crossing a bar-width boundary) or the cava config changed
         // (Settings Save). Everything else — pause/resume, modal open/close,
         // tab switches, a resize keeping the same bar count — reuses the
-        // running process: with the pipewire/pulse input methods a respawn
-        // makes the USB DAC stop and renegotiate its ALSA period, which
+        // running process: with the pipewire input a respawn makes the USB
+        // DAC stop and renegotiate its ALSA period, which
         // drops the audio for a moment. Only Stop (app exit) kills the
         // process.
         let mut process: Option<ProcessGuard> = None;
@@ -801,8 +796,8 @@ mod tests {
     }
 
     /// Respawns are the expensive (audio-graph-churning) part of the cava
-    /// visualizer: with the pipewire/pulse input methods killing and
-    /// respawning the process makes the USB DAC stop and renegotiate its
+    /// visualizer: with the pipewire input killing and respawning the
+    /// process makes the USB DAC stop and renegotiate its
     /// ALSA period, dropping the audio for a moment. The process must only
     /// be (re)spawned when it is missing, when the bar count changed (a
     /// resize crossing a bar-width boundary), or when the cava config
@@ -887,6 +882,10 @@ mod tests {
             norm("alsa_input.usb-BurrBrown_from_Texas_Instruments_USB_AUDIO_CODEC-00.analog-stereo"),
             "alsa_input.usb-BurrBrown_from_Texas_Instruments_USB_AUDIO_CODEC-00.analog-stereo"
         );
+        // Round 30: a leftover MPD-fifo path falls back to the PipeWire
+        // default capture source.
+        assert_eq!(norm("/tmp/mpd-cava.fifo"), "auto");
+        assert_eq!(norm("mpd-cava.fifo"), "auto");
     }
 
     /// A deferred start while paused (or with a modal open) is dropped
