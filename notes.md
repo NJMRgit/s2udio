@@ -1,3 +1,21 @@
+# Notes for the container agent — round 30 MERGED to main (2026-08-12)
+
+## ROUND 30 MERGED to main (2026-08-12) — host push
+
+Round 30 (cava is PipeWire-only — FIFO input removed) plus the three
+host-validated follow-ups are now **the production `master`**
+(`NJMRgit/s2udio` @ `bc6e69f`, clean buildable subset — 15 files):
+follow-ups = persist the settings panel's "show virtual devices" toggle
+(state.ron, serde-default off), gate every virtual PipeWire node (KDE
+split-sink monitors + Easy Effects) with that toggle, and the cava
+device row stepper interaction (Enter/d/right focuses the [<] [>]
+controls, a/left + d/right cycle, Esc reverts; d/right on any stepper
+row enters adjust mode). Host-validated on master: `cargo test
+--release` **1367/1367**, warnings 3 baseline. The full tree lives on
+this private repo's `working` branch @ `b8b6d35`. Live: the installed
+binary is the round-30 build (FIFO gone from the settings panel).
+
+---
 # Notes for the container agent — round 30 IMPLEMENTED host-side (2026-08-12)
 
 ## ROUND 30 — remove the cava FIFO input (PipeWire only) (2026-08-12) — committed on `working`
