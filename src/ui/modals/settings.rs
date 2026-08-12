@@ -1048,17 +1048,16 @@ impl SettingsModal {
         self.cava_pending.waves
     }
 
-    /// The nodes currently offered to the device row. Sink monitors
-    /// (`X.monitor`) are the visualizer's bread and butter — capturing what
-    /// a sink plays — so they are always offered; the "show virtual
-    /// devices" toggle only gates non-monitor virtual sources (Easy
-    /// Effects' processing source).
+    /// The nodes currently offered to the device row. The "show virtual
+    /// devices" toggle gates every virtual PipeWire node — the KDE
+    /// split-sink monitors (`Media.monitor` etc.) and Easy Effects (sink
+    /// monitor + processing source) — so off offers only real hardware
+    /// capture points (plus "auto"); on offers everything. Non-virtual
+    /// nodes are always offered.
     fn visible_nodes(&self) -> Vec<PwNode> {
         self.nodes
             .iter()
-            .filter(|n| {
-                self.ui_pending.show_virtual_devices || !n.is_virtual || n.name.ends_with(".monitor")
-            })
+            .filter(|n| self.ui_pending.show_virtual_devices || !n.is_virtual)
             .cloned()
             .collect()
     }
@@ -3031,7 +3030,7 @@ Source #165
     /// visualizer's job); the "show virtual devices" toggle only gates
     /// non-monitor virtual sources.
     #[test]
-    fn virtual_monitors_are_always_offered() {
+    fn virtual_devices_toggle_gates_every_virtual_node() {
         let ctx = crate::tests::fixtures::ctx(
             (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
             (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
@@ -3054,12 +3053,20 @@ Source #165
         modal.ui_pending.show_virtual_devices = false;
         let visible: Vec<String> =
             modal.visible_nodes().into_iter().map(|n| n.name).collect();
-        assert_eq!(visible, vec!["auto", "Media.monitor"], "monitors stay offered");
+        assert_eq!(
+            visible,
+            vec!["auto"],
+            "off offers only real (non-virtual) capture points"
+        );
 
         modal.ui_pending.show_virtual_devices = true;
         let visible: Vec<String> =
             modal.visible_nodes().into_iter().map(|n| n.name).collect();
-        assert_eq!(visible, vec!["auto", "Media.monitor", "easyeffects_source"]);
+        assert_eq!(
+            visible,
+            vec!["auto", "Media.monitor", "easyeffects_source"],
+            "on offers the virtual sink monitor and source too"
+        );
     }
 
     #[test]
