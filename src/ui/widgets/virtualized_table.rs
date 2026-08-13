@@ -6,7 +6,7 @@ use ratatui::{
     widgets::{Row, StatefulWidget, Table, TableState},
 };
 
-use crate::ui::dirstack::DirState;
+use crate::ui::dirstack::{DirState, ScrollingState};
 
 /// A simple wrapper around ratatui's Table widget which virtualizes the rows
 /// iterator to only materialize the rows necessary for rendering. This is why
@@ -100,8 +100,14 @@ where
 
         StatefulWidget::render(table, area, buf, state.as_render_state_ref());
 
-        // Restore the original state
+        // Restore the original state. The offset is the authoritative
+        // viewport start: a viewport-only wheel scroll moves it
+        // independently of the selection, so restoring via `DirState::select`
+        // (which re-applies the scrolloff clamp) would pull the offset back
+        // and undo that scroll — restore the raw selection without
+        // scrolling.
         *state.inner.offset_mut() = original_offset;
-        state.select(original_selected, 0);
+        state.inner.select_scrolling(original_selected);
+        state.scrollbar_state = state.scrollbar_state.position(original_offset);
     }
 }
