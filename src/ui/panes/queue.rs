@@ -657,14 +657,16 @@ impl Pane for QueuePane {
                 .or(Some(0));
             self.queue.select_idx_opt(to_select, usize::MAX);
             self.should_center_cursor_on_current = false;
-        } else {
-            let to_select = self
-                .queue
-                .selected_with_idx()
-                .or(ctx.find_current_song_in_queue())
-                .map(|v| v.0)
-                .or(Some(0));
-            self.queue.select_idx_opt(to_select, usize::MAX);
+        } else if self
+            .queue
+            .selected_with_idx()
+            .is_none_or(|(sel, _)| sel >= self.queue.items.len())
+        {
+            // Round 32: re-shows (tab switches) keep the user's selection
+            // and scroll position — only land somewhere when the selection
+            // fell out of bounds (the queue was reloaded underneath).
+            let to_select = ctx.find_current_song_in_queue().map(|(idx, _)| idx).or(Some(0));
+            self.queue.select_idx_opt(to_select, ctx.config.scrolloff);
         }
 
         // Chapters mode: land the highlight on the currently playing
@@ -1844,10 +1846,14 @@ mod stream_filter_tests {
             "the startup jump is one-shot"
         );
 
-        // A later show keeps the user's selection instead of re-jumping.
+        // A later show keeps the user's selection instead of re-jumping —
+        // and the scroll position (the offset is not re-centered).
         pane.queue.select_idx(3, 0);
         pane.before_show(&ctx).unwrap();
         assert_eq!(pane.queue.state.get_selected(), Some(3), "later shows keep the selection");
+        // select_idx's minimal scroll lands at 3; a re-show must not
+        // re-center it (the old code jumped it to 1).
+        assert_eq!(pane.queue.state.offset(), 3, "later shows keep the scroll position");
     }
 
     #[test]
@@ -2525,6 +2531,62 @@ mod stream_filter_tests {
             "wheel down clamps at the last page"
         );
         assert_eq!(pane.queue.state.get_selected(), Some(0), "the highlight never moved");
+    }
+
+    /// Regression (host round-32 follow-up): a viewport-only wheel scroll
+    /// must keep working after renders — production renders after every
+    /// wheel event, and the render previously restored the state through
+    /// `DirState::select`, which re-applied the scrolloff clamp and pulled
+    /// the offset back the moment the selection reached the top/bottom row
+    /// of the window. With the selection pinned at 0 the wheel must still
+    /// scroll the whole list (the highlight leaves the visible area).
+    #[test]
+    fn wheel_scrolls_the_viewport_past_the_selection_with_renders_between() {
+        let (app_tx, _app_rx) = crossbeam::channel::unbounded();
+        let mut ctx = crate::tests::fixtures::ctx(
+            (app_tx, _app_rx),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+        );
+        ctx.queue = songs(100);
+        let mut pane = QueuePane::new(&ctx);
+
+        let backend = ratatui::backend::TestBackend::new(100, 40);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| pane.render(frame, Rect::new(0, 0, 100, 40), &ctx).unwrap())
+            .unwrap();
+
+        let viewport = pane.areas[Areas::Table].height as usize;
+        // Selection stays on row 0; scroll far past it (the old restore
+        // clamp stopped at offset 0, so the viewport could not move at all).
+        for _ in 0..(viewport * 2) {
+            wheel(&mut pane, 2, MouseEventKind::ScrollDown, &mut ctx);
+            terminal
+                .draw(|frame| pane.render(frame, Rect::new(0, 0, 100, 40), &ctx).unwrap())
+                .unwrap();
+        }
+        assert_eq!(
+            pane.queue.state.get_selected(),
+            Some(0),
+            "the highlight never moved"
+        );
+        assert!(
+            pane.queue.state.offset() > viewport,
+            "the viewport scrolls past the selection (offset {} > viewport {})",
+            pane.queue.state.offset(),
+            viewport
+        );
+
+        // And back up past the selection to the top.
+        for _ in 0..(viewport * 2) {
+            wheel(&mut pane, 2, MouseEventKind::ScrollUp, &mut ctx);
+            terminal
+                .draw(|frame| pane.render(frame, Rect::new(0, 0, 100, 40), &ctx).unwrap())
+                .unwrap();
+        }
+        assert_eq!(pane.queue.state.offset(), 0, "wheel up reaches the top again");
+        assert_eq!(pane.queue.state.get_selected(), Some(0), "the highlight still never moved");
     }
 
     /// Round 32: the wheel scrolls the video list's viewport only — the
