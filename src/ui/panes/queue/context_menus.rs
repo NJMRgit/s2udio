@@ -204,6 +204,24 @@ impl QueuePane {
         // picked (highest range first, so the indices stay valid).
         let marked_ranges: Vec<std::ops::RangeInclusive<usize>> =
             self.queue.marked().ranges().collect();
+        // The selection the playlist actions act on: the marked rows when
+        // any are marked, else the highlighted song — so a single selected
+        // song gets "Add to playlist" / "Create playlist" too (only the
+        // selected tracks land in the playlist; the whole-queue options
+        // below stay separate).
+        let selection_items: Vec<String> = if self.queue.marked().is_empty() {
+            selected_song
+                .as_ref()
+                .map(|song| vec![song.file.clone()])
+                .unwrap_or_default()
+        } else {
+            self.queue
+                .marked()
+                .iter()
+                .filter_map(|idx| self.queue.items.get(*idx))
+                .map(|song| song.file.clone())
+                .collect()
+        };
 
         let modal = MenuModal::new(ctx)
             .list_section(ctx, |mut section| {
@@ -244,25 +262,13 @@ impl QueuePane {
                 // "play without adding to queue" item, radio/stream rows)
                 // never leak into a playlist.
                 let items = self.queue.items.iter().map(|song| song.file.clone()).collect_vec();
-                // Marked rows (when a multi-selection is active): the
-                // selected-tracks playlist actions add exactly those.
-                let marked_items: Vec<String> = self
-                    .queue
-                    .marked()
-                    .iter()
-                    .filter_map(|idx| self.queue.items.get(*idx))
-                    .map(|song| song.file.clone())
-                    .collect();
-                let has_marks = !marked_items.is_empty();
-                let marked_items_add = marked_items.clone();
-                if has_marks {
-                    // "Add tracks to playlist" with a multi-selection: only
-                    // the selected tracks land in the target playlist.
-                    section.add_item("Add selected to playlist", move |ctx| {
+                let selection_add = selection_items.clone();
+                if !selection_items.is_empty() {
+                    section.add_item("Add to playlist", move |ctx| {
                         // The radio favourites playlist is Radio-tab-owned:
                         // it never appears as an add target.
                         let radio_playlist = ctx.config.radio.playlist.clone();
-                        let items = marked_items_add.clone();
+                        let items = selection_add.clone();
                         let playlists = ctx.query_sync(move |client| {
                             Ok(client
                                 .picker_playlists(&radio_playlist)?
@@ -290,8 +296,8 @@ impl QueuePane {
                         );
                         Ok(())
                     });
-                    section.add_item("Create playlist from selected", move |ctx| {
-                        let items = marked_items.clone();
+                    section.add_item("Create playlist", move |ctx| {
+                        let items = selection_items.clone();
                         modal!(
                             ctx,
                             InputModal::new(ctx)

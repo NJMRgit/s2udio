@@ -3632,10 +3632,13 @@ mod nav_tests {
         assert_eq!(modal.adjusting, None);
         assert_eq!(modal.source(), source_before);
 
-        // Esc cancels the whole session and reverts the staged source.
+        // Esc cancels the whole session and reverts the staged source. The
+        // step lands on `expected_next` here too — with no non-virtual
+        // PipeWire sources the capture list is only ["auto"], so stepping
+        // wraps onto itself and cannot move the device.
         modal.handle_raw_key(key(KeyCode::Enter), &mut ctx).unwrap();
         modal.handle_raw_key(key(KeyCode::Char('d')), &mut ctx).unwrap();
-        assert_ne!(modal.source(), source_before, "the device moved while adjusting");
+        assert_eq!(modal.source(), expected_next, "d/→ steps to the next capture source");
         modal.handle_raw_key(key(KeyCode::Esc), &mut ctx).unwrap();
         assert_eq!(modal.adjusting, None);
         assert_eq!(modal.source(), source_before, "Esc reverts the device selection");
