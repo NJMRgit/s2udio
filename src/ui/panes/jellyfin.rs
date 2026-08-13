@@ -394,6 +394,7 @@ impl JellyfinPane {
             .collect();
         if !self.items.is_empty() {
             self.item_list.select(Some(0));
+            *self.item_list.offset_mut() = 0;
         }
     }
 
@@ -1051,7 +1052,9 @@ impl TreeBrowserCore for JellyfinPane {
                 self.rebuild_tree();
                 self.populate_items();
                 self.select_items_item(&prev_id);
+                self.scroll_items_selection_into_view(ctx);
                 self.sync_tree_to_items_cursor();
+                self.scroll_tree_selection_into_view(ctx);
                 self.sync_poster(ctx);
                 ctx.render()?;
             }
@@ -1062,7 +1065,9 @@ impl TreeBrowserCore for JellyfinPane {
                 self.rebuild_tree();
                 self.populate_items();
                 self.select_items_item(&prev_id);
+                self.scroll_items_selection_into_view(ctx);
                 self.sync_tree_to_items_cursor();
+                self.scroll_tree_selection_into_view(ctx);
                 self.sync_poster(ctx);
                 ctx.render()?;
             }
@@ -1697,10 +1702,21 @@ impl TreeBrowserCore for JellyfinPane {
     fn on_items_cursor_moved(&mut self, ctx: &Ctx) -> Result<()> {
         // The tree highlight follows the right-pane cursor, and the info
         // box fetches the newly highlighted item's poster.
+        let before = self.tree_selected();
         self.sync_tree_to_items_cursor();
+        if self.tree_selected() != before {
+            self.scroll_tree_selection_into_view(ctx);
+        }
         self.sync_poster(ctx);
         ctx.render()?;
         Ok(())
+    }
+
+    /// Round 32: the wheel scrolls the viewport only in Queue, Playlists,
+    /// MPD, Help and Radio — Jellyfin is NOT in the round-32 pane list, so
+    /// it keeps the wheel-moves-selection behavior.
+    fn wheel_scrolls_viewport(&self) -> bool {
+        false
     }
 
     fn on_tree_focus(&mut self) {

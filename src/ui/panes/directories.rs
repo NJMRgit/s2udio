@@ -504,6 +504,7 @@ impl DirectoriesPane {
         self.items = items;
         if !self.items.is_empty() {
             self.item_list.select(Some(0));
+            *self.item_list.offset_mut() = 0;
         }
     }
 
@@ -1001,7 +1002,9 @@ impl TreeBrowserCore for DirectoriesPane {
         self.fetch_children(&parent, ctx);
         self.populate_items();
         self.select_items_item(&prev);
+        self.scroll_items_selection_into_view(ctx);
         self.sync_tree_to_items_cursor();
+        self.scroll_tree_selection_into_view(ctx);
         ctx.render()?;
         Ok(())
     }
@@ -1445,6 +1448,7 @@ impl Pane for DirectoriesPane {
                 if is_current {
                     self.populate_items();
                     self.sync_tree_to_items_cursor();
+                    self.scroll_tree_selection_into_view(ctx);
                     ctx.render()?;
                 }
             }
@@ -2021,6 +2025,55 @@ mod tests {
         .unwrap();
         assert!(pane.marked.is_empty());
         assert_eq!(pane.item_list.selected(), Some(1));
+    }
+
+    /// Round 32: the wheel over the MPD items pane scrolls the viewport
+    /// only — the highlight stays put (it may leave the visible area) and
+    /// the offset clamps at the list's ends.
+    #[test]
+    fn wheel_scrolls_the_items_viewport() {
+        let ctx = test_ctx();
+        let mut pane = pane_with_items(&ctx);
+        let backend = ratatui::backend::TestBackend::new(80, 30);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| pane.render(frame, Rect::new(0, 0, 80, 30), &ctx).unwrap())
+            .unwrap();
+        // A short viewport so the 5-entry list overflows it.
+        let area = pane.items_area();
+        pane.set_items_area(Rect::new(area.x, area.y, area.width, 2));
+
+        let selected = pane.item_list.selected();
+        assert_eq!(selected, Some(0), "the list opens on the first row");
+        let wheel = |pane: &mut DirectoriesPane, kind: MouseEventKind| {
+            pane.handle_mouse_event(
+                MouseEvent {
+                    x: area.x + 1,
+                    y: area.y + 1,
+                    kind,
+                    modifiers: KeyModifiers::NONE,
+                },
+                &ctx,
+            )
+            .unwrap();
+        };
+
+        wheel(&mut pane, MouseEventKind::ScrollDown);
+        assert_eq!(pane.item_list.offset(), 1, "wheel down scrolls the viewport");
+        assert_eq!(pane.item_list.selected(), selected, "the highlight does not move");
+        wheel(&mut pane, MouseEventKind::ScrollUp);
+        assert_eq!(pane.item_list.offset(), 0, "wheel up scrolls back");
+        wheel(&mut pane, MouseEventKind::ScrollUp);
+        assert_eq!(pane.item_list.offset(), 0, "wheel up clamps at the top");
+        for _ in 0..20 {
+            wheel(&mut pane, MouseEventKind::ScrollDown);
+        }
+        assert_eq!(
+            pane.item_list.offset(),
+            pane.items.len().saturating_sub(2),
+            "wheel down clamps at the last page"
+        );
+        assert_eq!(pane.item_list.selected(), selected, "the highlight never moved");
     }
 
     #[test]

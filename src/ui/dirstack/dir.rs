@@ -283,6 +283,12 @@ where
         self.state.scroll_up(amount, scrolloff);
     }
 
+    /// Scroll the viewport by `dir * amount` rows without moving the
+    /// selection (round-32 wheel behavior).
+    pub fn scroll_viewport(&mut self, dir: i64, amount: usize) {
+        self.state.scroll_viewport(dir, amount);
+    }
+
     pub fn last(&mut self) {
         self.state.last();
     }
