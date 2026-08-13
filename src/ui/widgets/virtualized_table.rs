@@ -77,7 +77,16 @@ where
         let original_offset = state.offset();
         let original_selected = state.inner.selected();
         *state.inner.offset_mut() = 0;
-        state.select(original_selected.map(|v| v.saturating_sub(original_offset)), 0);
+        // Only highlight the selection when it is inside the visible
+        // window: with a viewport-only wheel scroll the selection may sit
+        // above or below the visible area, and a saturating shift would
+        // wrongly highlight the first/last visible row.
+        state.select(
+            original_selected
+                .and_then(|v| v.checked_sub(original_offset))
+                .filter(|v| *v < viewport_len),
+            0,
+        );
 
         let actual_rows = self
             .items
