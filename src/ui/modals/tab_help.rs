@@ -8,7 +8,7 @@ use ratatui::{
     style::{Modifier, Style},
     symbols::border,
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, ListItem, ListState, Paragraph},
+    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph},
 };
 
 use super::Modal;
@@ -253,8 +253,7 @@ impl Modal for TabHelpModal {
 
         let list_area = body_area;
         ratatui::widgets::StatefulWidget::render(
-            crate::ui::widgets::virtualized_list::VirtualizedList::new(items)
-                .highlight_style(ctx.config.theme.current_item_style),
+            List::new(items).highlight_style(ctx.config.theme.current_item_style),
             list_area,
             frame.buffer_mut(),
             &mut self.list_state,
@@ -297,15 +296,6 @@ impl Modal for TabHelpModal {
                         let current = self.list_state.selected().unwrap_or(0) as i64;
                         let next = (current + dir).clamp(0, self.rows.len() as i64 - 1) as usize;
                         self.list_state.select(Some(next));
-                        // The list renders from its offset, so keyboard
-                        // moves scroll the selection back into view (the
-                        // wheel only scrolls the viewport).
-                        crate::ui::widgets::virtualized_list::scroll_selection_into_view(
-                            &mut self.list_state,
-                            self.rows.len(),
-                            self.list_area.height as usize,
-                            ctx.config.scrolloff,
-                        );
                         ctx.render()?;
                     }
                     return Ok(());
@@ -339,17 +329,13 @@ impl Modal for TabHelpModal {
         if self.list_area.contains(event.into())
             && matches!(event.kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown)
         {
-            // Round 32: the wheel scrolls the viewport only — the
-            // highlight stays put and may leave the visible area.
             let dir = if matches!(event.kind, MouseEventKind::ScrollUp) { -1 } else { 1 };
-            crate::ui::widgets::virtualized_list::scroll_viewport(
-                &mut self.list_state,
-                dir,
-                ctx.config.scroll_amount.max(1),
-                self.rows.len(),
-                self.list_area.height as usize,
-            );
-            ctx.render()?;
+            if !self.rows.is_empty() {
+                let current = self.list_state.selected().unwrap_or(0) as i64;
+                let next = (current + dir).clamp(0, self.rows.len() as i64 - 1) as usize;
+                self.list_state.select(Some(next));
+                ctx.render()?;
+            }
         }
         Ok(())
     }

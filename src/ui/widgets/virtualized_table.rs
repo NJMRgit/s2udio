@@ -6,7 +6,7 @@ use ratatui::{
     widgets::{Row, StatefulWidget, Table, TableState},
 };
 
-use crate::ui::dirstack::{DirState, ScrollingState};
+use crate::ui::dirstack::DirState;
 
 /// A simple wrapper around ratatui's Table widget which virtualizes the rows
 /// iterator to only materialize the rows necessary for rendering. This is why
@@ -77,16 +77,7 @@ where
         let original_offset = state.offset();
         let original_selected = state.inner.selected();
         *state.inner.offset_mut() = 0;
-        // Only highlight the selection when it is inside the visible
-        // window: with a viewport-only wheel scroll the selection may sit
-        // above or below the visible area, and a saturating shift would
-        // wrongly highlight the first/last visible row.
-        state.select(
-            original_selected
-                .and_then(|v| v.checked_sub(original_offset))
-                .filter(|v| *v < viewport_len),
-            0,
-        );
+        state.select(original_selected.map(|v| v.saturating_sub(original_offset)), 0);
 
         let actual_rows = self
             .items
@@ -100,14 +91,8 @@ where
 
         StatefulWidget::render(table, area, buf, state.as_render_state_ref());
 
-        // Restore the original state. The offset is the authoritative
-        // viewport start: a viewport-only wheel scroll moves it
-        // independently of the selection, so restoring via `DirState::select`
-        // (which re-applies the scrolloff clamp) would pull the offset back
-        // and undo that scroll — restore the raw selection without
-        // scrolling.
+        // Restore the original state
         *state.inner.offset_mut() = original_offset;
-        state.inner.select_scrolling(original_selected);
-        state.scrollbar_state = state.scrollbar_state.position(original_offset);
+        state.select(original_selected, 0);
     }
 }

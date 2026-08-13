@@ -205,7 +205,7 @@ impl SearchPane {
         {
             items[hover] = items[hover].clone().style(config.theme.hovered_item_style);
         }
-        let current = crate::ui::widgets::virtualized_list::VirtualizedList::new(items)
+        let current = List::new(items)
             .highlight_style(if hover_idx == directory.state.get_selected() || results_focused {
                 config.theme.hovered_item_style
             } else {
@@ -1207,9 +1207,7 @@ impl Pane for SearchPane {
                     ctx.render()?;
                 }
                 Phase::BrowseResults => {
-                    // Round 32: the wheel scrolls the viewport only — the
-                    // highlight stays put and may leave the visible area.
-                    self.songs_dir.scroll_viewport(1, ctx.config.scroll_amount.max(1));
+                    self.songs_dir.scroll_down(ctx.config.scroll_amount, ctx.config.scrolloff);
                     ctx.render()?;
                 }
             },
@@ -1224,9 +1222,7 @@ impl Pane for SearchPane {
                     ctx.render()?;
                 }
                 Phase::BrowseResults => {
-                    // Round 32: the wheel scrolls the viewport only — the
-                    // highlight stays put and may leave the visible area.
-                    self.songs_dir.scroll_viewport(-1, ctx.config.scroll_amount.max(1));
+                    self.songs_dir.scroll_up(ctx.config.scroll_amount, ctx.config.scrolloff);
                     ctx.render()?;
                 }
             },
