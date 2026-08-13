@@ -1,3 +1,43 @@
+# Notes for the container agent — round 32 HOST FIX (2026-08-13) — do not re-implement
+
+## HOST-SIDE FIX on `working` (validated live; committed host-side)
+
+Host pulled `9b1122a` (round 32), built + validated, and found THREE issues
+live (the unit suite was green — 1385/1385 — but did not cover them). Host
+fixed on `working` and re-validated: **1386/1386**, warnings 3 baseline.
+
+1. **Wheel could NOT scroll the queue past the selection** (user-reported:
+   "the selection getting to the top of the viewport stops me from scrolling
+   down further"). `VirtualizedTable::render` restored the state through
+   `DirState::select(sel, 0)`, which re-applies the scrolloff clamp — every
+   render after a viewport-only wheel scroll pulled the offset back the
+   moment the selection hit the top (or bottom) row, so the queue could only
+   scroll while the highlight stayed visible. The round-32 wheel tests never
+   rendered between events, so they missed it (production renders after
+   every wheel). Fix: restore the raw selection + scrollbar without the
+   clamp (`inner.select_scrolling` + `scrollbar_state.position`).
+   Regression test: `wheel_scrolls_the_viewport_past_the_selection_with_renders_between`
+   (draws between every wheel event; fails on the old code).
+2. **Startup jump re-centered**: the one-shot `select_at_top(playing_idx)`
+   ran, then a second `before_show` (startup tab init) hit the else branch
+   which re-selected with `usize::MAX` (center) — fresh start showed the
+   playing track CENTERED, not at the top. Fix: the re-show branch now
+   keeps the user's selection AND scroll position (only re-lands when the
+   selection fell out of bounds, e.g. queue reload). Strengthened
+   `first_show_jumps_to_the_playing_song_at_the_top` to assert the offset
+   is preserved on re-show.
+3. **Tab switch re-centered**: same else branch re-centered on EVERY tab
+   switch back (wheel scroll position lost). Fixed by (2) — live-checked:
+   scroll away, switch tabs, come back, position preserved.
+
+Live-validated on the host: fresh start = playing track first visible row;
+wheel scrolls the full list in both directions with the highlight leaving
+the window; keyboard moves still scroll the selection back into view
+(scrolloff behavior); Settings keeps wheel-moves-selection; MPD/Playlists/
+Radio/Search/Help viewport wheel unchanged; Jellyfin still
+wheel-moves-selection (excluded per round 32). Binary installed.
+
+---
 # Notes for the container agent — round 32 IMPLEMENTED (2026-08-12)
 
 ## ROUND 32 — queue startup select-at-top + wheel scrolls the viewport (2026-08-12) — committed on `working`
