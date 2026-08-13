@@ -1227,13 +1227,32 @@ impl TreeBrowserCore for DirectoriesPane {
         }
     }
 
+    fn on_select_all(&mut self, ctx: &mut Ctx) -> Result<bool> {
+        let len = self.items_len();
+        if len > 0 {
+            self.marked.mark_all(len);
+            ctx.render()?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
     fn handle_items_left_click(&mut self, row: usize, event: &MouseEvent, ctx: &Ctx) -> Result<()> {
         if row >= self.items_len() {
             return Ok(());
         }
         if event.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) {
+            // Additive selection: the row under the cursor joins the marks
+            // too (a ctrl+click must never drop the initially selected
+            // item), and the clicked row is added without toggling off.
+            if self.marked.is_empty() {
+                if let Some(sel) = self.item_list.selected() {
+                    self.marked.add(sel);
+                }
+            }
+            self.marked.add(row);
             self.item_list.select(Some(row));
-            self.marked.toggle(row);
             self.sync_tree_to_items_cursor();
             ctx.render()?;
         } else if event.modifiers.contains(crossterm::event::KeyModifiers::ALT) {
@@ -1935,7 +1954,8 @@ mod tests {
             .unwrap();
         let inner = pane.items_inner;
 
-        // Plain click on row 2 sets the anchor; ctrl+click row 4 toggles.
+        // Plain click on row 2 sets the anchor; ctrl+click row 4 ADDS to
+        // it (the initially selected row stays marked).
         pane.handle_mouse_event(
             MouseEvent {
                 x: inner.x + 1,
@@ -1956,7 +1976,24 @@ mod tests {
             &ctx,
         )
         .unwrap();
-        assert_eq!(pane.marked.iter().collect::<Vec<_>>(), vec![4]);
+        assert_eq!(
+            pane.marked.iter().collect::<Vec<_>>(),
+            vec![2, 4],
+            "ctrl+click keeps the initially selected row and adds the clicked row"
+        );
+
+        // ctrl+click an unmarked row keeps growing the selection.
+        pane.handle_mouse_event(
+            MouseEvent {
+                x: inner.x + 1,
+                y: inner.y + 3,
+                kind: MouseEventKind::LeftClick,
+                modifiers: KeyModifiers::CONTROL,
+            },
+            &ctx,
+        )
+        .unwrap();
+        assert_eq!(pane.marked.iter().collect::<Vec<_>>(), vec![2, 3, 4]);
 
         // alt+click row 3 ranges from the anchor (2) to 3.
         pane.handle_mouse_event(
@@ -1984,6 +2021,22 @@ mod tests {
         .unwrap();
         assert!(pane.marked.is_empty());
         assert_eq!(pane.item_list.selected(), Some(1));
+    }
+
+    #[test]
+    fn ctrl_a_marks_every_item_of_the_right_pane() {
+        let mut ctx = test_ctx();
+        let mut pane = pane_with_items(&ctx);
+        assert!(pane.marked.is_empty());
+
+        let mut ev = action(vec![Actions::Common(CommonAction::SelectAll)]);
+        pane.handle_action(&mut ev, &mut ctx).unwrap();
+        assert_eq!(pane.marked.iter().collect::<Vec<_>>(), vec![0, 1, 2, 3, 4]);
+
+        // Ctrl+A again keeps everything marked.
+        let mut ev = action(vec![Actions::Common(CommonAction::SelectAll)]);
+        pane.handle_action(&mut ev, &mut ctx).unwrap();
+        assert_eq!(pane.marked.iter().count(), 5);
     }
 
     #[test]

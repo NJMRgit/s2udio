@@ -528,6 +528,13 @@ where
                 self.fetch_data_internal(ctx);
                 ctx.render()?;
             }
+            CommonAction::SelectAll => {
+                let len = self.list().len();
+                if len > 0 {
+                    self.list_mut().state.mark_range(0, len - 1);
+                }
+                ctx.render()?;
+            }
             CommonAction::InvertSelection => {
                 self.list_mut().invert_marked();
 

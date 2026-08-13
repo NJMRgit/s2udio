@@ -445,6 +445,9 @@ impl SearchPane {
                 CommonAction::NextResult => {}
                 CommonAction::PreviousResult => {}
                 CommonAction::Select => {}
+                // Ctrl+A does not apply to the search filter pane (the
+                // results list in the BrowseResults phase handles it).
+                CommonAction::SelectAll => {}
                 CommonAction::SelectDown => {}
                 CommonAction::SelectUp => {}
                 CommonAction::InvertSelection => {}
@@ -661,6 +664,27 @@ impl SearchPane {
         let modal = MenuModal::new(ctx)
             .list_section(ctx, move |mut section| {
                 if !self.songs_dir.items.is_empty() {
+                    // Marked (or the highlighted result) bulk actions first:
+                    // add/replace the queue with exactly the selected rows.
+                    let (_, selected_enqueue) = self.enqueue(false);
+                    if !selected_enqueue.is_empty() {
+                        let enqueue_clone = selected_enqueue.clone();
+                        section.add_item("Add to queue", move |ctx| {
+                            ctx.command(move |client| {
+                                client.enqueue_multiple(enqueue_clone, None, None, false)?;
+                                Ok(())
+                            });
+                            Ok(())
+                        });
+                        let enqueue_clone = selected_enqueue.clone();
+                        section.add_item("Replace queue", move |ctx| {
+                            ctx.command(move |client| {
+                                client.enqueue_multiple(enqueue_clone, None, None, true)?;
+                                Ok(())
+                            });
+                            Ok(())
+                        });
+                    }
                     let (_, enqueue) = self.enqueue(true);
                     if !enqueue.is_empty() {
                         let enqueue_clone = enqueue.clone();
@@ -1072,8 +1096,17 @@ impl Pane for SearchPane {
                     .into();
                 if let Some(idx) = self.songs_dir.state.get_at_rendered_row(clicked_row) {
                     if event.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) {
+                        // Additive selection: the row under the cursor
+                        // joins the marks too (a ctrl+click must never
+                        // drop the initially selected item), and the
+                        // clicked row is added without toggling off.
+                        if self.songs_dir.state.marked.is_empty() {
+                            if let Some(sel) = self.songs_dir.state.get_selected() {
+                                self.songs_dir.state.mark(sel);
+                            }
+                        }
+                        self.songs_dir.state.mark(idx);
                         self.songs_dir.select_idx(idx, ctx.config.scrolloff);
-                        self.songs_dir.state.toggle_mark(idx);
                     } else if event.modifiers.contains(crossterm::event::KeyModifiers::ALT) {
                         if self.songs_dir.state.mark_anchor().is_none() {
                             self.songs_dir.state.set_mark_anchor(idx);
@@ -1279,10 +1312,19 @@ mod tests {
 
     use super::{BrowserArea, Phase, SearchPane};
     use crate::{
+        config::keys::CommonAction,
         mpd::commands::Song,
-        shared::mouse_event::{MouseEvent, MouseEventKind},
+        shared::{
+            keys::{ActionEvent, Actions},
+            mouse_event::{MouseEvent, MouseEventKind},
+        },
         ui::{dirstack::Dir, panes::Pane},
     };
+
+    fn act(pane: &mut SearchPane, ctx: &mut crate::ctx::Ctx, actions: Vec<Actions>) {
+        let mut event = ActionEvent::from(std::sync::Arc::new(actions));
+        pane.handle_action(&mut event, ctx).unwrap();
+    }
 
     fn songs() -> Vec<Song> {
         (0..5)
@@ -1466,24 +1508,59 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_click_toggles_and_plain_click_clears_the_marks() {
+    fn ctrl_click_adds_to_the_selection_and_plain_click_clears() {
         let mut ctx = make_ctx();
         let mut pane = rendered_pane(&mut ctx);
         pane.songs_dir = Dir::new(songs());
         pane.phase = Phase::BrowseResults;
         let current = pane.column_areas[BrowserArea::Current];
 
-        // ctrl+click marks rows 0 and 2.
-        click_row(&mut pane, current, 0, KeyModifiers::CONTROL, &mut ctx);
+        // A plain click highlights row 0; ctrl+click rows 2 and 4 ADD to
+        // it (the initially selected row stays marked).
+        click_row(&mut pane, current, 0, KeyModifiers::NONE, &mut ctx);
         click_row(&mut pane, current, 2, KeyModifiers::CONTROL, &mut ctx);
-        assert_eq!(marks(&pane), vec![0, 2]);
-        // ctrl+click on an already-marked row unmarks it.
+        click_row(&mut pane, current, 4, KeyModifiers::CONTROL, &mut ctx);
+        assert_eq!(
+            marks(&pane),
+            vec![0, 2, 4],
+            "ctrl+click keeps the initially selected row and adds the clicked rows"
+        );
+        // ctrl+click on an already-marked row keeps it (pure additive).
         click_row(&mut pane, current, 0, KeyModifiers::CONTROL, &mut ctx);
-        assert_eq!(marks(&pane), vec![2]);
+        assert_eq!(marks(&pane), vec![0, 2, 4]);
         // A plain click on a different row clears the whole selection.
         click_row(&mut pane, current, 3, KeyModifiers::NONE, &mut ctx);
         assert!(marks(&pane).is_empty(), "plain click clears the marks");
         assert_eq!(pane.songs_dir.state.get_selected(), Some(3));
+    }
+
+    #[test]
+    fn ctrl_a_marks_every_result_in_browse_results_phase() {
+        let mut ctx = make_ctx();
+        let mut pane = rendered_pane(&mut ctx);
+        pane.songs_dir = Dir::new(songs());
+        pane.phase = Phase::BrowseResults;
+
+        act(&mut pane, &mut ctx, vec![Actions::Common(CommonAction::SelectAll)]);
+        assert_eq!(marks(&pane), (0..5).collect::<Vec<_>>());
+
+        // Ctrl+A again keeps everything marked.
+        act(&mut pane, &mut ctx, vec![Actions::Common(CommonAction::SelectAll)]);
+        assert_eq!(marks(&pane).len(), 5);
+    }
+
+    #[test]
+    fn ctrl_a_in_the_filter_phase_is_a_no_op() {
+        let mut ctx = make_ctx();
+        let mut pane = rendered_pane(&mut ctx);
+        pane.songs_dir = Dir::new(songs());
+        pane.phase = Phase::Search;
+
+        act(&mut pane, &mut ctx, vec![Actions::Common(CommonAction::SelectAll)]);
+        assert!(
+            pane.songs_dir.marked().is_empty(),
+            "the MPD search filter pane is excluded from ctrl+a"
+        );
     }
 
     #[test]
@@ -1512,10 +1589,10 @@ mod tests {
         pane.phase = Phase::BrowseResults;
         let current = pane.column_areas[BrowserArea::Current];
 
-        // ctrl+click rows 2 and 4: both marked; the cursor lands on row 4.
-        for row in [2u16, 4] {
-            click_row(&mut pane, current, row, KeyModifiers::CONTROL, &mut ctx);
-        }
+        // Plain-click row 2, then ctrl+click row 4: both marked (the
+        // initially selected row stays marked); the cursor lands on row 4.
+        click_row(&mut pane, current, 2, KeyModifiers::NONE, &mut ctx);
+        click_row(&mut pane, current, 4, KeyModifiers::CONTROL, &mut ctx);
         assert_eq!(marks(&pane), vec![2, 4]);
 
         // The marked row that is not the cursor renders with the lighter
