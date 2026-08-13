@@ -118,14 +118,23 @@ the user's decisions win. Locked in across sessions (details in the docs):
 
 ## Current state (verified)
 
-- **Master**: `NJMRgit/s2udio` **master @ `bc6e69f`** (clean buildable
-  subset) — round 30 merged 2026-08-12 (rounds 28/28b/29 on top of
-  `898a5bb`); validated **1364/1364**, warnings 3 baseline. Round 31
-  (multi-select Ctrl+A / additive ctrl+click / bulk actions) is committed
-  on `working` and not yet merged to master.
-- **Branch**: `working` (tracks `s2udio-working/working`), at `c76fae2` +
-  **round 31 committed on top** (host-implemented; **1377/1377**
-  host-validated 2026-08-12, warnings 3 baseline, binary build clean).
+- **Master**: `NJMRgit/s2udio` **master @ `4ff3b3d`** (clean buildable
+  subset) — rounds 31 + 32 + the round-32 host follow-up merged 2026-08-13
+  (five clean-subset commits on top of round-30 `bc6e69f`); validated
+  **1386/1386**, warnings 3 baseline. Tree = clean subset (14 paths; no
+  docs/agent files).
+- **Branch**: `working` (tracks `s2udio-working/working`), at `0b1a22d`
+  + doc updates (round-32 host follow-up on top of round 32; **1386/1386**
+  host-validated 2026-08-13, warnings 3 baseline, binary installed).
+  **Round 32 host follow-up (2026-08-13, host-implemented)**: (1) the
+  queue wheel can now scroll the viewport past the selection —
+  `VirtualizedTable::render` restored state via `DirState::select` which
+  re-applied the scrolloff clamp (the wheel stopped the moment the
+  highlight hit the top/bottom row); restore now bypasses the clamp,
+  regression test `wheel_scrolls_the_viewport_past_the_selection_with_renders_between`;
+  (2) the queue's re-show branch no longer re-centers — startup keeps the
+  playing track as the FIRST visible row (`select_at_top` survives) and
+  tab switches preserve the user's selection AND scroll position.
   **Round 31 (2026-08-12, host-implemented)**: multi-select UX — new
   `CommonAction::SelectAll` bound to **Ctrl+A** (navigation defaults +
   `assets/example_config.ron` + the live `~/.config/s2udio/config.ron`)
