@@ -1,3 +1,14 @@
+## MERGED to main (host, 2026-08-13)
+
+Production `master` (`NJMRgit/s2udio`) carried to **`4ff3b3d`**: rounds 31
+(multi-select) + 32 (wheel viewport scroll + queue startup) + the round-32
+host follow-up (queue wheel block / startup centering / tab-switch
+re-centering — see the HOST FIX entry above). Master validated
+**1386/1386**, warnings 3 baseline, clean subset (14 paths). `working`
+pushed to `s2udio-working` at `0bfae6a`. No further action needed from
+isodev for these rounds.
+
+---
 # Notes for the container agent — round 32 HOST FIX (2026-08-13) — do not re-implement
 
 ## HOST-SIDE FIX on `working` (validated live; committed host-side)
