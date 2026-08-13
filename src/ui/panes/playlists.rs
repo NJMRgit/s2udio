@@ -272,7 +272,7 @@ impl PlaylistsPane {
         );
         let items = playlist_items(&items_snapshot, &marked, hover_idx, ctx, &self.playlist_kinds);
         ratatui::widgets::StatefulWidget::render(
-            List::new(items)
+            crate::ui::widgets::virtualized_list::VirtualizedList::new(items)
                 .highlight_style(if hover_idx == state.get_selected() || focused {
                     ctx.config.theme.hovered_item_style
                 } else {
@@ -333,7 +333,7 @@ impl PlaylistsPane {
                 &self.playlist_kinds,
             );
             ratatui::widgets::StatefulWidget::render(
-                List::new(items)
+                crate::ui::widgets::virtualized_list::VirtualizedList::new(items)
                     .highlight_style(if hover_idx == state.get_selected() {
                         ctx.config.theme.hovered_item_style
                     } else {
@@ -366,7 +366,7 @@ impl PlaylistsPane {
             // its selection renders with the hover highlight so the active
             // pane is visible while navigating.
             ratatui::widgets::StatefulWidget::render(
-                List::new(items)
+                crate::ui::widgets::virtualized_list::VirtualizedList::new(items)
                     .highlight_style(if hover_idx == state.get_selected() || !at_root {
                         ctx.config.theme.hovered_item_style
                     } else {
@@ -1152,13 +1152,13 @@ impl Pane for PlaylistsPane {
                     }
                 }
                 MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
-                    let dir = self.stack.root_mut();
-                    if matches!(event.kind, MouseEventKind::ScrollUp) {
-                        dir.scroll_up(ctx.config.scroll_amount, ctx.config.scrolloff);
-                    } else {
-                        dir.scroll_down(ctx.config.scroll_amount, ctx.config.scrolloff);
-                    }
-                    SongListCore::fetch_data_internal(self, ctx)?;
+                    // Round 32: the wheel scrolls the viewport only — the
+                    // highlight stays put and may leave the visible area.
+                    // The songs pane mirrors the highlighted playlist; a
+                    // viewport-only scroll never changes the selection, so
+                    // no refetch is needed.
+                    let dir = if matches!(event.kind, MouseEventKind::ScrollUp) { -1 } else { 1 };
+                    self.stack.root_mut().scroll_viewport(dir, ctx.config.scroll_amount.max(1));
                     ctx.render()?;
                 }
                 _ => {}
@@ -1248,12 +1248,10 @@ impl Pane for PlaylistsPane {
                     ctx.render()?;
                 }
                 MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
-                    let dir = self.stack.current_mut();
-                    if matches!(event.kind, MouseEventKind::ScrollUp) {
-                        dir.scroll_up(ctx.config.scroll_amount, ctx.config.scrolloff);
-                    } else {
-                        dir.scroll_down(ctx.config.scroll_amount, ctx.config.scrolloff);
-                    }
+                    // Round 32: the wheel scrolls the viewport only — the
+                    // highlight stays put and may leave the visible area.
+                    let dir = if matches!(event.kind, MouseEventKind::ScrollUp) { -1 } else { 1 };
+                    self.stack.current_mut().scroll_viewport(dir, ctx.config.scroll_amount.max(1));
                     ctx.render()?;
                 }
                 _ => {}

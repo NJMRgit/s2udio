@@ -10,7 +10,7 @@ use ratatui::{
     prelude::{Constraint, Layout, Rect},
     style::Modifier,
     text::Line,
-    widgets::{List, ListItem, StatefulWidget},
+    widgets::{ListItem, StatefulWidget},
 };
 
 use unicode_width::UnicodeWidthStr;
@@ -138,7 +138,7 @@ impl QueuePane {
             })
             .collect();
 
-        let list = List::new(items)
+        let list = crate::ui::widgets::virtualized_list::VirtualizedList::new(items)
             .highlight_style(if hover_idx == self.video_state.selected() {
                 ctx.config.theme.hovered_item_style
             } else {
@@ -319,8 +319,25 @@ impl QueuePane {
         Ok(())
     }
 
+    /// Round 32: the wheel scrolls the video list's viewport only — the
+    /// highlight stays put and may leave the visible area. The offset
+    /// clamps at the list's ends.
+    pub(super) fn video_scroll_viewport(&mut self, dir: i64, ctx: &Ctx) -> Result<()> {
+        crate::ui::widgets::virtualized_list::scroll_viewport(
+            &mut self.video_state,
+            dir,
+            ctx.config.scroll_amount.max(1),
+            self.video_items_len,
+            self.areas[Areas::Table].height as usize,
+        );
+        ctx.render()?;
+        Ok(())
+    }
+
     /// Move the video list highlight by `dir` rows (clamped). The first
     /// move from no selection highlights the first entry (menu convention).
+    /// The list renders from its offset, so the move also scrolls the
+    /// selection back into view (the wheel only scrolls the viewport).
     pub(super) fn video_move(&mut self, dir: i64, ctx: &Ctx) -> Result<()> {
         let len = self.video_items_len;
         if len == 0 {
@@ -328,12 +345,24 @@ impl QueuePane {
         }
         let Some(current) = self.video_state.selected() else {
             self.video_state.select(Some(0));
+            crate::ui::widgets::virtualized_list::scroll_selection_into_view(
+                &mut self.video_state,
+                len,
+                self.areas[Areas::Table].height as usize,
+                ctx.config.scrolloff,
+            );
             ctx.render()?;
             return Ok(());
         };
         let new = ((current as i64) + dir).clamp(0, len as i64 - 1) as usize;
         if new != current {
             self.video_state.select(Some(new));
+            crate::ui::widgets::virtualized_list::scroll_selection_into_view(
+                &mut self.video_state,
+                len,
+                self.areas[Areas::Table].height as usize,
+                ctx.config.scrolloff,
+            );
             ctx.render()?;
         }
         Ok(())
@@ -354,7 +383,9 @@ impl QueuePane {
         self.video_move(dir * viewport, ctx)
     }
 
-    /// Highlight the playlist entry at `idx` (clamped to the list).
+    /// Highlight the playlist entry at `idx` (clamped to the list) and
+    /// scroll it into view (keyboard Home/End; the wheel only scrolls the
+    /// viewport).
     pub(super) fn video_jump(&mut self, idx: usize, ctx: &Ctx) -> Result<()> {
         let len = self.video_items_len;
         if len == 0 {
@@ -363,6 +394,12 @@ impl QueuePane {
         let idx = idx.min(len - 1);
         if self.video_state.selected() != Some(idx) {
             self.video_state.select(Some(idx));
+            crate::ui::widgets::virtualized_list::scroll_selection_into_view(
+                &mut self.video_state,
+                len,
+                self.areas[Areas::Table].height as usize,
+                ctx.config.scrolloff,
+            );
             ctx.render()?;
         }
         Ok(())

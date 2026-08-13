@@ -1,3 +1,59 @@
+# Notes for the container agent — round 32 IMPLEMENTED (2026-08-12)
+
+## ROUND 32 — queue startup select-at-top + wheel scrolls the viewport (2026-08-12) — committed on `working`
+
+**User feedback (2026-08-12) →
+[FEEDBACK-2026-08-12-5.md](FEEDBACK-2026-08-12-5.md).** Two items:
+
+1. **Queue startup**: on first show, highlight the currently playing track
+   and position it as the FIRST visible row via `DirState::select_at_top`
+   (offset = playing index, clamped at list end) — one-shot only, later tab
+   switches keep the user's selection/scroll. **Already on `working`**
+   (commit `2be838c`, 2026-08-11: `startup_jump_done` + `select_at_top` +
+   the `first_show_jumps_to_the_playing_song_at_the_top` test) — verified,
+   no further code needed.
+2. **Wheel scrolls the viewport, not the selection** — implemented across
+   Queue (Audio/Video/Chapters), Playlists (root + songs), MPD (tree,
+   items, search results), Help and Radio (regions + stations); Settings
+   keeps today's wheel behavior.
+
+### Implementation
+
+- New shared widget **`VirtualizedList`** (`src/ui/widgets/virtualized_list.rs`,
+  mirroring the queue's `VirtualizedTable`): renders a ratatui `List` from
+  its state's offset, showing only the visible slice and shifting the
+  selection by -offset — so the highlight only appears when the selected
+  row is inside the window. This is required because ratatui's `List`
+  render forces the selected item visible, which would undo a viewport-only
+  scroll. Also fixes `VirtualizedTable` to not wrongly highlight the
+  first/last visible row when the selection sits above/below the window.
+- **Viewport scroll helpers**: `DirState::scroll_viewport(dir, amount)`
+  (+ `Dir` wrapper) for offset-only scrolling (no selection clamp, clamped
+  at the ends), and `virtualized_list::scroll_viewport` /
+  `scroll_selection_into_view` for `ListState`-based lists.
+- **Wheel arms** in Queue (audio/video/chapters), Playlists, MPD
+  (tree/items via the shared tree-browser), Search results, Help, Radio
+  now call the viewport-scroll helpers — the highlight stays put and may
+  leave the visible area.
+- **Keyboard moves keep the old scrolloff behavior**: selection moves
+  (w/s/arrows, Home/End, PageUp/Down, cursor-follow syncs, list
+  repopulation) scroll the selection back into view explicitly, since the
+  virtualized render no longer auto-scrolls. Offsets reset to 0 when lists
+  repopulate (MPD/Jellyfin `populate_items`, radio `rebuild_regions` /
+  `populate_stations`, etc.).
+- **Jellyfin is NOT in the round-32 pane list** (Queue, Playlists, MPD,
+  Help, Radio): the shared tree-browser wheel arms branch on a new
+  `TreeBrowserCore::wheel_scrolls_viewport()` hook (default true; Jellyfin
+  overrides false) so Jellyfin keeps wheel-moves-selection.
+- The search *filter* pane (a form of inputs, like Settings) keeps its
+  wheel behavior; only the search *results* list scrolls the viewport.
+
+**1385/1385**, warnings 3 baseline. Wheel tests updated to assert
+viewport-scroll (offset moves, highlight stays); new tests: playlists list
+wheel, MPD items wheel, radio regions+stations wheel, plus
+`virtualized_list` unit tests. Host: validate + live-check on `working`.
+
+---
 # Notes for the container agent — round 32 FILED (host)
 
 ## ROUND 32 — FILED for isodev (2026-08-12) — do not implement host-side

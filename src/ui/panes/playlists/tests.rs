@@ -1048,6 +1048,75 @@ mod info_scroll {
             "wheel up scrolls back from the jumped position"
         );
     }
+
+    /// Round 32: the wheel over the playlist list scrolls the viewport
+    /// only — the highlight stays put (it may leave the visible area) and
+    /// the offset clamps at the list's ends.
+    #[test]
+    fn wheel_scrolls_the_playlist_list_viewport() {
+        let (app_tx, app_rx) = crossbeam::channel::unbounded();
+        let mut ctx = crate::tests::fixtures::ctx(
+            (app_tx, app_rx),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+        );
+        let mut pane = PlaylistsPane::new(&ctx);
+        pane.on_query_finished(
+            super::super::INIT,
+            MpdQueryResult::DirOrSong {
+                data: (0..30).map(|i| dir(&format!("pl{i}"))).collect(),
+                path: None,
+            },
+            true,
+            &ctx,
+        )
+        .unwrap();
+        pane.stack.current_mut().select_idx(0, 0);
+        render_pane(&mut pane, &ctx);
+
+        let selected = pane.stack.current().selected().cloned();
+        assert_eq!(selected, Some(dir("pl0")), "the list opens on the first row");
+        let area = pane.playlists_area;
+
+        let wheel = |pane: &mut PlaylistsPane, kind: MouseEventKind| {
+            pane.handle_mouse_event(
+                MouseEvent {
+                    x: area.x + 5,
+                    y: area.y + 2,
+                    kind,
+                    modifiers: KeyModifiers::NONE,
+                },
+                &ctx,
+            )
+            .unwrap();
+        };
+
+        wheel(&mut pane, MouseEventKind::ScrollDown);
+        assert_eq!(pane.stack.current().state.offset(), 1, "wheel down scrolls the viewport");
+        assert_eq!(
+            pane.stack.current().selected(),
+            Some(dir("pl0")).as_ref(),
+            "the highlight does not move"
+        );
+        wheel(&mut pane, MouseEventKind::ScrollUp);
+        assert_eq!(pane.stack.current().state.offset(), 0, "wheel up scrolls back");
+        wheel(&mut pane, MouseEventKind::ScrollUp);
+        assert_eq!(pane.stack.current().state.offset(), 0, "wheel up clamps at the top");
+        for _ in 0..100 {
+            wheel(&mut pane, MouseEventKind::ScrollDown);
+        }
+        let viewport = pane.stack.current().state.viewport_len().unwrap_or(area.height as usize);
+        assert_eq!(
+            pane.stack.current().state.offset(),
+            pane.stack.current().items.len().saturating_sub(viewport),
+            "wheel down clamps at the last page"
+        );
+        assert_eq!(
+            pane.stack.current().selected(),
+            Some(dir("pl0")).as_ref(),
+            "the highlight never moved"
+        );
+    }
 }
 
 /// Multi-selection in the songs pane (the playlists tab's right pane):
