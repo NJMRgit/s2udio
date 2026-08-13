@@ -11,6 +11,7 @@ pub mod sub_tab_bar;
 pub mod scrolling_line;
 pub mod wrap;
 pub mod tabs;
+pub mod virtualized_list;
 pub mod virtualized_table;
 pub mod volume;
 

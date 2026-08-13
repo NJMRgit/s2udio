@@ -282,6 +282,34 @@ impl<T: ScrollingState> DirState<T> {
         }
     }
 
+    /// Scroll the viewport by `dir * amount` rows without moving the
+    /// selection (round-32 wheel behavior: the wheel scrolls the
+    /// viewport, not the selection — the selection may leave the visible
+    /// area). The offset clamps at the list's ends.
+    pub fn scroll_viewport(&mut self, dir: i64, amount: usize) {
+        let Some(viewport_len) = self.viewport_len else {
+            return;
+        };
+        let Some(content_len) = self.content_len else {
+            return;
+        };
+
+        let old_offset = self.offset();
+        let max_offset = content_len.saturating_sub(viewport_len);
+        let new_offset = if dir < 0 {
+            old_offset.saturating_sub(amount)
+        } else {
+            old_offset.saturating_add(amount).min(max_offset)
+        };
+
+        if new_offset == old_offset {
+            return;
+        }
+
+        self.inner.set_offset(new_offset);
+        self.scrollbar_state = self.scrollbar_state.position(new_offset);
+    }
+
     pub fn scroll_up(&mut self, amount: usize, scrolloff: usize) {
         let Some(_content_len) = self.content_len else {
             return;

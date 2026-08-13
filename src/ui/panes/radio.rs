@@ -386,6 +386,7 @@ impl RadioPane {
             }
         }
         self.region_list.select(if self.regions.is_empty() { None } else { Some(0) });
+        *self.region_list.offset_mut() = 0;
     }
 
     /// Populate the right station list for a region, loading data lazily.
@@ -393,6 +394,15 @@ impl RadioPane {
         self.selected = Some(kind.clone());
         self.ensure_region_data(kind, ctx);
         self.populate_stations(kind);
+        // The fresh list starts at the top; scroll the restored station
+        // into view (the wheel only scrolls the viewport, so selection
+        // moves restore the standard scrolloff behavior).
+        crate::ui::widgets::virtualized_list::scroll_selection_into_view(
+            &mut self.station_list,
+            self.stations.len(),
+            (self.stations_area.height as usize) / 2,
+            ctx.config.scrolloff,
+        );
         ctx.render()?;
         Ok(())
     }
@@ -537,6 +547,9 @@ impl RadioPane {
                 .unwrap_or_else(|| previous_idx.min(self.stations.len().saturating_sub(1)));
             self.station_list.select(Some(idx));
         }
+        // A fresh list starts at the top; the restored selection is
+        // scrolled into view when it survives.
+        *self.station_list.offset_mut() = 0;
     }
 
     /// Expand (or collapse) a tree region. Expanding a country fetches its
@@ -1420,8 +1433,17 @@ impl Pane for RadioPane {
                     }
                 }
                 MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                    // Round 32: the wheel scrolls the viewport only — the
+                    // highlight stays put and may leave the visible area.
                     let dir = if matches!(event.kind, MouseEventKind::ScrollUp) { -1 } else { 1 };
-                    self.move_region(dir, ctx)?;
+                    crate::ui::widgets::virtualized_list::scroll_viewport(
+                        &mut self.region_list,
+                        dir,
+                        ctx.config.scroll_amount.max(1),
+                        self.regions.len(),
+                        self.regions_area.height as usize,
+                    );
+                    ctx.render()?;
                 }
                 _ => {}
             }
@@ -1454,8 +1476,18 @@ impl Pane for RadioPane {
                     }
                 }
                 MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                    // Round 32: the wheel scrolls the viewport only — the
+                    // highlight stays put and may leave the visible area
+                    // (stations are two-line rows).
                     let dir = if matches!(event.kind, MouseEventKind::ScrollUp) { -1 } else { 1 };
-                    self.move_station(dir, ctx)?;
+                    crate::ui::widgets::virtualized_list::scroll_viewport(
+                        &mut self.station_list,
+                        dir,
+                        ctx.config.scroll_amount.max(1),
+                        self.stations.len(),
+                        (self.stations_area.height as usize) / 2,
+                    );
+                    ctx.render()?;
                 }
                 _ => {}
             }
@@ -2382,7 +2414,7 @@ mod tests {
 
 #[cfg(test)]
 mod paste_play_tests {
-    use super::RadioPane;
+    use super::{RadioPane, RadioStation, RegionKind, StationRow};
     use crate::{
         MpdQueryResult,
         config::tabs::TreeBrowserArgs,
@@ -2463,5 +2495,100 @@ mod paste_play_tests {
         let (regions, stations) = pane.split_tree(ratatui::prelude::Rect::new(0, 0, 160, 30));
         assert_eq!(regions.width, 48, "radio keeps its 30% region tree (160*30%)");
         assert_eq!(stations.width, 112, "the stations pane gets the rest");
+    }
+
+    /// Round 32: the wheel over the regions tree and the stations list
+    /// scrolls the viewport only — the highlight stays put (it may leave
+    /// the visible area) and the offsets clamp at the lists' ends.
+    #[test]
+    fn wheel_scrolls_the_regions_and_stations_viewports() {
+        use ratatui::backend::TestBackend;
+        use ratatui::prelude::Rect;
+
+        use crate::shared::mouse_event::{MouseEvent, MouseEventKind};
+
+        let (app_tx, app_rx) = crossbeam::channel::unbounded();
+        let (work_tx, work_rx) = crossbeam::channel::unbounded();
+        let (client_tx, client_rx) = crossbeam::channel::unbounded();
+        // Keep the receivers alive for the whole test: render and pane
+        // actions send render/work/client requests that must never fail.
+        std::mem::forget(app_rx);
+        std::mem::forget(work_rx);
+        std::mem::forget(client_rx);
+        let mut pane_ctx = ctx(
+            (app_tx, crossbeam::channel::unbounded().1),
+            (work_tx, crossbeam::channel::unbounded().1),
+            (client_tx, crossbeam::channel::unbounded().1),
+        );
+        let mut pane = RadioPane::new(&pane_ctx);
+        // A populated regions tree + a long favourites station list so
+        // both viewports have room to scroll.
+        pane.regions = (0..40)
+            .map(|i| crate::ui::panes::radio::RegionRow {
+                kind: RegionKind::Favourites,
+                label: format!("Region {i}"),
+                depth: 0,
+                expandable: false,
+                expanded: false,
+            })
+            .collect();
+        pane.region_list.select(Some(0));
+        pane.stations = (0..40)
+            .map(|i| StationRow::Favourite(RadioStation {
+                name: format!("S{i}"),
+                url: format!("http://s{i}"),
+            }))
+            .collect();
+        pane.station_list.select(Some(0));
+
+        let backend = TestBackend::new(160, 30);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| pane.render(frame, Rect::new(0, 0, 160, 30), &pane_ctx).unwrap())
+            .unwrap();
+        let regions_area = pane.regions_area;
+        let stations_area = pane.stations_area;
+
+        let region_sel = pane.region_list.selected();
+        let station_sel = pane.station_list.selected();
+
+        // Wheel over the regions tree.
+        pane.handle_mouse_event(
+            MouseEvent {
+                x: regions_area.x + 5,
+                y: regions_area.y + 2,
+                kind: MouseEventKind::ScrollDown,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            },
+            &pane_ctx,
+        )
+        .unwrap();
+        assert_eq!(pane.region_list.offset(), 1, "wheel down scrolls the regions viewport");
+        assert_eq!(pane.region_list.selected(), region_sel, "the region highlight does not move");
+
+        // Wheel over the stations list.
+        pane.handle_mouse_event(
+            MouseEvent {
+                x: stations_area.x + 5,
+                y: stations_area.y + 2,
+                kind: MouseEventKind::ScrollDown,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            },
+            &pane_ctx,
+        )
+        .unwrap();
+        assert_eq!(pane.station_list.offset(), 1, "wheel down scrolls the stations viewport");
+        assert_eq!(pane.station_list.selected(), station_sel, "the station highlight does not move");
+        pane.handle_mouse_event(
+            MouseEvent {
+                x: stations_area.x + 5,
+                y: stations_area.y + 2,
+                kind: MouseEventKind::ScrollUp,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            },
+            &pane_ctx,
+        )
+        .unwrap();
+        assert_eq!(pane.station_list.offset(), 0, "wheel up scrolls the stations viewport back");
     }
 }

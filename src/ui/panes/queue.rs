@@ -690,6 +690,12 @@ impl Pane for QueuePane {
             })
         {
             self.video_state.select(Some(idx));
+            crate::ui::widgets::virtualized_list::scroll_selection_into_view(
+                &mut self.video_state,
+                self.video_items_len,
+                self.areas[Areas::Table].height as usize,
+                ctx.config.scrolloff,
+            );
         }
 
         Ok(())
@@ -806,19 +812,18 @@ impl Pane for QueuePane {
                         return Ok(());
                     }
                     MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
-                        // Scroll moves the highlight (first move selects
-                        // chapter 0), like w/s; the offset follows it.
+                        // Round 32: the wheel scrolls the viewport only —
+                        // the highlight stays put and may leave the visible
+                        // area.
                         let dir = if matches!(event.kind, MouseEventKind::ScrollUp) { -1 } else { 1 };
-                        let current = self.chapters_state.selected().unwrap_or(0) as i64;
-                        let len = self.chapters_items_len;
-                        if len == 0 {
-                            return Ok(());
-                        }
-                        let new = (current + dir).clamp(0, len as i64 - 1) as usize;
-                        if new != self.chapters_state.selected().unwrap_or(usize::MAX) {
-                            self.chapters_state.select(Some(new));
-                            ctx.render()?;
-                        }
+                        crate::ui::widgets::virtualized_list::scroll_viewport(
+                            &mut self.chapters_state,
+                            dir,
+                            ctx.config.scroll_amount.max(1),
+                            self.chapters_items_len,
+                            self.areas[Areas::Table].height as usize,
+                        );
+                        ctx.render()?;
                         return Ok(());
                     }
                     _ => {}
@@ -912,13 +917,12 @@ impl Pane for QueuePane {
                         }
                     }
                     MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
-                        // Wheel moves the highlight (like w/s), honoring
-                        // the configured scroll amount; the viewport
-                        // follows it.
+                        // Round 32: the wheel scrolls the viewport only —
+                        // the highlight stays put and may leave the visible
+                        // area.
                         let dir =
                             if matches!(event.kind, MouseEventKind::ScrollUp) { -1 } else { 1 };
-                        let amount = ctx.config.scroll_amount.max(1) as i64;
-                        self.video_move(dir * amount, ctx)?;
+                        self.video_scroll_viewport(dir, ctx)?;
                         return Ok(());
                     }
                     _ => {}
@@ -1095,20 +1099,12 @@ impl Pane for QueuePane {
             MouseEventKind::ScrollDown | MouseEventKind::ScrollUp
                 if self.areas[Areas::Table].contains(event.into()) =>
             {
-                // Wheel moves the highlight (like w/s), honoring the
-                // configured scroll amount; the viewport follows it.
-                let len = self.queue.items.len();
-                if len == 0 {
-                    return Ok(());
-                }
+                // Round 32: the wheel scrolls the viewport only — the
+                // highlight stays put and may leave the visible area.
                 let dir = if matches!(event.kind, MouseEventKind::ScrollUp) { -1 } else { 1 };
-                let amount = ctx.config.scroll_amount.max(1) as i64;
-                let current = i64::try_from(self.queue.state.get_selected().unwrap_or(0)).unwrap_or(0);
-                let new = (current + dir * amount).clamp(0, i64::try_from(len - 1).unwrap_or(0)) as usize;
-                if new != self.queue.state.get_selected().unwrap_or(usize::MAX) {
-                    self.queue.select_idx(new, ctx.config.scrolloff);
-                    ctx.render()?;
-                }
+                let amount = ctx.config.scroll_amount.max(1);
+                self.queue.state.scroll_viewport(dir, amount);
+                ctx.render()?;
                 return Ok(());
             }
             MouseEventKind::ScrollDown | MouseEventKind::ScrollUp => {}
@@ -2487,18 +2483,18 @@ mod stream_filter_tests {
         assert_eq!(ctx.queue_tab.get(), crate::ctx::QueueTabMode::Audio);
     }
 
-    /// The wheel moves the audio list's highlight (like w/s) and clamps at
-    /// both ends — it never leaves the highlight stuck below the top like
-    /// the old viewport-only scroll did.
+    /// Round 32: the wheel scrolls the audio list's viewport only — the
+    /// highlight stays put (it may leave the visible area) and the offset
+    /// clamps at both ends.
     #[test]
-    fn wheel_moves_the_audio_list_highlight() {
+    fn wheel_scrolls_the_audio_list_viewport() {
         let (app_tx, _app_rx) = crossbeam::channel::unbounded();
         let mut ctx = crate::tests::fixtures::ctx(
             (app_tx, _app_rx),
             (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
             (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
         );
-        ctx.queue = songs(8);
+        ctx.queue = songs(100);
         let mut pane = QueuePane::new(&ctx);
 
         let backend = ratatui::backend::TestBackend::new(100, 40);
@@ -2509,25 +2505,33 @@ mod stream_filter_tests {
 
         assert_eq!(pane.queue.state.get_selected(), Some(0), "the list opens on the first row");
         wheel(&mut pane, 2, MouseEventKind::ScrollDown, &mut ctx);
-        assert_eq!(pane.queue.state.get_selected(), Some(1), "wheel down moves the highlight");
+        assert_eq!(pane.queue.state.offset(), 1, "wheel down scrolls the viewport");
+        assert_eq!(pane.queue.state.get_selected(), Some(0), "the highlight does not move");
         wheel(&mut pane, 2, MouseEventKind::ScrollDown, &mut ctx);
-        assert_eq!(pane.queue.state.get_selected(), Some(2));
+        assert_eq!(pane.queue.state.offset(), 2, "wheel down scrolls again");
         wheel(&mut pane, 2, MouseEventKind::ScrollUp, &mut ctx);
-        assert_eq!(pane.queue.state.get_selected(), Some(1), "wheel up moves it back");
+        assert_eq!(pane.queue.state.offset(), 1, "wheel up scrolls back");
         wheel(&mut pane, 2, MouseEventKind::ScrollUp, &mut ctx);
-        assert_eq!(pane.queue.state.get_selected(), Some(0), "wheel up reaches the top");
+        assert_eq!(pane.queue.state.offset(), 0, "wheel up reaches the top");
         wheel(&mut pane, 2, MouseEventKind::ScrollUp, &mut ctx);
-        assert_eq!(pane.queue.state.get_selected(), Some(0), "wheel up clamps at the top");
-        for _ in 0..20 {
+        assert_eq!(pane.queue.state.offset(), 0, "wheel up clamps at the top");
+        for _ in 0..200 {
             wheel(&mut pane, 2, MouseEventKind::ScrollDown, &mut ctx);
         }
-        assert_eq!(pane.queue.state.get_selected(), Some(7), "wheel down clamps at the last row");
+        let viewport = pane.areas[Areas::Table].height as usize;
+        assert_eq!(
+            pane.queue.state.offset(),
+            pane.queue.items.len().saturating_sub(viewport),
+            "wheel down clamps at the last page"
+        );
+        assert_eq!(pane.queue.state.get_selected(), Some(0), "the highlight never moved");
     }
 
-    /// The wheel moves the video list's highlight (like w/s) and clamps at
-    /// both ends.
+    /// Round 32: the wheel scrolls the video list's viewport only — the
+    /// highlight stays put (it may leave the visible area) and the offset
+    /// clamps at both ends.
     #[test]
-    fn wheel_moves_the_video_list_highlight() {
+    fn wheel_scrolls_the_video_list_viewport() {
         let mut ctx = video_ctx();
         let mut pane = QueuePane::new(&ctx);
 
@@ -2537,20 +2541,29 @@ mod stream_filter_tests {
             .draw(|frame| pane.render(frame, Rect::new(0, 0, 100, 40), &ctx).unwrap())
             .unwrap();
         pane.before_show(&ctx).unwrap();
+        // Shrink the table area so the 3-entry playlist overflows the
+        // viewport (the offset has room to move).
+        pane.areas[Areas::Table].height = 2;
 
-        assert_eq!(pane.video_state.selected(), Some(1), "the playing entry is highlighted");
+        let start_sel = pane.video_state.selected();
+        assert_eq!(start_sel, Some(1), "the playing entry is highlighted");
         wheel(&mut pane, 1, MouseEventKind::ScrollDown, &mut ctx);
-        assert_eq!(pane.video_state.selected(), Some(2), "wheel down moves the highlight");
+        assert_eq!(pane.video_state.offset(), 1, "wheel down scrolls the viewport");
+        assert_eq!(pane.video_state.selected(), start_sel, "the highlight does not move");
         wheel(&mut pane, 1, MouseEventKind::ScrollUp, &mut ctx);
-        assert_eq!(pane.video_state.selected(), Some(1), "wheel up moves it back");
+        assert_eq!(pane.video_state.offset(), 0, "wheel up scrolls back");
         wheel(&mut pane, 1, MouseEventKind::ScrollUp, &mut ctx);
-        assert_eq!(pane.video_state.selected(), Some(0), "wheel up reaches the top");
-        wheel(&mut pane, 1, MouseEventKind::ScrollUp, &mut ctx);
-        assert_eq!(pane.video_state.selected(), Some(0), "wheel up clamps at the top");
+        assert_eq!(pane.video_state.offset(), 0, "wheel up clamps at the top");
         for _ in 0..10 {
             wheel(&mut pane, 1, MouseEventKind::ScrollDown, &mut ctx);
         }
-        assert_eq!(pane.video_state.selected(), Some(2), "wheel down clamps at the last row");
+        let viewport = pane.areas[Areas::Table].height as usize;
+        assert_eq!(
+            pane.video_state.offset(),
+            pane.video_items_len.saturating_sub(viewport),
+            "wheel down clamps at the last page"
+        );
+        assert_eq!(pane.video_state.selected(), start_sel, "the highlight never moved");
     }
 
     #[test]

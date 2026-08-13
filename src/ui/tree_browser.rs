@@ -4,7 +4,7 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::Style,
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
+    widgets::{Block, Borders, ListItem, ListState, Paragraph},
 };
 
 use crate::{
@@ -180,11 +180,27 @@ pub(in crate::ui) trait TreeBrowserCore: Pane {
 
     // ── defaulted behavior hooks ───────────────────────────────────────
 
+    /// Whether the wheel scrolls the viewport only (round 32: Queue,
+    /// Playlists, MPD, Help, Radio) instead of moving the selection.
+    /// Jellyfin is NOT in the round-32 pane list, so it keeps the
+    /// wheel-moves-selection behavior.
+    fn wheel_scrolls_viewport(&self) -> bool {
+        true
+    }
+
     /// Called after the items cursor moves (keyboard or click): keep the
     /// tree highlight on the cursor. Radio's tree never follows the
     /// station cursor.
     fn on_items_cursor_moved(&mut self, ctx: &Ctx) -> Result<()> {
+        let before = self.tree_selected();
         self.sync_tree_to_items_cursor();
+        // The items cursor's keyboard move moved the tree cursor: scroll
+        // the tree back to it (the wheel only scrolls the tree viewport,
+        // so keyboard moves restore the standard scrolloff behavior).
+        // Radio's sync is a no-op, so an untouched tree stays put.
+        if self.tree_selected() != before {
+            self.scroll_tree_selection_into_view(ctx);
+        }
         ctx.render()?;
         Ok(())
     }
@@ -267,7 +283,25 @@ pub(in crate::ui) trait TreeBrowserCore: Pane {
         let new_idx = (current + dir).clamp(0, len as i64 - 1) as usize;
         if new_idx != current as usize {
             self.highlight_tree_node(new_idx, ctx)?;
+            self.scroll_tree_selection_into_view(ctx);
         }
+        Ok(())
+    }
+
+    /// Round 32: the wheel scrolls the tree viewport only — the highlight
+    /// stays put and may leave the visible area. The offset clamps at the
+    /// tree's ends.
+    fn scroll_tree_viewport(&mut self, dir: i64, ctx: &Ctx) -> Result<()> {
+        let len = self.tree_rows().len();
+        let viewport = self.tree_area().height as usize;
+        crate::ui::widgets::virtualized_list::scroll_viewport(
+            self.tree_list_mut(),
+            dir,
+            ctx.config.scroll_amount.max(1),
+            len,
+            viewport,
+        );
+        ctx.render()?;
         Ok(())
     }
 
@@ -281,9 +315,67 @@ pub(in crate::ui) trait TreeBrowserCore: Pane {
         let new_idx = (current + dir).clamp(0, len as i64 - 1) as usize;
         if new_idx != current as usize {
             self.items_list_mut().select(Some(new_idx));
+            self.scroll_items_selection_into_view(ctx);
             self.on_items_cursor_moved(ctx)?;
         }
         Ok(())
+    }
+
+    /// Round 32: the wheel scrolls the items viewport only — the highlight
+    /// stays put and may leave the visible area. The offset clamps at the
+    /// list's ends (row height accounted for, e.g. radio's two-line rows).
+    fn scroll_items_viewport(&mut self, dir: i64, ctx: &Ctx) -> Result<()> {
+        let len = self.items_len();
+        let viewport =
+            (self.items_area().height as usize) / (self.item_row_height().max(1) as usize);
+        crate::ui::widgets::virtualized_list::scroll_viewport(
+            self.items_list_mut(),
+            dir,
+            ctx.config.scroll_amount.max(1),
+            len,
+            viewport,
+        );
+        ctx.render()?;
+        Ok(())
+    }
+
+    /// Scroll the tree list so the tree cursor is visible again after a
+    /// keyboard move (the wheel only scrolls the viewport, so keyboard
+    /// moves restore the standard scrolloff behavior).
+    fn scroll_tree_selection_into_view(&mut self, ctx: &Ctx) {
+        let len = self.tree_rows().len();
+        let viewport = self.tree_area().height as usize;
+        if len > 0 {
+            // The MPD pane keeps its cursor in `tree.selected` and only
+            // mirrors it into the ListState at render time; mirror it now
+            // so the scroll uses the current cursor (Jellyfin/Radio keep
+            // their cursor in the ListState, so this is a no-op there).
+            let sel = self.tree_selected().min(len - 1);
+            if self.tree_list().selected() != Some(sel) {
+                self.tree_list_mut().select(Some(sel));
+            }
+        }
+        crate::ui::widgets::virtualized_list::scroll_selection_into_view(
+            self.tree_list_mut(),
+            len,
+            viewport,
+            ctx.config.scrolloff,
+        );
+    }
+
+    /// Scroll the items list so the items cursor is visible again after a
+    /// keyboard move (the wheel only scrolls the viewport, so keyboard
+    /// moves restore the standard scrolloff behavior).
+    fn scroll_items_selection_into_view(&mut self, ctx: &Ctx) {
+        let len = self.items_len();
+        let viewport =
+            (self.items_area().height as usize) / (self.item_row_height().max(1) as usize);
+        crate::ui::widgets::virtualized_list::scroll_selection_into_view(
+            self.items_list_mut(),
+            len,
+            viewport,
+            ctx.config.scrolloff,
+        );
     }
 
     /// The full pane layout: tree + items + tips + info. The pane's
@@ -345,7 +437,7 @@ pub(in crate::ui) trait TreeBrowserCore: Pane {
             }
         }
         ratatui::widgets::StatefulWidget::render(
-            List::new(items)
+            crate::ui::widgets::virtualized_list::VirtualizedList::new(items)
                 .highlight_style(self.tree_highlight(hover_idx, ctx))
                 .style(ctx.config.as_list_name_style()),
             inner,
@@ -381,9 +473,10 @@ pub(in crate::ui) trait TreeBrowserCore: Pane {
             .collect();
 
         ratatui::widgets::StatefulWidget::render(
-            List::new(items)
+            crate::ui::widgets::virtualized_list::VirtualizedList::new(items)
                 .highlight_style(self.items_highlight(hover_idx, ctx))
-                .style(ctx.config.as_list_name_style()),
+                .style(ctx.config.as_list_name_style())
+                .row_height(self.item_row_height()),
             inner,
             frame.buffer_mut(),
             self.items_list_mut(),
@@ -505,7 +598,11 @@ pub(in crate::ui) trait TreeBrowserCore: Pane {
             MouseEventKind::RightClick => self.tree_context_menu(row, ctx),
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
                 let dir = if matches!(event.kind, MouseEventKind::ScrollUp) { -1 } else { 1 };
-                self.move_tree(dir, ctx)
+                if self.wheel_scrolls_viewport() {
+                    self.scroll_tree_viewport(dir, ctx)
+                } else {
+                    self.move_tree(dir, ctx)
+                }
             }
             _ => Ok(()),
         }
@@ -539,7 +636,11 @@ pub(in crate::ui) trait TreeBrowserCore: Pane {
             }
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
                 let dir = if matches!(event.kind, MouseEventKind::ScrollUp) { -1 } else { 1 };
-                self.move_items(dir, ctx)?;
+                if self.wheel_scrolls_viewport() {
+                    self.scroll_items_viewport(dir, ctx)?;
+                } else {
+                    self.move_items(dir, ctx)?;
+                }
             }
             _ => {}
         }

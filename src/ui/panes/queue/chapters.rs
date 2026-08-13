@@ -8,7 +8,7 @@ use ratatui::{
     layout::Flex,
     prelude::{Constraint, Layout},
     text::Line,
-    widgets::{List, ListItem, StatefulWidget},
+    widgets::{ListItem, StatefulWidget},
 };
 use unicode_width::UnicodeWidthStr;
 
@@ -108,12 +108,15 @@ impl QueuePane {
             .collect();
 
         // The click-selected chapter (first click highlights it, the second
-        // seeks) gets the accent highlight.
-        let list = List::new(items).highlight_style(if hover_idx == self.chapters_state.selected() {
-            ctx.config.theme.hovered_item_style
-        } else {
-            ctx.config.theme.highlighted_item_style
-        });
+        // seeks) gets the accent highlight. Rendered through the
+        // virtualized list so the wheel can scroll the viewport without
+        // dragging the highlight (round 32).
+        let list = crate::ui::widgets::virtualized_list::VirtualizedList::new(items)
+            .highlight_style(if hover_idx == self.chapters_state.selected() {
+                ctx.config.theme.hovered_item_style
+            } else {
+                ctx.config.theme.highlighted_item_style
+            });
         StatefulWidget::render(list, area, frame.buffer_mut(), &mut self.chapters_state);
 
         if let Some(scrollbar) = ctx.config.as_styled_scrollbar()
@@ -252,6 +255,8 @@ impl QueuePane {
 
     /// Move the chapters highlight by `dir` rows (clamped). The first move
     /// from no selection highlights the first chapter (menu convention).
+    /// The list renders from its offset, so the move also scrolls the
+    /// selection back into view (the wheel only scrolls the viewport).
     pub(super) fn chapters_move(&mut self, dir: i64, ctx: &Ctx) -> Result<()> {
         let len = self.chapters_items_len;
         if len == 0 {
@@ -259,12 +264,24 @@ impl QueuePane {
         }
         let Some(current) = self.chapters_state.selected() else {
             self.chapters_state.select(Some(0));
+            crate::ui::widgets::virtualized_list::scroll_selection_into_view(
+                &mut self.chapters_state,
+                len,
+                self.areas[Areas::Table].height as usize,
+                ctx.config.scrolloff,
+            );
             ctx.render()?;
             return Ok(());
         };
         let new = ((current as i64) + dir).clamp(0, len as i64 - 1) as usize;
         if new != current {
             self.chapters_state.select(Some(new));
+            crate::ui::widgets::virtualized_list::scroll_selection_into_view(
+                &mut self.chapters_state,
+                len,
+                self.areas[Areas::Table].height as usize,
+                ctx.config.scrolloff,
+            );
             ctx.render()?;
         }
         Ok(())
@@ -276,7 +293,8 @@ impl QueuePane {
         self.chapters_move(dir * viewport, ctx)
     }
 
-    /// Highlight the chapter at `idx` (clamped to the list).
+    /// Highlight the chapter at `idx` (clamped to the list) and scroll it
+    /// into view (keyboard Home/End; the wheel only scrolls the viewport).
     pub(super) fn chapters_jump(&mut self, idx: usize, ctx: &Ctx) -> Result<()> {
         let len = self.chapters_items_len;
         if len == 0 {
@@ -285,6 +303,12 @@ impl QueuePane {
         let idx = idx.min(len - 1);
         if self.chapters_state.selected() != Some(idx) {
             self.chapters_state.select(Some(idx));
+            crate::ui::widgets::virtualized_list::scroll_selection_into_view(
+                &mut self.chapters_state,
+                len,
+                self.areas[Areas::Table].height as usize,
+                ctx.config.scrolloff,
+            );
             ctx.render()?;
         }
         Ok(())
@@ -308,6 +332,12 @@ impl QueuePane {
             .rposition(|c| position >= c.start_secs)
             .unwrap_or(0);
         self.chapters_state.select(Some(idx));
+        crate::ui::widgets::virtualized_list::scroll_selection_into_view(
+            &mut self.chapters_state,
+            self.chapters_items_len,
+            self.areas[Areas::Table].height as usize,
+            ctx.config.scrolloff,
+        );
     }
 
     /// Seek to the highlighted chapter (MPD or mpv). The highlight stays
