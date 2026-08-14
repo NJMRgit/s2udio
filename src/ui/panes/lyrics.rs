@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use anyhow::Result;
 use ratatui::{
     Frame,
@@ -9,6 +11,7 @@ use ratatui::{
 
 use super::Pane;
 use crate::{
+    config::keys::CommonAction,
     core::command::{create_env, run_external_blocking},
     ctx::Ctx,
     mpd::commands::{Song, State},
@@ -16,13 +19,117 @@ use crate::{
         events::WorkRequest,
         ext::duration::DurationExt,
         keys::ActionEvent,
-        lrc::{Lrc, get_lrc_path},
-        macros::status_error,
+        lrc::{Lrc, LrcEditSession, get_lrc_path},
+        macros::{modal, status_error, status_info},
         mouse_event::{MouseEvent, MouseEventKind},
         mpd_query::run_status_update,
     },
-    ui::{UiEvent, widgets::wrap::{wrap_spans, wrap_to_width}},
+    ui::{
+        UiEvent,
+        modals::input_modal::InputModal,
+        widgets::wrap::{wrap_spans, wrap_to_width},
+    },
 };
+
+/// A clickable word in the edit-mode lyrics view (screen coords + the
+/// edit session's `(line, word)` indices).
+#[derive(Debug, Clone, Copy)]
+struct WordArea {
+    rect: Rect,
+    line: usize,
+    word: usize,
+}
+
+/// One word + its timing, ready to render in edit mode.
+struct EditUnit {
+    word: String,
+    time: String,
+    word_w: usize,
+    time_w: usize,
+}
+
+/// Draws edit-mode rows: words in the lyrics style, timings in the
+/// edit-timing style, the selected word (and its timing) highlighted.
+struct EditRowDrawer<'frame, 'buf> {
+    frame: &'frame mut Frame<'buf>,
+    default_style: Style,
+    selected_style: Style,
+    timing_style: Style,
+    selection: Option<(usize, usize)>,
+}
+
+impl<'frame, 'buf> EditRowDrawer<'frame, 'buf> {
+    /// Place one wrapped row of word units at `row`, recording each
+    /// word's hit area.
+    fn place(
+        &mut self,
+        row: Rect,
+        units: &[EditUnit],
+        row_units: &[usize],
+        line_idx: usize,
+        word_areas: &mut Vec<WordArea>,
+    ) {
+        let buf = self.frame.buffer_mut();
+        let mut x = row.x;
+        for &ui in row_units {
+            let Some(u) = units.get(ui) else { continue };
+            let sel = self.selection == Some((line_idx, ui));
+            let word_style = if sel { self.selected_style } else { self.default_style };
+            let time_style = if sel { self.selected_style } else { self.timing_style };
+            let word_w = u.word_w as u16;
+            let time_w = u.time_w as u16;
+            buf.set_stringn(x, row.y, &u.word, u.word_w, word_style);
+            buf.set_stringn(x + word_w, row.y, " ", 1, self.default_style);
+            buf.set_stringn(x + word_w + 1, row.y, &u.time, u.time_w, time_style);
+            buf.set_stringn(x + word_w + 1 + time_w, row.y, " ", 1, self.default_style);
+            word_areas.push(WordArea {
+                rect: Rect { x, y: row.y, width: word_w + 2 + time_w, height: 1 },
+                line: line_idx,
+                word: ui,
+            });
+            x += word_w + 2 + time_w;
+        }
+    }
+
+    /// Place one row of plain (non-word-timed) lyrics text, centered.
+    fn place_plain(&mut self, row: Rect, text: &str) {
+        let text = Text::from(text.to_owned()).centered().style(self.default_style);
+        self.frame.render_widget(text, row);
+    }
+}
+
+/// Wrap word+timing units into rows of unit indices that fit `width`
+/// (units wrap whole: a word is never split from its timing).
+fn wrap_edit_units(units: &[EditUnit], width: usize) -> Vec<Vec<usize>> {
+    let mut rows: Vec<Vec<usize>> = Vec::new();
+    let mut row: Vec<usize> = Vec::new();
+    let mut x = 0usize;
+    for (i, u) in units.iter().enumerate() {
+        let w = u.word_w + 2 + u.time_w;
+        if x + w > width && !row.is_empty() {
+            rows.push(std::mem::take(&mut row));
+            x = 0;
+        }
+        row.push(i);
+        x += w;
+    }
+    if !row.is_empty() {
+        rows.push(row);
+    }
+    rows
+}
+
+/// The wrapped display rows of a plain (non-word-timed) line, with the
+/// `[mm:ss.xx]` prefix when the timestamp flag is on (mirrors the normal
+/// karaoke view).
+fn plain_edit_chunks(line: &crate::shared::lrc::EditableLine, timestamp: bool, width: usize) -> Vec<String> {
+    let formatted = if timestamp && !line.content.is_empty() {
+        format!("[{}] {}", LrcEditSession::format_time(line.time), line.content)
+    } else {
+        line.content.clone()
+    };
+    textwrap::wrap(&formatted, width).into_iter().map(|s| s.as_ref().to_owned()).collect()
+}
 
 #[derive(Debug)]
 pub struct LyricsPane {
@@ -55,6 +162,20 @@ pub struct LyricsPane {
     /// Click zone of the `fetch lyrics` button (screen coords,
     /// from the last lyrics render).
     fetch_btn_area: Rect,
+    /// Click zone of the edit-mode pencil button (screen coords, from
+    /// the last lyrics render).
+    edit_btn_area: Rect,
+    /// Edit mode (round 34): the pencil button toggles it; while ON and
+    /// paused the lyrics stay visible with editable per-word timings.
+    edit_mode: bool,
+    /// The editing session over the source `.lrc` (raw text + marker
+    /// positions); `None` outside edit mode.
+    edit_session: Option<LrcEditSession>,
+    /// The selected word as `(line, word)` into the edit session.
+    edit_selection: Option<(usize, usize)>,
+    /// Screen rects of every rendered word (edit mode), for click
+    /// selection.
+    word_areas: Vec<WordArea>,
     /// File of the song whose lyrics were marked wrong (hidden) by the
     /// `hide lyrics` button. Per-song, in-session state; `fetch lyrics`
     /// clears it.
@@ -77,6 +198,7 @@ pub struct LyricsPane {
 enum LyricsBtn {
     Wrong,
     Fetch,
+    Edit,
 }
 
 impl LyricsPane {
@@ -95,6 +217,11 @@ impl LyricsPane {
             info_scrollbar_drag: crate::shared::mouse_event::ScrollbarDrag::default(),
             wrong_btn_area: Rect::default(),
             fetch_btn_area: Rect::default(),
+            edit_btn_area: Rect::default(),
+            edit_mode: false,
+            edit_session: None,
+            edit_selection: None,
+            word_areas: Vec::new(),
             wrong_song_file: None,
             fetching: false,
             pressed_btn: None,
@@ -160,6 +287,31 @@ impl LyricsPane {
         let buttons_y = area.bottom().saturating_sub(1);
         buf.set_stringn(area.x, bottom_margin_y, "─".repeat(width), width, margin_style);
 
+        let mouse = ctx.mouse_pos();
+        let hovered_style = ctx.config.theme.hovered_item_style;
+
+        // Round 34: the edit-mode pencil button, left-aligned on the same
+        // row (one cell in from the left border), independent of the
+        // right-aligned cluster's fit-collapse logic. Icon only — no
+        // text: `✎` off, `✏` while edit mode is ON (persistent active
+        // state), `⭘` while physically held (the pressed marker).
+        let edit_glyph = if self.pressed_btn == Some(LyricsBtn::Edit) {
+            "⭘"
+        } else if self.edit_mode {
+            "✏"
+        } else {
+            "✎"
+        };
+        self.edit_btn_area = Rect { x: area.x + 1, y: buttons_y, width: 1, height: 1 };
+        let edit_hovered = mouse.is_some_and(|p| self.edit_btn_area.contains(p));
+        buf.set_stringn(
+            area.x + 1,
+            buttons_y,
+            edit_glyph,
+            1,
+            if edit_hovered { crate::config::hover_style(base).patch(hovered_style) } else { base },
+        );
+
         // Right-aligned button cluster: `● hide lyrics | ● fetch lyrics`
         // (or `● show lyrics` while the current song is wrong-marked),
         // collapsed to `● hide | ● fetch` / `● show | ● fetch` when
@@ -196,7 +348,6 @@ impl LyricsPane {
         self.fetch_btn_area =
             Rect { x: start + wrong_w + 3, y: buttons_y, width: fetch_w, height: 1 };
 
-        let mouse = ctx.mouse_pos();
         let wrong_hovered = mouse.is_some_and(|p| self.wrong_btn_area.contains(p));
         let fetch_hovered = mouse.is_some_and(|p| self.fetch_btn_area.contains(p));
 
@@ -229,7 +380,6 @@ impl LyricsPane {
                 Span::styled(text, text_style),
             ])
         }
-        let hovered_style = ctx.config.theme.hovered_item_style;
         buf.set_line(
             self.wrong_btn_area.x,
             buttons_y,
@@ -364,9 +514,410 @@ impl LyricsPane {
     }
 
     /// Whether the box is currently showing track details instead of
-    /// lyrics: paused/stopped, or playing a song without lyrics.
+    /// lyrics: paused/stopped, or playing a song without lyrics. Round 34:
+    /// while edit mode is ON, pausing keeps the lyrics visible (edit mode
+    /// is the explicit opt-in that shows and edits per-word timings);
+    /// stopped still shows the info panel.
     fn showing_info(&self, ctx: &Ctx) -> bool {
+        if self.edit_mode
+            && matches!(ctx.status.state, State::Pause)
+            && self.current_lyrics.is_some()
+        {
+            return false;
+        }
         !matches!(ctx.status.state, State::Play) || self.current_lyrics.is_none()
+    }
+
+    /// The edit-mode anchor line: the timed line at/just before the paused
+    /// position (raw file times — the editor works on the file, not the
+    /// offset-adjusted karaoke times).
+    fn anchor_line(&self, ctx: &Ctx) -> usize {
+        self.edit_session
+            .as_ref()
+            .map(|s| {
+                let elapsed = ctx.status.elapsed;
+                s.lines
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, l)| !l.content.trim().is_empty() && elapsed >= l.time)
+                    .min_by(|a, b| a.1.time.abs_diff(elapsed).cmp(&b.1.time.abs_diff(elapsed)))
+                    .map(|(i, _)| i)
+                    .unwrap_or(0)
+            })
+            .unwrap_or(0)
+    }
+
+    /// Render the lyrics in edit mode (paused): every visible line shows
+    /// each word with its raw file time next to it in the edit-timing
+    /// style; the selected word is highlighted. Returns the word hit
+    /// areas for click selection.
+    fn render_edit_mode<'frame, 'buf>(
+        &self,
+        frame: &'frame mut Frame<'buf>,
+        area: Rect,
+        ctx: &Ctx,
+    ) -> Vec<WordArea> {
+        use unicode_width::UnicodeWidthStr;
+
+        let Some(session) = &self.edit_session else { return Vec::new() };
+        if area.height == 0 {
+            return Vec::new();
+        }
+        let default_style = Style::default().fg(ctx.config.theme.text_color.unwrap_or_default());
+        let selected_style = ctx.config.theme.highlighted_item_style;
+        let timing_style = ctx
+            .config
+            .theme
+            .lyrics
+            .edit_timing
+            .unwrap_or_else(|| default_style.add_modifier(Modifier::DIM));
+
+        let anchor = self.anchor_line(ctx);
+        let areas = Layout::vertical((0..area.height).map(|_| Constraint::Length(1))).split(area);
+        let middle_row = area.height.saturating_sub(1) / 2;
+        let width = area.width as usize;
+        let timestamp = ctx.config.theme.lyrics.timestamp;
+
+        let mut word_areas = Vec::new();
+        let mut drawer = EditRowDrawer {
+            frame,
+            default_style,
+            selected_style,
+            timing_style,
+            selection: self.edit_selection,
+        };
+
+        let units_of = |line: usize| -> Vec<EditUnit> {
+            session
+                .lines
+                .get(line)
+                .map(|l| {
+                    l.words
+                        .iter()
+                        .map(|w| {
+                            let time = LrcEditSession::format_time(w.time);
+                            let time_w = time.width();
+                            EditUnit { word: w.text.clone(), time, word_w: w.text.width(), time_w }
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+
+        // The anchor line: rows centered around the middle row.
+        let current_units = units_of(anchor);
+        let current_rows = wrap_edit_units(&current_units, width);
+        let active_start = middle_row.saturating_sub(current_rows.len().saturating_sub(1) as u16);
+        for (ri, row_units) in current_rows.iter().enumerate() {
+            let Some(row) = areas.get((active_start + ri as u16) as usize).copied() else {
+                break;
+            };
+            drawer.place(row, &current_units, row_units, anchor, &mut word_areas);
+        }
+        let mut after_row = active_start + current_rows.len() as u16;
+
+        // Lines before the anchor fill upward.
+        let mut before_row = active_start;
+        let mut before_line = anchor;
+        while before_line > 0 && before_row > 0 {
+            before_line -= 1;
+            let units = units_of(before_line);
+            if units.is_empty() {
+                for chunk in plain_edit_chunks(&session.lines[before_line], timestamp, width)
+                    .iter()
+                    .rev()
+                {
+                    if before_row == 0 {
+                        break;
+                    }
+                    before_row -= 1;
+                    if let Some(row) = areas.get(before_row as usize).copied() {
+                        drawer.place_plain(row, chunk);
+                    }
+                }
+                continue;
+            }
+            let rows_ = wrap_edit_units(&units, width);
+            for r in rows_.iter().rev() {
+                if before_row == 0 {
+                    break;
+                }
+                before_row -= 1;
+                let Some(row) = areas.get(before_row as usize).copied() else {
+                    break;
+                };
+                drawer.place(row, &units, r, before_line, &mut word_areas);
+            }
+        }
+
+        // Lines after the anchor fill downward.
+        let mut after_line = anchor;
+        while after_line + 1 < session.lines.len() && after_row < areas.len() as u16 {
+            after_line += 1;
+            let units = units_of(after_line);
+            if units.is_empty() {
+                for chunk in plain_edit_chunks(&session.lines[after_line], timestamp, width) {
+                    if after_row >= areas.len() as u16 {
+                        break;
+                    }
+                    if let Some(row) = areas.get(after_row as usize).copied() {
+                        drawer.place_plain(row, &chunk);
+                    }
+                    after_row += 1;
+                }
+                continue;
+            }
+            let rows_ = wrap_edit_units(&units, width);
+            for r in &rows_ {
+                if after_row >= areas.len() as u16 {
+                    break;
+                }
+                let Some(row) = areas.get(after_row as usize).copied() else {
+                    break;
+                };
+                drawer.place(row, &units, r, after_line, &mut word_areas);
+                after_row += 1;
+            }
+        }
+
+        word_areas
+    }
+
+    /// The edit-session lines that have editable words (navigation
+    /// targets; plain lines are skipped).
+    fn selectable_lines(&self) -> Vec<usize> {
+        self.edit_session
+            .as_ref()
+            .map(|s| {
+                s.lines
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, l)| !l.words.is_empty())
+                    .map(|(i, _)| i)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn word_count(&self, line: usize) -> usize {
+        self.edit_session
+            .as_ref()
+            .and_then(|s| s.lines.get(line))
+            .map(|l| l.words.len())
+            .unwrap_or(0)
+    }
+
+    /// Select the first word of the anchor line (or of the next line with
+    /// words), when entering edit mode or after a reload.
+    fn select_initial_word(&mut self, ctx: &Ctx) {
+        let anchor = self.anchor_line(ctx);
+        let lines = self.selectable_lines();
+        self.edit_selection = lines
+            .iter()
+            .find(|&&l| l >= anchor)
+            .or_else(|| lines.first())
+            .map(|&l| (l, 0));
+    }
+
+    /// Move the word selection: `dx` = previous/next word (wrapping
+    /// across lines), `dy` = previous/next line (same word index,
+    /// clamped).
+    fn move_selection(&mut self, dx: isize, dy: isize) {
+        let lines = self.selectable_lines();
+        if lines.is_empty() {
+            return;
+        }
+        let (cl, cw) = self.edit_selection.unwrap_or((lines[0], 0));
+        let Some(li) = lines.iter().position(|&l| l == cl) else {
+            self.edit_selection = Some((lines[0], 0));
+            return;
+        };
+        if dy != 0 {
+            let target = li as isize + dy;
+            if target < 0 || target >= lines.len() as isize {
+                return;
+            }
+            let tl = lines[target as usize];
+            let nw = cw.min(self.word_count(tl).saturating_sub(1));
+            self.edit_selection = Some((tl, nw));
+            return;
+        }
+        let mut nl = li;
+        let mut nw = cw as isize + dx;
+        loop {
+            let count = self.word_count(lines[nl]) as isize;
+            if nw < 0 {
+                if nl == 0 {
+                    return;
+                }
+                nl -= 1;
+                nw = self.word_count(lines[nl]) as isize - 1;
+            } else if nw >= count {
+                if nl + 1 >= lines.len() {
+                    return;
+                }
+                nl += 1;
+                nw = 0;
+            } else {
+                break;
+            }
+        }
+        self.edit_selection = Some((lines[nl], nw as usize));
+    }
+
+    /// Nudge the selected word's time by `delta_ms` (10 ms steps).
+    fn nudge_selection(&mut self, ctx: &Ctx, delta_ms: i64) -> Result<()> {
+        let Some((l, w)) = self.edit_selection else { return Ok(()) };
+        let Some(session) = &mut self.edit_session else { return Ok(()) };
+        let Some(word) = session.lines.get(l).and_then(|ln| ln.words.get(w)) else {
+            return Ok(());
+        };
+        let new = if delta_ms < 0 {
+            word.time.saturating_sub(Duration::from_millis((-delta_ms) as u64))
+        } else {
+            word.time + Duration::from_millis(delta_ms as u64)
+        };
+        session.set_word_time(l, w, new)?;
+        ctx.render()?;
+        Ok(())
+    }
+
+    /// Write the pending edits back to the source `.lrc` and reload the
+    /// lyrics (stays in edit mode).
+    fn save_edit(&mut self, ctx: &Ctx) -> Result<()> {
+        if !self.edit_session.as_ref().is_some_and(|s| s.is_dirty()) {
+            return Ok(());
+        }
+        if let Some(session) = &mut self.edit_session {
+            session.save()?;
+        }
+        self.update_lyrics(ctx)?;
+        ctx.render()?;
+        status_info!("Lyrics timings saved");
+        Ok(())
+    }
+
+    /// Toggle edit mode. Turning it ON builds the edit session over the
+    /// source `.lrc` (the file `find_current_lyrics_path` resolved);
+    /// turning it OFF writes any pending edits back to that file and
+    /// reloads the lyrics so the karaoke view reflects the saved timings.
+    fn set_edit_mode(&mut self, ctx: &Ctx, on: bool) -> Result<()> {
+        if on == self.edit_mode {
+            return Ok(());
+        }
+        if on {
+            let Some(path) = ctx.find_current_lyrics_path() else {
+                status_info!("No lyrics file to edit");
+                return Ok(());
+            };
+            let raw = match std::fs::read_to_string(&path) {
+                Ok(raw) => raw,
+                Err(err) => {
+                    status_error!("Failed to read lyrics file: '{err}'");
+                    return Ok(());
+                }
+            };
+            self.edit_session = Some(LrcEditSession::open(path, raw));
+            self.edit_mode = true;
+            self.select_initial_word(ctx);
+            ctx.render()?;
+        } else {
+            if self.edit_session.as_ref().is_some_and(|s| s.is_dirty())
+                && let Some(session) = &mut self.edit_session
+                && let Err(err) = session.save()
+            {
+                status_error!("Failed to save lyrics: '{err}'");
+            }
+            self.edit_session = None;
+            self.edit_selection = None;
+            self.word_areas.clear();
+            self.edit_mode = false;
+            // Reload so the karaoke view reflects the saved timings.
+            if let Err(err) = self.update_lyrics(ctx) {
+                status_error!("Failed to reload lyrics file: '{err}'");
+            }
+            ctx.render()?;
+        }
+        Ok(())
+    }
+
+    /// Rebuild the edit session from the current lyrics file (an in-edit
+    /// exact-time write landed on disk). Keeps the selection when the
+    /// word still exists. When the file is gone/unreadable the session is
+    /// dropped and edit mode ends (there is nothing left to edit).
+    fn rebuild_edit_session(&mut self, ctx: &Ctx) -> Result<()> {
+        let selection = self.edit_selection;
+        let Some(path) = ctx.find_current_lyrics_path() else {
+            self.edit_session = None;
+            self.edit_selection = None;
+            self.edit_mode = false;
+            return Ok(());
+        };
+        let raw = match std::fs::read_to_string(&path) {
+            Ok(raw) => raw,
+            Err(err) => {
+                status_error!("Failed to read lyrics file: '{err}'");
+                self.edit_session = None;
+                self.edit_selection = None;
+                self.edit_mode = false;
+                return Ok(());
+            }
+        };
+        self.edit_session = Some(LrcEditSession::open(path, raw));
+        let valid = selection.is_some_and(|(l, w)| {
+            self.edit_session
+                .as_ref()
+                .is_some_and(|s| s.lines.get(l).is_some_and(|ln| w < ln.words.len()))
+        });
+        if !valid {
+            self.select_initial_word(ctx);
+        }
+        Ok(())
+    }
+
+    /// The exact-value popup for the selected word: an input modal
+    /// prefilled with the current time (`mm:ss.xx`). Pending nudges are
+    /// saved first so the popup's read-modify-write starts from the saved
+    /// file; the confirm writes the new marker and requests a lyrics
+    /// re-index, which reloads the pane.
+    fn open_time_modal(&mut self, ctx: &mut Ctx) -> Result<()> {
+        let Some((l, w)) = self.edit_selection else { return Ok(()) };
+        let (path, line, word, current) = {
+            let Some(session) = &self.edit_session else { return Ok(()) };
+            let Some(word) = session.lines.get(l).and_then(|ln| ln.words.get(w)) else {
+                return Ok(());
+            };
+            (session.path().clone(), l, w, LrcEditSession::format_time(word.time))
+        };
+        if let Some(session) = &mut self.edit_session
+            && session.is_dirty()
+        {
+            session.save()?;
+        }
+        modal!(
+            ctx,
+            InputModal::new(ctx)
+                .title("Word time (mm:ss.xx)")
+                .confirm_label("Set")
+                .input_label("Time:")
+                .initial_value(current)
+                .on_confirm(move |ctx, value| {
+                    let Some(time) = LrcEditSession::parse_time(value) else {
+                        status_error!("Invalid time: expected mm:ss.xx");
+                        return Ok(());
+                    };
+                    let raw = std::fs::read_to_string(&path)?;
+                    let new_raw = LrcEditSession::apply_to_raw(&raw, line, word, time)?;
+                    LrcEditSession::write_atomic(&path, &new_raw)?;
+                    crate::shared::macros::try_skip!(
+                        ctx.work_sender
+                            .send(crate::shared::events::WorkRequest::IndexSingleLrc { path }),
+                        "Failed to request lyrics index update"
+                    );
+                    Ok(())
+                })
+        );
+        Ok(())
     }
 
     /// Render the song details (File / Filename / Title / ... with the
@@ -784,6 +1335,8 @@ impl Pane for LyricsPane {
             self.info_scrollbar_area = Rect::default();
             self.wrong_btn_area = Rect::default();
             self.fetch_btn_area = Rect::default();
+            self.edit_btn_area = Rect::default();
+            self.word_areas.clear();
             self.pressed_btn = None;
             return Ok(());
         }
@@ -792,6 +1345,8 @@ impl Pane for LyricsPane {
         if crate::core::mpv::mpv_is_ui_source(ctx) {
             self.wrong_btn_area = Rect::default();
             self.fetch_btn_area = Rect::default();
+            self.edit_btn_area = Rect::default();
+            self.word_areas.clear();
             self.pressed_btn = None;
             self.render_mpv_info(frame, area, ctx);
             return Ok(());
@@ -807,6 +1362,8 @@ impl Pane for LyricsPane {
             // render.
             self.wrong_btn_area = Rect::default();
             self.fetch_btn_area = Rect::default();
+            self.edit_btn_area = Rect::default();
+            self.word_areas.clear();
             self.pressed_btn = None;
             let selected = || {
                 ctx.queue_selected_id
@@ -860,6 +1417,14 @@ impl Pane for LyricsPane {
             if let Some(song) = song {
                 self.render_info(frame, body_area, song, ctx);
             }
+            return Ok(());
+        }
+        // Round 34: edit mode + paused renders the lyrics with every
+        // word's timing next to it (raw file times), the selected word
+        // highlighted, all visible lines editable. Resume keeps the normal
+        // karaoke highlighting — edit mode only changes the paused view.
+        if self.edit_mode && matches!(ctx.status.state, State::Pause) {
+            self.word_areas = self.render_edit_mode(frame, body_area, ctx);
             return Ok(());
         }
         let area = body_area;
@@ -1034,15 +1599,16 @@ impl Pane for LyricsPane {
 
     fn on_event(&mut self, event: &mut UiEvent, _is_visible: bool, ctx: &Ctx) -> Result<()> {
         match event {
-            UiEvent::SongChanged | UiEvent::Reconnected | UiEvent::LyricsIndexed => {
-                // A finished fetch (or a song change) clears the in-flight
-                // state. The held-button marker is left alone: its
-                // lifecycle belongs to the press / `LeftRelease` /
-                // release-check fallback alone, so a fetch completing
-                // mid-hold (LyricsIndexed) keeps `⭘` until the mouse
-                // button actually ends the press (round 12 follow-up — the
-                // fetch button lost its marker exactly here, while the
-                // show/hide button never fires this event).
+            UiEvent::SongChanged | UiEvent::Reconnected => {
+                // A new song invalidates the edit session: save any
+                // pending edits and leave edit mode first.
+                if self.edit_mode {
+                    self.set_edit_mode(ctx, false)?;
+                }
+                // A song change clears the in-flight state. The held-button
+                // marker is left alone: its lifecycle belongs to the press
+                // / `LeftRelease` / release-check fallback alone (round 12
+                // follow-up).
                 self.fetching = false;
                 if let Err(err) = self.update_lyrics(ctx) {
                     status_error!("Failed to load lyrics file: '{err}'");
@@ -1050,6 +1616,23 @@ impl Pane for LyricsPane {
                 ctx.render()?;
                 // Nothing scheduled yet: the next render arms the schedule
                 // for the current position.
+                self.last_requested_line_idx = usize::MAX;
+            }
+            UiEvent::LyricsIndexed => {
+                // A finished fetch — or an in-edit exact-time write from
+                // the popup — landed here. In edit mode the session is
+                // rebuilt from the saved file (staying in edit mode);
+                // otherwise the lyrics reload.
+                self.fetching = false;
+                if let Err(err) = self.update_lyrics(ctx) {
+                    status_error!("Failed to load lyrics file: '{err}'");
+                }
+                if self.edit_mode
+                    && let Err(err) = self.rebuild_edit_session(ctx)
+                {
+                    status_error!("Failed to reload the lyrics editor: '{err}'");
+                }
+                ctx.render()?;
                 self.last_requested_line_idx = usize::MAX;
             }
             UiEvent::PlaybackStateChanged => {
@@ -1066,7 +1649,47 @@ impl Pane for LyricsPane {
         Ok(())
     }
 
-    fn handle_action(&mut self, _event: &mut ActionEvent, _ctx: &mut Ctx) -> Result<()> {
+    fn handle_action(&mut self, event: &mut ActionEvent, ctx: &mut Ctx) -> Result<()> {
+        // Round 34: edit mode owns the keyboard while paused — word
+        // navigation (`←`/`→`, `w`/`s`), nudge (`+`/`-`, 10 ms), the
+        // exact-time popup (Enter), save (`<C-s>`), exit (Esc, saving).
+        // Outside edit mode (or while playing) the pane claims nothing.
+        if !self.edit_mode
+            || !matches!(ctx.status.state, State::Pause)
+            || self.edit_session.is_none()
+        {
+            return Ok(());
+        }
+        match event.claim_common() {
+            Some(CommonAction::Left) => {
+                self.move_selection(-1, 0);
+                ctx.render()?;
+            }
+            Some(CommonAction::Right) => {
+                self.move_selection(1, 0);
+                ctx.render()?;
+            }
+            Some(CommonAction::Up) => {
+                self.move_selection(0, -1);
+                ctx.render()?;
+            }
+            Some(CommonAction::Down) => {
+                self.move_selection(0, 1);
+                ctx.render()?;
+            }
+            Some(CommonAction::Confirm) => self.open_time_modal(ctx)?,
+            Some(CommonAction::Close) => {
+                // The first Esc leaves edit mode (saving); it consumes the
+                // key so the settings panel bound to the same key does not
+                // open on the same press.
+                self.set_edit_mode(ctx, false)?;
+                event.consume();
+            }
+            Some(CommonAction::LyricsNudgeUp) => self.nudge_selection(ctx, 10)?,
+            Some(CommonAction::LyricsNudgeDown) => self.nudge_selection(ctx, -10)?,
+            Some(CommonAction::LyricsSave) => self.save_edit(ctx)?,
+            _ => {}
+        }
         Ok(())
     }
 
@@ -1085,15 +1708,41 @@ impl Pane for LyricsPane {
         match event.kind {
             MouseEventKind::LeftClick | MouseEventKind::DoubleClick => {
                 let pos: ratatui::layout::Position = event.into();
+                if self.edit_btn_area.contains(pos) {
+                    self.pressed_btn = Some(LyricsBtn::Edit);
+                    self.schedule_release_check(ctx);
+                    return self.set_edit_mode(ctx, !self.edit_mode);
+                }
                 if self.wrong_btn_area.contains(pos) {
+                    // `hide lyrics` hides the body — a contradictory state
+                    // while editing, so leaving edit mode (saving) first.
+                    if self.edit_mode {
+                        self.set_edit_mode(ctx, false)?;
+                    }
                     self.pressed_btn = Some(LyricsBtn::Wrong);
                     self.schedule_release_check(ctx);
                     return self.toggle_wrong(ctx);
                 }
                 if self.fetch_btn_area.contains(pos) {
+                    // Fetching replaces the lyrics: leave edit mode
+                    // (saving) first so the edit session cannot race the
+                    // refetch.
+                    if self.edit_mode {
+                        self.set_edit_mode(ctx, false)?;
+                    }
                     self.pressed_btn = Some(LyricsBtn::Fetch);
                     self.schedule_release_check(ctx);
                     return self.fetch_lyrics(ctx);
+                }
+                // Round 34: a click on a word in edit mode selects it.
+                if self.edit_mode
+                    && matches!(ctx.status.state, State::Pause)
+                    && !self.is_wrong(ctx)
+                    && let Some(area) = self.word_areas.iter().find(|w| w.rect.contains(pos))
+                {
+                    self.edit_selection = Some((area.line, area.word));
+                    ctx.render()?;
+                    return Ok(());
                 }
             }
             MouseEventKind::LeftRelease => {
@@ -1371,8 +2020,12 @@ mod tests {
 
     use super::{LINK_BLUE, LyricsBtn, LyricsPane, Pane, format_clock};
     use crate::{
+        config::keys::CommonAction,
         mpd::commands::{Song, State},
-        shared::mouse_event::{MouseEvent, MouseEventKind},
+        shared::{
+            keys::{ActionEvent, Actions},
+            mouse_event::{MouseEvent, MouseEventKind},
+        },
         tests::fixtures::ctx,
     };
 
@@ -2443,7 +3096,213 @@ mod tests {
         assert_eq!(spans[0].style, base);
         assert_eq!(spans[2].style, base);
     }
+// ---- Round 34: lyrics edit mode ----
+
+    /// A pause fixture whose lyrics live in a real temp-dir file (the edit
+    /// session writes back to it).
+    fn edit_fixture() -> (crate::ctx::Ctx, LyricsPane, std::path::PathBuf) {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "s2u-lyrics-pane-{}-{n}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("First.lrc");
+        std::fs::write(
+            &path,
+            "[ti:First]\n[ar:Test Artist]\n# lrcgen-gap-align:v1\n\n[00:01.00]<00:01.20>hello <00:01.40>world\n[00:02.00]<00:02.10>a <00:02.30>b\n",
+        )
+        .unwrap();
+
+        let (app_tx, _app_rx) = crossbeam::channel::unbounded();
+        let mut ctx = crate::tests::fixtures::ctx(
+            (app_tx, _app_rx),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+        );
+        let mut first = song(1, "First");
+        first.file = dir.join("First.flac").to_string_lossy().into_owned();
+        ctx.queue = vec![first, song(2, "Second"), song(3, "Third")];
+        ctx.status.state = State::Pause;
+        ctx.status.songid = Some(1);
+        ctx.status.elapsed = Duration::from_millis(1500);
+
+        let mut pane = LyricsPane::new(&ctx);
+        pane.update_lyrics(&ctx).unwrap();
+        assert!(pane.current_lyrics.is_some(), "lyrics loaded from the temp file");
+        (ctx, pane, path)
+    }
+
+    fn action(action: crate::config::keys::CommonAction) -> ActionEvent {
+        ActionEvent::from(std::sync::Arc::new(vec![Actions::Common(action)]))
+    }
+
+    #[test]
+    fn edit_pencil_button_renders_left_and_toggles_edit_mode() {
+        let (mut ctx, mut pane, _path) = edit_fixture();
+        // The buttons row only exists in lyrics mode, so check the pencil
+        // while playing (lyrics visible, edit mode off -> `✎`).
+        ctx.status.state = State::Play;
+        let text = rendered(&mut pane, &mut ctx, 60, 12);
+        let row: Vec<char> = text.lines().nth(11).unwrap().chars().collect();
+        assert_eq!(row[1], '✎', "pencil on the left of the button row: {text}");
+        assert!(
+            text.contains("● hide lyrics | ● fetch lyrics"),
+            "right-aligned cluster intact: {text}"
+        );
+        assert_eq!(pane.edit_btn_area, Rect::new(1, 11, 1, 1), "click zone recorded");
+
+        // A full press+release toggles edit mode ON: the glyph flips to
+        // the active `✏` (persistent — no need to hold the button).
+        let btn = pane.edit_btn_area;
+        click_and_release(&mut pane, &ctx, btn);
+        assert!(pane.edit_mode, "pencil click enters edit mode");
+        let text = rendered(&mut pane, &mut ctx, 60, 12);
+        assert_eq!(text.lines().nth(11).unwrap().chars().nth(1), Some('✏'), "{text}");
+
+        // Click again exits edit mode (nothing was edited, no write-back).
+        let btn = pane.edit_btn_area;
+        click_and_release(&mut pane, &ctx, btn);
+        assert!(!pane.edit_mode, "pencil click leaves edit mode");
+        assert!(pane.edit_session.is_none());
+    }
+
+    #[test]
+    fn edit_mode_paused_keeps_the_lyrics_with_per_word_timings() {
+        let (mut ctx, mut pane, _path) = edit_fixture();
+        pane.set_edit_mode(&ctx, true).unwrap();
+
+        let text = rendered(&mut pane, &mut ctx, 60, 12);
+        // The lyrics stay visible (no track-details info panel).
+        assert!(text.contains("hello"), "lyrics shown while paused in edit mode: {text}");
+        assert!(text.contains("world"), "{text}");
+        assert!(!text.contains("Title"), "no info panel while editing: {text}");
+        // Each word carries its raw file timing, styled separately.
+        assert!(text.contains("00:01.20"), "word timing shown: {text}");
+        assert!(text.contains("00:01.40"), "{text}");
+        assert!(
+            pane.word_areas.iter().any(|w| w.line == 0 && w.word == 0),
+            "word hit areas recorded: {:?}",
+            pane.word_areas
+        );
+        // The selected word renders highlighted (bold); a non-selected
+        // word keeps the plain lyrics style.
+        let selected = cell_style(&mut pane, &mut ctx, 60, 12, 2, 5);
+        assert!(
+            selected.add_modifier.contains(Modifier::BOLD),
+            "selected word is bold: {selected:?}"
+        );
+        let plain = cell_style(&mut pane, &mut ctx, 60, 12, 16, 5);
+        assert!(
+            !plain.add_modifier.contains(Modifier::BOLD),
+            "non-selected word is not bold: {plain:?}"
+        );
+    }
+
+    #[test]
+    fn edit_mode_playing_keeps_the_normal_karaoke_view() {
+        let (mut ctx, mut pane, _path) = edit_fixture();
+        ctx.status.state = State::Play;
+        pane.set_edit_mode(&ctx, true).unwrap();
+        let text = rendered(&mut pane, &mut ctx, 60, 12);
+        assert!(!text.contains("00:01.20"), "no per-word timings while playing: {text}");
+        assert!(text.contains("hello world"), "normal karaoke text: {text}");
+        assert!(pane.word_areas.is_empty(), "no click targets while playing");
+    }
+
+    #[test]
+    fn paused_without_edit_mode_still_shows_the_info_panel() {
+        let (mut ctx, mut pane, _path) = edit_fixture();
+        let text = rendered(&mut pane, &mut ctx, 60, 12);
+        assert!(text.contains("Title"), "paused + no edit mode shows info: {text}");
+        assert!(!text.contains("hello"), "no lyrics: {text}");
+    }
+
+    #[test]
+    fn clicking_a_word_selects_it() {
+        let (mut ctx, mut pane, _path) = edit_fixture();
+        pane.set_edit_mode(&ctx, true).unwrap();
+        rendered(&mut pane, &mut ctx, 60, 12);
+        let rect = pane.word_areas.iter().find(|w| w.line == 0 && w.word == 1).unwrap().rect;
+        click(&mut pane, &ctx, rect);
+        assert_eq!(pane.edit_selection, Some((0, 1)), "click selects the word");
+    }
+
+    #[test]
+    fn word_navigation_moves_across_words_and_lines() {
+        let (mut ctx, mut pane, _path) = edit_fixture();
+        pane.set_edit_mode(&ctx, true).unwrap();
+        // The anchor line is line 0 (elapsed 1.5s); initial selection is
+        // its first word.
+        assert_eq!(pane.edit_selection, Some((0, 0)));
+
+        pane.handle_action(&mut action(CommonAction::Right), &mut ctx).unwrap();
+        assert_eq!(pane.edit_selection, Some((0, 1)), "right moves to the next word");
+        pane.handle_action(&mut action(CommonAction::Right), &mut ctx).unwrap();
+        assert_eq!(
+            pane.edit_selection,
+            Some((1, 0)),
+            "right past the last word wraps to the next line"
+        );
+        pane.handle_action(&mut action(CommonAction::Left), &mut ctx).unwrap();
+        assert_eq!(pane.edit_selection, Some((0, 1)), "left wraps back");
+        pane.handle_action(&mut action(CommonAction::Down), &mut ctx).unwrap();
+        assert_eq!(pane.edit_selection, Some((1, 1)), "down keeps the word column");
+        pane.handle_action(&mut action(CommonAction::Up), &mut ctx).unwrap();
+        assert_eq!(pane.edit_selection, Some((0, 1)), "up returns");
+    }
+
+    #[test]
+    fn nudge_and_esc_exit_saves_the_edited_timings() {
+        let (mut ctx, mut pane, path) = edit_fixture();
+        pane.set_edit_mode(&ctx, true).unwrap();
+
+        // Nudge the selected word's time up by 10 ms.
+        pane.handle_action(&mut action(CommonAction::LyricsNudgeUp), &mut ctx).unwrap();
+        assert!(pane.edit_session.as_ref().unwrap().is_dirty(), "nudge marks the session dirty");
+        assert_eq!(
+            pane.edit_session.as_ref().unwrap().lines[0].words[0].time,
+            Duration::from_millis(1210)
+        );
+
+        // Esc leaves edit mode and writes the change back.
+        let mut ev = action(CommonAction::Close);
+        pane.handle_action(&mut ev, &mut ctx).unwrap();
+        assert!(!pane.edit_mode, "esc exits edit mode");
+        assert!(ev.is_consumed(), "esc consumed so settings does not open");
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            on_disk.contains("<00:01.21>hello"),
+            "changed marker written back: {on_disk}"
+        );
+        assert!(
+            on_disk.contains("# lrcgen-gap-align:v1"),
+            "stamp line preserved: {on_disk}"
+        );
+        assert!(on_disk.contains("<00:01.40>world"), "other markers untouched: {on_disk}");
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn exact_time_confirm_opens_the_value_popup() {
+        let (mut ctx, mut pane, _path) = edit_fixture();
+        pane.set_edit_mode(&ctx, true).unwrap();
+        let (tx, rx) = crossbeam::channel::unbounded();
+        ctx.app_event_sender = tx;
+        pane.handle_action(&mut action(CommonAction::Confirm), &mut ctx).unwrap();
+        let received = rx.try_recv().unwrap();
+        assert!(
+            matches!(
+                received,
+                crate::AppEvent::UiEvent(crate::ui::UiAppEvent::Modal(_))
+            ),
+            "Confirm opens the input modal: {received:?}"
+        );
+    }
+
 }
+
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
@@ -2470,6 +3329,8 @@ mod schedule_tests {
             usize::MAX,
             "pause/resume invalidates the stale next-line schedule so the \
              first lyrics render after the resume re-arms it"
+
+    
         );
     }
 }

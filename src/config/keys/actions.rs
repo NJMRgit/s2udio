@@ -883,6 +883,12 @@ pub enum CommonActionFile {
     Close,
     Confirm,
     FocusInput,
+    // Lyrics edit mode (round 34): nudge the selected word's time by the
+    // small step (`+`/`-`), save the pending edits without leaving edit
+    // mode (`<C-s>`).
+    NudgeUp,
+    NudgeDown,
+    SaveLyrics,
     Add,
     AddAll,
     AddReplace,
@@ -947,6 +953,12 @@ pub enum CommonAction {
     Close,
     Confirm,
     FocusInput,
+    /// Lyrics edit mode (round 34): nudge the selected word's time up
+    /// (10 ms) / down (10 ms); `LyricsSave` writes the pending edits back
+    /// to the `.lrc` file without leaving edit mode.
+    LyricsNudgeUp,
+    LyricsNudgeDown,
+    LyricsSave,
     #[strum(to_string = "AddOptions({kind})")]
     AddOptions {
         kind: AddKind,
@@ -1008,6 +1020,11 @@ impl ToDescription for CommonAction {
             CommonAction::Confirm => {
                 "Confirm whatever action is currently going on. In browser panes it either enters a directory or adds and plays a song under cursor".into()
             }
+            CommonAction::LyricsNudgeUp => "Lyrics edit mode: nudge the word's time up by 10 ms".into(),
+            CommonAction::LyricsNudgeDown => {
+                "Lyrics edit mode: nudge the word's time down by 10 ms".into()
+            }
+            CommonAction::LyricsSave => "Lyrics edit mode: save the edited timings".into(),
             CommonAction::FocusInput => {
                 "Focuses textbox if any is on the screen and is not focused".into()
             }
@@ -1224,6 +1241,9 @@ impl TryFrom<CommonActionFile> for CommonAction {
             CommonActionFile::Close => CommonAction::Close,
             CommonActionFile::Confirm => CommonAction::Confirm,
             CommonActionFile::FocusInput => CommonAction::FocusInput,
+            CommonActionFile::NudgeUp => CommonAction::LyricsNudgeUp,
+            CommonActionFile::NudgeDown => CommonAction::LyricsNudgeDown,
+            CommonActionFile::SaveLyrics => CommonAction::LyricsSave,
             CommonActionFile::PaneUp => CommonAction::PaneUp,
             CommonActionFile::PaneDown => CommonAction::PaneDown,
             CommonActionFile::PaneLeft => CommonAction::PaneLeft,
@@ -1333,6 +1353,9 @@ impl From<CommonAction> for CommonActionFile {
             CommonAction::DeleteFromPlaylist { kind } => {
                 CommonActionFile::DeleteFromPlaylist { kind }
             }
+            CommonAction::LyricsNudgeUp => CommonActionFile::NudgeUp,
+            CommonAction::LyricsNudgeDown => CommonActionFile::NudgeDown,
+            CommonAction::LyricsSave => CommonActionFile::SaveLyrics,
         }
     }
 }

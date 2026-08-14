@@ -74,6 +74,13 @@
             "<S-Up>":     SelectUp,
             "<S-Down>":   SelectDown,
             "<C-a>":      SelectAll,
+            // Lyrics edit mode (round 34): ←/→ across words, +/− nudge
+            // the selected word's time (10 ms), <C-s> saves.
+            "<Left>":     Left,
+            "<Right>":    Right,
+            "<S-+>":      NudgeUp,
+            "-":          NudgeDown,
+            "<C-s>":      SaveLyrics,
         },
 
         directories: {
