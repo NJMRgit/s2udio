@@ -173,6 +173,10 @@ pub struct LyricsPane {
     edit_session: Option<LrcEditSession>,
     /// The selected word as `(line, word)` into the edit session.
     edit_selection: Option<(usize, usize)>,
+    /// Round 35: the line a just-inserted lyric should land on; the
+    /// `LyricsIndexed` reload selects it (set before the insert modal
+    /// opens, consumed by `rebuild_edit_session`).
+    pending_insert_select: Option<usize>,
     /// Screen rects of every rendered word (edit mode), for click
     /// selection.
     word_areas: Vec<WordArea>,
@@ -221,6 +225,7 @@ impl LyricsPane {
             edit_mode: false,
             edit_session: None,
             edit_selection: None,
+            pending_insert_select: None,
             word_areas: Vec::new(),
             wrong_song_file: None,
             fetching: false,
@@ -847,6 +852,7 @@ impl LyricsPane {
     /// dropped and edit mode ends (there is nothing left to edit).
     fn rebuild_edit_session(&mut self, ctx: &Ctx) -> Result<()> {
         let selection = self.edit_selection;
+        let pending_select = self.pending_insert_select.take();
         let Some(path) = ctx.find_current_lyrics_path() else {
             self.edit_session = None;
             self.edit_selection = None;
@@ -864,6 +870,17 @@ impl LyricsPane {
             }
         };
         self.edit_session = Some(LrcEditSession::open(path, raw));
+        // Round 35: a just-inserted line (from the insert modal) is
+        // selected on reload so the user lands on the new lyric.
+        if let Some(idx) = pending_select
+            && self
+                .edit_session
+                .as_ref()
+                .is_some_and(|s| s.lines.get(idx).is_some_and(|ln| !ln.words.is_empty()))
+        {
+            self.edit_selection = Some((idx, 0));
+            return Ok(());
+        }
         let valid = selection.is_some_and(|(l, w)| {
             self.edit_session
                 .as_ref()
@@ -909,6 +926,162 @@ impl LyricsPane {
                     let raw = std::fs::read_to_string(&path)?;
                     let new_raw = LrcEditSession::apply_to_raw(&raw, line, word, time)?;
                     LrcEditSession::write_atomic(&path, &new_raw)?;
+                    crate::shared::macros::try_skip!(
+                        ctx.work_sender
+                            .send(crate::shared::events::WorkRequest::IndexSingleLrc { path }),
+                        "Failed to request lyrics index update"
+                    );
+                    Ok(())
+                })
+        );
+        Ok(())
+    }
+
+    /// Round 35: delete the current lyric line (pending until save).
+    /// The selection moves to the next selectable line, else the
+    /// previous one.
+    fn delete_current_line(&mut self, ctx: &mut Ctx) -> Result<()> {
+        let Some((l, _)) = self.edit_selection else { return Ok(()) };
+        let Some(session) = &mut self.edit_session else { return Ok(()) };
+        if l >= session.lines.len() {
+            return Ok(());
+        }
+        session.delete_line(l)?;
+        let selectable = self.selectable_lines();
+        if let Some(&next) = selectable.iter().find(|&&x| x >= l) {
+            self.edit_selection = Some((next, 0));
+        } else if let Some(&prev) = selectable.last() {
+            self.edit_selection = Some((prev, 0));
+        } else {
+            self.edit_selection = None;
+        }
+        ctx.render()?;
+        Ok(())
+    }
+
+    /// Round 35: edit the current line's text. Pending edits are saved
+    /// first (round-34 pattern); the modal rewrites the line through a
+    /// fresh session so word timings re-interpolate when the word count
+    /// changes.
+    fn open_line_text_modal(&mut self, ctx: &mut Ctx) -> Result<()> {
+        let Some((l, _)) = self.edit_selection else { return Ok(()) };
+        let (path, line_idx, current) = {
+            let Some(session) = &self.edit_session else { return Ok(()) };
+            let Some(line) = session.lines.get(l) else { return Ok(()) };
+            (session.path().clone(), l, line.content.clone())
+        };
+        if let Some(session) = &mut self.edit_session
+            && session.is_dirty()
+        {
+            session.save()?;
+        }
+        modal!(
+            ctx,
+            InputModal::new(ctx)
+                .title("Lyrics text")
+                .confirm_label("Set")
+                .input_label("Text:")
+                .initial_value(current)
+                .on_confirm(move |ctx, value| {
+                    let raw = std::fs::read_to_string(&path)?;
+                    let mut session = LrcEditSession::open(path.clone(), raw);
+                    session.set_line_text(line_idx, value)?;
+                    session.save()?;
+                    crate::shared::macros::try_skip!(
+                        ctx.work_sender
+                            .send(crate::shared::events::WorkRequest::IndexSingleLrc { path }),
+                        "Failed to request lyrics index update"
+                    );
+                    Ok(())
+                })
+        );
+        Ok(())
+    }
+
+    /// Round 35: set the current line's timestamp (the `[mm:ss.xx]` tag;
+    /// word markers are untouched). Same save-first + fresh-session
+    /// pattern as the text modal.
+    fn open_line_time_modal(&mut self, ctx: &mut Ctx) -> Result<()> {
+        let Some((l, _)) = self.edit_selection else { return Ok(()) };
+        let (path, line_idx, current) = {
+            let Some(session) = &self.edit_session else { return Ok(()) };
+            let Some(line) = session.lines.get(l) else { return Ok(()) };
+            (session.path().clone(), l, LrcEditSession::format_time(line.time))
+        };
+        if let Some(session) = &mut self.edit_session
+            && session.is_dirty()
+        {
+            session.save()?;
+        }
+        modal!(
+            ctx,
+            InputModal::new(ctx)
+                .title("Line time (mm:ss.xx)")
+                .confirm_label("Set")
+                .input_label("Time:")
+                .initial_value(current)
+                .on_confirm(move |ctx, value| {
+                    let Some(time) = LrcEditSession::parse_time(value) else {
+                        status_error!("Invalid time: expected mm:ss.xx");
+                        return Ok(());
+                    };
+                    let raw = std::fs::read_to_string(&path)?;
+                    let mut session = LrcEditSession::open(path.clone(), raw);
+                    session.set_line_time(line_idx, time)?;
+                    session.save()?;
+                    crate::shared::macros::try_skip!(
+                        ctx.work_sender
+                            .send(crate::shared::events::WorkRequest::IndexSingleLrc { path }),
+                        "Failed to request lyrics index update"
+                    );
+                    Ok(())
+                })
+        );
+        Ok(())
+    }
+
+    /// Round 35: insert a new lyric line before (`before`) or after the
+    /// current line. The suggested timestamp is the midpoint to the
+    /// neighbour (5 s past the anchor at the ends); the text comes from
+    /// the modal, the line is written immediately (pending edits are
+    /// saved first) and re-selected via the re-index.
+    fn insert_new_line(&mut self, ctx: &mut Ctx, before: bool) -> Result<()> {
+        let Some((l, _)) = self.edit_selection else { return Ok(()) };
+        let (path, position, time) = {
+            let Some(session) = &self.edit_session else { return Ok(()) };
+            let Some(anchor) = session.lines.get(l) else { return Ok(()) };
+            let position = if before { l } else { l + 1 };
+            let time = if before {
+                match session.lines.get(l.wrapping_sub(1)).map(|x| x.time) {
+                    Some(prev) if prev < anchor.time => prev + (anchor.time - prev) / 2,
+                    _ => anchor.time.saturating_sub(Duration::from_secs(5)),
+                }
+            } else {
+                match session.lines.get(l + 1).map(|x| x.time) {
+                    Some(next) if next > anchor.time => anchor.time + (next - anchor.time) / 2,
+                    _ => anchor.time + Duration::from_secs(5),
+                }
+            };
+            (session.path().clone(), position, time)
+        };
+        if let Some(session) = &mut self.edit_session
+            && session.is_dirty()
+        {
+            session.save()?;
+        }
+        self.pending_insert_select = Some(position);
+        modal!(
+            ctx,
+            InputModal::new(ctx)
+                .title(if before { "New lyric before" } else { "New lyric after" })
+                .confirm_label("Insert")
+                .input_label("Text:")
+                .on_confirm(move |ctx, value| {
+                    let raw = std::fs::read_to_string(&path)?;
+                    let mut session = LrcEditSession::open(path.clone(), raw);
+                    let idx = session.insert_line_at(position, time)?;
+                    session.set_line_text(idx, value)?;
+                    session.save()?;
                     crate::shared::macros::try_skip!(
                         ctx.work_sender
                             .send(crate::shared::events::WorkRequest::IndexSingleLrc { path }),
@@ -1642,6 +1815,19 @@ impl Pane for LyricsPane {
                 // resume. Resetting here makes the first lyrics render after
                 // the resume schedule the next line from the fresh position.
                 self.last_requested_line_idx = usize::MAX;
+                // Round 35: with edit mode on, pausing re-anchors the
+                // selection to the lyric at the pause position (unless it
+                // is already on it) — the user asked that the selection
+                // always sit on the current lyric while paused.
+                if self.edit_mode
+                    && matches!(ctx.status.state, State::Pause)
+                    && self.edit_session.is_some()
+                {
+                    let anchor = self.anchor_line(ctx);
+                    if !self.edit_selection.is_some_and(|(l, _)| l == anchor) {
+                        self.select_initial_word(ctx);
+                    }
+                }
                 ctx.render()?;
             }
             _ => {}
@@ -1688,6 +1874,14 @@ impl Pane for LyricsPane {
             Some(CommonAction::LyricsNudgeUp) => self.nudge_selection(ctx, 10)?,
             Some(CommonAction::LyricsNudgeDown) => self.nudge_selection(ctx, -10)?,
             Some(CommonAction::LyricsSave) => self.save_edit(ctx)?,
+            // Round 35: line-level editing. `d` deletes the current
+            // line, `e` edits its text, `i`/`a` insert a new line
+            // before/after, `t` sets the line's timestamp.
+            Some(CommonAction::LyricsDeleteLine) => self.delete_current_line(ctx)?,
+            Some(CommonAction::LyricsEditLine) => self.open_line_text_modal(ctx)?,
+            Some(CommonAction::LyricsInsertBefore) => self.insert_new_line(ctx, true)?,
+            Some(CommonAction::LyricsInsertAfter) => self.insert_new_line(ctx, false)?,
+            Some(CommonAction::LyricsLineTime) => self.open_line_time_modal(ctx)?,
             _ => {}
         }
         Ok(())
@@ -3301,6 +3495,73 @@ mod tests {
         );
     }
 
+    #[test]
+    fn d_deletes_the_current_line_and_moves_the_selection() {
+        let (mut ctx, mut pane, path) = edit_fixture();
+        pane.set_edit_mode(&ctx, true).unwrap();
+        assert_eq!(pane.edit_selection, Some((0, 0)), "selection on the current lyric");
+
+        pane.handle_action(&mut action(CommonAction::LyricsDeleteLine), &mut ctx).unwrap();
+
+        assert_eq!(pane.edit_session.as_ref().unwrap().lines.len(), 1);
+        assert_eq!(pane.edit_session.as_ref().unwrap().lines[0].content, "a b");
+        assert_eq!(pane.edit_selection, Some((0, 0)), "selection moves to the next line");
+        // Esc saves the deletion (the file keeps the header + stamp).
+        let mut ev = action(CommonAction::Close);
+        pane.handle_action(&mut ev, &mut ctx).unwrap();
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            on_disk.contains("# lrcgen-gap-align:v1") && on_disk.contains("[00:02.00]"),
+            "deletion written, header/stamp intact: {on_disk}"
+        );
+        assert!(!on_disk.contains("hello"), "deleted line gone: {on_disk}");
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn e_opens_the_line_text_modal() {
+        let (mut ctx, mut pane, _path) = edit_fixture();
+        pane.set_edit_mode(&ctx, true).unwrap();
+        let (tx, rx) = crossbeam::channel::unbounded();
+        ctx.app_event_sender = tx;
+        pane.handle_action(&mut action(CommonAction::LyricsEditLine), &mut ctx).unwrap();
+        let received = rx.try_recv().unwrap();
+        assert!(
+            matches!(received, crate::AppEvent::UiEvent(crate::ui::UiAppEvent::Modal(_))),
+            "e opens the text modal: {received:?}"
+        );
+    }
+
+    #[test]
+    fn i_and_a_open_the_insert_modals() {
+        let (mut ctx, mut pane, _path) = edit_fixture();
+        pane.set_edit_mode(&ctx, true).unwrap();
+        for act in [CommonAction::LyricsInsertBefore, CommonAction::LyricsInsertAfter] {
+            let (tx, rx) = crossbeam::channel::unbounded();
+            ctx.app_event_sender = tx;
+            pane.handle_action(&mut action(act), &mut ctx).unwrap();
+            let received = rx.try_recv().unwrap();
+            assert!(
+                matches!(received, crate::AppEvent::UiEvent(crate::ui::UiAppEvent::Modal(_))),
+                "insert modal opens: {received:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn t_opens_the_line_time_modal() {
+        let (mut ctx, mut pane, _path) = edit_fixture();
+        pane.set_edit_mode(&ctx, true).unwrap();
+        let (tx, rx) = crossbeam::channel::unbounded();
+        ctx.app_event_sender = tx;
+        pane.handle_action(&mut action(CommonAction::LyricsLineTime), &mut ctx).unwrap();
+        let received = rx.try_recv().unwrap();
+        assert!(
+            matches!(received, crate::AppEvent::UiEvent(crate::ui::UiAppEvent::Modal(_))),
+            "t opens the line-time modal: {received:?}"
+        );
+    }
+
 }
 
 
@@ -3328,9 +3589,101 @@ mod schedule_tests {
             pane.last_requested_line_idx,
             usize::MAX,
             "pause/resume invalidates the stale next-line schedule so the \
-             first lyrics render after the resume re-arms it"
-
-    
+             "
         );
+    }
+
+    #[test]
+    fn pausing_reanchors_the_edit_selection_to_the_current_lyric() {
+        use crate::mpd::commands::State;
+        use std::time::Duration;
+
+        let (app_tx, _app_rx) = crossbeam::channel::unbounded();
+        let mut ctx = crate::tests::fixtures::ctx(
+            (app_tx, _app_rx),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+        );
+        let mut pane = LyricsPane::new(&ctx);
+        let dir =
+            std::env::temp_dir().join(format!("s2u-lyrics-anchor-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("song.lrc");
+        std::fs::write(
+            &path,
+            "[00:01.00]<00:01.10>one <00:01.30>two\n[00:03.00]<00:03.10>three\n",
+        )
+        .unwrap();
+        let mut song = crate::mpd::commands::Song::default();
+        song.id = 1;
+        song.file = dir.join("song.flac").to_string_lossy().into_owned();
+        song.metadata.insert("title".to_string(), "Song".into());
+        song.metadata.insert("artist".to_string(), "Test Artist".into());
+        ctx.queue = vec![song];
+        ctx.status.state = State::Pause;
+        ctx.status.songid = Some(1);
+        ctx.status.elapsed = Duration::from_millis(1500);
+        pane.update_lyrics(&ctx).unwrap();
+        assert!(pane.current_lyrics.is_some(), "lyrics loaded from the sidecar");
+        pane.set_edit_mode(&ctx, true).unwrap();
+        assert!(pane.edit_mode, "edit mode enabled");
+        // Move the selection off the current lyric (line 0) to line 1.
+        pane.edit_selection = Some((1, 0));
+        assert_eq!(pane.anchor_line(&ctx), 0, "anchor = the lyric at the pause position");
+
+        pane.on_event(&mut UiEvent::PlaybackStateChanged, true, &ctx).unwrap();
+
+        assert_eq!(
+            pane.edit_selection,
+            Some((0, 0)),
+            "pausing re-anchors the selection to the current lyric"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn pausing_keeps_the_selection_when_already_on_the_current_lyric() {
+        use crate::mpd::commands::State;
+        use std::time::Duration;
+
+        let (app_tx, _app_rx) = crossbeam::channel::unbounded();
+        let mut ctx = crate::tests::fixtures::ctx(
+            (app_tx, _app_rx),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+        );
+        let mut pane = LyricsPane::new(&ctx);
+        let dir =
+            std::env::temp_dir().join(format!("s2u-lyrics-anchor2-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("song.lrc");
+        std::fs::write(
+            &path,
+            "[00:01.00]<00:01.10>one <00:01.30>two\n[00:03.00]<00:03.10>three\n",
+        )
+        .unwrap();
+        let mut song = crate::mpd::commands::Song::default();
+        song.id = 1;
+        song.file = dir.join("song.flac").to_string_lossy().into_owned();
+        song.metadata.insert("title".to_string(), "Song".into());
+        song.metadata.insert("artist".to_string(), "Test Artist".into());
+        ctx.queue = vec![song];
+        ctx.status.state = State::Pause;
+        ctx.status.songid = Some(1);
+        ctx.status.elapsed = Duration::from_millis(1500);
+        pane.update_lyrics(&ctx).unwrap();
+        pane.set_edit_mode(&ctx, true).unwrap();
+        // Already on the current lyric, second word — a pause keeps the
+        // word the user is editing.
+        pane.edit_selection = Some((0, 1));
+
+        pane.on_event(&mut UiEvent::PlaybackStateChanged, true, &ctx).unwrap();
+
+        assert_eq!(
+            pane.edit_selection,
+            Some((0, 1)),
+            "already on the anchor: the word selection is preserved"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

@@ -37,6 +37,14 @@ pub struct EditableLine {
     /// The editable words (explicit markers + interpolated), in display
     /// order.
     pub words: Vec<EditableWord>,
+    /// Byte span of the full raw line (including its line ending) in the
+    /// file text the session was opened on. `None` for lines inserted
+    /// during this session (they are re-rendered on save).
+    pub raw_span: Option<(usize, usize)>,
+    /// The line changed structurally since open (text or line time), so
+    /// `save` re-renders it from the model instead of emitting the raw
+    /// line verbatim.
+    pub dirty: bool,
 }
 
 /// An in-memory editing session over one `.lrc` file. The raw file text is
@@ -52,6 +60,13 @@ pub struct LrcEditSession {
     pub lines: Vec<EditableLine>,
     /// (line, word) pairs whose time changed since the last save.
     pending: Vec<(usize, usize)>,
+    /// A line was removed since the last save (removed lines leave
+    /// `lines`, so `is_dirty` cannot see them — this flag remembers).
+    structural: bool,
+    /// Raw byte spans of the lines deleted since the last save, so
+    /// `render` can skip them during the gap-fill (everything between
+    /// the surviving lines' chunks passes through verbatim otherwise).
+    deleted_spans: Vec<(usize, usize)>,
 }
 
 impl LrcEditSession {
@@ -60,7 +75,7 @@ impl LrcEditSession {
     /// produce no editable lines).
     pub fn open(path: PathBuf, raw: String) -> Self {
         let lines = parse_lines(&raw);
-        Self { path, raw, lines, pending: Vec::new() }
+        Self { path, raw, lines, pending: Vec::new(), structural: false, deleted_spans: Vec::new() }
     }
 
     pub fn path(&self) -> &PathBuf {
@@ -68,7 +83,7 @@ impl LrcEditSession {
     }
 
     pub fn is_dirty(&self) -> bool {
-        !self.pending.is_empty()
+        self.structural || !self.pending.is_empty() || self.lines.iter().any(|l| l.dirty)
     }
 
     /// Change one word's time in the session (written back on `save`).
@@ -82,11 +97,101 @@ impl LrcEditSession {
         Ok(())
     }
 
+    /// Round-35 line-level edits (all pending until `save`, like the
+    /// word nudges): delete a line, replace a line's text, set a line's
+    /// timestamp, insert a new line after an existing one.
+    pub fn delete_line(&mut self, index: usize) -> Result<()> {
+        let line = self.lines.get(index).context("line out of range")?;
+        if let Some(span) = line.raw_span {
+            self.deleted_spans.push(span);
+        }
+        self.lines.remove(index);
+        self.structural = true;
+        self.pending.retain(|&(l, _)| l != index);
+        for (l, _) in &mut self.pending {
+            if *l > index {
+                *l -= 1;
+            }
+        }
+        Ok(())
+    }
+
+    /// Replace a line's text (marker-stripped content). Word timings are
+    /// kept word-for-word when the word count is unchanged; otherwise the
+    /// new words interpolate from the line's timestamp to the next line's
+    /// timestamp (explicit markers are written on save).
+    pub fn set_line_text(&mut self, index: usize, text: &str) -> Result<()> {
+        let content = text.trim().to_owned();
+        let (line_time, end) = {
+            let line = self.lines.get(index).context("line out of range")?;
+            let end = self
+                .lines
+                .get(index + 1)
+                .map(|l| l.time)
+                .filter(|t| *t > line.time)
+                .unwrap_or(line.time + Duration::from_secs(5));
+            (line.time, end)
+        };
+        let line = self.lines.get_mut(index).context("line out of range")?;
+        let old_words = std::mem::take(&mut line.words);
+        let new_words: Vec<&str> = content.split_whitespace().collect();
+        line.words = if !old_words.is_empty() && old_words.len() == new_words.len() {
+            new_words
+                .iter()
+                .zip(old_words.iter())
+                .map(|(w, ow)| EditableWord {
+                    text: (*w).to_owned(),
+                    time: ow.time,
+                    marker: None,
+                    text_span: None,
+                })
+                .collect()
+        } else {
+            interpolate_words(&content, line_time, end)
+        };
+        line.content = content;
+        line.dirty = true;
+        self.pending.retain(|&(l, _)| l != index);
+        Ok(())
+    }
+
+    /// Set a line's timestamp (the `[mm:ss.xx]` tag). Word markers are
+    /// untouched — they stay the karaoke sync points.
+    pub fn set_line_time(&mut self, index: usize, time: Duration) -> Result<()> {
+        let line = self.lines.get_mut(index).context("line out of range")?;
+        line.time = time;
+        line.dirty = true;
+        Ok(())
+    }
+
+    /// Insert a new empty line at `position` (`0..=len`, i.e. after the
+    /// line at `position - 1`; pending until `save`); the caller sets its
+    /// text via `set_line_text`. Returns the new line's index.
+    pub fn insert_line_at(&mut self, position: usize, time: Duration) -> Result<usize> {
+        if position > self.lines.len() {
+            anyhow::bail!("insert position out of range: {position} > {}", self.lines.len());
+        }
+        let line = EditableLine {
+            time,
+            content: String::new(),
+            words: Vec::new(),
+            raw_span: None,
+            dirty: true,
+        };
+        self.lines.insert(position, line);
+        for (l, _) in &mut self.pending {
+            if *l >= position {
+                *l += 1;
+            }
+        }
+        Ok(position)
+    }
+
     /// Write every pending edit back to the file (atomic replace), then
     /// rebuild the session from the saved text. No-op when nothing is
     /// pending.
     pub fn save(&mut self) -> Result<()> {
-        if self.pending.is_empty() {
+        if !self.is_dirty() {
             return Ok(());
         }
         let new_raw = self.render_pending()?;
@@ -94,6 +199,8 @@ impl LrcEditSession {
         self.raw = new_raw;
         self.lines = parse_lines(&self.raw);
         self.pending.clear();
+        self.structural = false;
+        self.deleted_spans.clear();
         Ok(())
     }
 
@@ -126,22 +233,91 @@ impl LrcEditSession {
         Ok((start, start))
     }
 
-    /// Apply all pending edits to the current raw text (descending byte
-    /// order keeps earlier offsets valid).
+    /// Apply all pending edits to the current raw text. Lines that
+    /// changed structurally are re-rendered from the model; unchanged
+    /// lines are emitted verbatim with only their changed word markers
+    /// rewritten (byte-descending order keeps earlier offsets valid).
     fn render_pending(&self) -> Result<String> {
+        let mut out = String::new();
+        let mut cursor = 0usize;
+        for (i, line) in self.lines.iter().enumerate() {
+            match line.raw_span {
+                Some((start, end)) => {
+                    if start > cursor {
+                        out.push_str(&self.gap_without_deleted(cursor, start));
+                    }
+                    if line.dirty {
+                        out.push_str(&Self::render_line(line));
+                    } else {
+                        out.push_str(&self.apply_word_pending(i, start, end)?);
+                    }
+                    cursor = end;
+                }
+                None => out.push_str(&Self::render_line(line)),
+            }
+        }
+        if cursor < self.raw.len() {
+            out.push_str(&self.gap_without_deleted(cursor, self.raw.len()));
+        }
+        Ok(out)
+    }
+
+    /// The raw text in `[from, to)` with the deleted lines' chunks
+    /// removed (header, blank and metadata lines pass through verbatim).
+    fn gap_without_deleted(&self, from: usize, to: usize) -> String {
+        let mut gap = self.raw[from..to].to_owned();
+        let mut spans: Vec<&(usize, usize)> = self
+            .deleted_spans
+            .iter()
+            .filter(|(ds, de)| *ds >= from && *de <= to)
+            .collect();
+        spans.sort_by_key(|(ds, _)| std::cmp::Reverse(*ds));
+        for (ds, de) in spans {
+            gap.replace_range(ds - from..de - from, "");
+        }
+        gap
+    }
+
+    /// Apply the pending word-time edits belonging to `line` to its
+    /// verbatim raw chunk (offsets relative to the chunk).
+    fn apply_word_pending(&self, line: usize, start: usize, end: usize) -> Result<String> {
         let mut edits = Vec::new();
-        for &(line, word) in &self.pending {
-            let l = self.lines.get(line).context("line out of range")?;
-            let w = l.words.get(word).context("word out of range")?;
-            let (start, end) = self.span_of(line, word)?;
-            edits.push((start, end, format!("<{}>", Self::format_time(w.time))));
+        for &(l, w) in &self.pending {
+            if l != line {
+                continue;
+            }
+            let lr = self.lines.get(l).context("line out of range")?;
+            let wr = lr.words.get(w).context("word out of range")?;
+            let (ws, we) = self.span_of(l, w)?;
+            if ws >= start && we <= end {
+                edits.push((ws - start, we - start, format!("<{}>", Self::format_time(wr.time))));
+            }
         }
-        edits.sort_by_key(|(start, _, _)| std::cmp::Reverse(*start));
-        let mut new_raw = self.raw.clone();
-        for (start, end, marker) in edits {
-            new_raw.replace_range(start..end, &marker);
+        edits.sort_by_key(|(s, _, _)| std::cmp::Reverse(*s));
+        let mut chunk = self.raw[start..end].to_owned();
+        for (s, e, marker) in edits {
+            chunk.replace_range(s..e, &marker);
         }
-        Ok(new_raw)
+        Ok(chunk)
+    }
+
+    /// Render one line from the model: `[mm:ss.xx]` + either the plain
+    /// content or every word as an explicit `<mm:ss.xx>` marker.
+    fn render_line(line: &EditableLine) -> String {
+        let tag = Self::format_time(line.time);
+        if line.words.is_empty() {
+            format!("[{tag}]{}
+", line.content)
+        } else {
+            let body = line
+                .words
+                .iter()
+                .map(|w| format!("<{}>{}", Self::format_time(w.time), w.text))
+                .collect::<Vec<_>>()
+                .join(" ");
+            format!("[{tag}]{body}
+")
+        }
     }
 
     /// Format a duration as the enhanced-LRC word marker time `mm:ss.xx`
@@ -184,7 +360,8 @@ fn parse_lines(raw: &str) -> Vec<EditableLine> {
         offset = end;
         let line = chunk.strip_suffix('\n').unwrap_or(chunk);
         let line = line.strip_suffix('\r').unwrap_or(line);
-        if let Some(parsed) = parse_line(line, start) {
+        if let Some(mut parsed) = parse_line(line, start) {
+            parsed.raw_span = Some((start, end));
             lines.push(parsed);
         }
     }
@@ -232,7 +409,7 @@ fn parse_line(line: &str, line_start: usize) -> Option<EditableLine> {
     let content_base = line_start + lead + pos + tail_lead;
 
     let (content, words) = parse_words(content_raw, content_base);
-    Some(EditableLine { time: line_time, content, words })
+    Some(EditableLine { time: line_time, content, words, raw_span: None, dirty: false })
 }
 
 /// Split a line's content on inline `<time>` markers, producing the
@@ -328,6 +505,28 @@ fn split_words_with_spans(text: &str, base: (usize, usize)) -> Vec<(String, (usi
     }
     if start < text.len() {
         out.push((text[start..].to_owned(), (base.0 + start, base.0 + text.len())));
+    }
+    out
+}
+
+/// Time the words of a user-typed lyric line: the first word starts at
+/// `start`, the rest interpolate proportionally to display width up to
+/// `end` (mirroring the parser's segment interpolation). All words come
+/// back without markers — the line is re-rendered with explicit markers
+/// on save.
+fn interpolate_words(text: &str, start: Duration, end: Duration) -> Vec<EditableWord> {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    if words.is_empty() {
+        return Vec::new();
+    }
+    let span = end.saturating_sub(start);
+    let total: usize = words.iter().map(|w| w.width()).sum::<usize>().max(1);
+    let mut acc = 0usize;
+    let mut out = Vec::with_capacity(words.len());
+    for (i, w) in words.into_iter().enumerate() {
+        let time = if i == 0 { start } else { start + span.mul_f64(acc as f64 / total as f64) };
+        acc += w.width();
+        out.push(EditableWord { text: w.to_owned(), time, marker: None, text_span: None });
     }
     out
 }
@@ -497,5 +696,122 @@ mod tests {
         assert_eq!(session.lines.len(), 2);
         let m = "[00:01.00]<00:01.20>hello".find("<00:01.20>").unwrap();
         assert_eq!(session.lines[0].words[0].marker, Some((m, m + 10)));
+    }
+
+    #[test]
+    fn parsed_lines_record_their_raw_and_tag_spans() {
+        let raw = "[ti:X]\n# lrcgen-gap-align:v1\n[00:01.00]<00:01.20>hello\n";
+        let session = LrcEditSession::open(PathBuf::new(), raw.to_owned());
+        assert_eq!(session.lines.len(), 1);
+        let l0 = &session.lines[0];
+        let raw_line = "[00:01.00]<00:01.20>hello\n";
+        let start = raw.find(raw_line).unwrap();
+        assert_eq!(l0.raw_span, Some((start, start + raw_line.len())));
+        assert!(!l0.dirty);
+    }
+
+    #[test]
+    fn delete_line_removes_the_line_and_remaps_pending() {
+        let raw = "[00:01.00]<00:01.10>a\n[00:02.00]<00:02.10>b\n[00:03.00]<00:03.10>c\n";
+        let mut session = LrcEditSession::open(PathBuf::new(), raw.to_owned());
+        session.set_word_time(2, 0, Duration::from_millis(3100)).unwrap();
+        session.delete_line(0).unwrap();
+        assert_eq!(session.lines.len(), 2);
+        assert_eq!(session.lines[0].content, "b");
+        // The pending edit followed the shifted line.
+        assert_eq!(session.pending, vec![(1, 0)]);
+        let new_raw = session.render_pending().unwrap();
+        assert_eq!(new_raw, "[00:02.00]<00:02.10>b\n[00:03.00]<00:03.10>c\n");
+    }
+
+    #[test]
+    fn set_line_text_keeps_word_times_when_the_count_matches() {
+        let raw = "[00:01.00]<00:01.20>hello <00:01.40>world\n";
+        let mut session = LrcEditSession::open(PathBuf::new(), raw.to_owned());
+        session.set_line_text(0, "hello there").unwrap();
+        assert_eq!(session.lines[0].content, "hello there");
+        assert_eq!(session.lines[0].words.len(), 2);
+        assert_eq!(session.lines[0].words[0].text, "hello");
+        assert_eq!(session.lines[0].words[0].time, Duration::from_millis(1200));
+        assert_eq!(session.lines[0].words[1].text, "there");
+        assert_eq!(session.lines[0].words[1].time, Duration::from_millis(1400));
+        let new_raw = session.render_pending().unwrap();
+        assert_eq!(new_raw, "[00:01.00]<00:01.20>hello <00:01.40>there\n");
+    }
+
+    #[test]
+    fn set_line_text_reinterpolates_when_the_count_changes() {
+        let raw = "[00:01.00]<00:01.20>hello\n[00:03.00]next\n";
+        let mut session = LrcEditSession::open(PathBuf::new(), raw.to_owned());
+        session.set_line_text(0, "a b c d").unwrap();
+        let words = &session.lines[0].words;
+        assert_eq!(words.len(), 4);
+        assert_eq!(words[0].time, Duration::from_millis(1000));
+        // The rest interpolate across the 2 s span to the next line.
+        assert!(words[1].time > Duration::from_millis(1000));
+        assert!(words[3].time < Duration::from_millis(3000));
+        let new_raw = session.render_pending().unwrap();
+        assert!(new_raw.starts_with("[00:01.00]<00:01.00>a <00:01."), "got {new_raw}");
+        assert!(new_raw.ends_with(">d\n[00:03.00]next\n"));
+    }
+
+    #[test]
+    fn set_line_time_rewrites_the_tag_keeping_the_words() {
+        let raw = "[00:01.00]<00:01.20>hello <00:01.40>world\n";
+        let mut session = LrcEditSession::open(PathBuf::new(), raw.to_owned());
+        session.set_line_time(0, Duration::from_millis(2500)).unwrap();
+        let new_raw = session.render_pending().unwrap();
+        assert_eq!(new_raw, "[00:02.50]<00:01.20>hello <00:01.40>world\n");
+    }
+
+    #[test]
+    fn insert_line_adds_a_line_after_the_anchor() {
+        let raw = "[00:01.00]<00:01.10>a\n[00:03.00]<00:03.10>b\n";
+        let mut session = LrcEditSession::open(PathBuf::new(), raw.to_owned());
+        let idx = session.insert_line_at(1, Duration::from_millis(2000)).unwrap();
+        assert_eq!(idx, 1);
+        session.set_line_text(idx, "middle").unwrap();
+        let new_raw = session.render_pending().unwrap();
+        assert_eq!(new_raw, "[00:01.00]<00:01.10>a\n[00:02.00]<00:02.00>middle\n[00:03.00]<00:03.10>b\n");
+    }
+
+    #[test]
+    fn save_splices_structural_edits_and_keeps_the_header_and_stamp() {
+        let dir = std::env::temp_dir().join(format!("s2u-lrc-edit-r35-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("song.lrc");
+        let raw = "[ti:Test]\n[ar:Artist]\n# lrcgen-gap-align:v1\n\n[00:01.00]<00:01.20>hello <00:01.40>world\n[00:02.00]plain line\n[00:03.00]<00:03.10>a <00:03.30>b <00:03.50>c\n";
+        std::fs::write(&path, raw).unwrap();
+        let mut session = LrcEditSession::open(path.clone(), raw.to_owned());
+        // Structural: delete line 1 (plain), rewrite the last line's
+        // text, insert a line after line 0, nudge a word on line 0.
+        session.delete_line(1).unwrap();
+        session.set_line_text(1, "x y").unwrap();
+        let ins = session.insert_line_at(1, Duration::from_millis(1500)).unwrap();
+        session.set_line_text(ins, "new line").unwrap();
+        session.set_word_time(0, 0, Duration::from_millis(1250)).unwrap();
+        assert!(session.is_dirty());
+        session.save().unwrap();
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert!(on_disk.starts_with("[ti:Test]\n[ar:Artist]\n# lrcgen-gap-align:v1\n\n"));
+        assert_eq!(
+            on_disk,
+            "[ti:Test]\n[ar:Artist]\n# lrcgen-gap-align:v1\n\n[00:01.00]<00:01.25>hello <00:01.40>world\n[00:01.50]<00:01.50>new <00:02.14>line\n[00:03.00]<00:03.00>x <00:05.50>y\n"
+        );
+        // The rebuilt session reflects the saved file (header lines are
+        // still not editable lines).
+        assert_eq!(session.lines.len(), 3);
+        assert!(!session.is_dirty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn deleting_every_line_keeps_the_header_verbatim() {
+        let raw = "[ti:Test]\n# lrcgen-gap-align:v1\n[00:01.00]one\n[00:02.00]two\n";
+        let mut session = LrcEditSession::open(PathBuf::new(), raw.to_owned());
+        session.delete_line(1).unwrap();
+        session.delete_line(0).unwrap();
+        let new_raw = session.render_pending().unwrap();
+        assert_eq!(new_raw, "[ti:Test]\n# lrcgen-gap-align:v1\n");
     }
 }

@@ -1,3 +1,46 @@
+# Notes for the container agent — round 35 IMPLEMENTED host-side (2026-08-14) — do not re-implement
+
+## ROUND 35 — line-level lyrics editing + pause re-anchor — committed on `working`
+
+**User feedback (2026-08-14, direct to the host):** "when editing the
+lyrics I need to be able to remove the lyric, edit the lyric, the
+timestamp, and also add a new lyric before or after the current one" +
+"when edit mode is enabled and the music is paused the selection should
+be on the current lyric". Host implemented on `working` (round-35 commit
+`9abb183`, on top of round 34 + the round-34 host fix). **1422/1422**,
+warnings 3 baseline.
+
+1. **`d` deletes the current line** (pending until `<C-s>`/Esc; the
+   selection moves to the next line, else the previous).
+2. **`e` edits the line's text** (modal prefilled; same word count keeps
+   each word's timestamp, otherwise the words re-interpolate across the
+   line's span).
+3. **`i` / `a` insert a new line before / after the current one**
+   (modal for the text; the line lands at the midpoint of the
+   neighbours' timestamps — 5 s past the anchor at the edges — and is
+   re-selected on reload).
+4. **`t` sets the line's timestamp** (`[mm:ss.xx]`; word markers
+   untouched). Enter still edits the selected word's timestamp, `+`/`-`
+   still nudge it.
+5. **Pausing with edit mode ON re-anchors the selection to the current
+   lyric** (unless it is already on it).
+
+Write-back keeps the header, `# lrcgen-gap-align:v1` stamp, line
+structure and enhanced format; only touched lines are rewritten, the
+rest stay verbatim. New `src/shared/lrc/edit.rs` ops: `delete_line`,
+`set_line_text`, `set_line_time`, `insert_line_at` (raw spans +
+spliced save; deleted-span tracking). New actions
+`LyricsDeleteLine`/`LyricsEditLine`/`LyricsInsertBefore`/
+`LyricsInsertAfter`/`LyricsLineTime`; default navigation bindings
+`d`/`e`/`i`/`a`/`t` (defaults + example_config.ron + the live
+config.ron, added host-side). Live-validated (tmux + SGR/key
+injection): d-delete written on Esc, a-insert at the interpolated
+midpoint + selected, e-edit keeping word times, t-modal opens,
+pause re-anchor on the current lyric. Test `.lrc` restored byte-exact.
+Host: binary `a5c5e5db` installed; the running instance needs a
+restart. Nothing for you to implement — pull `working` when ready.
+
+---
 # Notes for the container agent — round 34 HOST FIX (2026-08-14) — do not re-implement
 
 ## HOST-SIDE FIX on `working` (validated live; committed host-side)

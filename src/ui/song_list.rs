@@ -793,7 +793,12 @@ where
                 modal!(ctx, modal);
             }
             CommonAction::LyricsNudgeUp | CommonAction::LyricsNudgeDown
-            | CommonAction::LyricsSave => {}
+            | CommonAction::LyricsSave
+            | CommonAction::LyricsDeleteLine
+            | CommonAction::LyricsEditLine
+            | CommonAction::LyricsInsertBefore
+            | CommonAction::LyricsInsertAfter
+            | CommonAction::LyricsLineTime => {}
         }
 
         Ok(())

@@ -157,6 +157,11 @@ pub(crate) fn remap_description(action: &Actions) -> String {
             CommonAction::LyricsNudgeUp => "Nudge word time up",
             CommonAction::LyricsNudgeDown => "Nudge word time down",
             CommonAction::LyricsSave => "Save lyrics edit",
+            CommonAction::LyricsDeleteLine => "Delete lyric line",
+            CommonAction::LyricsEditLine => "Edit lyric line text",
+            CommonAction::LyricsInsertBefore => "Insert lyric line before",
+            CommonAction::LyricsInsertAfter => "Insert lyric line after",
+            CommonAction::LyricsLineTime => "Set lyric line time",
         }
         .to_string(),
         Actions::Queue(a) => match a {
