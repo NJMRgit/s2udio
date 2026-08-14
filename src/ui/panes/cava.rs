@@ -191,8 +191,9 @@ impl CavaPane {
             ("+ \u{2212}", "nudge \u{b1}10 ms", "Enter", "exact word time"),
             ("t", "line timestamp", "e", "edit line text"),
             ("d", "delete line", "i", "insert before"),
-            ("a", "insert after", "C-s", "save"),
-            ("Esc", "exit (saves)", "pause", "select current word"),
+            ("a", "insert after", "C-c", "save + exit"),
+            ("C-s", "save in place", "Esc", "discard"),
+            ("pause", "select current word", "", ""),
         ];
 
         let two_col = width >= 44;
@@ -887,6 +888,9 @@ mod tests {
         assert!(text.contains("delete line"), "delete line entry: {text}");
         assert!(text.contains("insert before"), "insert entry: {text}");
         assert!(text.contains("nudge"), "nudge entry: {text}");
+        assert!(text.contains("save + exit"), "ctrl+c entry: {text}");
+        assert!(text.contains("discard"), "esc-discard entry: {text}");
+        assert!(text.contains("save in place"), "ctrl+s entry: {text}");
 
         // Leaving edit mode while playing restores the visualizer.
         ctx.lyrics_edit_mode.set(false);
