@@ -154,6 +154,9 @@ pub(crate) fn remap_description(action: &Actions) -> String {
             CommonAction::Rate { .. } => "Rate song",
             CommonAction::Save { .. } => "Save playlist",
             CommonAction::DeleteFromPlaylist { .. } => "Remove from playlist",
+            CommonAction::LyricsNudgeUp => "Nudge word time up",
+            CommonAction::LyricsNudgeDown => "Nudge word time down",
+            CommonAction::LyricsSave => "Save lyrics edit",
         }
         .to_string(),
         Actions::Queue(a) => match a {

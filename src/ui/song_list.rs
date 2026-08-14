@@ -792,6 +792,8 @@ where
                 let modal = create_delete_modal(song_paths, confirmation, ctx)?;
                 modal!(ctx, modal);
             }
+            CommonAction::LyricsNudgeUp | CommonAction::LyricsNudgeDown
+            | CommonAction::LyricsSave => {}
         }
 
         Ok(())

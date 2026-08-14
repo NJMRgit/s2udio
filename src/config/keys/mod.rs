@@ -98,6 +98,15 @@ impl Default for KeyConfigFile {
             (s().page_up(),                       C::PageUp),
             (s().page_down(),                     C::PageDown),
             (s().delete(),                        C::Delete),
+            // Lyrics edit mode (round 34): `←`/`→` move across words,
+            // `+`/`-` nudge the selected word's time (10 ms), `<C-s>`
+            // saves without leaving edit mode. (`+` is Shift+= on the
+            // user's layout, reported as `<S-+>`.)
+            (s().left(),                          C::Left),
+            (s().right(),                         C::Right),
+            ("<S-+>".parse().unwrap(),            C::NudgeUp),
+            (s().char('-'),                       C::NudgeDown),
+            (s().char('s').ctrl(),                C::SaveLyrics),
         ]);
 
         let queue = HashMap::from([

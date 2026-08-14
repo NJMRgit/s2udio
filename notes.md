@@ -1,3 +1,49 @@
+# Notes for the container agent — round 34 IMPLEMENTED (isodev, 2026-08-14)
+
+## ROUND 34 — lyrics edit mode: pencil button + pause shows editable per-word timings — committed on `working`
+
+**User feedback (2026-08-14) →
+[FEEDBACK-2026-08-14-0.md](FEEDBACK-2026-08-14-0.md).** Implemented in the
+container (working tree, awaiting host pull/validation):
+
+1. **Pencil button** (round-34 §1): `LyricsBtn::Edit` + `edit_btn_area`,
+   left-aligned at `area.x + 1` on the lyrics button row; `✎` off / `✏`
+   while edit mode is ON / `⭘` while held; hover on the glyph only;
+   independent of the right-aligned cluster's fit-collapse.
+2. **Edit mode** (round-34 §2): `showing_info()` keeps the lyrics while
+   `edit_mode && Pause && current_lyrics.is_some()` (`Stop` still shows
+   info); paused edit view renders every visible line with each word's raw
+   file time in a dim style (new optional `theme.lyrics.edit_timing`;
+   default DIM), the selected word highlighted, word hit areas recorded
+   for click selection. Playing keeps the normal karaoke view.
+3. **Editing** (round-34 §3): `←`/`→` word-to-word (wraps), `w`/`s`/↑/↓
+   line-to-line (same column, clamped); `+`/`-` nudge ±10 ms (step choice
+   documented — the shift-for-100-ms variant has no distinct key on the
+   user's US layout; exact jumps via the popup); Enter opens an
+   `InputModal` prefilled with `mm:ss.xx` (confirm writes the single
+   marker atomically + re-indexes); `<C-s>` saves in place; Esc leaves
+   edit mode saving (consumed, so Settings needs a second Esc).
+   Write-back via the new `src/shared/lrc/edit.rs` session: raw text kept
+   verbatim, only changed `<mm:ss.xx>` markers rewritten (interpolated
+   words promoted on first edit), header + `# lrcgen-gap-align:v1` stamp +
+   enhanced format preserved, atomic temp+rename save. Song change leaves
+   edit mode (saving); `LyricsIndexed` while editing rebuilds the session
+   in place.
+4. **New actions**: `LyricsNudgeUp` / `LyricsNudgeDown` / `LyricsSave`
+   (CommonAction + File forms + descriptions + reverse remap + remap-keys
+   display name + no-op arms in song_list/search). **New default
+   navigation bindings** (defaults + `assets/example_config.ron`):
+   `<Left>`/`<Right>` → Left/Right, `<S-+>` → NudgeUp, `-` → NudgeDown,
+   `<C-s>` → SaveLyrics. **The live `config.ron` (`keybinds: clear: true`)
+   needs these five entries added host-side** (like round 31's `<C-a>`).
+
+**Gate: `cargo test --release` 1407/1407** (1389 baseline + 10 edit.rs +
+8 pane tests), warnings 3 baseline. Host: pull `working`, add the live
+keybinds, build + install, live-check (pencil toggle, paused timings,
+nudge + Esc write-back with the stamp intact, exact-time popup, second-Esc
+settings). Full details: `docs/design/Sessions/2026-08-14.md`.
+
+---
 ## MERGED to main (host, 2026-08-14)
 
 Production `master` (`NJMRgit/s2udio`) carried to **`53efdd6`**: round 33

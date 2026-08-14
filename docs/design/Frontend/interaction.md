@@ -87,6 +87,50 @@ tags: [keyboard, mouse, keybinds, interaction]
 - Context menus: `w`/`s` + `↑`/`↓` move the highlight; **`d` and `→`
   select** the highlighted option (like Enter).
 
+## Lyrics edit mode (round 34)
+
+The lyrics box's bottom row carries a **pencil button on the LEFT**
+(`✎` off / `✏` while edit mode is ON / `⭘` while physically held),
+independent of the right-aligned `● hide lyrics | ● fetch lyrics`
+cluster. Click it to toggle edit mode (a full click; the `⭘` marker is
+press-while-held like the other buttons, the `✏` is the persistent active
+state).
+
+While **edit mode is ON and the song is paused**, the lyrics stay visible
+(pause normally swaps the box to the track-info panel — edit mode is the
+explicit opt-in that overrides that) and every visible line shows each
+word with its raw file time next to it in a dim/secondary style
+(`theme.lyrics.edit_timing`, optional; default = DIM). Plain lines
+without word markers render normally and are skipped by word navigation.
+The lyrics pane is keyboard-focusable: click a word (or the pencil) to
+focus it, then:
+
+- `←`/`→` — move the selection word-to-word (wraps across lines);
+  `w`/`s`/`↑`/`↓` — move line-to-line keeping the word column.
+- `+`/`-` — nudge the selected word's time by **10 ms** (holds repeat;
+  `+` is Shift+= on the user's layout, configured as `<S-+>`).
+- Enter — open the **exact-time popup** prefilled with the word's current
+  `mm:ss.xx`; type a new value and confirm (accepted: `mm:ss.xx`,
+  `mm:ss:xx`, `mm:ss`).
+- `<C-s>` — save the pending edits without leaving edit mode.
+- Esc — leave edit mode, saving; the keypress is consumed so the settings
+  panel only opens on a second Esc (nothing selected).
+
+Write-back is minimal: only the changed `<mm:ss.xx>` word markers are
+rewritten in the source `.lrc` (the file `find_current_lyrics_path`
+resolved — the colocated library sidecar or the `lyrics_dir` mirror),
+preserving the header, the `# lrcgen-gap-align:v1` stamp, line structure
+and the enhanced format; interpolated words are promoted to an explicit
+marker on first edit. A song change leaves edit mode (saving); resuming
+playback keeps the normal karaoke highlighting.
+
+New default navigation bindings: `<Left>` → `Left`, `<Right>` → `Right`
+(`←`/`→` already carried `Directories(FolderCollapse/PlayFile)` — a key
+carrying multiple actions is the documented `w` pattern; other panes are
+unaffected), `<S-+>` → `NudgeUp`, `-` → `NudgeDown`, `<C-s>` →
+`SaveLyrics`. The live `config.ron` (`keybinds: clear: true`) needs these
+five entries added by the host.
+
 ## Enter / confirm semantics
 
 - `Enter` opens the **context menu** (the same one right-click opens) in
