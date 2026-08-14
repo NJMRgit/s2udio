@@ -1879,14 +1879,33 @@ impl Pane for LyricsPane {
         // Round 34: edit mode owns the keyboard while paused — word
         // navigation (`←`/`→`, `w`/`s`), nudge (`+`/`-`, 10 ms), the
         // exact-time popup (Enter), save (`<C-s>`), exit (Esc, saving).
-        // Outside edit mode (or while playing) the pane claims nothing.
-        if !self.edit_mode
-            || !matches!(ctx.status.state, State::Pause)
-            || self.edit_session.is_none()
-        {
+        // Outside edit mode the pane claims nothing.
+        if !self.edit_mode || self.edit_session.is_none() {
             return Ok(());
         }
-        match event.claim_common() {
+        // Round 38 regression: Esc while edit mode is ON and the song is
+        // PLAYING opened Settings instead of discarding — the old
+        // paused-only gate let the key fall through to the global
+        // ShowSettings half. The exit/save keys (Esc = discard,
+        // `<C-c>` = save+exit, `<C-s>` = save in place) now work in ANY
+        // play state while the lyrics pane is focused (handle_action is
+        // only called for the focused pane); the rest of the edit key
+        // set stays paused-gated and falls through to the global
+        // handlers unchanged while playing.
+        let paused = matches!(ctx.status.state, State::Pause);
+        let claimed = event.claim_common();
+        if !paused
+            && !matches!(
+                claimed,
+                Some(CommonAction::Close)
+                    | Some(CommonAction::LyricsSaveAndExit)
+                    | Some(CommonAction::LyricsSave)
+            )
+        {
+            event.abandon();
+            return Ok(());
+        }
+        match claimed {
             Some(CommonAction::Left) => {
                 self.move_selection(-1, 0);
                 ctx.render()?;
@@ -3561,6 +3580,67 @@ mod tests {
         );
         assert!(on_disk.contains("<00:01.20>hello"), "file unchanged: {on_disk}");
         std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn esc_while_playing_exits_edit_mode_without_opening_settings() {
+        // Round 38 regression: edit mode is toggleable in any play state,
+        // but the old paused-only gate let Esc fall through to the global
+        // ShowSettings binding while the song is playing. Esc must leave
+        // edit mode (discard) and consume the key in ANY play state.
+        let (mut ctx, mut pane, _path) = edit_fixture();
+        pane.set_edit_mode(&ctx, true).unwrap();
+        ctx.status.state = State::Play;
+        assert!(pane.edit_mode, "edit mode is on while playing");
+
+        let mut ev = action(CommonAction::Close);
+        pane.handle_action(&mut ev, &mut ctx).unwrap();
+
+        assert!(!pane.edit_mode, "esc exits edit mode while playing");
+        assert!(ev.is_consumed(), "esc consumed so settings does not open");
+        assert!(pane.edit_session.is_none(), "edit session dropped");
+        assert!(!ctx.lyrics_edit_mode.get(), "legend flag cleared");
+    }
+
+    #[test]
+    fn ctrl_c_saves_and_exits_while_playing() {
+        // Round 38 audit of the same play-state hole: `<C-c>` (save +
+        // exit) must also work while the song is playing, not only paused.
+        let (mut ctx, mut pane, path) = edit_fixture();
+        pane.set_edit_mode(&ctx, true).unwrap();
+        pane.edit_selection = Some((0, 0));
+        pane.handle_action(&mut action(CommonAction::LyricsNudgeUp), &mut ctx).unwrap();
+        assert!(pane.edit_session.as_ref().unwrap().is_dirty());
+
+        ctx.status.state = State::Play;
+        pane.handle_action(&mut action(CommonAction::LyricsSaveAndExit), &mut ctx).unwrap();
+
+        assert!(!pane.edit_mode, "ctrl+c exits edit mode while playing");
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            on_disk.contains("<00:01.21>hello") && on_disk.contains("# lrcgen-gap-align:v1"),
+            "saved while playing, stamp intact: {on_disk}"
+        );
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn edit_mode_playing_does_not_claim_non_exit_keys() {
+        // While playing, the edit key set beyond Esc/Ctrl+C/Ctrl+S stays
+        // paused-gated: a nudge must neither move the selection nor be
+        // consumed (the key falls through to the global handlers, exactly
+        // as before round 38).
+        let (mut ctx, mut pane, _path) = edit_fixture();
+        pane.set_edit_mode(&ctx, true).unwrap();
+        let selection = pane.edit_selection;
+        ctx.status.state = State::Play;
+
+        let mut ev = action(CommonAction::LyricsNudgeUp);
+        pane.handle_action(&mut ev, &mut ctx).unwrap();
+
+        assert!(pane.edit_mode, "still in edit mode");
+        assert!(!ev.is_consumed(), "nudge key not consumed while playing");
+        assert_eq!(pane.edit_selection, selection, "selection unchanged while playing");
     }
 
     #[test]

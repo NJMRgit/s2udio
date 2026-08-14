@@ -11,6 +11,12 @@
     // .lrc files and is never written to.
     lyrics_dir: "~/.config/s2udio/lyrics",
     enable_lyrics_hot_reload: true,
+    // Round 38: lyrics source priority. local-first (default): colocated
+    // .lrc sidecar -> lyrics_dir mirror -> lyrics index, then the
+    // on_song_change network fetch as the last fallback. local-only:
+    // local files only — the fetch is never spawned (on_song_change is
+    // skipped; the manual "fetch lyrics" button still works).
+    lyrics_source: LocalFirst,
     on_song_change: ["rmpc-fetch-lyrics"],
     exec_on_song_change_at_start: true,
     cava: (
