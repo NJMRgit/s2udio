@@ -1,3 +1,17 @@
+## MERGED to main (host, 2026-08-14)
+
+Production `master` (`NJMRgit/s2udio`) carried to **`53efdd6`**: round 33
+(settings toggle for the mpDris2 desktop notification on track change).
+Master validated (cargo check clean, baseline warnings), clean subset
+(tests/ stays on `working`). Installed host-side: binary
+`~/.local/bin/s2udio` (backup `s2udio.bak-r33-20260814`), shim
+`~/.local/bin/s2u-mpdris2` (backup `s2u-mpdris2.bak-r33-20260814`),
+`mpDris2.service` restarted; toggle validated live (state file
+`~/.cache/s2udio/mpdris2-notify.json`; disabled = 0 popups, enabled = 1
+popup on track change; left enabled = default). `working` pushed to
+`s2udio-working`. No further action needed from isodev for this round.
+
+---
 ## MERGED to main (host, 2026-08-13)
 
 Production `master` (`NJMRgit/s2udio`) carried to **`4ff3b3d`**: rounds 31
