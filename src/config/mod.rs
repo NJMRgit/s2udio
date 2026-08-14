@@ -64,6 +64,14 @@ pub struct UiSettings {
     /// other UI toggles (was a transient panel-only view filter before).
     #[serde(default)]
     pub show_virtual_devices: bool,
+    /// The mpDris2 desktop notification on track change (the "Music Player
+    /// Daemon" now-playing popup, sent by the mpDris2 MPRIS bridge via
+    /// libnotify). s2udio syncs this to the bridge's state file so the
+    /// toggle applies live, without a service restart. Defaults to on —
+    /// matches mpDris2's own default, so a legacy state file (or no file
+    /// at all) behaves like upstream.
+    #[serde(default = "crate::config::defaults::bool::<true>")]
+    pub mpdris2_notifications: bool,
 }
 
 impl Default for UiSettings {
@@ -76,6 +84,7 @@ impl Default for UiSettings {
             show_jellyfin_tab: true,
             auto_show_chapters: true,
             show_virtual_devices: false,
+            mpdris2_notifications: true,
         }
     }
 }
@@ -947,6 +956,7 @@ mod tests {
             show_jellyfin_tab: false,
             auto_show_chapters: true,
             show_virtual_devices: false,
+            mpdris2_notifications: true,
         };
         assert!(config.is_pane_hidden(&PaneType::AlbumArt));
         assert!(config.is_pane_hidden(&PaneType::Lyrics));

@@ -1172,6 +1172,13 @@ impl Ui {
                 // colors are runtime-only in the config schema; persist them
                 // here so a restart keeps them.
                 state.ui = Some(staged.ui);
+                // The mpDris2 track-change notification toggle: sync it to
+                // the bridge state file so the s2u-mpdris2 shim applies it
+                // live (no mpDris2 service restart).
+                crate::shared::mpdris2::write_notify_state(
+                    ctx.config.cache_dir.as_deref(),
+                    staged.ui.mpdris2_notifications,
+                );
                 state.appearance = Some(
                     modals::settings::persisted_appearance(&config),
                 );

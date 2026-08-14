@@ -9,7 +9,12 @@ the resolved YouTube/Jellyfin thumbnail to ~/.cache/rmpc/mpris-art
 URLs (cache-busted by mtime so KDE media controls re-fetch on stream
 change), then runs the official main body unmodified.
 
-Second extension — seek hardening: MPD cannot seek HLS audio streams
+Second extension — desktop-notification toggle: s2udio's Settings
+panel can turn the mpDris2 "now playing" popup off; the shim wraps
+NotifyWrapper.notify() to consult s2udio's mpdris2-notify.json state
+file on every notification (absent = enabled, the upstream default).
+
+Third extension — seek hardening: MPD cannot seek HLS audio streams
 (they answer "Not seekable"), and the official Seek/SetPosition would
 crash the daemon: seekid() only exists via __getattr__ -> call(), which
 catches CommandError as MPDError and calls reconnect(), releasing the
@@ -21,12 +26,14 @@ through dbus-python's _method_lookup()) to no-op on CommandError and on
 stream statuses with no 'time' timeline (KeyError). The seekable-looking
 timeline is kept on purpose — seeks on the MPD path just no-op.
 
-Version-guarded: the find_cover/update_metadata extensions are
+Version-guarded: the find_cover/update_metadata/notify extensions are
 version-guarded (if the installed mpDris2 changes shape, the shim runs
-it unpatched rather than breaking MPRIS); the seekid method is safe to
-install unconditionally because assigning a real method only shadows
-the __getattr__ delegation. This is a compat shim over the official
-package — no patched copy of mpDris2 is shipped or installed.
+it unpatched rather than breaking MPRIS — unpatched also means the
+notification toggle is inert and notifications stay on, the upstream
+default); the seekid method is safe to install unconditionally because
+assigning a real method only shadows the __getattr__ delegation. This
+is a compat shim over the official package — no patched copy of
+mpDris2 is shipped or installed.
 
 setup.sh installs this to ~/.local/bin/s2u-mpdris2 and points
 mpDris2.service at it via a drop-in. Any extra argv is passed through to
@@ -64,6 +71,12 @@ MARKER = "if __name__ == '__main__':"
 # s2udio's resolved-stream info cache (stream URL + canonical link ->
 # title / channel / duration), written by the app during playback.
 YT_INFO = _s2u_cache("yt-info.json")
+# s2udio's mpDris2 desktop-notification toggle (Settings -> general ->
+# "mpdris2 desktop notifications"). The app writes {"notify": bool} here
+# on Save and at startup; consulted on every notification so the toggle
+# applies without a service restart. Absent/unparsable = enabled (the
+# upstream default).
+NOTIFY_STATE = _s2u_cache("mpdris2-notify.json")
 # How long to keep re-probing for the s2udio-written art file after a
 # song change (the download is async and lands after the metadata
 # rebuild), and how often.
@@ -244,6 +257,31 @@ def _patch_mpdris2(mod):
                 _schedule_art_retry(self, url)
 
         wrapper.update_metadata = update_metadata
+        patched = True
+
+    # s2udio: mpDris2 desktop-notification toggle. s2udio writes
+    # <cache>/mpdris2-notify.json from its Settings panel; the official
+    # daemon reads params['notify'] once at startup, so consult the state
+    # file on every notify() call instead — the toggle applies live, no
+    # service restart. Version-guarded: a refactored upstream without
+    # NotifyWrapper just runs unpatched (notifications always on, the
+    # upstream default).
+    nw = getattr(mod, "NotifyWrapper", None)
+    if nw is not None:
+        _orig_notify = nw.notify
+
+        def notify(self, *args, _orig=_orig_notify, **kwargs):
+            try:
+                with open(NOTIFY_STATE, encoding="utf-8") as f:
+                    state = json.load(f)
+                enabled = bool(state.get("notify", True))
+            except Exception:
+                enabled = True
+            if not enabled:
+                return
+            return _orig(self, *args, **kwargs)
+
+        nw.notify = notify
         patched = True
 
     # Harden Seek/SetPosition: MPD answers "Not seekable" for HLS audio
