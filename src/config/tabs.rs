@@ -416,9 +416,8 @@ pub const PANES_ALLOWED_IN_BOTH_TAB_AND_LAYOUT: [PaneTypeDiscriminants; 2] =
     [PaneTypeDiscriminants::Property, PaneTypeDiscriminants::Empty];
 
 #[cfg(debug_assertions)]
-pub const UNFOSUSABLE_TABS: [PaneTypeDiscriminants; 13] = [
+pub const UNFOSUSABLE_TABS: [PaneTypeDiscriminants; 12] = [
     PaneTypeDiscriminants::AlbumArt,
-    PaneTypeDiscriminants::Lyrics,
     PaneTypeDiscriminants::ProgressBar,
     PaneTypeDiscriminants::Volume,
     PaneTypeDiscriminants::Controls,
@@ -433,9 +432,8 @@ pub const UNFOSUSABLE_TABS: [PaneTypeDiscriminants; 13] = [
 ];
 
 #[cfg(not(debug_assertions))]
-pub const UNFOSUSABLE_TABS: [PaneTypeDiscriminants; 12] = [
+pub const UNFOSUSABLE_TABS: [PaneTypeDiscriminants; 11] = [
     PaneTypeDiscriminants::AlbumArt,
-    PaneTypeDiscriminants::Lyrics,
     PaneTypeDiscriminants::ProgressBar,
     PaneTypeDiscriminants::Volume,
     PaneTypeDiscriminants::Controls,
@@ -1646,6 +1644,20 @@ mod tests {
             config.tree_browser_args(PaneTypeDiscriminants::Radio),
             TreeBrowserArgs::default(),
             "panes absent from the config fall back to the defaults"
+        );
+    }
+
+    /// Round-34 live regression: the lyrics pane must be keyboard-
+    /// focusable in release builds (it was in `UNFOSUSABLE_TABS`, so
+    /// clicks on the pencil/words never moved focus and the edit-mode
+    /// keyboard — ←/→/w/s/+/-/Enter/<C-s>/Esc — never reached the pane;
+    /// the unit tests exercised `handle_action` directly and missed it).
+    #[test]
+    fn lyrics_pane_is_focusable() {
+        let pane_type: PaneType = PaneTypeFile::Lyrics.try_into().expect("Lyrics pane converts");
+        assert!(
+            !UNFOSUSABLE_TABS.contains(&PaneTypeDiscriminants::from(&pane_type)),
+            "Lyrics must not be in the unfocusable list (round-34 edit-mode keyboard)"
         );
     }
 }

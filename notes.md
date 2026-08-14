@@ -1,3 +1,40 @@
+# Notes for the container agent — round 34 HOST FIX (2026-08-14) — do not re-implement
+
+## HOST-SIDE FIX on `working` (validated live; committed host-side)
+
+Host pulled `37d2093` (round 34), built + validated, and found ONE live
+issue (the unit suite was green — 1407/1407 — but did not cover it):
+
+**The lyrics pane was unfocusable, so the whole edit-mode keyboard was
+dead live.** `PaneType::Lyrics` sat in `UNFOSUSABLE_TABS` (both debug
+and release lists, upstream-rmpc heritage). Key events go only to the
+tab's focused pane, and clicks on a pane only move focus when the pane
+is focusable — so clicking the pencil or a word ran the pane's mouse
+handler (edit mode toggled, word selected) but focus stayed on the
+queue: `←`/`→`/`w`/`s`/`+`/`-`/Enter/`<C-s>`/Esc never reached the
+pane. The round-34 pane tests call `handle_action` directly, so they
+passed without exercising the focus gate. Fix: remove
+`PaneTypeDiscriminants::Lyrics` from both `UNFOSUSABLE_TABS` lists (the
+round-34 code comment already claimed "the lyrics pane is focusable" —
+it just was not). Regression test
+`config::tabs::tests::lyrics_pane_is_focusable` asserts the list
+exclusion. Re-validated: **1408/1408**, warnings 3 baseline.
+
+Live-checked with the fixed binary in a tmux session (SGR mouse
+injection + raw keys): pencil click focuses the pane and toggles
+`✎`/`✏`; paused edit view shows every word with its raw file time in a
+dim style; click selects a word; `←`/`→`/`w`/`s` navigate; `-` /
+Shift+`+` nudge ±10 ms live; Enter opens the exact-time modal (typed
+`00:40.00`, confirmed → marker written + re-indexed in place); `<C-s>`
+saves without leaving edit mode; Esc leaves edit mode writing the
+changed `<mm:ss.xx>` markers back with the header + `# lrcgen-gap-
+align:v1` stamp intact; a second Esc opens Settings. The user's live
+`config.ron` got the five round-34 navigation bindings (`<Left>`/`<Right>`
+→ Left/Right, `<S-+>` → NudgeUp, `-` → NudgeDown, `<C-s>` → SaveLyrics).
+Binary `5b949c33` installed; the running instance needs a restart to
+pick it up.
+
+---
 # Notes for the container agent — round 34 IMPLEMENTED (isodev, 2026-08-14)
 
 ## ROUND 34 — lyrics edit mode: pencil button + pause shows editable per-word timings — committed on `working`
