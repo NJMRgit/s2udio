@@ -897,6 +897,8 @@ pub enum CommonActionFile {
     InsertLyricsLineBefore,
     InsertLyricsLineAfter,
     SetLyricsLineTime,
+    // Lyrics edit mode (round 37): save and leave edit mode (`<C-c>`).
+    SaveLyricsAndExit,
     Add,
     AddAll,
     AddReplace,
@@ -975,6 +977,9 @@ pub enum CommonAction {
     LyricsInsertBefore,
     LyricsInsertAfter,
     LyricsLineTime,
+    /// Lyrics edit mode (round 37): save the pending edits AND leave
+    /// edit mode (`<C-c>`; Esc discards instead, `<C-s>` saves in place).
+    LyricsSaveAndExit,
     #[strum(to_string = "AddOptions({kind})")]
     AddOptions {
         kind: AddKind,
@@ -1055,6 +1060,9 @@ impl ToDescription for CommonAction {
             }
             CommonAction::LyricsLineTime => {
                 "Lyrics edit mode: set the current line's timestamp".into()
+            }
+            CommonAction::LyricsSaveAndExit => {
+                "Lyrics edit mode: save and exit (Ctrl+C)".into()
             }
             CommonAction::FocusInput => {
                 "Focuses textbox if any is on the screen and is not focused".into()
@@ -1280,6 +1288,7 @@ impl TryFrom<CommonActionFile> for CommonAction {
             CommonActionFile::InsertLyricsLineBefore => CommonAction::LyricsInsertBefore,
             CommonActionFile::InsertLyricsLineAfter => CommonAction::LyricsInsertAfter,
             CommonActionFile::SetLyricsLineTime => CommonAction::LyricsLineTime,
+            CommonActionFile::SaveLyricsAndExit => CommonAction::LyricsSaveAndExit,
             CommonActionFile::PaneUp => CommonAction::PaneUp,
             CommonActionFile::PaneDown => CommonAction::PaneDown,
             CommonActionFile::PaneLeft => CommonAction::PaneLeft,
@@ -1397,6 +1406,7 @@ impl From<CommonAction> for CommonActionFile {
             CommonAction::LyricsInsertBefore => CommonActionFile::InsertLyricsLineBefore,
             CommonAction::LyricsInsertAfter => CommonActionFile::InsertLyricsLineAfter,
             CommonAction::LyricsLineTime => CommonActionFile::SetLyricsLineTime,
+            CommonAction::LyricsSaveAndExit => CommonActionFile::SaveLyricsAndExit,
         }
     }
 }

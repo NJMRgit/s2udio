@@ -162,6 +162,7 @@ pub(crate) fn remap_description(action: &Actions) -> String {
             CommonAction::LyricsInsertBefore => "Insert lyric line before",
             CommonAction::LyricsInsertAfter => "Insert lyric line after",
             CommonAction::LyricsLineTime => "Set lyric line time",
+            CommonAction::LyricsSaveAndExit => "Save lyrics and exit",
         }
         .to_string(),
         Actions::Queue(a) => match a {
