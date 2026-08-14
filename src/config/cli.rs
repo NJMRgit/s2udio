@@ -28,6 +28,13 @@ pub struct Args {
     #[arg(short, long)]
     /// Override the MPD password
     pub password: Option<String>,
+    #[arg(long, value_enum)]
+    /// Where lyrics come from: local-first (default — colocated .lrc
+    /// sidecar, then the lyrics_dir mirror, then the index, then the
+    /// on_song_change network fetch as the last fallback) or local-only
+    /// (local files only — the network fetch is never spawned).
+    /// Overrides the config file's `lyrics_source` key.
+    pub lyrics_source: Option<LyricsSource>,
 
     #[command(flatten)]
     pub partition: Partition,
@@ -473,6 +480,20 @@ pub enum OnOffOneshot {
     Oneshot,
 }
 
+/// Round 38: where the lyrics come from. `LocalFirst` (default) resolves
+/// the colocated .lrc sidecar, then the `lyrics_dir` mirror, then the
+/// lyrics index, and only then falls back to the network fetch via the
+/// `on_song_change` hook. `LocalOnly` keeps the first three steps and
+/// never spawns the fetch (the `on_song_change` hook is skipped), so
+/// lyrics only ever come from local files.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
+#[clap(rename_all = "kebab-case")]
+pub enum LyricsSource {
+    #[default]
+    LocalFirst,
+    LocalOnly,
+}
+
 impl Args {
     /// Split a shell-like command line into tokens (argv).
     ///
@@ -556,5 +577,23 @@ impl Args {
         }
         argv.insert(0, "rmpc".to_string()); // clap expects argv[0]
         <Self as Parser>::try_parse_from(argv)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lyrics_source_cli_flag_parses() {
+        // Round 38: --lyrics-source accepts both modes (kebab-case) and
+        // is absent by default.
+        let args = Args::parse_from(["s2udio", "--lyrics-source", "local-only"]);
+        assert_eq!(args.lyrics_source, Some(LyricsSource::LocalOnly));
+        let args = Args::parse_from(["s2udio", "--lyrics-source", "local-first"]);
+        assert_eq!(args.lyrics_source, Some(LyricsSource::LocalFirst));
+        let args = Args::parse_from(["s2udio"]);
+        assert_eq!(args.lyrics_source, None);
+        assert!(Args::try_parse_from(["s2udio", "--lyrics-source", "bogus"]).is_err());
     }
 }

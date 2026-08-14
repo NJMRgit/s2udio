@@ -11,7 +11,7 @@ use ratatui::{Terminal, layout::Rect, prelude::Backend};
 
 use super::command::{create_env, run_external};
 use crate::{
-    config::{Config, cli::RemoteCommandQuery},
+    config::{Config, LyricsSource, cli::RemoteCommandQuery},
     ctx::Ctx,
     mpd::{
         commands::{volume::Bound as _, IdleEvent, State},
@@ -196,8 +196,11 @@ fn main_task<B: Backend + std::io::Write>(
     };
 
     // Execute on_song_change at startup if
-    // configured and current song is available.
+    // configured and current song is available. Round 38: with
+    // `lyrics_source: LocalOnly` the hook (the network-fetch vehicle) is
+    // never spawned — lyrics only ever come from local files.
     if ctx.config.exec_on_song_change_at_start
+        && ctx.config.lyrics_source != LyricsSource::LocalOnly
         && let Some((_, _song)) = ctx.find_current_song_in_queue()
         && let Some(command) = &ctx.config.on_song_change
     {
@@ -1733,7 +1736,11 @@ fn main_task<B: Backend + std::io::Write>(
                             if let Some((_, song)) = ctx.find_current_song_in_queue()
                                 && Some(song.id) != current_song_id
                             {
-                                if let Some(command) = &ctx.config.on_song_change {
+                                // Round 38: `lyrics_source: LocalOnly` skips the
+                                // hook (the network-fetch vehicle) entirely.
+                                if let Some(command) = &ctx.config.on_song_change
+                                    && ctx.config.lyrics_source != LyricsSource::LocalOnly
+                                {
                                     let mut env = create_env(&ctx, std::iter::empty());
 
                                     let prev_song_file = (previous_status.state != State::Stop)

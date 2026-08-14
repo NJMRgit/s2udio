@@ -1,3 +1,47 @@
+# Notes for the container agent — round 38 IMPLEMENTED (isodev, 2026-08-14) — do not re-implement
+
+## ROUND 38 — lyrics source priority option + Esc-in-edit-mode regression fix
+
+**User feedback (2026-08-14) →
+[FEEDBACK-2026-08-14-1.md](FEEDBACK-2026-08-14-1.md).** Two parts,
+implemented and committed on `working`: **1434/1434**, binary warnings 3
+baseline.
+
+### 1. `lyrics_source` config option (local-first default / local-only)
+
+- New enum `LyricsSource { LocalFirst (default), LocalOnly }`
+  (`src/config/cli.rs`, re-exported from `src/config/mod.rs`), serde
+  RON key `lyrics_source` on `ConfigFile` + runtime `Config.lyrics_source`
+  (PascalCase variants, `ShowPlaylistsMode` style).
+- **CLI flag** `--lyrics-source <local-first|local-only>` (clap,
+  kebab-case) overrides the config file; applied in
+  `read_config_and_theme` and the `Config::default_cli` fallback.
+- `assets/example_config.ron` documents the key (`lyrics_source:
+  LocalFirst`, commented), so `s2udio config` prints it too.
+- `LocalOnly` gates the network fallback: the `on_song_change` hook
+  (the `rmpc-fetch-lyrics` vehicle) is **not spawned** at either site —
+  startup `exec_on_song_change_at_start` and on song change
+  (`src/core/event_loop.rs`), no env tricks, just skip. Sidecar →
+  mirror → index resolution in `find_current_lyrics_path` is untouched
+  (option's job is explicitness + gating, per the feedback). The manual
+  "fetch lyrics" button still works in `local-only` (user-initiated).
+
+### 2. Esc-in-edit-mode regression (Settings instead of discard, while playing)
+
+- Root cause: `LyricsPane::handle_action` claimed the edit key set only
+  while **paused**; the pencil toggles in any play state, so Esc while
+  playing fell through to the global `ShowSettings` binding.
+- Fix: while edit mode is on (session open), Esc (`Close` = discard),
+  `<C-c>` (`LyricsSaveAndExit` = save+exit) and `<C-s>` (`LyricsSave` =
+  save in place) now work in **any** play state and the key is consumed;
+  the rest of the edit set stays paused-gated and falls through to the
+  global handlers unchanged while playing (`event.abandon()`).
+- New tests: `esc_while_playing_exits_edit_mode_without_opening_settings`,
+  `ctrl_c_saves_and_exits_while_playing`,
+  `edit_mode_playing_does_not_claim_non_exit_keys` (+ 4 config/CLI tests:
+  default, RON parse, into_config flow, `--lyrics-source` flag parsing).
+
+---
 # Notes for the container agent — round 37 IMPLEMENTED host-side (2026-08-14) — do not re-implement
 
 ## ROUND 37 — edit-mode save semantics: Esc discards, Ctrl+S saves in place, Ctrl+C saves and exits

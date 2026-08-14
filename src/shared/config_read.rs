@@ -84,7 +84,13 @@ pub fn read_config_and_theme(args: &mut Args) -> Result<ConfigResult, ConfigRead
 
     let chosen_config_path = resolve_config_path(args.config.as_deref())?;
 
-    let config = read_config_file(&chosen_config_path)?;
+    let mut config = read_config_file(&chosen_config_path)?;
+
+    // Round 38: the --lyrics-source CLI flag overrides the config file's
+    // `lyrics_source` key (absent flag = config file / default wins).
+    if let Some(source) = args.lyrics_source {
+        config.lyrics_source = source;
+    }
 
     let theme = match &config.theme {
         Some(theme_name) => {

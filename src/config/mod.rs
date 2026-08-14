@@ -40,6 +40,7 @@ pub mod theme;
 pub mod torrent;
 
 pub use address::MpdAddress;
+pub use cli::LyricsSource;
 pub use search::{FilterKindFile, Search};
 
 /// Runtime UI visibility settings, toggled from the Settings panel. These
@@ -114,6 +115,10 @@ pub struct Config {
     pub lyrics_offset: LrcOffset,
     pub enable_lyrics_index: bool,
     pub enable_lyrics_hot_reload: bool,
+    /// Round 38: lyrics source priority — `LocalFirst` (default) keeps
+    /// today's order (sidecar -> mirror -> index -> network fetch as the
+    /// last fallback); `LocalOnly` never spawns the fetch.
+    pub lyrics_source: LyricsSource,
     pub volume_step: u8,
     pub max_fps: u32,
     pub scrolloff: usize,
@@ -229,6 +234,7 @@ pub struct ConfigFile {
     lyrics_offset_ms: i64,
     enable_lyrics_index: bool,
     enable_lyrics_hot_reload: bool,
+    pub lyrics_source: LyricsSource,
     pub theme: Option<String>,
     volume_step: u8,
     pub max_fps: u32,
@@ -311,6 +317,7 @@ impl ConfigFile {
             lyrics_offset_ms: 0,
             enable_lyrics_index: true,
             enable_lyrics_hot_reload: false,
+            lyrics_source: LyricsSource::default(),
             image_method: None,
             select_current_song_on_change: false,
             center_current_song_on_change: false,
@@ -461,14 +468,18 @@ impl Config {
     }
 
     pub fn default_cli(args: &mut Args) -> Config {
-        ConfigFile::default()
-            .into_config(
-                UiConfig::default(),
-                std::mem::take(&mut args.address),
-                std::mem::take(&mut args.password),
-                false,
-            )
-            .expect("Default config should always convert")
+        let mut file = ConfigFile::default();
+        // Round 38: the --lyrics-source CLI flag overrides the default.
+        if let Some(source) = args.lyrics_source {
+            file.lyrics_source = source;
+        }
+        file.into_config(
+            UiConfig::default(),
+            std::mem::take(&mut args.address),
+            std::mem::take(&mut args.password),
+            false,
+        )
+        .expect("Default config should always convert")
     }
 
     pub fn default_with_album_art_check() -> Result<Config> {
@@ -501,6 +512,7 @@ impl ConfigFile {
             lyrics_offset: LrcOffset::from_millis(self.lyrics_offset_ms),
             enable_lyrics_index: self.enable_lyrics_index,
             enable_lyrics_hot_reload: self.enable_lyrics_hot_reload,
+            lyrics_source: self.lyrics_source,
             tabs,
             original_tabs_definition,
             active_panes,
@@ -878,9 +890,40 @@ mod tests {
     #[cfg(debug_assertions)]
     use crate::config::keys::KeyConfigFile;
     use crate::config::{
-        Config, ConfigFile, S2udioConfigFile, UiSettings, theme::UiConfigFile,
+        Config, ConfigFile, LyricsSource, S2udioConfigFile, UiSettings, theme::UiConfigFile,
     };
     use crate::config::tabs::{PaneType, TabName};
+
+    #[test]
+    fn lyrics_source_defaults_to_local_first() {
+        // Round 38: default must reproduce today's behavior — local
+        // files first, network fetch as the last fallback.
+        assert_eq!(ConfigFile::default().lyrics_source, LyricsSource::LocalFirst);
+        assert_eq!(Config::default().lyrics_source, LyricsSource::LocalFirst);
+    }
+
+    #[test]
+    fn lyrics_source_parses_from_ron() {
+        // The RON key accepts both modes (serde default = PascalCase
+        // variants, matching ShowPlaylistsMode-style config enums).
+        let file: ConfigFile = ron::de::from_str("(lyrics_source: LocalOnly)").unwrap();
+        assert_eq!(file.lyrics_source, LyricsSource::LocalOnly);
+        let file: ConfigFile = ron::de::from_str("(lyrics_source: LocalFirst)").unwrap();
+        assert_eq!(file.lyrics_source, LyricsSource::LocalFirst);
+        // A config without the key (older files) falls back to the default.
+        let file: ConfigFile = ron::de::from_str("()").unwrap();
+        assert_eq!(file.lyrics_source, LyricsSource::LocalFirst);
+    }
+
+    #[test]
+    fn lyrics_source_flows_through_into_config() {
+        let mut file = ConfigFile::default();
+        file.lyrics_source = LyricsSource::LocalOnly;
+        let config = file.into_config(UiConfig::default(), None, None, true).unwrap();
+        assert_eq!(config.lyrics_source, LyricsSource::LocalOnly);
+        // And the other way round: the example default config is LocalFirst.
+        assert_eq!(Config::default().lyrics_source, LyricsSource::LocalFirst);
+    }
 
     #[test]
     fn s2udio_overlay_overrides_the_base_sections_and_leaves_the_rest() {
