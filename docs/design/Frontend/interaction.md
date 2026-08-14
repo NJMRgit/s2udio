@@ -112,9 +112,11 @@ focus it, then:
 - Enter — open the **exact-time popup** prefilled with the word's current
   `mm:ss.xx`; type a new value and confirm (accepted: `mm:ss.xx`,
   `mm:ss:xx`, `mm:ss`).
-- `<C-s>` — save the pending edits without leaving edit mode.
-- Esc — leave edit mode, saving; the keypress is consumed so the settings
-  panel only opens on a second Esc (nothing selected).
+- `<C-s>` — **save** the pending edits without leaving edit mode.
+- `<C-c>` — **save and leave** edit mode (round 37).
+- Esc — leave edit mode **without saving** (discard; round 37); the
+  keypress is consumed so the settings panel only opens on a second Esc
+  (nothing selected).
 
 Write-back is minimal: only the changed `<mm:ss.xx>` word markers are
 rewritten in the source `.lrc` (the file `find_current_lyrics_path`
@@ -134,8 +136,9 @@ five entries added by the host.
 ## Lyrics edit mode — line editing (round 35)
 
 Round 34 edits **words**; round 35 adds **line-level** editing. All of
-it is pending until `<C-s>`/Esc (like the nudges), and every write-back
-keeps the header, the `# lrcgen-gap-align:v1` stamp, line structure and
+it is pending until `<C-s>` (save in place) / `<C-c>` (save and exit) —
+Esc **discards** (round 37) — and every write-back keeps the header, the
+`# lrcgen-gap-align:v1` stamp, line structure and
 the enhanced `<mm:ss.xx>` format (only the touched lines are rewritten;
 untouched lines stay verbatim). Pausing while edit mode is ON re-anchors
 the selection to the lyric at the pause position (the user asked that the
@@ -143,7 +146,7 @@ selection always sit on the current lyric).
 
 - `d` — **delete the current line** (the one holding the selection). The
   selection moves to the next line, else the previous one. Written back
-  on `<C-s>`/Esc.
+  on `<C-s>`/`<C-c>`.
 - `e` — **edit the current line's text**: an input modal prefilled with
   the line's words. If the new word count matches, each word keeps its
   timestamp; otherwise the words re-interpolate across the line's span

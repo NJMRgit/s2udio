@@ -867,6 +867,26 @@ impl LyricsPane {
         Ok(())
     }
 
+    /// Round 37: leave edit mode WITHOUT writing the pending changes
+    /// (Esc = discard). The session is dropped as-is and the lyrics
+    /// reload from the untouched file.
+    fn discard_edit_mode(&mut self, ctx: &Ctx) -> Result<()> {
+        if !self.edit_mode {
+            return Ok(());
+        }
+        self.edit_session = None;
+        self.edit_selection = None;
+        self.pending_insert_select = None;
+        self.word_areas.clear();
+        self.edit_mode = false;
+        ctx.lyrics_edit_mode.set(false);
+        if let Err(err) = self.update_lyrics(ctx) {
+            status_error!("Failed to reload lyrics file: '{err}'");
+        }
+        ctx.render()?;
+        Ok(())
+    }
+
     /// Rebuild the edit session from the current lyrics file (an in-edit
     /// exact-time write landed on disk). Keeps the selection when the
     /// word still exists. When the file is gone/unreadable the session is
@@ -1885,11 +1905,16 @@ impl Pane for LyricsPane {
             }
             Some(CommonAction::Confirm) => self.open_time_modal(ctx)?,
             Some(CommonAction::Close) => {
-                // The first Esc leaves edit mode (saving); it consumes the
-                // key so the settings panel bound to the same key does not
-                // open on the same press.
-                self.set_edit_mode(ctx, false)?;
+                // Round 37: Esc leaves edit mode WITHOUT saving (discard);
+                // it consumes the key so the settings panel bound to the
+                // same key does not open on the same press. `<C-s>` saves
+                // in place, `<C-c>` saves and exits.
+                self.discard_edit_mode(ctx)?;
                 event.consume();
+            }
+            Some(CommonAction::LyricsSaveAndExit) => {
+                // `<C-c>`: save the pending edits and leave edit mode.
+                self.set_edit_mode(ctx, false)?;
             }
             Some(CommonAction::LyricsNudgeUp) => self.nudge_selection(ctx, 10)?,
             Some(CommonAction::LyricsNudgeDown) => self.nudge_selection(ctx, -10)?,
@@ -3475,36 +3500,66 @@ mod tests {
     }
 
     #[test]
-    fn nudge_and_esc_exit_saves_the_edited_timings() {
+    fn ctrl_s_saves_without_exiting() {
         let (mut ctx, mut pane, path) = edit_fixture();
         pane.set_edit_mode(&ctx, true).unwrap();
-        // The initial selection is the current word ("world") — nudge the
-        // first word explicitly so the assertion targets a stable word.
         pane.edit_selection = Some((0, 0));
 
-        // Nudge the selected word's time up by 10 ms.
         pane.handle_action(&mut action(CommonAction::LyricsNudgeUp), &mut ctx).unwrap();
-        assert!(pane.edit_session.as_ref().unwrap().is_dirty(), "nudge marks the session dirty");
-        assert_eq!(
-            pane.edit_session.as_ref().unwrap().lines[0].words[0].time,
-            Duration::from_millis(1210)
-        );
+        assert!(pane.edit_session.as_ref().unwrap().is_dirty());
 
-        // Esc leaves edit mode and writes the change back.
+        // `<C-s>` writes the change and stays in edit mode.
+        pane.handle_action(&mut action(CommonAction::LyricsSave), &mut ctx).unwrap();
+        assert!(pane.edit_mode, "ctrl+s keeps edit mode on");
+        assert!(!pane.edit_session.as_ref().unwrap().is_dirty(), "pending edits saved");
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert!(on_disk.contains("<00:01.21>hello"), "marker written: {on_disk}");
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn ctrl_c_saves_and_exits() {
+        let (mut ctx, mut pane, path) = edit_fixture();
+        pane.set_edit_mode(&ctx, true).unwrap();
+        pane.edit_selection = Some((0, 0));
+
+        pane.handle_action(&mut action(CommonAction::LyricsNudgeUp), &mut ctx).unwrap();
+
+        // `<C-c>` writes the change and leaves edit mode.
+        pane.handle_action(&mut action(CommonAction::LyricsSaveAndExit), &mut ctx).unwrap();
+        assert!(!pane.edit_mode, "ctrl+c exits edit mode");
+        assert!(!ctx.lyrics_edit_mode.get(), "legend flag cleared");
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            on_disk.contains("<00:01.21>hello") && on_disk.contains("# lrcgen-gap-align:v1"),
+            "saved with the stamp intact: {on_disk}"
+        );
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn esc_discards_pending_edits_without_saving() {
+        let (mut ctx, mut pane, path) = edit_fixture();
+        pane.set_edit_mode(&ctx, true).unwrap();
+        pane.edit_selection = Some((0, 0));
+
+        pane.handle_action(&mut action(CommonAction::LyricsNudgeUp), &mut ctx).unwrap();
+        assert!(pane.edit_session.as_ref().unwrap().is_dirty());
+
+        // Esc leaves edit mode WITHOUT writing the pending change; the
+        // key is consumed so the settings panel does not open.
         let mut ev = action(CommonAction::Close);
         pane.handle_action(&mut ev, &mut ctx).unwrap();
         assert!(!pane.edit_mode, "esc exits edit mode");
         assert!(ev.is_consumed(), "esc consumed so settings does not open");
+        assert!(pane.edit_session.is_none(), "edit session dropped");
+        assert!(!ctx.lyrics_edit_mode.get(), "legend flag cleared");
         let on_disk = std::fs::read_to_string(&path).unwrap();
         assert!(
-            on_disk.contains("<00:01.21>hello"),
-            "changed marker written back: {on_disk}"
+            !on_disk.contains("<00:01.21>"),
+            "discarded edit NOT written: {on_disk}"
         );
-        assert!(
-            on_disk.contains("# lrcgen-gap-align:v1"),
-            "stamp line preserved: {on_disk}"
-        );
-        assert!(on_disk.contains("<00:01.40>world"), "other markers untouched: {on_disk}");
+        assert!(on_disk.contains("<00:01.20>hello"), "file unchanged: {on_disk}");
         std::fs::remove_dir_all(path.parent().unwrap()).ok();
     }
 
@@ -3550,9 +3605,9 @@ mod tests {
         assert_eq!(pane.edit_session.as_ref().unwrap().lines.len(), 1);
         assert_eq!(pane.edit_session.as_ref().unwrap().lines[0].content, "a b");
         assert_eq!(pane.edit_selection, Some((0, 0)), "selection moves to the next line");
-        // Esc saves the deletion (the file keeps the header + stamp).
-        let mut ev = action(CommonAction::Close);
-        pane.handle_action(&mut ev, &mut ctx).unwrap();
+        // `<C-c>` saves the deletion and exits (the file keeps the header
+        // + stamp).
+        pane.handle_action(&mut action(CommonAction::LyricsSaveAndExit), &mut ctx).unwrap();
         let on_disk = std::fs::read_to_string(&path).unwrap();
         assert!(
             on_disk.contains("# lrcgen-gap-align:v1") && on_disk.contains("[00:02.00]"),

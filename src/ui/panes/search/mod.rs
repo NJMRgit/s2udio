@@ -566,7 +566,8 @@ impl SearchPane {
                 | CommonAction::LyricsEditLine
                 | CommonAction::LyricsInsertBefore
                 | CommonAction::LyricsInsertAfter
-                | CommonAction::LyricsLineTime => {}
+                | CommonAction::LyricsLineTime
+                | CommonAction::LyricsSaveAndExit => {}
             }
         }
 

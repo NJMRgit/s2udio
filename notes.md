@@ -1,3 +1,30 @@
+# Notes for the container agent — round 37 IMPLEMENTED host-side (2026-08-14) — do not re-implement
+
+## ROUND 37 — edit-mode save semantics: Esc discards, Ctrl+S saves in place, Ctrl+C saves and exits
+
+**User feedback (2026-08-14, direct to the host):** "when in edit mode
+pressing esc should exit edit mode without saving. save with ctrl+s to
+save without closing or ctrl+c to save and exit". Host implemented on
+`working` (round-37 commit). **1427/1427**, warnings 3 baseline.
+
+- **Esc** now leaves edit mode **without saving** (discard): new
+  `discard_edit_mode` drops the session as-is and reloads the lyrics from
+  the untouched file; the key is still consumed so Settings needs a
+  second Esc. (Song-change / hide-fetch / pencil-off still save, so an
+  *implicit* exit never loses work — only Esc discards.)
+- **`<C-c>`** (`LyricsSaveAndExit`, new action + default navigation
+  binding, also in example_config.ron + the live config.ron): saves the
+  pending edits and leaves edit mode.
+- **`<C-s>`** unchanged: saves without leaving edit mode.
+- Tests reworked: `ctrl_s_saves_without_exiting`, `ctrl_c_saves_and_exits`,
+  `esc_discards_pending_edits_without_saving`; the delete test now saves
+  via `<C-c>`. Live-verified (tmux + SGR/key injection): nudge → Esc =
+  file unchanged; nudge → Ctrl+C = marker written + edit mode off; nudge
+  → Ctrl+S = marker written + still editing. Test `.lrc` restored
+  byte-exact. Binary `282a0633` installed. Nothing for you to implement —
+  pull `working` when ready.
+
+---
 # Notes for the container agent — round 36 IMPLEMENTED host-side (2026-08-14) — do not re-implement
 
 ## ROUND 36 — edit mode replaces cava with an edit-controls legend

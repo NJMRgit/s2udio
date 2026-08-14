@@ -115,6 +115,9 @@ impl Default for KeyConfigFile {
             (s().char('i'),                       C::InsertLyricsLineBefore),
             (s().char('a'),                       C::InsertLyricsLineAfter),
             (s().char('t'),                       C::SetLyricsLineTime),
+            // Lyrics edit mode (round 37): `<C-c>` saves and exits (Esc
+            // discards, `<C-s>` saves in place).
+            (s().char('c').ctrl(),                C::SaveLyricsAndExit),
         ]);
 
         let queue = HashMap::from([
