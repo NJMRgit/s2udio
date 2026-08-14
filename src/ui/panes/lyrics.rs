@@ -712,16 +712,34 @@ impl LyricsPane {
             .unwrap_or(0)
     }
 
-    /// Select the first word of the anchor line (or of the next line with
-    /// words), when entering edit mode or after a reload.
+    /// Select the anchor line's word that is current at the pause
+    /// position (the last word whose raw time is <= the elapsed time —
+    /// the word being sung), or the next line with words when the anchor
+    /// line is plain. Runs when entering edit mode and when pausing, so
+    /// the selection always lands on the current lyric.
     fn select_initial_word(&mut self, ctx: &Ctx) {
         let anchor = self.anchor_line(ctx);
         let lines = self.selectable_lines();
+        if lines.contains(&anchor) {
+            let word = self.current_word_at(ctx, anchor);
+            self.edit_selection = Some((anchor, word));
+            return;
+        }
         self.edit_selection = lines
             .iter()
             .find(|&&l| l >= anchor)
             .or_else(|| lines.first())
             .map(|&l| (l, 0));
+    }
+
+    /// The anchor line's word current at the pause position: the last
+    /// word whose raw time is <= the elapsed position (0 when the pause
+    /// precedes every word of the line).
+    fn current_word_at(&self, ctx: &Ctx, line: usize) -> usize {
+        let Some(session) = &self.edit_session else { return 0 };
+        let Some(l) = session.lines.get(line) else { return 0 };
+        let elapsed = ctx.status.elapsed;
+        l.words.iter().rposition(|w| w.time <= elapsed).unwrap_or(0)
     }
 
     /// Move the word selection: `dx` = previous/next word (wrapping
@@ -1816,17 +1834,14 @@ impl Pane for LyricsPane {
                 // the resume schedule the next line from the fresh position.
                 self.last_requested_line_idx = usize::MAX;
                 // Round 35: with edit mode on, pausing re-anchors the
-                // selection to the lyric at the pause position (unless it
-                // is already on it) — the user asked that the selection
-                // always sit on the current lyric while paused.
+                // selection to the word being sung at the pause position
+                // (the user asked that the selection always sit on the
+                // current lyric while paused).
                 if self.edit_mode
                     && matches!(ctx.status.state, State::Pause)
                     && self.edit_session.is_some()
                 {
-                    let anchor = self.anchor_line(ctx);
-                    if !self.edit_selection.is_some_and(|(l, _)| l == anchor) {
-                        self.select_initial_word(ctx);
-                    }
+                    self.select_initial_word(ctx);
                 }
                 ctx.render()?;
             }
@@ -3381,13 +3396,22 @@ mod tests {
             pane.word_areas
         );
         // The selected word renders highlighted (bold); a non-selected
-        // word keeps the plain lyrics style.
-        let selected = cell_style(&mut pane, &mut ctx, 60, 12, 2, 5);
+        // word keeps the plain lyrics style. The selection lands on the
+        // word current at the pause position (1.5 s -> "world").
+        let (_, sel_word) = pane.edit_selection.expect("selection after entering edit mode");
+        assert_eq!(sel_word, 1, "the word current at the pause position is selected");
+        let sel_rect = pane
+            .word_areas
+            .iter()
+            .find(|w| w.line == 0 && w.word == sel_word)
+            .unwrap()
+            .rect;
+        let selected = cell_style(&mut pane, &mut ctx, 60, 12, sel_rect.x, sel_rect.y);
         assert!(
             selected.add_modifier.contains(Modifier::BOLD),
             "selected word is bold: {selected:?}"
         );
-        let plain = cell_style(&mut pane, &mut ctx, 60, 12, 16, 5);
+        let plain = cell_style(&mut pane, &mut ctx, 60, 12, 2, 5);
         assert!(
             !plain.add_modifier.contains(Modifier::BOLD),
             "non-selected word is not bold: {plain:?}"
@@ -3427,12 +3451,10 @@ mod tests {
     fn word_navigation_moves_across_words_and_lines() {
         let (mut ctx, mut pane, _path) = edit_fixture();
         pane.set_edit_mode(&ctx, true).unwrap();
-        // The anchor line is line 0 (elapsed 1.5s); initial selection is
-        // its first word.
-        assert_eq!(pane.edit_selection, Some((0, 0)));
+        // The anchor line is line 0 (elapsed 1.5s); the initial selection
+        // is the word current at the pause position ("world", 1.40s).
+        assert_eq!(pane.edit_selection, Some((0, 1)));
 
-        pane.handle_action(&mut action(CommonAction::Right), &mut ctx).unwrap();
-        assert_eq!(pane.edit_selection, Some((0, 1)), "right moves to the next word");
         pane.handle_action(&mut action(CommonAction::Right), &mut ctx).unwrap();
         assert_eq!(
             pane.edit_selection,
@@ -3451,6 +3473,9 @@ mod tests {
     fn nudge_and_esc_exit_saves_the_edited_timings() {
         let (mut ctx, mut pane, path) = edit_fixture();
         pane.set_edit_mode(&ctx, true).unwrap();
+        // The initial selection is the current word ("world") — nudge the
+        // first word explicitly so the assertion targets a stable word.
+        pane.edit_selection = Some((0, 0));
 
         // Nudge the selected word's time up by 10 ms.
         pane.handle_action(&mut action(CommonAction::LyricsNudgeUp), &mut ctx).unwrap();
@@ -3499,7 +3524,11 @@ mod tests {
     fn d_deletes_the_current_line_and_moves_the_selection() {
         let (mut ctx, mut pane, path) = edit_fixture();
         pane.set_edit_mode(&ctx, true).unwrap();
-        assert_eq!(pane.edit_selection, Some((0, 0)), "selection on the current lyric");
+        assert_eq!(
+            pane.edit_selection,
+            Some((0, 1)),
+            "selection on the current lyric's word (world, at 1.5s)"
+        );
 
         pane.handle_action(&mut action(CommonAction::LyricsDeleteLine), &mut ctx).unwrap();
 
@@ -3635,8 +3664,8 @@ mod schedule_tests {
 
         assert_eq!(
             pane.edit_selection,
-            Some((0, 0)),
-            "pausing re-anchors the selection to the current lyric"
+            Some((0, 1)),
+            "pausing re-anchors the selection to the word current at the pause position"
         );
         std::fs::remove_dir_all(&dir).ok();
     }

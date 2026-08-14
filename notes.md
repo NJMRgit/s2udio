@@ -40,6 +40,18 @@ pause re-anchor on the current lyric. Test `.lrc` restored byte-exact.
 Host: binary `a5c5e5db` installed; the running instance needs a
 restart. Nothing for you to implement — pull `working` when ready.
 
+## ROUND 35 FOLLOW-UP — pause lands on the current WORD (host, 2026-08-14)
+
+**User:** "pausing causes edit mode to land the lyric at the start of
+the current line instead of the current lyric". The initial/re-anchored
+selection now targets the **word being sung at the pause position** (the
+last word whose raw file time is <= the paused position) instead of word
+0 of the line — on edit-mode entry and on every pause (the re-anchor is
+now unconditional). `current_word_at` + updated `select_initial_word`;
+tests updated; live-verified (paused mid-line → the sung word is
+selected). **1422/1422**, warnings 3 baseline. Binary `81ddb41a`
+installed. Nothing to implement — pull `working` when ready.
+
 ---
 # Notes for the container agent — round 34 HOST FIX (2026-08-14) — do not re-implement
 
