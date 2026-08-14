@@ -107,6 +107,14 @@ impl Default for KeyConfigFile {
             ("<S-+>".parse().unwrap(),            C::NudgeUp),
             (s().char('-'),                       C::NudgeDown),
             (s().char('s').ctrl(),                C::SaveLyrics),
+            // Lyrics edit mode (round 35): `d` deletes the current line,
+            // `e` edits its text, `i`/`a` insert a line before/after,
+            // `t` sets the line's timestamp.
+            (s().char('d'),                       C::DeleteLyricsLine),
+            (s().char('e'),                       C::EditLyricsLine),
+            (s().char('i'),                       C::InsertLyricsLineBefore),
+            (s().char('a'),                       C::InsertLyricsLineAfter),
+            (s().char('t'),                       C::SetLyricsLineTime),
         ]);
 
         let queue = HashMap::from([

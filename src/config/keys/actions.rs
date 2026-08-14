@@ -889,6 +889,14 @@ pub enum CommonActionFile {
     NudgeUp,
     NudgeDown,
     SaveLyrics,
+    // Lyrics edit mode (round 35): delete the current line, edit the
+    // line's text, insert a new line before/after the current one, set
+    // the line's timestamp.
+    DeleteLyricsLine,
+    EditLyricsLine,
+    InsertLyricsLineBefore,
+    InsertLyricsLineAfter,
+    SetLyricsLineTime,
     Add,
     AddAll,
     AddReplace,
@@ -959,6 +967,14 @@ pub enum CommonAction {
     LyricsNudgeUp,
     LyricsNudgeDown,
     LyricsSave,
+    /// Lyrics edit mode (round 35): line-level editing — delete the
+    /// current line, edit its text, insert a new line before/after the
+    /// current one, set the line's timestamp.
+    LyricsDeleteLine,
+    LyricsEditLine,
+    LyricsInsertBefore,
+    LyricsInsertAfter,
+    LyricsLineTime,
     #[strum(to_string = "AddOptions({kind})")]
     AddOptions {
         kind: AddKind,
@@ -1025,6 +1041,21 @@ impl ToDescription for CommonAction {
                 "Lyrics edit mode: nudge the word's time down by 10 ms".into()
             }
             CommonAction::LyricsSave => "Lyrics edit mode: save the edited timings".into(),
+            CommonAction::LyricsDeleteLine => {
+                "Lyrics edit mode: delete the current line".into()
+            }
+            CommonAction::LyricsEditLine => {
+                "Lyrics edit mode: edit the current line's text".into()
+            }
+            CommonAction::LyricsInsertBefore => {
+                "Lyrics edit mode: insert a new line before the current one".into()
+            }
+            CommonAction::LyricsInsertAfter => {
+                "Lyrics edit mode: insert a new line after the current one".into()
+            }
+            CommonAction::LyricsLineTime => {
+                "Lyrics edit mode: set the current line's timestamp".into()
+            }
             CommonAction::FocusInput => {
                 "Focuses textbox if any is on the screen and is not focused".into()
             }
@@ -1244,6 +1275,11 @@ impl TryFrom<CommonActionFile> for CommonAction {
             CommonActionFile::NudgeUp => CommonAction::LyricsNudgeUp,
             CommonActionFile::NudgeDown => CommonAction::LyricsNudgeDown,
             CommonActionFile::SaveLyrics => CommonAction::LyricsSave,
+            CommonActionFile::DeleteLyricsLine => CommonAction::LyricsDeleteLine,
+            CommonActionFile::EditLyricsLine => CommonAction::LyricsEditLine,
+            CommonActionFile::InsertLyricsLineBefore => CommonAction::LyricsInsertBefore,
+            CommonActionFile::InsertLyricsLineAfter => CommonAction::LyricsInsertAfter,
+            CommonActionFile::SetLyricsLineTime => CommonAction::LyricsLineTime,
             CommonActionFile::PaneUp => CommonAction::PaneUp,
             CommonActionFile::PaneDown => CommonAction::PaneDown,
             CommonActionFile::PaneLeft => CommonAction::PaneLeft,
@@ -1356,6 +1392,11 @@ impl From<CommonAction> for CommonActionFile {
             CommonAction::LyricsNudgeUp => CommonActionFile::NudgeUp,
             CommonAction::LyricsNudgeDown => CommonActionFile::NudgeDown,
             CommonAction::LyricsSave => CommonActionFile::SaveLyrics,
+            CommonAction::LyricsDeleteLine => CommonActionFile::DeleteLyricsLine,
+            CommonAction::LyricsEditLine => CommonActionFile::EditLyricsLine,
+            CommonAction::LyricsInsertBefore => CommonActionFile::InsertLyricsLineBefore,
+            CommonAction::LyricsInsertAfter => CommonActionFile::InsertLyricsLineAfter,
+            CommonAction::LyricsLineTime => CommonActionFile::SetLyricsLineTime,
         }
     }
 }

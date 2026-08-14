@@ -131,6 +131,39 @@ unaffected), `<S-+>` → `NudgeUp`, `-` → `NudgeDown`, `<C-s>` →
 `SaveLyrics`. The live `config.ron` (`keybinds: clear: true`) needs these
 five entries added by the host.
 
+## Lyrics edit mode — line editing (round 35)
+
+Round 34 edits **words**; round 35 adds **line-level** editing. All of
+it is pending until `<C-s>`/Esc (like the nudges), and every write-back
+keeps the header, the `# lrcgen-gap-align:v1` stamp, line structure and
+the enhanced `<mm:ss.xx>` format (only the touched lines are rewritten;
+untouched lines stay verbatim). Pausing while edit mode is ON re-anchors
+the selection to the lyric at the pause position (the user asked that the
+selection always sit on the current lyric).
+
+- `d` — **delete the current line** (the one holding the selection). The
+  selection moves to the next line, else the previous one. Written back
+  on `<C-s>`/Esc.
+- `e` — **edit the current line's text**: an input modal prefilled with
+  the line's words. If the new word count matches, each word keeps its
+  timestamp; otherwise the words re-interpolate across the line's span
+  (line time → next line's time) and are written as explicit markers.
+- `i` / `a` — **insert a new line before / after the current one**: an
+  input modal for the text; on confirm the line lands at the midpoint
+  between the neighbours' timestamps (5 s past the anchor at the file's
+  edges) and its words interpolate across the span. The new line is
+  selected on reload so the user lands right on it.
+- `t` — **set the current line's timestamp** (`[mm:ss.xx]` tag) via the
+  same `mm:ss.xx` modal; word markers are untouched.
+- Enter (round 34) still edits the selected **word's** timestamp; `+`/`-`
+  still nudge it.
+
+New default navigation bindings: `d` → `DeleteLyricsLine`, `e` →
+`EditLyricsLine`, `i` → `InsertLyricsLineBefore`, `a` →
+`InsertLyricsLineAfter`, `t` → `SetLyricsLineTime` (`d` also carries
+`Directories(FolderExpand)` — the documented multi-action pattern). The
+live `config.ron` needs these five entries added by the host.
+
 ## Enter / confirm semantics
 
 - `Enter` opens the **context menu** (the same one right-click opens) in
