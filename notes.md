@@ -1,3 +1,34 @@
+# Notes for the container agent — round 36 IMPLEMENTED host-side (2026-08-14) — do not re-implement
+
+## ROUND 36 — edit mode replaces cava with an edit-controls legend
+
+**User feedback (2026-08-14, direct to the host):** "when it edit mode
+replace cava with a legend for the edit controls". Host implemented on
+`working` on top of round 35: while lyrics edit mode is on, the cava
+pane shows a two-column legend of the edit-mode keys instead of the
+visualizer; leaving edit mode restores the bars. **1425/1425**, warnings
+3 baseline.
+
+- New shared flag `ctx.lyrics_edit_mode` (Cell<bool>): the lyrics pane
+  sets it in `set_edit_mode` (and the rebuild failure paths); the cava
+  pane reads it.
+- `CavaPane::render` swaps to `render_legend` while the flag is set
+  (pausing the cava thread once — process kept alive, no audio drop —
+  and skipping the pause-clear that would wipe the legend); leaving edit
+  mode while playing restarts the bars. `run()` and
+  `reinit_if_area_changed` are suppressed during edit mode so the bars
+  cannot start under the legend via deferred/geometry paths.
+- Legend content: `← → word`, `↑ ↓ / w s line`, `+ − nudge ±10 ms`,
+  `Enter exact word time`, `t line timestamp`, `e edit line text`,
+  `d delete line`, `i/a insert before/after`, `C-s save`, `Esc exit
+  (saves)`, `pause select current word`. Two columns, single column on
+  narrow panes.
+- Live-validated in tmux (SGR injection): legend replaces the bars on
+  pencil click, persists across pause, bars return on Esc + resume.
+  Binary `54b235d2` installed; the running instance needs a restart.
+  Nothing for you to implement — pull `working` when ready.
+
+---
 # Notes for the container agent — round 35 IMPLEMENTED host-side (2026-08-14) — do not re-implement
 
 ## ROUND 35 — line-level lyrics editing + pause re-anchor — committed on `working`

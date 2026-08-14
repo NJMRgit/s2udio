@@ -78,6 +78,7 @@ pub fn ctx(
         stickers: HashMap::new(),
         active_tab: TabName::from("test_tab"),
         queue_selected_id: Cell::new(None),
+        lyrics_edit_mode: Cell::new(false),
         temp_play_id: Cell::new(None),
         app_event_sender: app_event_channel.0.clone(),
         work_sender: work_request_channel.0.clone(),
