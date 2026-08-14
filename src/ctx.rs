@@ -146,6 +146,10 @@ pub struct Ctx {
     /// The id of the song currently selected in the queue pane (kept in sync
     /// by the queue's render); the lyrics pane shows its info when paused.
     pub(crate) queue_selected_id: Cell<Option<u32>>,
+    /// Lyrics edit mode is on (round 35): the lyrics pane sets it when the
+    /// pencil toggles edit mode; the cava pane swaps the visualizer for an
+    /// edit-controls legend while it is set.
+    pub(crate) lyrics_edit_mode: Cell<bool>,
     /// Id of a file played via the Directories pane's right arrow /
     /// double-click (a temporary queue entry). The queue pane hides it from
     /// the list; the directories pane clears it when the entry is dropped.
@@ -345,6 +349,7 @@ impl Ctx {
             active_tab,
             supported_commands,
             queue_selected_id: Cell::new(None),
+            lyrics_edit_mode: Cell::new(false),
             temp_play_id: Cell::new(None),
             db_update_start: None,
             app_event_sender,

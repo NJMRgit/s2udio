@@ -861,6 +861,9 @@ impl LyricsPane {
             }
             ctx.render()?;
         }
+        // Round 35: the cava pane swaps the visualizer for the edit-controls
+        // legend while edit mode is on.
+        ctx.lyrics_edit_mode.set(self.edit_mode);
         Ok(())
     }
 
@@ -875,6 +878,7 @@ impl LyricsPane {
             self.edit_session = None;
             self.edit_selection = None;
             self.edit_mode = false;
+            ctx.lyrics_edit_mode.set(false);
             return Ok(());
         };
         let raw = match std::fs::read_to_string(&path) {
@@ -884,6 +888,7 @@ impl LyricsPane {
                 self.edit_session = None;
                 self.edit_selection = None;
                 self.edit_mode = false;
+                ctx.lyrics_edit_mode.set(false);
                 return Ok(());
             }
         };
@@ -3518,6 +3523,16 @@ mod tests {
             ),
             "Confirm opens the input modal: {received:?}"
         );
+    }
+
+    #[test]
+    fn edit_mode_toggles_the_shared_cava_flag() {
+        let (mut ctx, mut pane, _path) = edit_fixture();
+        assert!(!ctx.lyrics_edit_mode.get(), "flag off by default");
+        pane.set_edit_mode(&ctx, true).unwrap();
+        assert!(ctx.lyrics_edit_mode.get(), "entering edit mode sets the flag");
+        pane.set_edit_mode(&ctx, false).unwrap();
+        assert!(!ctx.lyrics_edit_mode.get(), "leaving edit mode clears the flag");
     }
 
     #[test]
