@@ -276,6 +276,7 @@ enum GeneralRow {
     Jellyfin,
     VideoPlayback,
     AutoChapters,
+    Mpdris2Notifications,
     CavaHeader,
     AutoSens,
     Sensitivity,
@@ -936,6 +937,7 @@ impl SettingsModal {
                     ContentRow::General(GeneralRow::Jellyfin),
                     ContentRow::General(GeneralRow::VideoPlayback),
                     ContentRow::General(GeneralRow::AutoChapters),
+                    ContentRow::General(GeneralRow::Mpdris2Notifications),
                     ContentRow::General(GeneralRow::CavaHeader),
                     ContentRow::General(GeneralRow::AutoSens),
                     ContentRow::General(GeneralRow::Sensitivity),
@@ -1085,6 +1087,7 @@ impl SettingsModal {
             GeneralRow::Radio => self.ui_pending.show_radio_tab = value,
             GeneralRow::Jellyfin => self.ui_pending.show_jellyfin_tab = value,
             GeneralRow::AutoChapters => self.ui_pending.auto_show_chapters = value,
+            GeneralRow::Mpdris2Notifications => self.ui_pending.mpdris2_notifications = value,
             _ => unreachable!("toggle_ui called with a non-toggle row"),
         }
         ctx.render()?;
@@ -1461,7 +1464,8 @@ impl SettingsModal {
         match &row {
             ContentRow::General(g) => match g {
                 GeneralRow::AlbumArt | GeneralRow::Lyrics | GeneralRow::Cava | GeneralRow::Radio
-                | GeneralRow::Jellyfin | GeneralRow::AutoChapters => {
+                | GeneralRow::Jellyfin | GeneralRow::AutoChapters
+                | GeneralRow::Mpdris2Notifications => {
                     let value = match g {
                         GeneralRow::AlbumArt => !self.ui_pending.show_album_art,
                         GeneralRow::Lyrics => !self.ui_pending.show_lyrics,
@@ -1469,6 +1473,9 @@ impl SettingsModal {
                         GeneralRow::Radio => !self.ui_pending.show_radio_tab,
                         GeneralRow::Jellyfin => !self.ui_pending.show_jellyfin_tab,
                         GeneralRow::AutoChapters => !self.ui_pending.auto_show_chapters,
+                        GeneralRow::Mpdris2Notifications => {
+                            !self.ui_pending.mpdris2_notifications
+                        }
                         _ => unreachable!(),
                     };
                     self.toggle_ui(ctx, *g, value)
@@ -1835,6 +1842,7 @@ impl SettingsModal {
                 | GeneralRow::Radio
                 | GeneralRow::Jellyfin
                 | GeneralRow::AutoChapters
+                | GeneralRow::Mpdris2Notifications
                 | GeneralRow::AutoSens
                 | GeneralRow::VirtualDevices
                 | GeneralRow::Monstercat
@@ -1850,6 +1858,10 @@ impl SettingsModal {
                         GeneralRow::AutoChapters => (
                             "If media contains chapters open to chapters list",
                             self.ui_pending.auto_show_chapters,
+                        ),
+                        GeneralRow::Mpdris2Notifications => (
+                            "mpdris2 desktop notifications",
+                            self.ui_pending.mpdris2_notifications,
                         ),
                         GeneralRow::AutoSens => ("auto-sens", self.cava_pending.autosens),
                         GeneralRow::VirtualDevices => {
@@ -3805,6 +3817,45 @@ mod nav_tests {
     }
 
     #[test]
+    fn mpdris2_notifications_toggle_stages_and_round_trips() {
+        let (app_tx, _app_rx) = crossbeam::channel::unbounded();
+        let mut ctx = crate::tests::fixtures::ctx(
+            (app_tx, _app_rx),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+        );
+        let mut modal = SettingsModal::new(&ctx);
+        let ui_before = ctx.config.ui;
+
+        // The row lives in the features block.
+        assert!(modal
+            .rows
+            .iter()
+            .any(|r| matches!(r, ContentRow::General(GeneralRow::Mpdris2Notifications))));
+
+        // Activate flips the staged value; the live config is untouched.
+        select_row(&mut modal, |r| matches!(r, ContentRow::General(GeneralRow::Mpdris2Notifications)));
+        modal.activate(&mut ctx).unwrap();
+        assert_eq!(modal.ui_pending.mpdris2_notifications, false);
+        assert_eq!(ctx.config.ui, ui_before, "live ui settings must not change while staged");
+        assert!(modal.has_changes());
+
+        // The staged value round-trips through state.ron like the other
+        // UI toggles.
+        let mut state = crate::config::state::AppStateFile::default();
+        state.ui = Some(modal.ui_pending);
+        let content = ron::ser::to_string_pretty(&state, ron::ser::PrettyConfig::default())
+            .expect("state serializes");
+        let back: crate::config::state::AppStateFile =
+            ron::de::from_str(&content).expect("state parses");
+        assert!(!back.ui.expect("ui restored").mpdris2_notifications);
+
+        // Toggling back restores it.
+        modal.activate(&mut ctx).unwrap();
+        assert_eq!(modal.ui_pending.mpdris2_notifications, true);
+    }
+
+    #[test]
     fn remap_is_recorded_but_not_persisted() {
         let (mut modal, mut ctx) = fixture();
         let keybinds_before = ctx.config.keybinds.clone();
@@ -3977,6 +4028,10 @@ mod nav_tests {
             ron::de::from_str(legacy).expect("legacy state parses");
         let ui = state.ui.expect("ui record present");
         assert!(!ui.show_virtual_devices, "missing field defaults to off");
+        assert!(
+            ui.mpdris2_notifications,
+            "the mpdris2 notification toggle defaults to on (matches mpDris2)"
+        );
     }
 
     /// The settings-panel UI toggles + appearance colors survive a restart:

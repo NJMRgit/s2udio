@@ -133,6 +133,18 @@ class FakeWrapper(object):
     # omits it to catch that regression.
 
 
+class FakeNotifyWrapper(object):
+    """Mirrors the official /usr/bin/mpDris2 NotifyWrapper: a notify()
+    method the shim wraps to consult s2udio's mpdris2-notify.json state
+    file (absent = enabled, the upstream default)."""
+
+    def __init__(self):
+        self.calls = []
+
+    def notify(self, title, body, uri=""):
+        self.calls.append((title, body, uri))
+
+
 class FakeMethod(object):
     def __init__(self, func):
         self.func = func
@@ -190,6 +202,7 @@ def make_mod():
         socket=FakeSocket,
         mpd=FakeMpd(),
         MPDWrapper=FakeWrapper,
+        NotifyWrapper=FakeNotifyWrapper,
         MPRISInterface=type("MPRISInterface", (), {
             "Seek": fake_dbus_method(_official_seek),
             "SetPosition": fake_dbus_method(_official_set_position),
@@ -330,7 +343,59 @@ def _test_patch_applies_and_metadata_injects():
     return ok
 
 
+def _test_notify_toggle():
+    shim = load_shim()
+    mod = make_mod()
+    # The wrapper must be the shim's, not the fake's (capture the original
+    # before patching — after `nw.notify = notify` the class attribute *is*
+    # the wrapper, so a post-patch `is` check would compare it to itself).
+    original_notify = FakeNotifyWrapper.notify
+    if not shim._patch_mpdris2(mod):
+        print("[FAIL] _patch_mpdris2 returned False")
+        return False
+    ok = True
+
+    if mod.NotifyWrapper.notify is original_notify:
+        check("notify wrapper installed", False, "notify not wrapped")
+        ok = False
+
+    with tempfile.TemporaryDirectory(prefix="mpdris2-shim-") as tmp:
+        state = os.path.join(tmp, "mpdris2-notify.json")
+        old = shim.NOTIFY_STATE
+        setattr(shim, "NOTIFY_STATE", state)
+        try:
+            # Disabled: notify() is suppressed.
+            with open(state, "w", encoding="utf-8") as f:
+                json.dump({"notify": False}, f)
+            w = FakeNotifyWrapper()
+            mod.NotifyWrapper.notify(w, "Title", "by Artist", "file:///art.jpg")
+            if w.calls:
+                check("notify suppressed when disabled", False, repr(w.calls))
+                ok = False
+
+            # Enabled: forwarded untouched.
+            with open(state, "w", encoding="utf-8") as f:
+                json.dump({"notify": True}, f)
+            w = FakeNotifyWrapper()
+            mod.NotifyWrapper.notify(w, "Title", "by Artist", "file:///art.jpg")
+            if w.calls != [("Title", "by Artist", "file:///art.jpg")]:
+                check("notify forwarded when enabled", False, repr(w.calls))
+                ok = False
+
+            # Absent state file = enabled (upstream default).
+            os.remove(state)
+            w = FakeNotifyWrapper()
+            mod.NotifyWrapper.notify(w, "Title", "by Artist", "")
+            if w.calls != [("Title", "by Artist", "")]:
+                check("notify enabled when state file absent", False, repr(w.calls))
+                ok = False
+        finally:
+            setattr(shim, "NOTIFY_STATE", old)
+
+    return ok
+
+
 if __name__ == "__main__":
-    results = [_test_patch_applies_and_metadata_injects()]
+    results = [_test_patch_applies_and_metadata_injects(), _test_notify_toggle()]
     print(f"\n{sum(results)}/{len(results)} mpdris2-shim tests passed")
     sys.exit(0 if all(results) else 1)

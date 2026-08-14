@@ -405,6 +405,13 @@ fn main() -> Result<()> {
             if let Some(ui) = state.ui {
                 config.ui = ui;
             }
+            // Sync the mpDris2 track-change notification toggle to the
+            // bridge state file: a restarted s2udio re-applies the
+            // persisted preference (and repairs a cleaned cache file).
+            crate::shared::mpdris2::write_notify_state(
+                config.cache_dir.as_deref(),
+                config.ui.mpdris2_notifications,
+            );
             let blur_mode_active = crate::core::blur::read_schedule_mode().is_some();
             if let Some(appearance) = state.appearance.clone() {
                 crate::ui::modals::settings::apply_persisted_appearance(
