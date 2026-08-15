@@ -986,23 +986,42 @@ impl LyricsPane {
         Ok(())
     }
 
-    /// Round 35: delete the current lyric line (pending until save).
-    /// The selection moves to the next selectable line, else the
-    /// previous one.
-    fn delete_current_line(&mut self, ctx: &mut Ctx) -> Result<()> {
-        let Some((l, _)) = self.edit_selection else { return Ok(()) };
+    /// Round 41: delete the selected WORD (`d`, pending until save like
+    /// the word nudges). The line itself is removed only when the word
+    /// was its last one; otherwise the selection moves to the word that
+    /// took the deleted word's place (else the previous word / previous
+    /// line).
+    fn delete_current_word(&mut self, ctx: &mut Ctx) -> Result<()> {
+        let Some((l, w)) = self.edit_selection else { return Ok(()) };
         let Some(session) = &mut self.edit_session else { return Ok(()) };
         if l >= session.lines.len() {
             return Ok(());
         }
-        session.delete_line(l)?;
-        let selectable = self.selectable_lines();
-        if let Some(&next) = selectable.iter().find(|&&x| x >= l) {
-            self.edit_selection = Some((next, 0));
-        } else if let Some(&prev) = selectable.last() {
-            self.edit_selection = Some((prev, 0));
+        let line_removed = match session.delete_word_at(l, w) {
+            Ok(v) => v,
+            Err(_) => return Ok(()),
+        };
+        if line_removed {
+            // The line is gone: land on the next selectable line, else
+            // the previous one.
+            let selectable = self.selectable_lines();
+            if let Some(&next) = selectable.iter().find(|&&x| x >= l) {
+                self.edit_selection = Some((next, 0));
+            } else if let Some(&prev) = selectable.last() {
+                self.edit_selection = Some((prev, 0));
+            } else {
+                self.edit_selection = None;
+            }
         } else {
-            self.edit_selection = None;
+            let word_count = session.lines.get(l).map(|ln| ln.words.len()).unwrap_or(0);
+            let nw = if word_count == 0 {
+                0
+            } else if w < word_count {
+                w
+            } else {
+                word_count - 1
+            };
+            self.edit_selection = Some((l, nw));
         }
         ctx.render()?;
         Ok(())
@@ -1989,15 +2008,14 @@ impl Pane for LyricsPane {
             Some(CommonAction::LyricsNudgeUp) => self.nudge_selection(ctx, 10)?,
             Some(CommonAction::LyricsNudgeDown) => self.nudge_selection(ctx, -10)?,
             Some(CommonAction::LyricsSave) => self.save_edit(ctx)?,
-            // Round 35: line-level editing. `d` deletes the current
-            // line, `e` edits its text, `i`/`a` insert a new line
-            // before/after, `t` sets the line's timestamp.
-            Some(CommonAction::LyricsDeleteLine) => self.delete_current_line(ctx)?,
+            // Round 35: `e` edits the line's text, `t` sets its
+            // timestamp; round 41: `d` deletes the selected WORD (the
+            // line is removed only when it ends up empty); round 40:
+            // `i`/`a` insert a new WORD into the current line
+            // (before/after the selected word), `o`/`O` add a whole new
+            // line after/before the current one.
             Some(CommonAction::LyricsEditLine) => self.open_line_text_modal(ctx)?,
-            // Round 40: `i`/`a` insert a new WORD into the current line
-            // (before/after the selected word — same line, time
-            // interpolated between the neighbours), `o`/`O` add a whole
-            // new line after/before the current one.
+            Some(CommonAction::LyricsDeleteWord) => self.delete_current_word(ctx)?,
             Some(CommonAction::LyricsInsertBefore) => self.insert_word(ctx, true)?,
             Some(CommonAction::LyricsInsertAfter) => self.insert_word(ctx, false)?,
             Some(CommonAction::LyricsAddLineBefore) => self.insert_new_line(ctx, true)?,
@@ -3728,7 +3746,7 @@ mod tests {
     }
 
     #[test]
-    fn d_deletes_the_current_line_and_moves_the_selection() {
+    fn d_deletes_the_selected_word_not_the_whole_line() {
         let (mut ctx, mut pane, path) = edit_fixture();
         pane.set_edit_mode(&ctx, true).unwrap();
         assert_eq!(
@@ -3737,20 +3755,26 @@ mod tests {
             "selection on the current lyric's word (world, at 1.5s)"
         );
 
-        pane.handle_action(&mut action(CommonAction::LyricsDeleteLine), &mut ctx).unwrap();
+        pane.handle_action(&mut action(CommonAction::LyricsDeleteWord), &mut ctx).unwrap();
 
-        assert_eq!(pane.edit_session.as_ref().unwrap().lines.len(), 1);
-        assert_eq!(pane.edit_session.as_ref().unwrap().lines[0].content, "a b");
-        assert_eq!(pane.edit_selection, Some((0, 0)), "selection moves to the next line");
+        let session = pane.edit_session.as_ref().unwrap();
+        assert_eq!(session.lines.len(), 2, "the LINE stays — only the word is deleted");
+        assert_eq!(session.lines[0].content, "hello");
+        assert_eq!(session.lines[1].content, "a b", "the next line is untouched");
+        assert_eq!(pane.edit_selection, Some((0, 0)), "selection moves to the remaining word");
         // `<C-c>` saves the deletion and exits (the file keeps the header
-        // + stamp).
+        // + stamp, the line survives without the word).
         pane.handle_action(&mut action(CommonAction::LyricsSaveAndExit), &mut ctx).unwrap();
         let on_disk = std::fs::read_to_string(&path).unwrap();
         assert!(
-            on_disk.contains("# lrcgen-gap-align:v1") && on_disk.contains("[00:02.00]"),
-            "deletion written, header/stamp intact: {on_disk}"
+            on_disk.contains("# lrcgen-gap-align:v1") && on_disk.contains("[00:01.00]<00:01.20>hello"),
+            "word deleted in place, line + header/stamp intact: {on_disk}"
         );
-        assert!(!on_disk.contains("hello"), "deleted line gone: {on_disk}");
+        assert!(!on_disk.contains("world"), "deleted word gone: {on_disk}");
+        assert!(
+            on_disk.contains("[00:02.00]<00:02.10>a <00:02.30>b"),
+            "next line untouched: {on_disk}"
+        );
         std::fs::remove_dir_all(path.parent().unwrap()).ok();
     }
 

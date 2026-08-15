@@ -794,7 +794,7 @@ where
             }
             CommonAction::LyricsNudgeUp | CommonAction::LyricsNudgeDown
             | CommonAction::LyricsSave
-            | CommonAction::LyricsDeleteLine
+            | CommonAction::LyricsDeleteWord
             | CommonAction::LyricsEditLine
             | CommonAction::LyricsInsertBefore
             | CommonAction::LyricsInsertAfter

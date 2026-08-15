@@ -280,6 +280,34 @@ impl LrcEditSession {
         Ok(insert_at)
     }
 
+    /// Round 41: delete a WORD from a line (pending until `save`, like
+    /// the word nudges). The line re-renders with the remaining words'
+    /// explicit markers; when the deleted word was the line's ONLY word
+    /// the whole line is removed (blank lyric rows are never left
+    /// behind). Returns `true` when the line itself was removed.
+    pub fn delete_word_at(&mut self, line: usize, word: usize) -> Result<bool> {
+        let l = self.lines.get_mut(line).context("line out of range")?;
+        if word >= l.words.len() {
+            anyhow::bail!("word out of range");
+        }
+        l.words.remove(word);
+        l.content = l.words.iter().map(|w| w.text.clone()).collect::<Vec<_>>().join(" ");
+        l.dirty = true;
+        // Drop the deleted word's own pending edit; same-line pending
+        // edits after it shift down by one.
+        self.pending.retain(|&(l, w)| !(l == line && w == word));
+        for (l, w) in &mut self.pending {
+            if *l == line && *w > word {
+                *w -= 1;
+            }
+        }
+        if l.words.is_empty() {
+            self.delete_line(line)?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
     /// Write every pending edit back to the file (atomic replace), then
     /// rebuild the session from the saved text. No-op when nothing is
     /// pending.
@@ -813,6 +841,47 @@ mod tests {
         let start = raw.find(raw_line).unwrap();
         assert_eq!(l0.raw_span, Some((start, start + raw_line.len())));
         assert!(!l0.dirty);
+    }
+
+    #[test]
+    fn delete_word_removes_only_the_word_and_keeps_the_line() {
+        let raw = "[00:01.00]<00:01.10>a <00:01.30>b <00:01.60>c\n";
+        let mut session = LrcEditSession::open(PathBuf::new(), raw.to_owned());
+        let removed_line = session.delete_word_at(0, 1).unwrap();
+        assert!(!removed_line, "the line survives");
+        assert_eq!(session.lines.len(), 1);
+        assert_eq!(session.lines[0].content, "a c");
+        assert_eq!(session.lines[0].words.len(), 2);
+        assert_eq!(session.lines[0].words[0].time, Duration::from_millis(1100));
+        assert_eq!(session.lines[0].words[1].time, Duration::from_millis(1600));
+        let new_raw = session.render_pending().unwrap();
+        assert_eq!(new_raw, "[00:01.00]<00:01.10>a <00:01.60>c\n");
+    }
+
+    #[test]
+    fn delete_word_removes_the_line_when_it_was_the_only_word() {
+        let raw = "[00:01.00]<00:01.10>a\n[00:02.00]<00:02.10>b\n";
+        let mut session = LrcEditSession::open(PathBuf::new(), raw.to_owned());
+        let removed_line = session.delete_word_at(0, 0).unwrap();
+        assert!(removed_line, "a line with no words left is removed");
+        assert_eq!(session.lines.len(), 1);
+        assert_eq!(session.lines[0].content, "b");
+        let new_raw = session.render_pending().unwrap();
+        assert_eq!(new_raw, "[00:02.00]<00:02.10>b\n");
+    }
+
+    #[test]
+    fn delete_word_remaps_and_drops_pending_edits() {
+        let raw = "[00:01.00]<00:01.10>a <00:01.30>b <00:01.60>c\n";
+        let mut session = LrcEditSession::open(PathBuf::new(), raw.to_owned());
+        session.set_word_time(0, 1, Duration::from_millis(1400)).unwrap();
+        session.set_word_time(0, 2, Duration::from_millis(1700)).unwrap();
+        session.delete_word_at(0, 1).unwrap();
+        // The deleted word's own pending edit is dropped; "c"'s pending
+        // shifted from word 2 to word 1.
+        assert_eq!(session.pending, vec![(0, 1)]);
+        let new_raw = session.render_pending().unwrap();
+        assert_eq!(new_raw, "[00:01.00]<00:01.10>a <00:01.70>c\n");
     }
 
     #[test]
