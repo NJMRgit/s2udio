@@ -36,6 +36,11 @@ pub struct RqEngineFile {
     /// The browser URL (`http://127.0.0.1:<proxy port>/web/` — the
     /// auth-injecting proxy; no credentials appear here or are needed).
     pub web_url: String,
+    /// The rqbit HTTP API port (the engine itself, behind the proxy) —
+    /// for the `rq check` auth-integrity probe. Missing in registrations
+    /// written before this field existed.
+    #[serde(default)]
+    pub engine_port: u16,
     /// The engine's cache/download dir (informational).
     pub cache_dir: String,
     /// Unix seconds when the engine was started.
@@ -82,9 +87,16 @@ pub fn pid_alive(pid: u32) -> bool {
 /// Used by the Settings panel (pid = the rqbit child; the GUI process
 /// owns the engine) and by the CLI daemon (pid = the daemon itself).
 pub fn register(engine: &crate::core::torrent::TorrentEngine) -> Result<(), String> {
+    let engine_port = engine
+        .base_url()
+        .rsplit(':')
+        .next()
+        .and_then(|p| p.parse::<u16>().ok())
+        .unwrap_or(0);
     let reg = RqEngineFile {
         pid: engine.pid(),
         web_url: engine.web_url(),
+        engine_port,
         cache_dir: engine.cache_dir.display().to_string(),
         started_at: SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -197,7 +209,96 @@ pub fn run(cmd: RqCmd) -> Result<(), String> {
             println!("{}", reg.web_url);
             Ok(())
         }
+        RqCmd::Check => check(),
         RqCmd::Serve => serve(),
+    }
+}
+
+/// Verify the auth-injecting proxy end-to-end:
+///   1. the proxy serves the web UI without credentials (200 text/html),
+///   2. the proxy serves the API without credentials (200),
+///   3. the engine port itself still rejects unauthenticated requests
+///      (401) — the proxy is the only way in without the token.
+/// Prints one PASS/FAIL line per probe; exit code 0 = all good.
+fn check() -> Result<(), String> {
+    let Some(reg) = registered_running() else {
+        return Err(
+            "No rqbit engine is running (start one with `s2udio rq start` or Settings -> torrent)"
+                .to_owned(),
+        );
+    };
+    println!(
+        "rqbit engine:   RUNNING (pid {}, web UI {})",
+        reg.pid, reg.web_url
+    );
+
+    let mut ok = true;
+    // Proxy base (the web URL minus the /web/ suffix).
+    let proxy_base = reg
+        .web_url
+        .trim_end_matches("/web/")
+        .trim_end_matches('/')
+        .to_owned();
+
+    // 1. Web UI through the proxy, no credentials.
+    match http_status(&format!("{proxy_base}/web/")) {
+        Ok(200) => println!("[PASS] web UI via proxy (no credentials)  -> 200"),
+        other => {
+            ok = false;
+            println!("[FAIL] web UI via proxy (no credentials)  -> {other:?}");
+        }
+    }
+    // 2. API through the proxy, no credentials.
+    match http_status(&format!("{proxy_base}/stats")) {
+        Ok(200) => println!("[PASS] API via proxy (no credentials)     -> 200"),
+        other => {
+            ok = false;
+            println!("[FAIL] API via proxy (no credentials)     -> {other:?}");
+        }
+    }
+    // 3. The engine port itself, no credentials -> must 401.
+    if reg.engine_port == 0 {
+        ok = false;
+        println!(
+            "[FAIL] engine port auth (no credentials)  -> unknown port in the registration              (restart the engine to refresh it)"
+        );
+    } else {
+        match http_status(&format!("http://127.0.0.1:{}/stats", reg.engine_port)) {
+            Ok(401) => {
+                println!(
+                    "[PASS] engine port auth (no credentials)  -> 401 (auth intact, port {})",
+                    reg.engine_port
+                )
+            }
+            other => {
+                ok = false;
+                println!(
+                    "[FAIL] engine port auth (no credentials)  -> {other:?} (expected 401, port {})",
+                    reg.engine_port
+                );
+            }
+        }
+    }
+
+    if ok {
+        println!("result: OK — the proxy is injecting auth correctly");
+        Ok(())
+    } else {
+        Err("result: FAILED — see the [FAIL] lines above".to_owned())
+    }
+}
+
+/// GET `url` and return the HTTP status (2xx/4xx both come back as
+/// numbers; only transport-level failures are reported as Err).
+fn http_status(url: &str) -> Result<u16, String> {
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_secs(2))
+        .timeout(Duration::from_secs(5))
+        .build();
+    match agent.get(url).call() {
+        Ok(resp) => Ok(resp.status()),
+        Err(ureq::Error::Status(code, _)) => Ok(code),
+        Err(err) => Err(format!("{url}: {err}")),
     }
 }
 
@@ -265,9 +366,16 @@ fn serve() -> Result<(), String> {
     }
     let config = torrent_config();
     let mut engine = crate::core::torrent::start_engine(&config)?;
+    let engine_port = engine
+        .base_url()
+        .rsplit(':')
+        .next()
+        .and_then(|p| p.parse::<u16>().ok())
+        .unwrap_or(0);
     let reg = RqEngineFile {
         pid: std::process::id(),
         web_url: engine.web_url(),
+        engine_port,
         cache_dir: engine.cache_dir.display().to_string(),
         started_at: SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -333,6 +441,7 @@ mod tests {
         let reg = RqEngineFile {
             pid: u32::MAX,
             web_url: "http://127.0.0.1:1/web/".to_owned(),
+            engine_port: 3030,
             cache_dir: "/tmp/x".to_owned(),
             started_at: 1,
         };

@@ -657,8 +657,12 @@ Toolchain env (container): `export PATH="$HOME/.cargo/bin:$PATH"`
   detached daemon (`s2udio rq serve`, hidden) owning the engine + auth
   proxy; `stop` kills the registered pid (SIGTERM→SIGKILL); `open` opens
   the web UI. Note: `s2rq start` also works while the s2udio GUI is
-  running (same engine). COMMITTED + PUSHED to `s2udio-working/working`
-  (2026-08-15); merge to master remains optional.
+  running (same engine). **`s2udio rq check`** (follow-up) verifies the
+  proxy end-to-end: proxy /web/ + /stats without credentials → 200,
+  engine port without credentials → 401; registration gained
+  `engine_port` (serde default). COMMITTED + PUSHED to
+  `s2udio-working/working` (2026-08-15); merge to master remains
+  optional.
 - **Round 42 (2026-08-15 user request) — rqbit web UI from Settings +
   VPN (SOCKS5) config: IMPLEMENTED host-side, VALIDATED 1447/1447 minus
   2 pre-existing env failures, docs + handoff + session log updated,

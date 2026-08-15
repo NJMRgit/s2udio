@@ -357,6 +357,10 @@ pub enum RqCmd {
     Stop,
     /// Open the rqbit web UI in the browser (engine must be running).
     Open,
+    /// Verify the engine + the auth-injecting proxy work end-to-end
+    /// (proxy serves the web UI + API without credentials while the
+    /// engine port itself still rejects unauthenticated requests).
+    Check,
     /// Hidden daemon entry point for `rq start`: owns the engine + the
     /// auth proxy and stays alive until stopped (never typed by users).
     #[clap(hide = true)]
@@ -612,6 +616,7 @@ mod tests {
             ("rq start", RqCmd::Start),
             ("rq stop", RqCmd::Stop),
             ("rq open", RqCmd::Open),
+            ("rq check", RqCmd::Check),
         ] {
             let args = Args::parse_from(["s2udio", "rq", line.split_whitespace().nth(1).unwrap()]);
             match args.command {
