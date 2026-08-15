@@ -125,7 +125,8 @@ the user's decisions win. Locked in across sessions (details in the docs):
   docs/agent files).
 - **Branch**: `working` (tracks `s2udio-working/working`) — **rounds 42 +
   43 below committed and pushed 2026-08-15** (round 41 tip `c5f65e4` +
-  1 commit; rounds 33–41 = the lyrics edit-mode series). Full suite
+  commit `da0df5d`; rounds 33–41 = the lyrics edit-mode series). Full
+  suite
   host-side: **1451/1453 pass** (2 pre-existing environment-dependent
   failures, also fail on the clean tree), warnings 3 baseline.
   **Round 42 (2026-08-15, host-implemented)**: Settings → **torrent**
@@ -656,8 +657,12 @@ Toolchain env (container): `export PATH="$HOME/.cargo/bin:$PATH"`
   detached daemon (`s2udio rq serve`, hidden) owning the engine + auth
   proxy; `stop` kills the registered pid (SIGTERM→SIGKILL); `open` opens
   the web UI. Note: `s2rq start` also works while the s2udio GUI is
-  running (same engine). COMMITTED + PUSHED to `s2udio-working/working`
-  (2026-08-15); merge to master remains optional.
+  running (same engine). **`s2udio rq check`** (follow-up) verifies the
+  proxy end-to-end: proxy /web/ + /stats without credentials → 200,
+  engine port without credentials → 401; registration gained
+  `engine_port` (serde default). COMMITTED + PUSHED to
+  `s2udio-working/working` (2026-08-15); merge to master remains
+  optional.
 - **Round 42 (2026-08-15 user request) — rqbit web UI from Settings +
   VPN (SOCKS5) config: IMPLEMENTED host-side, VALIDATED 1447/1447 minus
   2 pre-existing env failures, docs + handoff + session log updated,

@@ -529,6 +529,11 @@ URL only):
   registered pid, removes the registration. Also stops a GUI-started
   engine.
 - **`s2udio rq open`** — `xdg-open`s the registered web URL.
+- **`s2udio rq check`** — verifies the auth-injecting proxy end-to-end:
+  the proxy serves `/web/` and `/stats` WITHOUT credentials (200) while
+  the engine port itself rejects unauthenticated requests (401) — the
+  proxy is the only way in without the token. Prints one PASS/FAIL line
+  per probe; exit 0 = all good.
 - The Settings panel's web-UI rows consult the same registration
   (reuse, liveness) and register engines they start, so the GUI and the
   CLI never run two standalone engines.
