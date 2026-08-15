@@ -187,15 +187,25 @@ impl LrcEditSession {
         Ok(position)
     }
 
-    /// Round 40: insert a new WORD into a line (the insert is per word,
-    /// not per line — everything stays on the same line). `after ==
-    /// false` inserts before the word at `word`, `after == true` after
-    /// it. The new word's time interpolates between its neighbours: the
-    /// previous word's time (or the line's timestamp at the start) and
-    /// the next word's time (or the next line's timestamp / 5 s past the
-    /// last word at the end). The line is marked dirty so `save`
-    /// re-renders it with explicit `<mm:ss.xx>` markers. Returns the new
-    /// word's index. Errors when the line has no words to insert into.
+    /// Round 40/41: insert a new WORD into a line (the insert is per
+    /// word, not per line — everything stays on the same line).
+    /// `after == false` inserts before the word at `word`, `after ==
+    /// true` after it.
+    ///
+    /// Timing: mid-line the new word's time interpolates between its
+    /// neighbours (the previous word and the next word). At the line's
+    /// edges — where a midpoint has nothing to anchor to — the word is
+    /// placed 100 ms before the first word / after the last word so it
+    /// gets its own karaoke moment instead of sharing (or floating in)
+    /// the boundary's timing: before the FIRST word the line's
+    /// timestamp is moved earlier to match, so the new word lights on
+    /// screen before the original first word; after the LAST word the
+    /// word lands 100 ms on (capped by the next line's midpoint when
+    /// the next line starts too soon).
+    ///
+    /// The line is marked dirty so `save` re-renders it with explicit
+    /// `<mm:ss.xx>` markers. Returns the new word's index. Errors when
+    /// the line has no words to insert into.
     pub fn insert_word_at(
         &mut self,
         line: usize,
@@ -203,6 +213,7 @@ impl LrcEditSession {
         after: bool,
         text: &str,
     ) -> Result<usize> {
+        let step = Duration::from_millis(100);
         let l = self.lines.get(line).context("line out of range")?;
         if l.words.is_empty() {
             anyhow::bail!("line has no words to insert into");
@@ -210,21 +221,46 @@ impl LrcEditSession {
         if word >= l.words.len() {
             anyhow::bail!("word out of range");
         }
-        let (insert_at, time) = if after {
+        let (insert_at, time, extend_tag) = if after {
             let prev = l.words[word].time;
-            let next = l.words.get(word + 1).map(|w| w.time).or_else(|| {
-                self.lines
+            if word + 1 < l.words.len() {
+                // Mid-line: midpoint between this word and the next.
+                (word + 1, prev + l.words[word + 1].time.saturating_sub(prev) / 2, false)
+            } else {
+                // After the LAST word: its own moment 100 ms on, capped
+                // by the midpoint toward the next line when the next
+                // line starts too soon.
+                let next_line = self
+                    .lines
                     .get(line + 1)
                     .map(|l| l.time)
-                    .filter(|t| *t > prev)
-            }).unwrap_or(prev + Duration::from_secs(5));
-            (word + 1, prev + next.saturating_sub(prev) / 2)
-        } else {
-            let prev = if word > 0 { l.words[word - 1].time } else { l.time };
+                    .filter(|t| *t > prev);
+                let time = match next_line {
+                    Some(next) if next.saturating_sub(prev) <= step => {
+                        prev + next.saturating_sub(prev) / 2
+                    }
+                    _ => prev + step,
+                };
+                (word + 1, time, false)
+            }
+        } else if word > 0 {
+            // Mid-line: midpoint between the previous word and this one.
+            let prev = l.words[word - 1].time;
             let next = l.words[word].time;
-            (word, prev + next.saturating_sub(prev) / 2)
+            (word, prev + next.saturating_sub(prev) / 2, false)
+        } else {
+            // Before the FIRST word: its own moment 100 ms before the
+            // first word (the line tag extends earlier to match when the
+            // line currently starts exactly at the first word).
+            let first = l.words[0].time;
+            let time = first.saturating_sub(step);
+            let extend = time < l.time;
+            (word, time, extend)
         };
         let l = self.lines.get_mut(line).context("line out of range")?;
+        if extend_tag {
+            l.time = time;
+        }
         l.words.insert(
             insert_at,
             EditableWord {
@@ -895,16 +931,32 @@ mod tests {
         assert_eq!(idx, 0);
         assert_eq!(session.lines[0].words[0].text, "intro");
         assert_eq!(session.lines[0].words[0].time, Duration::from_millis(1100));
-        // After the LAST word (hello @1.20, now index 1): interpolate
-        // toward the next line's time (3.00) -> midpoint 2.10.
+        // After the LAST word (hello @1.20, now index 1): its own
+        // moment 100 ms on (1.30) — not floating at the midpoint of the
+        // 1.8 s gap to the next line.
         let idx = session.insert_word_at(0, 1, true, "outro").unwrap();
         assert_eq!(idx, 2);
-        assert_eq!(session.lines[0].words[2].time, Duration::from_millis(2100));
-        // Last word of the LAST line: the virtual next anchor is 5 s
-        // past the word, the new word sits at the midpoint (2.5 s on).
+        assert_eq!(session.lines[0].words[2].time, Duration::from_millis(1300));
+        // Last word of the LAST line: 100 ms on as well.
         let mut session = LrcEditSession::open(PathBuf::new(), "[00:01.00]<00:01.20>hello\n".to_owned());
         session.insert_word_at(0, 0, true, "tail").unwrap();
-        assert_eq!(session.lines[0].words[1].time, Duration::from_millis(3700));
+        assert_eq!(session.lines[0].words[1].time, Duration::from_millis(1300));
+    }
+
+    #[test]
+    fn insert_word_before_the_first_word_gets_its_own_moment() {
+        // Line starts exactly at the first word (1.45): the inserted word
+        // is placed 100 ms before it AND the line tag extends earlier so
+        // the karaoke lights the new word before the original first word.
+        let raw = "[00:01.45]<00:01.45>I <00:02.63>still\n";
+        let mut session = LrcEditSession::open(PathBuf::new(), raw.to_owned());
+        let idx = session.insert_word_at(0, 0, false, "ALPHA").unwrap();
+        assert_eq!(idx, 0);
+        assert_eq!(session.lines[0].time, Duration::from_millis(1350), "tag extends earlier");
+        assert_eq!(session.lines[0].words[0].time, Duration::from_millis(1350));
+        assert_eq!(session.lines[0].words[1].time, Duration::from_millis(1450));
+        let new_raw = session.render_pending().unwrap();
+        assert_eq!(new_raw, "[00:01.35]<00:01.35>ALPHA <00:01.45>I <00:02.63>still\n");
     }
 
     #[test]

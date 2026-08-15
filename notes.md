@@ -1,5 +1,32 @@
 # Notes for the container agent — round 40 IMPLEMENTED host-side (2026-08-15) — do not re-implement
 
+
+## ROUND 40 FOLLOW-UP — inserted words get their own karaoke timing (2026-08-15)
+
+**User:** "added lyrics aren't showing with the correct timing". The
+round-40 midpoint interpolation was degenerate at the line edges:
+inserting before the FIRST word when the line starts exactly at that
+word gave the new word the SAME timestamp as the first word (both lit
+at once — the added word never had its own moment), and after the LAST
+word the word floated at the midpoint of the gap (up to 5 s). Fix in
+`LrcEditSession::insert_word_at`:
+
+- **before the first word**: the new word is placed 100 ms before the
+  first word and the LINE's timestamp extends earlier to match — the
+  karaoke now lights the added word on its own, then the original first
+  word (`[00:01.35]<00:01.35>ALPHA <00:01.45>I <00:02.63>still …`).
+- **after the last word**: 100 ms on from the last word (capped by the
+  midpoint toward the next line when the next line starts within
+  100 ms) instead of floating mid-gap.
+- **mid-line inserts are unchanged** (midpoint between the neighbours —
+  the best initial guess; fine-tune with `+`/`-` or Enter).
+- +1 unit test (before-first-word tag extension), edges test updated.
+  **1443/1443**, warnings 3 baseline. Live-verified: ALPHA lights at
+  1.35 (I stays at 1.45) with the karaoke highlight. Binary `8742e0d2`
+  installed; running instance needs a restart.
+
+---
+
 ## ROUND 40 — i/a insert a WORD into the same line + legend survives modals
 
 **User feedback (2026-08-14/15, direct to the host, on round 39):**
