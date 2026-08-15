@@ -118,11 +118,15 @@ the user's decisions win. Locked in across sessions (details in the docs):
 
 ## Current state (verified)
 
-- **Master**: `NJMRgit/s2udio` **master @ `4ff3b3d`** (clean buildable
-  subset) — rounds 31 + 32 + the round-32 host follow-up merged 2026-08-13
-  (five clean-subset commits on top of round-30 `bc6e69f`); validated
-  **1386/1386**, warnings 3 baseline. Tree = clean subset (14 paths; no
-  docs/agent files).
+- **Master**: `NJMRgit/s2udio` **master @ `e3ea655`** (clean buildable
+  subset) — **rounds 34–43 merged + pushed 2026-08-15** (one clean-subset
+  commit on top of round-33 `53efdd6`): lyrics edit mode (34–41) + rqbit
+  web UI/CLI (42–43) + the README rqbit section. Validated on the master
+  tree: `cargo check` + `cargo build --release` clean, **1387/1389 tests
+  pass** (the same 2 pre-existing env failures; the lyrics-lookup test is
+  the known parallel-flaky one — passes alone). Tree = clean subset (no
+  docs/, agent .md files, tests/, .github/, .vscode/, .typos.toml,
+  flake.nix).
 - **Branch**: `working` (tracks `s2udio-working/working`) — **rounds 42 +
   43 below committed and pushed 2026-08-15** (round 41 tip `c5f65e4` +
   commit `da0df5d`; rounds 33–41 = the lyrics edit-mode series). Full
@@ -661,8 +665,7 @@ Toolchain env (container): `export PATH="$HOME/.cargo/bin:$PATH"`
   proxy end-to-end: proxy /web/ + /stats without credentials → 200,
   engine port without credentials → 401; registration gained
   `engine_port` (serde default). COMMITTED + PUSHED to
-  `s2udio-working/working` (2026-08-15); merge to master remains
-  optional.
+  `s2udio-working/working` and **merged to master (`e3ea655`)** 2026-08-15.
 - **Round 42 (2026-08-15 user request) — rqbit web UI from Settings +
   VPN (SOCKS5) config: IMPLEMENTED host-side, VALIDATED 1447/1447 minus
   2 pre-existing env failures, docs + handoff + session log updated,
@@ -678,8 +681,8 @@ Toolchain env (container): `export PATH="$HOME/.cargo/bin:$PATH"`
   VPN (verified — it's torrent management only); set the proxy in
   Settings, then stop/start the engine. **The user's running s2udio
   (PID 8105) is the pre-fix binary — restart to get the 401 fix.**
-  COMMITTED + PUSHED to `s2udio-working/working` (2026-08-15); merge to
-  master remains optional.
+  COMMITTED + PUSHED to `s2udio-working/working` and **merged to master
+  (`e3ea655`)** 2026-08-15.
 - **Round 29 (2026-08-12 user request) — IMPLEMENTED host-side,
   VALIDATED 1364/1364, binary installed + live-checked (see
   FEEDBACK-2026-08-12-2.md).** Name the cava PipeWire node via a new
