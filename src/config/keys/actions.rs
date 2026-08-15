@@ -890,12 +890,16 @@ pub enum CommonActionFile {
     NudgeDown,
     SaveLyrics,
     // Lyrics edit mode (round 35): delete the current line, edit the
-    // line's text, insert a new line before/after the current one, set
-    // the line's timestamp.
+    // line's text, split at the current word, set the line's timestamp.
     DeleteLyricsLine,
     EditLyricsLine,
+    /// Round 39: split the line at the selected word (before/after the
+    /// word).
     InsertLyricsLineBefore,
     InsertLyricsLineAfter,
+    /// Round 39: add a whole new line before/after the current one.
+    AddLyricsLineBefore,
+    AddLyricsLineAfter,
     SetLyricsLineTime,
     // Lyrics edit mode (round 37): save and leave edit mode (`<C-c>`).
     SaveLyricsAndExit,
@@ -970,12 +974,20 @@ pub enum CommonAction {
     LyricsNudgeDown,
     LyricsSave,
     /// Lyrics edit mode (round 35): line-level editing — delete the
-    /// current line, edit its text, insert a new line before/after the
-    /// current one, set the line's timestamp.
+    /// current line, edit its text, split at the current word, set the
+    /// line's timestamp.
     LyricsDeleteLine,
     LyricsEditLine,
+    /// Round 39: split the line at the selected word — `before` moves
+    /// the selected word (and everything after it) to a new line that
+    /// starts at the word's time; `after` moves the following words to a
+    /// new line starting at the next word's time.
     LyricsInsertBefore,
     LyricsInsertAfter,
+    /// Round 39: add a whole new line before/after the current one (the
+    /// old insert behavior, moved off `i`/`a`).
+    LyricsAddLineBefore,
+    LyricsAddLineAfter,
     LyricsLineTime,
     /// Lyrics edit mode (round 37): save the pending edits AND leave
     /// edit mode (`<C-c>`; Esc discards instead, `<C-s>` saves in place).
@@ -1053,10 +1065,16 @@ impl ToDescription for CommonAction {
                 "Lyrics edit mode: edit the current line's text".into()
             }
             CommonAction::LyricsInsertBefore => {
-                "Lyrics edit mode: insert a new line before the current one".into()
+                "Lyrics edit mode: split the line before the selected word (i)".into()
             }
             CommonAction::LyricsInsertAfter => {
-                "Lyrics edit mode: insert a new line after the current one".into()
+                "Lyrics edit mode: split the line after the selected word (a)".into()
+            }
+            CommonAction::LyricsAddLineBefore => {
+                "Lyrics edit mode: add a new line before the current one (O)".into()
+            }
+            CommonAction::LyricsAddLineAfter => {
+                "Lyrics edit mode: add a new line after the current one (o)".into()
             }
             CommonAction::LyricsLineTime => {
                 "Lyrics edit mode: set the current line's timestamp".into()
@@ -1287,6 +1305,8 @@ impl TryFrom<CommonActionFile> for CommonAction {
             CommonActionFile::EditLyricsLine => CommonAction::LyricsEditLine,
             CommonActionFile::InsertLyricsLineBefore => CommonAction::LyricsInsertBefore,
             CommonActionFile::InsertLyricsLineAfter => CommonAction::LyricsInsertAfter,
+            CommonActionFile::AddLyricsLineBefore => CommonAction::LyricsAddLineBefore,
+            CommonActionFile::AddLyricsLineAfter => CommonAction::LyricsAddLineAfter,
             CommonActionFile::SetLyricsLineTime => CommonAction::LyricsLineTime,
             CommonActionFile::SaveLyricsAndExit => CommonAction::LyricsSaveAndExit,
             CommonActionFile::PaneUp => CommonAction::PaneUp,
@@ -1405,6 +1425,8 @@ impl From<CommonAction> for CommonActionFile {
             CommonAction::LyricsEditLine => CommonActionFile::EditLyricsLine,
             CommonAction::LyricsInsertBefore => CommonActionFile::InsertLyricsLineBefore,
             CommonAction::LyricsInsertAfter => CommonActionFile::InsertLyricsLineAfter,
+            CommonAction::LyricsAddLineBefore => CommonActionFile::AddLyricsLineBefore,
+            CommonAction::LyricsAddLineAfter => CommonActionFile::AddLyricsLineAfter,
             CommonAction::LyricsLineTime => CommonActionFile::SetLyricsLineTime,
             CommonAction::LyricsSaveAndExit => CommonActionFile::SaveLyricsAndExit,
         }

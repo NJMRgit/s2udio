@@ -798,6 +798,8 @@ where
             | CommonAction::LyricsEditLine
             | CommonAction::LyricsInsertBefore
             | CommonAction::LyricsInsertAfter
+            | CommonAction::LyricsAddLineBefore
+            | CommonAction::LyricsAddLineAfter
             | CommonAction::LyricsLineTime
             | CommonAction::LyricsSaveAndExit => {}
         }

@@ -1136,6 +1136,58 @@ impl LyricsPane {
         Ok(())
     }
 
+    /// Round 39: `i`/`a` — split the current line at the selected WORD
+    /// (insert a line boundary per word, not per line). The split is
+    /// immediate: pending edits are saved first, the line is split in a
+    /// fresh session, saved and re-indexed; the new line is re-selected
+    /// via `pending_insert_select`. When there is nothing to move (first
+    /// word with `before`, last word with `after`, or a line without
+    /// words) it falls back to the add-line modal — the same
+    /// whole-line insert `o`/`O` use.
+    fn split_at_selected_word(&mut self, ctx: &mut Ctx, before: bool) -> Result<()> {
+        let Some((l, w)) = self.edit_selection else { return Ok(()) };
+        let (path, line_idx, word_idx) = {
+            let Some(session) = &self.edit_session else { return Ok(()) };
+            let Some(line) = session.lines.get(l) else { return Ok(()) };
+            if w >= line.words.len() {
+                return Ok(());
+            }
+            (session.path().clone(), l, w)
+        };
+        if let Some(session) = &mut self.edit_session
+            && session.is_dirty()
+        {
+            session.save()?;
+        }
+        let raw = match std::fs::read_to_string(&path) {
+            Ok(raw) => raw,
+            Err(err) => {
+                status_error!("Failed to read lyrics file: '{err}'");
+                return Ok(());
+            }
+        };
+        let mut session = LrcEditSession::open(path.clone(), raw);
+        let position = match session.split_line_at_word(line_idx, word_idx, !before) {
+            Ok(position) => position,
+            Err(_) => {
+                // Line edge / no words: nothing to split — offer the
+                // whole-line insert instead.
+                return self.insert_new_line(ctx, before);
+            }
+        };
+        if let Err(err) = session.save() {
+            status_error!("Failed to save the split: '{err}'");
+            return Ok(());
+        }
+        crate::shared::macros::try_skip!(
+            ctx.work_sender
+                .send(crate::shared::events::WorkRequest::IndexSingleLrc { path }),
+            "Failed to request lyrics index update"
+        );
+        self.pending_insert_select = Some(position);
+        Ok(())
+    }
+
     /// Render the song details (File / Filename / Title / ... with the
     /// yellow group labels), matching the Directories / Radio info boxes.
     /// Scrollable with the mouse wheel; the offset resets when the shown
@@ -1943,8 +1995,13 @@ impl Pane for LyricsPane {
             // before/after, `t` sets the line's timestamp.
             Some(CommonAction::LyricsDeleteLine) => self.delete_current_line(ctx)?,
             Some(CommonAction::LyricsEditLine) => self.open_line_text_modal(ctx)?,
-            Some(CommonAction::LyricsInsertBefore) => self.insert_new_line(ctx, true)?,
-            Some(CommonAction::LyricsInsertAfter) => self.insert_new_line(ctx, false)?,
+            // Round 39: `i`/`a` split the line at the selected WORD
+            // (falling back to the add-line modal at the line's edges),
+            // `o`/`O` add a whole new line after/before the current one.
+            Some(CommonAction::LyricsInsertBefore) => self.split_at_selected_word(ctx, true)?,
+            Some(CommonAction::LyricsInsertAfter) => self.split_at_selected_word(ctx, false)?,
+            Some(CommonAction::LyricsAddLineBefore) => self.insert_new_line(ctx, true)?,
+            Some(CommonAction::LyricsAddLineAfter) => self.insert_new_line(ctx, false)?,
             Some(CommonAction::LyricsLineTime) => self.open_line_time_modal(ctx)?,
             _ => {}
         }
@@ -3712,17 +3769,71 @@ mod tests {
     }
 
     #[test]
-    fn i_and_a_open_the_insert_modals() {
+    fn i_splits_the_line_before_the_selected_word() {
+        let (mut ctx, mut pane, path) = edit_fixture();
+        pane.set_edit_mode(&ctx, true).unwrap();
+        // The selection lands on "world" (word 1 of line 0 — the word
+        // sung at the pause position 1.50 s).
+        assert_eq!(pane.edit_selection, Some((0, 1)));
+        let (tx, rx) = crossbeam::channel::unbounded();
+        ctx.app_event_sender = tx;
+        pane.handle_action(&mut action(CommonAction::LyricsInsertBefore), &mut ctx).unwrap();
+        assert!(rx.try_recv().is_err(), "the split is immediate, no modal");
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            saved.contains("[00:01.40]<00:01.40>world"),
+            "the selected word starts its own line: {saved}"
+        );
+        assert!(
+            saved.contains("[00:01.00]<00:01.20>hello"),
+            "the earlier words stay on the original line: {saved}"
+        );
+    }
+
+    #[test]
+    fn a_splits_the_line_after_the_selected_word() {
+        let (mut ctx, mut pane, path) = edit_fixture();
+        pane.set_edit_mode(&ctx, true).unwrap();
+        pane.edit_selection = Some((0, 0));
+        let (tx, rx) = crossbeam::channel::unbounded();
+        ctx.app_event_sender = tx;
+        pane.handle_action(&mut action(CommonAction::LyricsInsertAfter), &mut ctx).unwrap();
+        assert!(rx.try_recv().is_err(), "the split is immediate, no modal");
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            saved.contains("[00:01.40]<00:01.40>world"),
+            "the following words move to a line at the next word's time: {saved}"
+        );
+        assert!(saved.contains("[00:01.00]<00:01.20>hello"), "hello stays: {saved}");
+    }
+
+    #[test]
+    fn i_at_the_first_word_falls_back_to_the_add_line_modal() {
         let (mut ctx, mut pane, _path) = edit_fixture();
         pane.set_edit_mode(&ctx, true).unwrap();
-        for act in [CommonAction::LyricsInsertBefore, CommonAction::LyricsInsertAfter] {
+        pane.edit_selection = Some((0, 0));
+        let (tx, rx) = crossbeam::channel::unbounded();
+        ctx.app_event_sender = tx;
+        pane.handle_action(&mut action(CommonAction::LyricsInsertBefore), &mut ctx).unwrap();
+        let received = rx.try_recv().unwrap();
+        assert!(
+            matches!(received, crate::AppEvent::UiEvent(crate::ui::UiAppEvent::Modal(_))),
+            "nothing before the first word -> the add-line modal opens: {received:?}"
+        );
+    }
+
+    #[test]
+    fn o_and_O_open_the_add_line_modals() {
+        let (mut ctx, mut pane, _path) = edit_fixture();
+        pane.set_edit_mode(&ctx, true).unwrap();
+        for act in [CommonAction::LyricsAddLineBefore, CommonAction::LyricsAddLineAfter] {
             let (tx, rx) = crossbeam::channel::unbounded();
             ctx.app_event_sender = tx;
             pane.handle_action(&mut action(act), &mut ctx).unwrap();
             let received = rx.try_recv().unwrap();
             assert!(
                 matches!(received, crate::AppEvent::UiEvent(crate::ui::UiAppEvent::Modal(_))),
-                "insert modal opens: {received:?}"
+                "add-line modal opens: {received:?}"
             );
         }
     }

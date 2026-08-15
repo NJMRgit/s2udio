@@ -107,13 +107,17 @@ impl Default for KeyConfigFile {
             ("<S-+>".parse().unwrap(),            C::NudgeUp),
             (s().char('-'),                       C::NudgeDown),
             (s().char('s').ctrl(),                C::SaveLyrics),
-            // Lyrics edit mode (round 35): `d` deletes the current line,
-            // `e` edits its text, `i`/`a` insert a line before/after,
-            // `t` sets the line's timestamp.
+            // Lyrics edit mode (round 35/39): `d` deletes the current
+            // line, `e` edits its text, `i`/`a` split the line at the
+            // selected word (before/after the word), `o`/`O` add a whole
+            // new line after/before the current one, `t` sets the line's
+            // timestamp.
             (s().char('d'),                       C::DeleteLyricsLine),
             (s().char('e'),                       C::EditLyricsLine),
             (s().char('i'),                       C::InsertLyricsLineBefore),
             (s().char('a'),                       C::InsertLyricsLineAfter),
+            (s().char('o'),                       C::AddLyricsLineAfter),
+            (s().char('O'),                       C::AddLyricsLineBefore),
             (s().char('t'),                       C::SetLyricsLineTime),
             // Lyrics edit mode (round 37): `<C-c>` saves and exits (Esc
             // discards, `<C-s>` saves in place).
@@ -393,6 +397,21 @@ mod tests {
             default.navigation.get(&KeySequence::new().char('a').ctrl()),
             Some(&CommonActionFile::SelectAll),
             "Ctrl+A selects all items of the current list"
+        );
+    }
+
+    #[test]
+    fn default_navigation_bindings_include_o_O_for_adding_lyric_lines() {
+        let default = KeyConfigFile::default();
+        assert_eq!(
+            default.navigation.get(&KeySequence::new().char('o')),
+            Some(&CommonActionFile::AddLyricsLineAfter),
+            "o adds a whole new lyric line after the current one"
+        );
+        assert_eq!(
+            default.navigation.get(&KeySequence::new().char('O')),
+            Some(&CommonActionFile::AddLyricsLineBefore),
+            "O adds a whole new lyric line before the current one"
         );
     }
 
