@@ -190,7 +190,7 @@ impl CavaPane {
             ("\u{2190} \u{2192}", "word", "\u{2191} \u{2193} / w s", "line"),
             ("+ \u{2212}", "nudge \u{b1}10 ms", "Enter", "exact word time"),
             ("t", "line timestamp", "e", "edit line text"),
-            ("d", "delete line", "i / a", "split at word"),
+            ("d", "delete line", "i / a", "insert word"),
             ("o / O", "add line", "C-c", "save + exit"),
             ("C-s", "save in place", "Esc", "discard"),
             ("pause", "select current word", "", ""),
@@ -753,7 +753,13 @@ impl Pane for CavaPane {
                 }
             }
             UiEvent::ModalOpened if is_visible => {
-                if !self.is_modal_open {
+                // Round 40: during lyrics edit mode the pane shows the
+                // legend, which lives in the ratatui buffer — a direct
+                // terminal write here would wipe it from the screen
+                // without invalidating the buffer, hiding it until a full
+                // re-render. The cava process is already paused by edit
+                // mode (legend path), so there is nothing to clear.
+                if !self.is_modal_open && !ctx.lyrics_edit_mode.get() {
                     self.pause_and_clear(ctx)?;
                 }
                 self.is_modal_open = true;
@@ -886,7 +892,7 @@ mod tests {
         let text: String = buf.content().iter().map(|c| c.symbol()).collect();
         assert!(text.contains("Lyrics edit mode"), "legend title: {text}");
         assert!(text.contains("delete line"), "delete line entry: {text}");
-        assert!(text.contains("split at word"), "split entry: {text}");
+        assert!(text.contains("insert word"), "insert-word entry: {text}");
         assert!(text.contains("add line"), "add-line entry: {text}");
         assert!(text.contains("nudge"), "nudge entry: {text}");
         assert!(text.contains("save + exit"), "ctrl+c entry: {text}");

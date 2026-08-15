@@ -107,11 +107,11 @@ impl Default for KeyConfigFile {
             ("<S-+>".parse().unwrap(),            C::NudgeUp),
             (s().char('-'),                       C::NudgeDown),
             (s().char('s').ctrl(),                C::SaveLyrics),
-            // Lyrics edit mode (round 35/39): `d` deletes the current
-            // line, `e` edits its text, `i`/`a` split the line at the
-            // selected word (before/after the word), `o`/`O` add a whole
-            // new line after/before the current one, `t` sets the line's
-            // timestamp.
+            // Lyrics edit mode (round 35/40): `d` deletes the current
+            // line, `e` edits its text, `i`/`a` insert a new word into
+            // the current line (before/after the selected word),
+            // `o`/`O` add a whole new line after/before the current one,
+            // `t` sets the line's timestamp.
             (s().char('d'),                       C::DeleteLyricsLine),
             (s().char('e'),                       C::EditLyricsLine),
             (s().char('i'),                       C::InsertLyricsLineBefore),
