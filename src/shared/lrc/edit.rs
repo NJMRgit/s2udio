@@ -187,74 +187,61 @@ impl LrcEditSession {
         Ok(position)
     }
 
-    /// Round 39: split a line at one of its words so the insert is per
-    /// WORD, not per line. `after == false` splits BEFORE `word`: the
-    /// selected word and everything after it move to a new line that
-    /// starts at the selected word's time, inserted at the current
-    /// line's position (so the boundary lands right before the word is
-    /// sung). `after == true` splits AFTER `word`: the following words
-    /// move to a new line starting at the next word's time, inserted
-    /// after the current line. Both halves are marked dirty so `save`
-    /// re-renders them with explicit `<mm:ss.xx>` markers (the moved
-    /// words keep their timings). Returns the new line's index.
-    ///
-    /// Errors when there is nothing to move (a line without words, or
-    /// the first word with `after == false` / the last word with
-    /// `after == true`) — the caller falls back to a plain line insert.
-    pub fn split_line_at_word(&mut self, line: usize, word: usize, after: bool) -> Result<usize> {
+    /// Round 40: insert a new WORD into a line (the insert is per word,
+    /// not per line — everything stays on the same line). `after ==
+    /// false` inserts before the word at `word`, `after == true` after
+    /// it. The new word's time interpolates between its neighbours: the
+    /// previous word's time (or the line's timestamp at the start) and
+    /// the next word's time (or the next line's timestamp / 5 s past the
+    /// last word at the end). The line is marked dirty so `save`
+    /// re-renders it with explicit `<mm:ss.xx>` markers. Returns the new
+    /// word's index. Errors when the line has no words to insert into.
+    pub fn insert_word_at(
+        &mut self,
+        line: usize,
+        word: usize,
+        after: bool,
+        text: &str,
+    ) -> Result<usize> {
         let l = self.lines.get(line).context("line out of range")?;
         if l.words.is_empty() {
-            anyhow::bail!("line has no words to split");
+            anyhow::bail!("line has no words to insert into");
         }
         if word >= l.words.len() {
             anyhow::bail!("word out of range");
         }
-        let (split_at, time) = if after {
-            if word + 1 >= l.words.len() {
-                anyhow::bail!("nothing after the last word");
-            }
-            (word + 1, l.words[word + 1].time)
+        let (insert_at, time) = if after {
+            let prev = l.words[word].time;
+            let next = l.words.get(word + 1).map(|w| w.time).or_else(|| {
+                self.lines
+                    .get(line + 1)
+                    .map(|l| l.time)
+                    .filter(|t| *t > prev)
+            }).unwrap_or(prev + Duration::from_secs(5));
+            (word + 1, prev + next.saturating_sub(prev) / 2)
         } else {
-            if word == 0 {
-                anyhow::bail!("nothing before the first word");
-            }
-            (word, l.words[word].time)
+            let prev = if word > 0 { l.words[word - 1].time } else { l.time };
+            let next = l.words[word].time;
+            (word, prev + next.saturating_sub(prev) / 2)
         };
         let l = self.lines.get_mut(line).context("line out of range")?;
-        let moved: Vec<EditableWord> = l.words.drain(split_at..).collect();
+        l.words.insert(
+            insert_at,
+            EditableWord {
+                text: text.trim().to_owned(),
+                time,
+                marker: None,
+                text_span: None,
+            },
+        );
         l.content = l.words.iter().map(|w| w.text.clone()).collect::<Vec<_>>().join(" ");
         l.dirty = true;
-        let moved_text =
-            moved.iter().map(|w| w.text.clone()).collect::<Vec<_>>().join(" ");
-        let new_line = EditableLine {
-            time,
-            content: moved_text,
-            words: moved,
-            raw_span: None,
-            dirty: true,
-        };
-        let position = if after { line + 1 } else { line };
-        self.lines.insert(position, new_line);
-        self.structural = true;
-        // Remap pending word edits: edits on the moved words follow them
-        // to the new line; edits on later lines shift with the insert.
+        // Pending edits on the same line after the insertion shift by one.
         self.pending = std::mem::take(&mut self.pending)
             .into_iter()
-            .map(|(l, w)| {
-                if l == line {
-                    if w >= split_at {
-                        (position, w - split_at)
-                    } else {
-                        (line, w)
-                    }
-                } else if l >= position {
-                    (l + 1, w)
-                } else {
-                    (l, w)
-                }
-            })
+            .map(|(l, w)| if l == line && w >= insert_at { (l, w + 1) } else { (l, w) })
             .collect();
-        Ok(position)
+        Ok(insert_at)
     }
 
     /// Write every pending edit back to the file (atomic replace), then
@@ -858,80 +845,90 @@ mod tests {
     }
 
     #[test]
-    fn split_before_a_word_moves_the_word_and_the_rest_to_a_new_line() {
-        // hello @1.20, world @1.40 — split before "world": the new line
-        // starts at world's time and holds world; hello stays behind.
+    fn insert_word_before_interpolates_between_the_neighbours() {
+        // hello @1.20, world @1.40 — insert "there" before world: it
+        // lands between the two, timed at the midpoint (1.30), and the
+        // whole line re-renders with explicit markers.
         let raw = "[ti:X]\n# lrcgen-gap-align:v1\n\n[00:01.00]<00:01.20>hello <00:01.40>world\n";
         let mut session = LrcEditSession::open(PathBuf::new(), raw.to_owned());
-        let idx = session.split_line_at_word(0, 1, false).unwrap();
-        assert_eq!(idx, 0, "the new line lands before the split line");
-        assert_eq!(session.lines.len(), 2);
-        assert_eq!(session.lines[0].time, Duration::from_millis(1400));
-        assert_eq!(session.lines[0].content, "world");
-        assert_eq!(session.lines[0].words.len(), 1);
-        assert_eq!(session.lines[0].words[0].time, Duration::from_millis(1400));
-        assert_eq!(session.lines[1].content, "hello");
-        assert_eq!(session.lines[1].words.len(), 1);
-        assert!(session.lines[0].dirty && session.lines[1].dirty);
+        let idx = session.insert_word_at(0, 1, false, "there").unwrap();
+        assert_eq!(idx, 1);
+        assert_eq!(session.lines.len(), 1, "still ONE line — the word joins the same line");
+        let words = &session.lines[0].words;
+        assert_eq!(words.len(), 3);
+        assert_eq!(words[0].text, "hello");
+        assert_eq!(words[1].text, "there");
+        assert_eq!(words[1].time, Duration::from_millis(1300));
+        assert_eq!(words[2].text, "world");
+        assert_eq!(words[2].time, Duration::from_millis(1400));
+        assert_eq!(session.lines[0].content, "hello there world");
+        assert!(session.lines[0].dirty);
         let new_raw = session.render_pending().unwrap();
         assert_eq!(
             new_raw,
-            "[ti:X]\n# lrcgen-gap-align:v1\n\n[00:01.40]<00:01.40>world\n[00:01.00]<00:01.20>hello\n"
+            "[ti:X]\n# lrcgen-gap-align:v1\n\n[00:01.00]<00:01.20>hello <00:01.30>there <00:01.40>world\n"
         );
     }
 
     #[test]
-    fn split_after_a_word_moves_the_following_words_to_a_new_line() {
-        // Split after "hello": the new line starts at the next word's
-        // time (world @1.40) and holds world; hello stays on the
-        // original line.
-        let raw = "[00:01.00]<00:01.20>hello <00:01.40>world <00:01.60>again\n";
+    fn insert_word_after_interpolates_between_the_neighbours() {
+        // Insert "there" after hello (word 0): between 1.20 and 1.40.
+        let raw = "[00:01.00]<00:01.20>hello <00:01.40>world\n";
         let mut session = LrcEditSession::open(PathBuf::new(), raw.to_owned());
-        let idx = session.split_line_at_word(0, 0, true).unwrap();
-        assert_eq!(idx, 1, "the new line lands after the split line");
-        assert_eq!(session.lines.len(), 2);
-        assert_eq!(session.lines[0].content, "hello");
-        assert_eq!(session.lines[0].words.len(), 1);
-        assert_eq!(session.lines[1].time, Duration::from_millis(1400));
-        assert_eq!(session.lines[1].content, "world again");
-        assert_eq!(session.lines[1].words.len(), 2);
-        assert_eq!(session.lines[1].words[0].time, Duration::from_millis(1400));
-        assert_eq!(session.lines[1].words[1].time, Duration::from_millis(1600));
+        let idx = session.insert_word_at(0, 0, true, "there").unwrap();
+        assert_eq!(idx, 1);
+        let words = &session.lines[0].words;
+        assert_eq!(words.len(), 3);
+        assert_eq!(words[0].text, "hello");
+        assert_eq!(words[1].text, "there");
+        assert_eq!(words[1].time, Duration::from_millis(1300));
         let new_raw = session.render_pending().unwrap();
-        assert_eq!(
-            new_raw,
-            "[00:01.00]<00:01.20>hello\n[00:01.40]<00:01.40>world <00:01.60>again\n"
-        );
+        assert_eq!(new_raw, "[00:01.00]<00:01.20>hello <00:01.30>there <00:01.40>world\n");
     }
 
     #[test]
-    fn split_refuses_line_edges_and_wordless_lines() {
-        let raw = "[00:01.00]<00:01.20>hello <00:01.40>world\n[00:02.00]plain\n";
+    fn insert_word_at_the_line_edges_uses_line_or_next_line_times() {
+        // Before the FIRST word: interpolate from the line's timestamp.
+        let raw = "[00:01.00]<00:01.20>hello\n[00:03.00]<00:03.10>next\n";
         let mut session = LrcEditSession::open(PathBuf::new(), raw.to_owned());
-        assert!(session.split_line_at_word(0, 0, false).is_err(), "nothing before the first word");
-        assert!(session.split_line_at_word(0, 1, true).is_err(), "nothing after the last word");
-        assert!(session.split_line_at_word(1, 0, false).is_err(), "wordless line has no words");
-        assert!(session.split_line_at_word(0, 5, false).is_err(), "word out of range");
+        let idx = session.insert_word_at(0, 0, false, "intro").unwrap();
+        assert_eq!(idx, 0);
+        assert_eq!(session.lines[0].words[0].text, "intro");
+        assert_eq!(session.lines[0].words[0].time, Duration::from_millis(1100));
+        // After the LAST word (hello @1.20, now index 1): interpolate
+        // toward the next line's time (3.00) -> midpoint 2.10.
+        let idx = session.insert_word_at(0, 1, true, "outro").unwrap();
+        assert_eq!(idx, 2);
+        assert_eq!(session.lines[0].words[2].time, Duration::from_millis(2100));
+        // Last word of the LAST line: the virtual next anchor is 5 s
+        // past the word, the new word sits at the midpoint (2.5 s on).
+        let mut session = LrcEditSession::open(PathBuf::new(), "[00:01.00]<00:01.20>hello\n".to_owned());
+        session.insert_word_at(0, 0, true, "tail").unwrap();
+        assert_eq!(session.lines[0].words[1].time, Duration::from_millis(3700));
+    }
+
+    #[test]
+    fn insert_word_requires_a_worded_line_and_valid_word() {
+        let raw = "[00:01.00]<00:01.20>hello\n[00:02.00]plain\n";
+        let mut session = LrcEditSession::open(PathBuf::new(), raw.to_owned());
+        assert!(session.insert_word_at(1, 0, false, "x").is_err(), "wordless line");
+        assert!(session.insert_word_at(0, 5, false, "x").is_err(), "word out of range");
         assert_eq!(session.lines.len(), 2, "no partial state on error");
     }
 
     #[test]
-    fn split_remaps_pending_edits_that_follow_the_moved_words() {
-        let raw = "[00:01.00]<00:01.20>hello <00:01.40>world <00:01.60>again\n[00:03.00]<00:03.10>next\n";
+    fn insert_word_remaps_pending_edits_after_the_insertion() {
+        let raw = "[00:01.00]<00:01.20>hello <00:01.40>world <00:01.60>again\n";
         let mut session = LrcEditSession::open(PathBuf::new(), raw.to_owned());
-        // Pending on the moved word "again" (line 0 word 2) and on the
-        // later line.
         session.set_word_time(0, 2, Duration::from_millis(1700)).unwrap();
-        session.set_word_time(1, 0, Duration::from_millis(3100)).unwrap();
-        let idx = session.split_line_at_word(0, 0, true).unwrap();
+        let idx = session.insert_word_at(0, 0, true, "there").unwrap();
         assert_eq!(idx, 1);
-        // "again" followed to the new line as word 1; the later line
-        // shifted to index 2.
-        assert_eq!(session.pending, vec![(1, 1), (2, 0)]);
+        // The pending edit on "again" shifted from word 2 to word 3.
+        assert_eq!(session.pending, vec![(0, 3)]);
         let new_raw = session.render_pending().unwrap();
         assert_eq!(
             new_raw,
-            "[00:01.00]<00:01.20>hello\n[00:01.40]<00:01.40>world <00:01.70>again\n[00:03.00]<00:03.10>next\n"
+            "[00:01.00]<00:01.20>hello <00:01.30>there <00:01.40>world <00:01.70>again\n"
         );
     }
 

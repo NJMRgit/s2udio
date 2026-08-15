@@ -978,14 +978,12 @@ pub enum CommonAction {
     /// line's timestamp.
     LyricsDeleteLine,
     LyricsEditLine,
-    /// Round 39: split the line at the selected word — `before` moves
-    /// the selected word (and everything after it) to a new line that
-    /// starts at the word's time; `after` moves the following words to a
-    /// new line starting at the next word's time.
+    /// Round 40: insert a new word into the current line before/after
+    /// the selected word (the word stays on the same line; its time
+    /// interpolates between the neighbours).
     LyricsInsertBefore,
     LyricsInsertAfter,
-    /// Round 39: add a whole new line before/after the current one (the
-    /// old insert behavior, moved off `i`/`a`).
+    /// Round 39: add a whole new line before/after the current one.
     LyricsAddLineBefore,
     LyricsAddLineAfter,
     LyricsLineTime,
@@ -1065,10 +1063,10 @@ impl ToDescription for CommonAction {
                 "Lyrics edit mode: edit the current line's text".into()
             }
             CommonAction::LyricsInsertBefore => {
-                "Lyrics edit mode: split the line before the selected word (i)".into()
+                "Lyrics edit mode: insert a new word before the selected word (i)".into()
             }
             CommonAction::LyricsInsertAfter => {
-                "Lyrics edit mode: split the line after the selected word (a)".into()
+                "Lyrics edit mode: insert a new word after the selected word (a)".into()
             }
             CommonAction::LyricsAddLineBefore => {
                 "Lyrics edit mode: add a new line before the current one (O)".into()

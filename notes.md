@@ -1,3 +1,56 @@
+# Notes for the container agent — round 40 IMPLEMENTED host-side (2026-08-15) — do not re-implement
+
+## ROUND 40 — i/a insert a WORD into the same line + legend survives modals
+
+**User feedback (2026-08-14/15, direct to the host, on round 39):**
+"the legend disappears if I add a word. also adding a word before the
+first word of the line makes a new line before it instead of appending
+it to the current line. I want to add words to the SAME line". Host
+implemented on `working` on top of round 39: **1442/1442**, warnings 3
+baseline.
+
+### 1. i/a insert a WORD into the current line (not a split / new line)
+
+- Round 39's split-at-word is replaced: `i` / `a` now open a small
+  "New word before/after" modal and the typed word joins the CURRENT
+  line at the selected word's position — **no new line is ever
+  created**. The new word's time interpolates between its neighbours
+  (previous word — or the line's timestamp before the first word — and
+  the next word — or the next line's timestamp / 5 s past the last
+  word at the end). The line re-renders with explicit `<mm:ss.xx>`
+  markers; header + `# lrcgen-gap-align:v1` stamp preserved; the new
+  word is re-selected.
+- `LrcEditSession::insert_word_at(line, word, after, text)` (replaces
+  the round-39 `split_line_at_word`); `LyricsPane::insert_word` uses
+  the save-first + fresh-session + modal pattern; `pending_insert_select`
+  is now `(line, word)` so the reload lands on the inserted WORD.
+- `o`/`O` still add a whole new line (unchanged).
+
+### 2. Legend disappearing after a modal (add word / any modal)
+
+- Root cause: `CavaPane::on_event(ModalOpened)` called
+  `pause_and_clear`, which CLEARS the cava area with a direct terminal
+  write (that is correct for the terminal-side cava bars). But in edit
+  mode the pane shows the LEGEND, which lives in the ratatui buffer —
+  the direct write wiped it from the screen without invalidating the
+  buffer, so no later frame re-emitted it (invisible until a resize).
+- Fix: `ModalOpened` skips `pause_and_clear` while
+  `ctx.lyrics_edit_mode` is set (the cava process is already paused by
+  the legend path; the modal paints over the legend and closing it
+  restores it). The round-36 pause guard already covered the
+  PlaybackStateChanged path.
+- Tests: 5 new `insert_word_at` unit tests (before/after interpolation,
+  line-edge anchoring, wordless-line errors, pending remap) + pane
+  insert-word modal test + same-line write test; legend test updated
+  ("i / a insert word"). Live-validated in tmux: HELLO before word 0
+  lands as word 0 of the SAME line (`[00:01.45]<00:01.45>HELLO
+  <00:01.45>I <00:02.63>still …`), MANY after a word lands in-line, and
+  the legend stays visible through the insert modal (no resize needed).
+- Host: binary `6f7b5748` installed (~/.local/bin/s2udio, backup
+  `.bak-r39-split`); running instance needs a restart. Nothing for you
+  to implement — pull `working` when ready.
+
+---
 # Notes for the container agent — round 39 IMPLEMENTED host-side (2026-08-14) — do not re-implement
 
 ## ROUND 39 — per-WORD insert (i/a split the line at the selected word) + new add-line option (o/O)
