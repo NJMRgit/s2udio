@@ -7,7 +7,7 @@ description: >
   The full-window settings panel: layout, sections, row types, staging
   and save/discard behavior.
 status: "current"
-updated: "2026-08-05"
+updated: "2026-08-15 (round 42: torrent section)"
 source_files:
   - src/ui/modals/settings.rs
   - src/ui/modals/remap_keys.rs
@@ -15,6 +15,7 @@ source_files:
 related:
   - backend/config-sidecars
   - backend/blur-theme-watcher
+  - backend/torrent-streaming
   - frontend/interaction
   - frontend/layout-templates
 tags: [settings, staging, panel]
@@ -26,8 +27,8 @@ tags: [settings, staging, panel]
 
 A **full-window** view (no popup over the TUI): rounded border + centered
 ` Settings ` title; left sidebar (general / keybinds / mpv / mpd /
-jellyfin, `│` divider) with the active section marked `>`; content rows on
-the right; footer at the bottom. The panel consumes **all** raw keys
+jellyfin / torrent, `│` divider) with the active section marked `>`;
+content rows on the right; footer at the bottom. The panel consumes **all** raw keys
 (`handle_raw_key` returns true always; `handle_key` is a no-op).
 
 Content rows are a two-column table: **label left, control right-aligned**
@@ -70,6 +71,14 @@ terminals so controls are never cut off.
   playback modes, outputs modal — acts immediately.
 - **jellyfin**: server URL / username / password + sign in (persists the
   `jellyfin.ron` sidecar).
+- **torrent**: rqbit engine controls — **web ui** `[start]`/`[open]`
+  (spawns the standalone engine if needed, opens the web UI in the
+  browser via its auth-injecting loopback proxy —
+  `http://127.0.0.1:<proxy port>/web/`, no credentials in the URL),
+  **stop engine** `[stop]` (kills the standalone engine; restart picks
+  up a changed proxy), **socks proxy** `[edit]` (SOCKS5 URL for all rqbit
+  traffic — the VPN route; "" = none; staged, applied + persisted to
+  `state.ron` on Save). See `backend/torrent-streaming.md` §9.2.
 
 ## Appearance rows
 

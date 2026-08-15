@@ -57,6 +57,7 @@
         cache_dir: "~/.cache/s2udio/torrents",
         auto_pick_file: true,
         keep_after_play: false,
+        socks_proxy: None,
     ),
     keybinds: (
         global: {

@@ -8,7 +8,7 @@ description: >
   links: engine choice, classification, bandwidth gate, mpv routing and
   session lifecycle.
 status: "in-progress"
-updated: "2026-08-09 (round 18 host fixes)"
+updated: "2026-08-15 (round 42: web UI + SOCKS5 proxy)"
 source_files:
   - src/ui/modals/paste.rs (classify / parse_paste / popup)
   - src/core/mpv.rs (run_mpv_playlist / MpvPlaylistEntry)
@@ -305,6 +305,37 @@ files remain (`keep_after_play`/cleanup is M4).
   (mirror `S2UDIO_YTDLP_BIN`). If missing at first use → status notice:
   "rqbit not found — install (cargo install rqbit / static binary) or
   set S2UDIO_RQBIT_BIN" and abort the action, nothing else breaks.
+- Round-18 fixes (implemented): each engine gets its own free peer
+  `--listen-port` (default 4240 would collide across concurrent engines)
+  and `--disable-dht-persistence` (ephemeral DHT port); every engine runs
+  `--disable-persistence` (`server start` option, AFTER the subcommand)
+  for a clean per-engine session — the shared session DB made re-added
+  torrents checksum-validate at startup (stuck `Initializing`, stream
+  endpoint errors, mpv exit 2). `--http-api-listen-addr`,
+  `--listen-port` and the proxy flags are GLOBAL options (BEFORE
+  `server`).
+- Round 42: the engine also serves the **rqbit web UI** at
+  `GET /web/` on the HTTP API port (verified against 9.0.0-beta.2; the
+  older `/ui` path is gone). The UI is auth-protected like every other
+  endpoint. **Round 42 follow-up (2026-08-15)**: the UI is an SPA whose
+  `fetch()` calls cannot authenticate — browsers do NOT replay
+  URL-userinfo basic auth on `fetch()` (verified with headless
+  Chromium: the page loads via `http://user:pass@host/web/` but every
+  API call fails, UI shows "Error refreshing torrents network error" /
+  401). So every engine now also spawns a tiny loopback
+  **auth-injecting reverse proxy** (`src/core/torrent_proxy.rs`,
+  std-only, `Connection: close` per request) that adds the
+  `Authorization` header to every forwarded request; `web_url()` points
+  at `http://127.0.0.1:<proxy port>/web/` (no credentials in the URL)
+  and the engine port itself stays auth-protected. Verified
+  end-to-end: real rqbit + proxy + headless Chromium loads the SPA;
+  the engine's own `/stats` still 401s without credentials.
+- Round 42: when `torrent.socks_proxy` is set, the spawn adds the GLOBAL
+  `--socks-url <proxy>` and `--disable-tcp-listen` flags — ALL outgoing
+  connections route through the SOCKS5 proxy (the VPN route) and the
+  engine stops listening for incoming connections (the proxy only does
+  outgoing, so listening would leak the real IP; rqbit's own
+  recommendation).
 - Check (implementation detail): whether rqbit accepts port 0 for an
   ephemeral port; if yes, prefer it and read the port from the server's
   stdout/state; otherwise the config port + fallback scan.
@@ -454,6 +485,56 @@ Round 17 (the up-front scan makes the file list available in the popup):
   keep/cleanup policy is still M4. Played engines keep their scan-map
   clone too, so re-paste after play reuses the same engine.
 
+### 9.2 Web UI & VPN routing (round 42 — Settings → torrent)
+
+The **Settings panel's `torrent` section** manages a **standalone web-UI
+engine** independent of the per-play engine (`Ctx.torrent_webui_engine`,
+a plain `RefCell<Option<TorrentEngine>>`; its `Drop` kills rqbit when
+the app exits):
+
+- **`web ui`** row: starts the standalone engine when none is running
+  (dead child = not running; blocking spawn ≤ 5 s readiness — the panel
+  is modal, like the Jellyfin sign-in) and opens the browser via
+  `xdg-open` on `TorrentEngine::web_url()` — the auth-injecting proxy
+  URL, so no credentials appear in the address bar and the SPA's
+  `fetch()` calls work. Row label flips `[start]` ↔ `[open]` with
+  engine liveness.
+- **`stop engine`** row: `take()`s the engine (Drop kills rqbit) — a
+  fresh start is how a changed SOCKS proxy takes effect on a running
+  engine.
+- **`socks proxy`** row: edits a `socks5://[user:pass@]host:port` URL in
+  an `InputModal`; staged like the other settings rows, applied to
+  `config.torrent.socks_proxy` + persisted to `state.ron`
+  (`torrent_socks_proxy`, "" = explicitly no proxy) on Save, restored at
+  startup in `main.rs`. Takes effect on the NEXT engine spawn (any
+  engine — play/download scans too, not just the web UI).
+- The built-in web UI (9.0.0-beta.2) is torrent management only — it has
+  **no proxy/VPN settings** (verified in its embedded JS); the SOCKS
+  route is configured here and applied at spawn.
+
+### 9.3 Shell control — `s2udio rq start|stop|open` (round 43)
+
+The standalone engine can also be driven from the shell, sharing ONE
+engine with the Settings panel through a registration file
+(`~/.cache/s2udio/rqbit.json`: pid + web URL; no auth token — the proxy
+URL only):
+
+- **`s2udio rq start`** — idempotent: prints the web UI URL when an
+  engine is already running (GUI- or CLI-started); otherwise spawns a
+  hidden `s2udio rq serve` **daemon** (new process group, detached,
+  signal-driven shutdown) that owns the rqbit child + auth proxy,
+  registers itself, and self-heals (exits + unregisters when rqbit
+  dies). `src/core/rqctl.rs`.
+- **`s2udio rq stop`** — SIGTERM (then SIGKILL after ~2 s) the
+  registered pid, removes the registration. Also stops a GUI-started
+  engine.
+- **`s2udio rq open`** — `xdg-open`s the registered web URL.
+- The Settings panel's web-UI rows consult the same registration
+  (reuse, liveness) and register engines they start, so the GUI and the
+  CLI never run two standalone engines.
+- Engine config for CLI starts: the `torrent` section of config.ron +
+  the state.ron socks override (same rule as app startup).
+
 ## 10. Configuration (`config.ron`, new `torrent` section)
 
 ```ron
@@ -467,12 +548,16 @@ torrent: (
   cache_dir: "~/.cache/s2udio/torrents",
   auto_pick_file: true,
   keep_after_play: false,
+  socks_proxy: None,   // socks5://[user:pass@]host:port — VPN route
 )
 ```
 
 Env override: `S2UDIO_RQBIT_BIN` (mirrors `S2UDIO_YTDLP_BIN`; unit tests
 use a fake script). `enabled: false` → torrent items classified but the
 popup section hidden / action shows "torrent streaming disabled".
+`socks_proxy: Some("socks5://…")` adds `--socks-url` +
+`--disable-tcp-listen` to every engine spawn; the Settings panel can set
+it too (persisted to `state.ron`, overrides the config on startup).
 
 ## 11. Edge cases & failure modes
 

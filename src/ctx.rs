@@ -253,6 +253,20 @@ pub struct Ctx {
     /// second and moves the completed file to `s2udio-downloads`.
     #[debug(skip)]
     pub(crate) torrent_download: RefCell<Option<crate::core::torrent::TorrentDownload>>,
+    /// The standalone rqbit engine behind Settings -> torrent -> web ui
+    /// (None until first opened): spawned on demand and kept alive (its
+    /// `Drop` kills the child) until the user stops it or the app exits —
+    /// independent of the per-play `torrent_engine` (UI-thread only, so a
+    /// plain value suffices), so the web UI survives a playback session
+    /// (VPN setup / verification use case).
+    #[debug(skip)]
+    pub(crate) torrent_webui_engine: RefCell<Option<crate::core::torrent::TorrentEngine>>,
+    /// The value typed into the Settings torrent socks-proxy input modal,
+    /// drained by the settings panel's render (mpv custom-language
+    /// pattern): the modal's `on_confirm` writes here because it only
+    /// receives `&Ctx`.
+    #[debug(skip)]
+    pub(crate) torrent_socks_proxy_input: RefCell<Option<String>>,
     /// Scanned torrents (round 17): item source key -> the scan outcome
     /// (the running engine + torrent id + file list, or the failure the
     /// popup shows as a dim notice). The paste popup's `[Torrent]` section
@@ -381,6 +395,8 @@ impl Ctx {
             seekbar: RefCell::new(crate::ui::seekbar::SeekbarState::default()),
             torrent_engine: RefCell::new(None),
             torrent_download: RefCell::new(None),
+            torrent_webui_engine: RefCell::new(None),
+            torrent_socks_proxy_input: RefCell::new(None),
             torrent_scans: RefCell::new(HashMap::new()),
             torrent_scans_pending: RefCell::new(HashSet::new()),
             torrent_scan_cancels: RefCell::new(HashMap::new()),

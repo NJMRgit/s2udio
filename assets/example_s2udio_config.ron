@@ -41,5 +41,8 @@
     //     cache_dir: "~/.cache/rmpc/torrents",
     //     auto_pick_file: true,
     //     keep_after_play: false,
+    //     // Route all rqbit traffic through a VPN's SOCKS5 proxy (set it
+    //     // from Settings -> torrent too; "" = direct connections):
+    //     socks_proxy: "socks5://127.0.0.1:1080",
     // ),
 )

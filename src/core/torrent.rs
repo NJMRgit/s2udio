@@ -65,6 +65,12 @@ pub struct TorrentEngine {
     user_pass: String,
     /// The configured cache/download folder (kept so the caller can clean it).
     pub cache_dir: PathBuf,
+    /// Loopback auth-injecting proxy for the web UI (`web_url()` points
+    /// at it; the engine port itself stays auth-protected — browsers do
+    /// not replay URL-userinfo credentials on SPA `fetch()` calls, see
+    /// `torrent_proxy`). None only when the proxy bind failed (the
+    /// userinfo URL is the fallback).
+    webui_proxy: Option<crate::core::torrent_proxy::WebUiProxy>,
 }
 
 impl Drop for TorrentEngine {
@@ -166,8 +172,18 @@ pub fn start_engine(config: &Torrent) -> Result<TorrentEngine, String> {
         .arg(format!("127.0.0.1:{port}"))
         .arg("--listen-port")
         .arg(listen_port.to_string())
-        .arg("--disable-dht-persistence")
-        .arg("server")
+        .arg("--disable-dht-persistence");
+    // SOCKS5 proxy (the VPN route, `torrent.socks_proxy` in config / the
+    // Settings panel): also a GLOBAL rqbit option (before the subcommand;
+    // `server start` rejects it after `start`). rqbit routes ALL outgoing
+    // connections through it (`--socks-url`); incoming connections are
+    // disabled too (`--disable-tcp-listen`) — the proxy only does
+    // outgoing, so listening on the real interface would leak the real IP
+    // (rqbit's own recommendation when proxying).
+    if let Some(proxy) = config.socks_proxy.as_deref().filter(|p| !p.trim().is_empty()) {
+        cmd.arg("--socks-url").arg(proxy).arg("--disable-tcp-listen");
+    }
+    cmd.arg("server")
         .arg("start")
         // `--disable-persistence` is a `server start` option (after the
         // subcommand), unlike the global flags above — see the
@@ -189,9 +205,28 @@ pub fn start_engine(config: &Torrent) -> Result<TorrentEngine, String> {
         .map_err(|err| format!("Failed to launch rqbit ({bin}): {err}"))?;
     let base_url = format!("http://127.0.0.1:{port}");
 
-    let mut engine = TorrentEngine { child, base_url, auth_header, user_pass, cache_dir };
+    let mut engine = TorrentEngine {
+        child,
+        base_url,
+        auth_header: auth_header.clone(),
+        user_pass,
+        cache_dir,
+        webui_proxy: None,
+    };
     match wait_until_ready(&engine) {
-        Ok(()) => Ok(engine),
+        Ok(()) => {
+            // The web UI is an SPA whose fetch() calls cannot carry the
+            // auth token (URL userinfo is not replayed by browsers) —
+            // expose it through an auth-injecting loopback proxy instead.
+            // Non-fatal: without it `web_url()` falls back to the
+            // userinfo URL (torrent streaming is unaffected either way).
+            engine.webui_proxy =
+                crate::core::torrent_proxy::WebUiProxy::spawn(port, auth_header.clone()).ok();
+            if engine.webui_proxy.is_none() {
+                log::warn!("Failed to spawn the rqbit web-UI auth proxy");
+            }
+            Ok(engine)
+        }
         Err(err) => {
             let _ = engine.kill();
             Err(format!("rqbit did not become ready: {err}"))
@@ -217,6 +252,29 @@ impl TorrentEngine {
             self.user_pass,
             self.base_url.trim_start_matches("http://")
         )
+    }
+
+    /// The rqbit web UI URL (`/web/`). Normally the auth-injecting
+    /// proxy URL (`http://127.0.0.1:<proxy port>/web/`, no credentials —
+    /// the SPA's fetch() calls work through it); falls back to the raw
+    /// userinfo URL (`http://user:pass@…/web/`) when the proxy could not
+    /// be spawned. Opens in a browser for torrent management /
+    /// VPN-route verification.
+    pub fn web_url(&self) -> String {
+        match &self.webui_proxy {
+            Some(proxy) => format!("http://127.0.0.1:{}/web/", proxy.port()),
+            None => format!(
+                "http://{}@{}/web/",
+                self.user_pass,
+                self.base_url.trim_start_matches("http://")
+            ),
+        }
+    }
+
+    /// The engine child's pid (used by the CLI `s2udio rq` registration
+    /// file so a separate process can stop the engine).
+    pub fn pid(&self) -> u32 {
+        self.child.id()
     }
 
     /// Kill the engine child (idempotent). The engine also dies when the
@@ -949,7 +1007,10 @@ mod tests {
 
     use std::net::TcpListener;
 
-    use super::{Torrent, TorrentSource, add_torrent, start_engine, torrent_details, torrent_stats};
+    use super::{
+        Torrent, TorrentEngine, TorrentSource, add_torrent, start_engine, torrent_details,
+        torrent_stats,
+    };
 
     /// The tests mutate `S2UDIO_RQBIT_BIN` and spawn fake servers; serialize
     /// them so a parallel run can't cross wires.
@@ -1061,6 +1122,7 @@ PY
             cache_dir: std::env::temp_dir().join(format!("rqbit-cache-{}", std::process::id())),
             auto_pick_file: true,
             keep_after_play: false,
+            socks_proxy: None,
         }
     }
 
@@ -1111,6 +1173,120 @@ PY
             spawn_line.contains("--listen-port"),
             "engine must have its own peer listen port: {spawn_line}"
         );
+        engine.kill().expect("kill must succeed");
+    }
+
+    #[test]
+    fn socks_proxy_is_passed_to_the_engine_spawn() {
+        let _guard = RQBIT_ENV_LOCK.lock().unwrap();
+        let (bin, log) = fake_engine_bin("socks");
+        unsafe {
+            std::env::set_var("S2UDIO_RQBIT_BIN", &bin);
+        }
+        let mut config = test_config(31330);
+        config.socks_proxy = Some("socks5://127.0.0.1:1080".to_owned());
+        let mut engine = start_engine(&config).expect("engine must start");
+        unsafe {
+            std::env::remove_var("S2UDIO_RQBIT_BIN");
+        }
+        let spawn = std::fs::read_to_string(&log).expect("spawn log");
+        let spawn_line = spawn.lines().find(|l| l.starts_with("SPAWN ")).expect("spawn recorded");
+        assert!(
+            spawn_line.contains("--socks-url") && spawn_line.contains("socks5://127.0.0.1:1080"),
+            "engine must route through the configured proxy: {spawn_line}"
+        );
+        assert!(
+            spawn_line.contains("--disable-tcp-listen"),
+            "a proxied engine must not listen for incoming connections: {spawn_line}"
+        );
+        // The web UI URL points at the auth-injecting loopback proxy (no
+        // credentials in the URL — browsers do not replay userinfo auth
+        // on the SPA's fetch() calls).
+        let web_url = engine.web_url();
+        assert!(web_url.starts_with("http://127.0.0.1:"), "{web_url}");
+        assert!(web_url.ends_with("/web/"), "{web_url}");
+        assert!(!web_url.contains('@'), "no credentials in the web UI URL: {web_url}");
+        engine.kill().expect("kill must succeed");
+    }
+
+    #[test]
+    fn web_ui_proxy_injects_auth_and_reaches_the_engine() {
+        let _guard = RQBIT_ENV_LOCK.lock().unwrap();
+        let (bin, log) = fake_engine_bin("webui-proxy");
+        unsafe {
+            std::env::set_var("S2UDIO_RQBIT_BIN", &bin);
+        }
+        let config = test_config(31430);
+        let mut engine = start_engine(&config).expect("engine must start");
+        unsafe {
+            std::env::remove_var("S2UDIO_RQBIT_BIN");
+        }
+        // The engine's own port stays auth-protected: no credentials ->
+        // 401 from the REAL server (the fake always 200s, so this
+        // assertion is about the URL shape only here; the proxy test
+        // below proves header injection against the fake's request log).
+        let url = engine.web_url();
+        // The proxy serves the API at the ROOT (the SPA strips `/web/`
+        // from its base URL): request /stats and /web/ WITHOUT
+        // credentials — the proxy injects the Authorization header, so
+        // both must answer.
+        let proxy_port = url
+            .trim_start_matches("http://127.0.0.1:")
+            .trim_end_matches("/web/");
+        let proxy_port: u16 = proxy_port.parse().expect("proxy port in web_url");
+        for path in ["/stats", "/web/"] {
+            let response = ureq::get(&format!("http://127.0.0.1:{proxy_port}{path}"))
+                .call()
+                .map_err(|err| format!("GET through proxy: {err}"))
+                .expect("proxy must forward");
+            assert_eq!(response.status(), 200, "proxy path {path}");
+        }
+        // The engine saw the injected Authorization header on every
+        // request. The fake records `METHOD path <Authorization>` (no
+        // header name) — a missing header would log an empty tail. The
+        // readiness poll's own GET /stats is authed by the engine client
+        // too, so the assertion is: every request line carries ` Basic `
+        // (the proxied /web/ + /stats ones prove injection, since the
+        // proxy client sends no credentials).
+        let reqs = std::fs::read_to_string(&log).expect("request log");
+        let requests: Vec<&str> = reqs.lines().filter(|l| !l.starts_with("SPAWN ")).collect();
+        assert!(
+            requests.len() >= 3 && requests.iter().all(|l| l.contains(" Basic ")),
+            "every engine request must carry auth: {reqs}"
+        );
+        assert!(
+            requests.iter().any(|l| l.starts_with("GET /web/ Basic")),
+            "the proxied web UI request must be authed: {reqs}"
+        );
+        engine.kill().expect("kill must succeed");
+    }
+
+    #[test]
+    fn web_ui_proxy_serves_the_real_rqbit_web_ui_without_credentials() {
+        // End-to-end against the REAL rqbit (skipped when not on PATH):
+        // the browser-visible URL has no credentials, yet /web/ and the
+        // API answer — exactly what the SPA needs (verified live in
+        // Chromium 2026-08-15).
+        let _guard = RQBIT_ENV_LOCK.lock().unwrap();
+        if which::which("rqbit").is_err() {
+            eprintln!("rqbit not on PATH — skipping real-engine web UI test");
+            return;
+        }
+        let config = test_config(31440);
+        let mut engine = start_engine(&config).expect("engine must start");
+        let url = engine.web_url();
+        assert!(!url.contains('@'), "clean browser URL expected: {url}");
+        let page = ureq::get(&url).call().expect("web UI page through proxy");
+        assert_eq!(page.status(), 200);
+        let proxy_port: u16 = url
+            .trim_start_matches("http://127.0.0.1:")
+            .trim_end_matches("/web/")
+            .parse()
+            .expect("proxy port in web_url");
+        let stats = ureq::get(&format!("http://127.0.0.1:{proxy_port}/stats"))
+            .call()
+            .expect("stats through proxy");
+        assert_eq!(stats.status(), 200);
         engine.kill().expect("kill must succeed");
     }
 

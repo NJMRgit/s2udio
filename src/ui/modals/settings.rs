@@ -237,6 +237,7 @@ enum Section {
     Mpv,
     Mpd,
     Jellyfin,
+    Torrent,
 }
 
 /// Which settings pane owns keyboard navigation. Mirrors the tab-pane
@@ -249,8 +250,15 @@ enum SettingsFocus {
 }
 
 impl Section {
-    fn all() -> [Section; 5] {
-        [Section::General, Section::Keybinds, Section::Mpv, Section::Mpd, Section::Jellyfin]
+    fn all() -> [Section; 6] {
+        [
+            Section::General,
+            Section::Keybinds,
+            Section::Mpv,
+            Section::Mpd,
+            Section::Jellyfin,
+            Section::Torrent,
+        ]
     }
 
     fn name(self) -> &'static str {
@@ -260,6 +268,7 @@ impl Section {
             Section::Mpv => "mpv",
             Section::Mpd => "mpd",
             Section::Jellyfin => "jellyfin",
+            Section::Torrent => "torrent",
         }
     }
 
@@ -333,6 +342,19 @@ enum JellyfinRow {
     Username,
     Password,
     SignIn,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TorrentRow {
+    Header,
+    /// Launch the rqbit web UI in the browser (starts the standalone
+    /// engine first when none is running).
+    WebUi,
+    /// Stop the standalone web-UI engine (next "web ui" start spawns a
+    /// fresh one — needed to pick up a changed SOCKS proxy).
+    StopEngine,
+    /// SOCKS5 proxy URL for all rqbit traffic (the VPN route); "" = none.
+    SocksProxy,
 }
 
 /// A staged appearance change: not applied until the panel is closed with
@@ -441,6 +463,9 @@ pub(crate) struct StagedSettings {
     /// Jellyfin credentials from a successful sign-in; persisted to the
     /// jellyfin.ron sidecar on Save.
     pub jellyfin: Option<crate::config::jellyfin::JellyfinCredentialsFile>,
+    /// rqbit SOCKS5 proxy URL staged in the settings panel; applied to the
+    /// engine config + persisted to state.ron on Save ("" = no proxy).
+    pub torrent_socks_proxy: String,
 }
 
 /// Which theme color an appearance row edits.
@@ -642,6 +667,7 @@ enum ContentRow {
     Mpd(MpdRow),
     Mpv(MpvRow),
     Jellyfin(JellyfinRow),
+    Torrent(TorrentRow),
 }
 
 impl ContentRow {
@@ -660,6 +686,7 @@ impl ContentRow {
                 )
                 | ContentRow::Mpv(MpvRow::Header)
                 | ContentRow::Jellyfin(JellyfinRow::Header)
+                | ContentRow::Torrent(TorrentRow::Header)
         )
     }
 }
@@ -770,6 +797,11 @@ pub struct SettingsModal {
     /// The Jellyfin text row currently being typed into (inline edit, like
     /// the appearance colors).
     editing_jellyfin_row: Option<JellyfinRow>,
+    /// The rqbit SOCKS5 proxy when the panel opened (staging baseline).
+    torrent_socks_proxy_initial: String,
+    /// Staged rqbit SOCKS5 proxy ("" = no proxy; applied to the engine
+    /// config + persisted to state.ron on Save).
+    torrent_socks_proxy_pending: String,
     /// UI show/hide toggles when the panel opened (staging baseline).
     ui_initial: UiSettings,
     /// Staged UI show/hide toggles (the live config is untouched until Save).
@@ -862,6 +894,8 @@ impl SettingsModal {
             _ => crate::config::mpv::os_language_code().unwrap_or_else(|| "en".to_owned()),
         };
         let cava_initial = StagedCava::from_config(&ctx.config);
+        let torrent_socks_proxy =
+            ctx.config.torrent.socks_proxy.clone().unwrap_or_default();
         let mut modal = Self {
             id: id::new(),
             section: Section::General,
@@ -876,6 +910,8 @@ impl SettingsModal {
             jellyfin_password: String::new(),
             jellyfin_credentials: None,
             editing_jellyfin_row: None,
+            torrent_socks_proxy_initial: torrent_socks_proxy.clone(),
+            torrent_socks_proxy_pending: torrent_socks_proxy,
             adjusting: None,
             adjust_snapshot: None,
             ui_initial,
@@ -999,6 +1035,12 @@ impl SettingsModal {
                 ContentRow::Jellyfin(JellyfinRow::Username),
                 ContentRow::Jellyfin(JellyfinRow::Password),
                 ContentRow::Jellyfin(JellyfinRow::SignIn),
+            ],
+            Section::Torrent => vec![
+                ContentRow::Torrent(TorrentRow::Header),
+                ContentRow::Torrent(TorrentRow::WebUi),
+                ContentRow::Torrent(TorrentRow::StopEngine),
+                ContentRow::Torrent(TorrentRow::SocksProxy),
             ],
         }
     }
@@ -1200,6 +1242,7 @@ impl SettingsModal {
             },
             ContentRow::Appearance(_) => Ok(()),
             ContentRow::Jellyfin(_) => Ok(()),
+            ContentRow::Torrent(_) => Ok(()),
             ContentRow::Mpd(m) => match m {
                 MpdRow::Crossfade => {
                     let v = (ctx.status.xfade.unwrap_or(0) as i64 + delta).clamp(0, 60) as u32;
@@ -1582,6 +1625,85 @@ impl SettingsModal {
                 }
                 JellyfinRow::Header => Ok(()),
             },
+            ContentRow::Torrent(m) => match m {
+                TorrentRow::WebUi => {
+                    // Start the standalone engine when none is running (a
+                    // dead child counts as not running). Blocking spawn is
+                    // fine: the panel is modal (Jellyfin sign-in blocks
+                    // too) and readiness waits ≤ 5 s.
+                    let needs_start = match ctx.torrent_webui_engine.borrow_mut().as_mut() {
+                        Some(engine) => !engine.is_running(),
+                        None => true,
+                    };
+                    if needs_start {
+                        // Reuse an engine registered by `s2udio rq start`
+                        // (or a previous session) instead of spawning a
+                        // second one — the CLI and the GUI share one
+                        // engine via the registration file.
+                        if let Some(reg) = crate::core::rqctl::registered_running() {
+                            Self::open_url(&reg.web_url);
+                            status_info!("rqbit web UI opened at {}", reg.web_url);
+                            ctx.render()?;
+                            return Ok(());
+                        }
+                        let config = ctx.config.torrent.clone();
+                        match crate::core::torrent::start_engine(&config) {
+                            Ok(engine) => {
+                                if let Err(err) = crate::core::rqctl::register(&engine) {
+                                    log::warn!(error:? = err; "Failed to register the rqbit engine");
+                                }
+                                *ctx.torrent_webui_engine.borrow_mut() = Some(engine);
+                            }
+                            Err(err) => {
+                                status_error!("rqbit web UI failed to start: {err}");
+                                ctx.render()?;
+                                return Ok(());
+                            }
+                        }
+                    }
+                    let url = ctx
+                        .torrent_webui_engine
+                        .borrow()
+                        .as_ref()
+                        .expect("engine started just above")
+                        .web_url();
+                    Self::open_url(&url);
+                    status_info!("rqbit web UI opened at {url}");
+                    ctx.render()?;
+                    Ok(())
+                }
+                TorrentRow::StopEngine => {
+                    // Stop the GUI's in-memory engine AND any engine the
+                    // `s2udio rq` CLI registered (shared registration).
+                    let stopped = ctx.torrent_webui_engine.borrow_mut().take().is_some();
+                    let stopped_registered =
+                        crate::core::rqctl::stop_registered().unwrap_or(false);
+                    if stopped || stopped_registered {
+                        status_info!("rqbit engine stopped");
+                    } else {
+                        status_info!("No rqbit engine is running");
+                    }
+                    ctx.render()?;
+                    Ok(())
+                }
+                TorrentRow::SocksProxy => {
+                    let current = self.torrent_socks_proxy_pending.clone();
+                    modal!(
+                        ctx,
+                        InputModal::new(ctx)
+                            .title("rqbit SOCKS5 proxy (VPN route)")
+                            .input_label("socks5://[user:pass@]host:port")
+                            .initial_value(current)
+                            .on_confirm(|ctx, value| {
+                                *ctx.torrent_socks_proxy_input.borrow_mut() =
+                                    Some(value.to_string());
+                                Ok(())
+                            })
+                    );
+                    Ok(())
+                }
+                TorrentRow::Header => Ok(()),
+            },
             ContentRow::Mpd(m) => match m {
                 MpdRow::LibraryPath => {
                     let current = self.library_path.clone();
@@ -1734,6 +1856,7 @@ impl SettingsModal {
                 .any(|c| !matches!(c, StagedColor::Unchanged))
             || !self.pending_remaps.is_empty()
             || self.jellyfin_credentials.is_some()
+            || self.torrent_socks_proxy_pending != self.torrent_socks_proxy_initial
     }
 
     /// The staged changes, handed to the UI to apply on Save.
@@ -1748,6 +1871,7 @@ impl SettingsModal {
             mpv_subtitles: self.mpv_subtitles_pending.clone(),
             mpv_svp: self.mpv_svp_pending,
             jellyfin: self.jellyfin_credentials.clone(),
+            torrent_socks_proxy: self.torrent_socks_proxy_pending.clone(),
         }
     }
 
@@ -2087,6 +2211,82 @@ impl SettingsModal {
                 // Section headers are rendered by `render_row` directly.
                 _ => (Vec::new(), Vec::new(), Vec::new(), None),
             },
+            ContentRow::Torrent(m) => match m {
+                TorrentRow::WebUi => {
+                    let running = self.torrent_webui_running(ctx);
+                    let desc = if running {
+                        "engine running — open the browser"
+                    } else {
+                        "start the engine + open the browser"
+                    };
+                    let button = if running { "[open]" } else { "[start]" };
+                    let d = desc.chars().count();
+                    (
+                        vec![Span::styled(" web ui", style)],
+                        vec![
+                            Span::styled(desc, dim),
+                            Span::raw("  "),
+                            Span::styled(button, style.bold()),
+                        ],
+                        vec![DeferredButton {
+                            offset: d + 2,
+                            label: button,
+                            click: Click::Activate,
+                        }],
+                        Some(Click::Activate),
+                    )
+                }
+                TorrentRow::StopEngine => {
+                    let running = self.torrent_webui_running(ctx);
+                    let desc = if running {
+                        "kill the standalone engine"
+                    } else {
+                        "no engine running"
+                    };
+                    let d = desc.chars().count();
+                    (
+                        vec![Span::styled(" stop engine", style)],
+                        vec![
+                            Span::styled(desc, dim),
+                            Span::raw("  "),
+                            Span::styled("[stop]", style.bold()),
+                        ],
+                        vec![DeferredButton {
+                            offset: d + 2,
+                            label: "[stop]",
+                            click: Click::Activate,
+                        }],
+                        Some(Click::Activate),
+                    )
+                }
+                TorrentRow::SocksProxy => {
+                    let value = self.torrent_socks_proxy_pending.clone();
+                    let display = if value.is_empty() {
+                        "(not set)".to_string()
+                    } else {
+                        value
+                    };
+                    let max_value = avail.saturating_sub(1 + "socks proxy".len() + 2 + "[edit]".len() + 2);
+                    let display = truncate_col(&display, max_value);
+                    let d = display.chars().count();
+                    (
+                        vec![Span::styled(" socks proxy", style)],
+                        vec![
+                            Span::styled(display, style.bold()),
+                            Span::raw("  "),
+                            Span::styled("[edit]", style.bold()),
+                        ],
+                        vec![DeferredButton {
+                            offset: d + 2,
+                            label: "[edit]",
+                            click: Click::Edit,
+                        }],
+                        Some(Click::Edit),
+                    )
+                }
+                // Section headers are rendered by `render_row` directly.
+                _ => (Vec::new(), Vec::new(), Vec::new(), None),
+            },
             _ => (Vec::new(), Vec::new(), Vec::new(), None),
         }
     }
@@ -2197,6 +2397,7 @@ impl SettingsModal {
             ContentRow::Mpd(MpdRow::PlaybackHeader) => "transport modes".into(),
             ContentRow::Mpd(MpdRow::DevicesHeader) => "outputs & sessions".into(),
             ContentRow::Jellyfin(JellyfinRow::Header) => "Jellyfin server".into(),
+            ContentRow::Torrent(TorrentRow::Header) => "rqbit torrent engine".into(),
             _ => String::new(),
         }
     }
@@ -2264,7 +2465,8 @@ impl SettingsModal {
             | ContentRow::Mpd(
                 MpdRow::LibraryHeader | MpdRow::PlaybackHeader | MpdRow::DevicesHeader
             )
-            | ContentRow::Jellyfin(JellyfinRow::Header) => {
+            | ContentRow::Jellyfin(JellyfinRow::Header)
+            | ContentRow::Torrent(TorrentRow::Header) => {
                 let title = match row {
                     ContentRow::General(GeneralRow::FeaturesHeader) => "[ features ]",
                     ContentRow::General(GeneralRow::CavaHeader) => "[ cava ]",
@@ -2274,6 +2476,7 @@ impl SettingsModal {
                     ContentRow::Mpd(MpdRow::PlaybackHeader) => "[ playback ]",
                     ContentRow::Mpd(MpdRow::DevicesHeader) => "[ devices ]",
                     ContentRow::Jellyfin(JellyfinRow::Header) => "[ server ]",
+                    ContentRow::Torrent(TorrentRow::Header) => "[ rqbit ]",
                     _ => unreachable!(),
                 };
                 let hint = self.section_hint(row);
@@ -2331,7 +2534,8 @@ impl SettingsModal {
             ContentRow::General(_)
             | ContentRow::Mpd(_)
             | ContentRow::Mpv(_)
-            | ContentRow::Jellyfin(_) => {
+            | ContentRow::Jellyfin(_)
+            | ContentRow::Torrent(_) => {
                 let (label, control, buttons, row_action) =
                     self.row_main(row, ctx, style, dim, width as usize);
                 if let Some(click) = row_action {
@@ -2377,6 +2581,36 @@ impl SettingsModal {
         }
     }
 
+    /// Whether the standalone web-UI engine is running: the GUI's
+    /// in-memory engine OR an engine the `s2udio rq` CLI registered (the
+    /// two share one registration file).
+    fn torrent_webui_running(&self, ctx: &Ctx) -> bool {
+        ctx.torrent_webui_engine
+            .borrow_mut()
+            .as_mut()
+            .map(|e| e.is_running())
+            .unwrap_or(false)
+            || crate::core::rqctl::registered_running().is_some()
+    }
+
+    /// Open `url` in the system browser (`xdg-open`); on failure the URL
+    /// stays in the status bar so the user can paste it manually.
+    fn open_url(url: &str) {
+        use std::process::Stdio;
+        match Command::new("xdg-open")
+            .arg(url)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            Ok(_) => {}
+            Err(err) => {
+                status_warn!("Could not open a browser (xdg-open): {err}");
+            }
+        }
+    }
+
     /// Whether the row registers a row-wide click (only those lighten on
     /// hover).
     fn is_clickable_row(row: &ContentRow) -> bool {
@@ -2388,6 +2622,7 @@ impl SettingsModal {
                 | ContentRow::Mpd(_)
                 | ContentRow::Mpv(_)
                 | ContentRow::Jellyfin(_)
+                | ContentRow::Torrent(_)
         )
     }
 }
@@ -2482,6 +2717,11 @@ impl Modal for SettingsModal {
         if let Some(lang) = ctx.mpv_custom_audio_lang.borrow_mut().take() {
             self.mpv_audio_pending = crate::config::mpv::MpvAudioLang::Custom { lang: lang.clone() };
             self.mpv_custom_lang = lang;
+        }
+        // Value typed into the torrent socks-proxy input modal (written to
+        // ctx by its on_confirm; drained here like the mpv languages).
+        if let Some(proxy) = ctx.torrent_socks_proxy_input.borrow_mut().take() {
+            self.torrent_socks_proxy_pending = proxy;
         }
         // Refresh the rows (device rows appear with PipeWire) and re-read the
         // persisted library path (edited through an input modal).
@@ -3472,6 +3712,24 @@ Source #165
             .unwrap();
         assert_eq!(modal.section, Section::Mpd);
         assert!(modal.rows.iter().any(|r| matches!(r, ContentRow::Mpd(MpdRow::Outputs))));
+        // Click "torrent" (the last sidebar item): the rqbit web-UI /
+        // SOCKS-proxy rows must populate and render.
+        let area = *modal.sidebar_areas.last().expect("torrent section is listed");
+        modal
+            .handle_mouse_event(
+                MouseEvent { x: area.x + 2, y: area.y, kind: MouseEventKind::LeftClick, modifiers: crossterm::event::KeyModifiers::NONE },
+                &mut ctx,
+            )
+            .unwrap();
+        assert_eq!(modal.section, Section::Torrent);
+        assert!(modal.rows.iter().any(|r| matches!(r, ContentRow::Torrent(TorrentRow::WebUi))));
+        assert!(modal.rows.iter().any(|r| matches!(r, ContentRow::Torrent(TorrentRow::SocksProxy))));
+        // The torrent section renders (header + rows) without panicking.
+        terminal
+            .draw(|frame| modal.render(frame, &mut ctx).unwrap())
+            .unwrap();
+        // With no proxy configured the row starts on "(not set)".
+        assert_eq!(modal.torrent_socks_proxy_pending, "");
         let _ = app_rx;
     }
 }

@@ -112,6 +112,8 @@ pub fn ctx(
         seekbar: std::cell::RefCell::new(crate::ui::seekbar::SeekbarState::default()),
         torrent_engine: std::cell::RefCell::new(None),
         torrent_download: std::cell::RefCell::new(None),
+        torrent_webui_engine: std::cell::RefCell::new(None),
+        torrent_socks_proxy_input: std::cell::RefCell::new(None),
         torrent_scans: std::cell::RefCell::new(std::collections::HashMap::new()),
         torrent_scans_pending: std::cell::RefCell::new(std::collections::HashSet::new()),
         torrent_scan_cancels: std::cell::RefCell::new(std::collections::HashMap::new()),

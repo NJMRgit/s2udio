@@ -339,6 +339,28 @@ pub enum Command {
         channel: String,
         content: String,
     },
+    /// Control the standalone rqbit engine (start / stop / open the web
+    /// UI). Shares the engine with Settings -> torrent.
+    Rq {
+        #[command(subcommand)]
+        cmd: RqCmd,
+    },
+}
+
+#[derive(Subcommand, Clone, Debug, PartialEq)]
+#[clap(rename_all = "lower")]
+pub enum RqCmd {
+    /// Start the standalone rqbit engine (idempotent: reuses a running
+    /// engine) and print the web UI URL.
+    Start,
+    /// Stop the standalone rqbit engine.
+    Stop,
+    /// Open the rqbit web UI in the browser (engine must be running).
+    Open,
+    /// Hidden daemon entry point for `rq start`: owns the engine + the
+    /// auth proxy and stays alive until stopped (never typed by users).
+    #[clap(hide = true)]
+    Serve,
 }
 
 #[derive(Subcommand, Clone, Debug, PartialEq, strum::EnumDiscriminants, strum::Display)]
@@ -583,6 +605,22 @@ impl Args {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rq_subcommand_parses() {
+        for (line, want) in [
+            ("rq start", RqCmd::Start),
+            ("rq stop", RqCmd::Stop),
+            ("rq open", RqCmd::Open),
+        ] {
+            let args = Args::parse_from(["s2udio", "rq", line.split_whitespace().nth(1).unwrap()]);
+            match args.command {
+                Some(Command::Rq { cmd }) => assert_eq!(cmd, want, "{line}"),
+                other => panic!("expected Command::Rq for {line}, got {other:?}"),
+            }
+        }
+        assert!(Args::try_parse_from(["s2udio", "rq", "bogus"]).is_err());
+    }
 
     #[test]
     fn lyrics_source_cli_flag_parses() {

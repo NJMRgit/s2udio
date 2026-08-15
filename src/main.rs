@@ -290,6 +290,9 @@ fn main() -> Result<()> {
                 option_env!("VERGEN_GIT_DESCRIBE").map(|g| format!(" git {g}")).unwrap_or_default()
             );
         }
+        Some(Command::Rq { cmd }) => {
+            crate::core::rqctl::run(cmd).map_err(anyhow::Error::msg)?;
+        }
         Some(Command::Remote { command, pid }) => {
             let pid = pid.or_else(|| {
                 std::env::var("PID")
@@ -394,6 +397,12 @@ fn main() -> Result<()> {
             }
             if let Some(svp) = state.mpv_svp {
                 config.mpv.svp = svp;
+            }
+            // Restore the rqbit SOCKS5 proxy (Settings -> torrent): the
+            // panel's value overrides the config default when present.
+            if let Some(proxy) = state.torrent_socks_proxy.clone() {
+                config.torrent.socks_proxy =
+                    if proxy.trim().is_empty() { None } else { Some(proxy) };
             }
             // The settings panel's UI toggles (incl. auto chapters) and
             // appearance colors: persisted to state.ron on Save, restored
