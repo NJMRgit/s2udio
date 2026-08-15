@@ -1,3 +1,47 @@
+# Notes for the container agent — round 39 IMPLEMENTED host-side (2026-08-14) — do not re-implement
+
+## ROUND 39 — per-WORD insert (i/a split the line at the selected word) + new add-line option (o/O)
+
+**User feedback (2026-08-14, direct to the host):** "inserting a lyric
+before or after inserts on the LINE before or after instead of the WORD
+before or after. add an option to add a new line and ensure the inserts
+are per word not line". Host implemented on `working` on top of round 38:
+**1442/1442**, warnings 3 baseline.
+
+- **`i` / `a` are now per-WORD**: `i` splits the current line BEFORE the
+  selected word — the selected word and everything after it move to a new
+  line that starts at the word's time (inserted at the line's position);
+  `a` splits AFTER the selected word — the following words move to a new
+  line starting at the next word's time. Moved words keep their exact
+  `<mm:ss.xx>` timings; both halves re-render with explicit markers on
+  save; the header + `# lrcgen-gap-align:v1` stamp are preserved. The new
+  line is re-selected. Edge cases fall back to the add-line modal
+  (first word + `i`, last word + `a`, lines without words).
+- **New option to add a whole new line**: `o` = add a new line after the
+  current one, `O` = before — the OLD insert behavior (midpoint
+  timestamp + text modal), moved off `i`/`a`. New actions
+  `LyricsAddLineAfter`/`LyricsAddLineBefore` (defaults + example_config.ron
+  + the live config.ron, host-side).
+- Implementation: `LrcEditSession::split_line_at_word` (src/shared/lrc/
+  edit.rs) — words split in the model, both halves dirty; `render_pending`
+  buffers inserted (no-raw-span) lines and emits them AFTER the preceding
+  raw gap so a line split before the FIRST lyric lands after the header
+  (never in front of it). `LyricsPane::split_at_selected_word`
+  (save-first, fresh session, save, re-index, re-select).
+- Legend updated: `i / a split at word`, `o / O add line` (cava pane).
+- New tests: 4 split unit tests (before/after/edges/pending-remap), 3
+  pane tests (i-split, a-split, first-word fallback), o/O modal test,
+  o/O default-binding test. Live-validated in tmux on a real
+  whisper-generated .lrc: i on "dream" → own line `[00:13.00]dream` with
+  the earlier words intact; a on "I" → rest moves to
+  `[00:02.63]still … me`; i on a line's first word → "New lyric before"
+  modal; o/O modals open; legend shows the new keys; test .lrc is a
+  scratch copy (nothing in the real library touched).
+- Host: binary `e549baff` installed (~/.local/bin/s2udio); the running
+  instance needs a restart. Nothing for you to implement — pull `working`
+  when ready.
+
+---
 # Notes for the container agent — round 38 IMPLEMENTED (isodev, 2026-08-14) — do not re-implement
 
 ## ROUND 38 — lyrics source priority option + Esc-in-edit-mode regression fix

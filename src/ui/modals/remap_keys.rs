@@ -159,8 +159,10 @@ pub(crate) fn remap_description(action: &Actions) -> String {
             CommonAction::LyricsSave => "Save lyrics edit",
             CommonAction::LyricsDeleteLine => "Delete lyric line",
             CommonAction::LyricsEditLine => "Edit lyric line text",
-            CommonAction::LyricsInsertBefore => "Insert lyric line before",
-            CommonAction::LyricsInsertAfter => "Insert lyric line after",
+            CommonAction::LyricsInsertBefore => "Split lyric line before word",
+            CommonAction::LyricsInsertAfter => "Split lyric line after word",
+            CommonAction::LyricsAddLineBefore => "Add lyric line before",
+            CommonAction::LyricsAddLineAfter => "Add lyric line after",
             CommonAction::LyricsLineTime => "Set lyric line time",
             CommonAction::LyricsSaveAndExit => "Save lyrics and exit",
         }
