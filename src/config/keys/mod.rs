@@ -98,6 +98,31 @@ impl Default for KeyConfigFile {
             (s().page_up(),                       C::PageUp),
             (s().page_down(),                     C::PageDown),
             (s().delete(),                        C::Delete),
+            // Lyrics edit mode (round 34): `←`/`→` move across words,
+            // `+`/`-` nudge the selected word's time (10 ms), `<C-s>`
+            // saves without leaving edit mode. (`+` is Shift+= on the
+            // user's layout, reported as `<S-+>`.)
+            (s().left(),                          C::Left),
+            (s().right(),                         C::Right),
+            ("<S-+>".parse().unwrap(),            C::NudgeUp),
+            (s().char('-'),                       C::NudgeDown),
+            (s().char('s').ctrl(),                C::SaveLyrics),
+            // Lyrics edit mode (round 35/41): `d` deletes the selected
+            // WORD (the line is removed only when it ends up empty),
+            // `e` edits the line's text, `i`/`a` insert a new word into
+            // the current line (before/after the selected word),
+            // `o`/`O` add a whole new line after/before the current one,
+            // `t` sets the line's timestamp.
+            (s().char('d'),                       C::DeleteLyricsWord),
+            (s().char('e'),                       C::EditLyricsLine),
+            (s().char('i'),                       C::InsertLyricsLineBefore),
+            (s().char('a'),                       C::InsertLyricsLineAfter),
+            (s().char('o'),                       C::AddLyricsLineAfter),
+            (s().char('O'),                       C::AddLyricsLineBefore),
+            (s().char('t'),                       C::SetLyricsLineTime),
+            // Lyrics edit mode (round 37): `<C-c>` saves and exits (Esc
+            // discards, `<C-s>` saves in place).
+            (s().char('c').ctrl(),                C::SaveLyricsAndExit),
         ]);
 
         let queue = HashMap::from([
@@ -373,6 +398,21 @@ mod tests {
             default.navigation.get(&KeySequence::new().char('a').ctrl()),
             Some(&CommonActionFile::SelectAll),
             "Ctrl+A selects all items of the current list"
+        );
+    }
+
+    #[test]
+    fn default_navigation_bindings_include_o_O_for_adding_lyric_lines() {
+        let default = KeyConfigFile::default();
+        assert_eq!(
+            default.navigation.get(&KeySequence::new().char('o')),
+            Some(&CommonActionFile::AddLyricsLineAfter),
+            "o adds a whole new lyric line after the current one"
+        );
+        assert_eq!(
+            default.navigation.get(&KeySequence::new().char('O')),
+            Some(&CommonActionFile::AddLyricsLineBefore),
+            "O adds a whole new lyric line before the current one"
         );
     }
 

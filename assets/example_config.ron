@@ -11,6 +11,12 @@
     // .lrc files and is never written to.
     lyrics_dir: "~/.config/s2udio/lyrics",
     enable_lyrics_hot_reload: true,
+    // Round 38: lyrics source priority. local-first (default): colocated
+    // .lrc sidecar -> lyrics_dir mirror -> lyrics index, then the
+    // on_song_change network fetch as the last fallback. local-only:
+    // local files only — the fetch is never spawned (on_song_change is
+    // skipped; the manual "fetch lyrics" button still works).
+    lyrics_source: LocalFirst,
     on_song_change: ["rmpc-fetch-lyrics"],
     exec_on_song_change_at_start: true,
     cava: (
@@ -51,6 +57,7 @@
         cache_dir: "~/.cache/s2udio/torrents",
         auto_pick_file: true,
         keep_after_play: false,
+        socks_proxy: None,
     ),
     keybinds: (
         global: {
@@ -74,6 +81,26 @@
             "<S-Up>":     SelectUp,
             "<S-Down>":   SelectDown,
             "<C-a>":      SelectAll,
+            // Lyrics edit mode (round 34): ←/→ across words, +/− nudge
+            // the selected word's time (10 ms), <C-s> saves.
+            "<Left>":     Left,
+            "<Right>":    Right,
+            "<S-+>":      NudgeUp,
+            "-":          NudgeDown,
+            "<C-s>":      SaveLyrics,
+            // Lyrics edit mode (round 35/41): d delete the selected word
+            // (line removed only when empty), e edit text, i/a insert a
+            // new word into the line (before/after the selected word),
+            // o/O add a whole new line after/before, t set line
+            // timestamp.
+            "d":          DeleteLyricsWord,
+            "e":          EditLyricsLine,
+            "i":          InsertLyricsLineBefore,
+            "a":          InsertLyricsLineAfter,
+            "o":          AddLyricsLineAfter,
+            "O":          AddLyricsLineBefore,
+            "t":          SetLyricsLineTime,
+            "<C-c>":      SaveLyricsAndExit,
         },
 
         directories: {

@@ -41,6 +41,10 @@ pub struct AppStateFile {
     /// `AppearanceTarget::all()` order: a hex string, "" for transparent,
     /// absent = leave the theme's default.
     pub appearance: Option<Vec<Option<String>>>,
+    /// The rqbit SOCKS5 proxy URL (Settings -> torrent), e.g.
+    /// `socks5://127.0.0.1:1080`; "" = explicitly no proxy, absent = keep
+    /// the config default.
+    pub torrent_socks_proxy: Option<String>,
 }
 
 impl AppStateFile {

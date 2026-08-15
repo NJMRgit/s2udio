@@ -45,6 +45,13 @@ pub struct Torrent {
     /// Keep the engine + partial files after playback ends (`true`) or kill
     /// it immediately (`false` — default; minimizes P2P seeding).
     pub keep_after_play: bool,
+    /// SOCKS5 proxy URL (e.g. `socks5://127.0.0.1:1080`) for ALL outgoing
+    /// rqbit connections — the VPN route for torrent traffic. Passed to
+    /// rqbit as `--socks-url`; when set, incoming connections are disabled
+    /// too (rqbit's own recommendation when proxying: the proxy only
+    /// handles outgoing, so listening would leak the real IP). `None` =
+    /// direct connections.
+    pub socks_proxy: Option<String>,
 }
 
 impl Default for Torrent {
@@ -59,6 +66,7 @@ impl Default for Torrent {
             cache_dir: defaults::default_torrent_cache_dir(),
             auto_pick_file: true,
             keep_after_play: false,
+            socks_proxy: None,
         }
     }
 }
@@ -77,6 +85,7 @@ pub struct TorrentFile {
     pub cache_dir: Option<PathBuf>,
     pub auto_pick_file: Option<bool>,
     pub keep_after_play: Option<bool>,
+    pub socks_proxy: Option<String>,
 }
 
 impl From<TorrentFile> for Torrent {
@@ -100,6 +109,7 @@ impl From<TorrentFile> for Torrent {
                 .unwrap_or_else(|| tilde_expand_path(&defaults::default_torrent_cache_dir())),
             auto_pick_file: value.auto_pick_file.unwrap_or(true),
             keep_after_play: value.keep_after_play.unwrap_or(false),
+            socks_proxy: value.socks_proxy,
         }
     }
 }

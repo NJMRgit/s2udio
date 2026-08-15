@@ -58,6 +58,9 @@ pub struct CavaPane {
     /// briefly wipe it). Cleared by `maybe_start` (after the first frame)
     /// and by every real `run()`.
     pending_start: bool,
+    /// Lyrics edit mode is on: the visualizer is paused and the pane shows
+    /// the edit-controls legend instead of the bars (round 35).
+    legend_shown: bool,
 }
 
 #[derive(Debug)]
@@ -93,6 +96,7 @@ impl CavaPane {
             handle: None,
             is_modal_open: false,
             pending_start: false,
+            legend_shown: false,
             command_channel: crossbeam::channel::bounded(0),
         }
     }
@@ -104,6 +108,10 @@ impl CavaPane {
     pub fn run(&mut self, ctx: &Ctx) -> Result<()> {
         if self.is_modal_open {
             log::debug!("Cava run suppressed: a modal is open");
+            return Ok(());
+        }
+        if ctx.lyrics_edit_mode.get() {
+            log::debug!("Cava run suppressed: lyrics edit mode");
             return Ok(());
         }
         self.pending_start = false;
@@ -140,9 +148,65 @@ impl CavaPane {
             && !self.is_modal_open
             && matches!(ctx.status.state, State::Play)
             && !ctx.resizing.get()
+            && !ctx.lyrics_edit_mode.get()
         {
             self.sent_area = self.area;
             self.command(CavaCommand::Start { area: self.area }).ok();
+        }
+    }
+
+    /// The lyrics edit-mode controls legend, drawn over the cava pane
+    /// while edit mode is on (round 35): two columns of `key  action`,
+    /// the keys in the highlight style, the actions in the text style.
+    /// Narrow panes fall back to a single column; short panes clip.
+    fn render_legend(&self, frame: &mut Frame, area: Rect, ctx: &Ctx) {
+        use unicode_width::UnicodeWidthStr;
+
+        let buf = frame.buffer_mut();
+        let text_style = ctx.config.as_text_style();
+        let key_style = ctx.config.theme.highlighted_item_style;
+        let width = area.width as usize;
+        let rows = area.height;
+        if rows == 0 || width == 0 {
+            return;
+        }
+
+        let cell = |buf: &mut ratatui::buffer::Buffer,
+                    x: u16,
+                    y: u16,
+                    max_w: usize,
+                    key: &str,
+                    desc: &str| {
+            buf.set_stringn(x, y, key, max_w, key_style);
+            let dx = x + key.width() as u16 + 1;
+            if dx < area.x + area.width {
+                buf.set_stringn(dx, y, desc, (area.x + area.width - dx) as usize, text_style);
+            }
+        };
+
+        buf.set_stringn(area.x, area.y, "Lyrics edit mode", width, key_style);
+
+        let body_rows = [
+            ("\u{2190} \u{2192}", "word", "\u{2191} \u{2193} / w s", "line"),
+            ("+ \u{2212}", "nudge \u{b1}10 ms", "Enter", "exact word time"),
+            ("t", "line timestamp", "e", "edit line text"),
+            ("d", "delete word", "i / a", "insert word"),
+            ("o / O", "add line", "C-c", "save + exit"),
+            ("C-s", "save in place", "Esc", "discard"),
+            ("pause", "select current word", "", ""),
+        ];
+
+        let two_col = width >= 44;
+        let half = (width / 2).min(30);
+        for (r, (lk, ld, rk, rd)) in body_rows.iter().enumerate() {
+            let y = area.y + 1 + r as u16;
+            if y >= area.y + rows {
+                break;
+            }
+            cell(buf, area.x, y, half, lk, ld);
+            if two_col {
+                cell(buf, area.x + half as u16, y, width - half, rk, rd);
+            }
         }
     }
 
@@ -601,6 +665,26 @@ impl CavaPane {
 impl Pane for CavaPane {
     fn render(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) -> anyhow::Result<()> {
         self.area = area;
+        if ctx.lyrics_edit_mode.get() {
+            // Round 35: lyrics edit mode swaps the visualizer for the
+            // edit-controls legend. The cava process is paused (kept
+            // alive — restarting it would drop the audio for a moment)
+            // and the bars are cleared before the legend draws.
+            if !self.legend_shown {
+                self.legend_shown = true;
+                self.pause_and_clear(ctx)?;
+            }
+            self.render_legend(frame, area, ctx);
+            return Ok(());
+        }
+        if self.legend_shown {
+            self.legend_shown = false;
+            // Leaving edit mode restores the visualizer when the player is
+            // playing; a pause keeps it off until playback resumes.
+            if matches!(ctx.status.state, State::Play) {
+                self.run(ctx)?;
+            }
+        }
         frame.render_widget(
             Block::default()
                 .style(Style::default().bg(Color::from_crossterm(ctx.config.theme.cava.bg_color))),
@@ -669,7 +753,13 @@ impl Pane for CavaPane {
                 }
             }
             UiEvent::ModalOpened if is_visible => {
-                if !self.is_modal_open {
+                // Round 40: during lyrics edit mode the pane shows the
+                // legend, which lives in the ratatui buffer — a direct
+                // terminal write here would wipe it from the screen
+                // without invalidating the buffer, hiding it until a full
+                // re-render. The cava process is already paused by edit
+                // mode (legend path), so there is nothing to clear.
+                if !self.is_modal_open && !ctx.lyrics_edit_mode.get() {
                     self.pause_and_clear(ctx)?;
                 }
                 self.is_modal_open = true;
@@ -690,7 +780,16 @@ impl Pane for CavaPane {
                 }
                 State::Stop | State::Pause => {
                     log::debug!("CavaPane: Player event received, clearing cava area");
-                    self.pause_and_clear(ctx)?;
+                    self.pending_start = false;
+                    self.command(CavaCommand::Pause)?;
+                    // Round 35: during lyrics edit mode the pane shows the
+                    // edit-controls legend — clearing the area would wipe
+                    // it (the bars are already paused, and no render
+                    // follows this event to restore the legend until the
+                    // next status change).
+                    if !ctx.lyrics_edit_mode.get() {
+                        self.clear(ctx)?;
+                    }
                 }
             },
             _ => {}
@@ -770,6 +869,60 @@ mod tests {
         ctx.status.state = State::Play;
         pane.on_event(&mut UiEvent::PlaybackStateChanged, true, &ctx).unwrap();
         assert_eq!(pane.sent_area, pane.area, "playback start redraws the bars");
+    }
+
+    /// Lyrics edit mode swaps the visualizer for the edit-controls
+    /// legend: rendering with the flag set draws the legend and pauses the
+    /// bars; clearing the flag (while playing) restarts them.
+    #[test]
+    fn edit_mode_renders_the_legend_and_pauses_the_bars() {
+        let mut ctx = test_ctx();
+        let mut pane = CavaPane::new(&ctx);
+        pane.area = Rect::new(0, 0, 60, 12);
+        ctx.status.state = State::Play;
+        ctx.lyrics_edit_mode.set(true);
+
+        let backend = ratatui::backend::TestBackend::new(60, 12);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| pane.render(f, pane.area, &ctx).unwrap())
+            .unwrap();
+        assert!(pane.legend_shown, "edit mode shows the legend");
+        let buf = terminal.backend().buffer();
+        let text: String = buf.content().iter().map(|c| c.symbol()).collect();
+        assert!(text.contains("Lyrics edit mode"), "legend title: {text}");
+        assert!(text.contains("delete word"), "delete-word entry: {text}");
+        assert!(text.contains("insert word"), "insert-word entry: {text}");
+        assert!(text.contains("add line"), "add-line entry: {text}");
+        assert!(text.contains("nudge"), "nudge entry: {text}");
+        assert!(text.contains("save + exit"), "ctrl+c entry: {text}");
+        assert!(text.contains("discard"), "esc-discard entry: {text}");
+        assert!(text.contains("save in place"), "ctrl+s entry: {text}");
+
+        // Leaving edit mode while playing restores the visualizer.
+        ctx.lyrics_edit_mode.set(false);
+        terminal
+            .draw(|f| pane.render(f, pane.area, &ctx).unwrap())
+            .unwrap();
+        assert!(!pane.legend_shown, "legend goes away after edit mode");
+        assert_eq!(pane.sent_area, pane.area, "bars restart after leaving edit mode");
+    }
+
+    /// The bars must never start while lyrics edit mode is on, even via
+    /// the deferred/geometry paths (before_show's pending start, area
+    /// reinit) — the legend owns the pane for the duration.
+    #[test]
+    fn edit_mode_suppresses_deferred_and_geometry_starts() {
+        let mut ctx = test_ctx();
+        let mut pane = CavaPane::new(&ctx);
+        pane.area = Rect::new(0, 0, 40, 12);
+        ctx.status.state = State::Play;
+        ctx.lyrics_edit_mode.set(true);
+
+        pane.run(&ctx).unwrap();
+        assert_eq!(pane.sent_area, Rect::default(), "run suppressed during edit mode");
+        pane.reinit_if_area_changed(&ctx);
+        assert_eq!(pane.sent_area, Rect::default(), "geometry reinit suppressed");
     }
 
     /// The first Start is deferred until the frame after `before_show`

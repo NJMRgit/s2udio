@@ -792,6 +792,16 @@ where
                 let modal = create_delete_modal(song_paths, confirmation, ctx)?;
                 modal!(ctx, modal);
             }
+            CommonAction::LyricsNudgeUp | CommonAction::LyricsNudgeDown
+            | CommonAction::LyricsSave
+            | CommonAction::LyricsDeleteWord
+            | CommonAction::LyricsEditLine
+            | CommonAction::LyricsInsertBefore
+            | CommonAction::LyricsInsertAfter
+            | CommonAction::LyricsAddLineBefore
+            | CommonAction::LyricsAddLineAfter
+            | CommonAction::LyricsLineTime
+            | CommonAction::LyricsSaveAndExit => {}
         }
 
         Ok(())

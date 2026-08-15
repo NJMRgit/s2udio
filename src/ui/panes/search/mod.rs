@@ -560,6 +560,16 @@ impl SearchPane {
                     modal!(ctx, modal);
                 }
                 CommonAction::DeleteFromPlaylist { .. } => {}
+                CommonAction::LyricsNudgeUp | CommonAction::LyricsNudgeDown
+                | CommonAction::LyricsSave
+                | CommonAction::LyricsDeleteWord
+                | CommonAction::LyricsEditLine
+                | CommonAction::LyricsInsertBefore
+                | CommonAction::LyricsInsertAfter
+                | CommonAction::LyricsAddLineBefore
+                | CommonAction::LyricsAddLineAfter
+                | CommonAction::LyricsLineTime
+                | CommonAction::LyricsSaveAndExit => {}
             }
         }
 

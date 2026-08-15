@@ -146,6 +146,10 @@ pub struct Ctx {
     /// The id of the song currently selected in the queue pane (kept in sync
     /// by the queue's render); the lyrics pane shows its info when paused.
     pub(crate) queue_selected_id: Cell<Option<u32>>,
+    /// Lyrics edit mode is on (round 35): the lyrics pane sets it when the
+    /// pencil toggles edit mode; the cava pane swaps the visualizer for an
+    /// edit-controls legend while it is set.
+    pub(crate) lyrics_edit_mode: Cell<bool>,
     /// Id of a file played via the Directories pane's right arrow /
     /// double-click (a temporary queue entry). The queue pane hides it from
     /// the list; the directories pane clears it when the entry is dropped.
@@ -249,6 +253,20 @@ pub struct Ctx {
     /// second and moves the completed file to `s2udio-downloads`.
     #[debug(skip)]
     pub(crate) torrent_download: RefCell<Option<crate::core::torrent::TorrentDownload>>,
+    /// The standalone rqbit engine behind Settings -> torrent -> web ui
+    /// (None until first opened): spawned on demand and kept alive (its
+    /// `Drop` kills the child) until the user stops it or the app exits —
+    /// independent of the per-play `torrent_engine` (UI-thread only, so a
+    /// plain value suffices), so the web UI survives a playback session
+    /// (VPN setup / verification use case).
+    #[debug(skip)]
+    pub(crate) torrent_webui_engine: RefCell<Option<crate::core::torrent::TorrentEngine>>,
+    /// The value typed into the Settings torrent socks-proxy input modal,
+    /// drained by the settings panel's render (mpv custom-language
+    /// pattern): the modal's `on_confirm` writes here because it only
+    /// receives `&Ctx`.
+    #[debug(skip)]
+    pub(crate) torrent_socks_proxy_input: RefCell<Option<String>>,
     /// Scanned torrents (round 17): item source key -> the scan outcome
     /// (the running engine + torrent id + file list, or the failure the
     /// popup shows as a dim notice). The paste popup's `[Torrent]` section
@@ -345,6 +363,7 @@ impl Ctx {
             active_tab,
             supported_commands,
             queue_selected_id: Cell::new(None),
+            lyrics_edit_mode: Cell::new(false),
             temp_play_id: Cell::new(None),
             db_update_start: None,
             app_event_sender,
@@ -376,6 +395,8 @@ impl Ctx {
             seekbar: RefCell::new(crate::ui::seekbar::SeekbarState::default()),
             torrent_engine: RefCell::new(None),
             torrent_download: RefCell::new(None),
+            torrent_webui_engine: RefCell::new(None),
+            torrent_socks_proxy_input: RefCell::new(None),
             torrent_scans: RefCell::new(HashMap::new()),
             torrent_scans_pending: RefCell::new(HashSet::new()),
             torrent_scan_cancels: RefCell::new(HashMap::new()),

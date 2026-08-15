@@ -565,6 +565,10 @@ def main() -> int:
     title = os.environ.get("TITLE", "")
     if not title:
         return 0
+    # s2udio already found lyrics (colocated sidecar in the music library,
+    # read-only priority-1 source): never fetch/replace when we have them.
+    if os.environ.get("HAS_LRC") == "true":
+        return 0
     out = os.environ.get("LRC_FILE", "") or os.environ.get("LRC_PATH", "")
     if not out:
         return 0

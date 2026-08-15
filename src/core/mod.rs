@@ -12,4 +12,9 @@ pub mod socket;
 /// (`start_engine`, `add_torrent`, …) are wired into the app in M2+.
 #[allow(dead_code)]
 pub mod torrent;
+/// Auth-injecting loopback proxy for the rqbit web UI (round 42 fix).
+pub mod torrent_proxy;
+/// `s2udio rq start|stop|open` — shell control of the standalone rqbit
+/// engine, sharing its registration with the Settings panel.
+pub mod rqctl;
 pub mod work;

@@ -883,6 +883,27 @@ pub enum CommonActionFile {
     Close,
     Confirm,
     FocusInput,
+    // Lyrics edit mode (round 34): nudge the selected word's time by the
+    // small step (`+`/`-`), save the pending edits without leaving edit
+    // mode (`<C-s>`).
+    NudgeUp,
+    NudgeDown,
+    SaveLyrics,
+    // Lyrics edit mode (round 35/41): delete the selected word (the
+    // line itself is removed only when it ends up empty), edit the
+    // line's text, insert a word before/after, set the line's timestamp.
+    DeleteLyricsWord,
+    EditLyricsLine,
+    /// Round 39: split the line at the selected word (before/after the
+    /// word).
+    InsertLyricsLineBefore,
+    InsertLyricsLineAfter,
+    /// Round 39: add a whole new line before/after the current one.
+    AddLyricsLineBefore,
+    AddLyricsLineAfter,
+    SetLyricsLineTime,
+    // Lyrics edit mode (round 37): save and leave edit mode (`<C-c>`).
+    SaveLyricsAndExit,
     Add,
     AddAll,
     AddReplace,
@@ -947,6 +968,30 @@ pub enum CommonAction {
     Close,
     Confirm,
     FocusInput,
+    /// Lyrics edit mode (round 34): nudge the selected word's time up
+    /// (10 ms) / down (10 ms); `LyricsSave` writes the pending edits back
+    /// to the `.lrc` file without leaving edit mode.
+    LyricsNudgeUp,
+    LyricsNudgeDown,
+    LyricsSave,
+    /// Lyrics edit mode (round 35/41): word-level editing — delete the
+    /// selected word (`d`; the line is removed only when it empties),
+    /// edit the line's text, insert a word before/after, set the line's
+    /// timestamp.
+    LyricsDeleteWord,
+    LyricsEditLine,
+    /// Round 40: insert a new word into the current line before/after
+    /// the selected word (the word stays on the same line; its time
+    /// interpolates between the neighbours).
+    LyricsInsertBefore,
+    LyricsInsertAfter,
+    /// Round 39: add a whole new line before/after the current one.
+    LyricsAddLineBefore,
+    LyricsAddLineAfter,
+    LyricsLineTime,
+    /// Lyrics edit mode (round 37): save the pending edits AND leave
+    /// edit mode (`<C-c>`; Esc discards instead, `<C-s>` saves in place).
+    LyricsSaveAndExit,
     #[strum(to_string = "AddOptions({kind})")]
     AddOptions {
         kind: AddKind,
@@ -1007,6 +1052,35 @@ impl ToDescription for CommonAction {
             }
             CommonAction::Confirm => {
                 "Confirm whatever action is currently going on. In browser panes it either enters a directory or adds and plays a song under cursor".into()
+            }
+            CommonAction::LyricsNudgeUp => "Lyrics edit mode: nudge the word's time up by 10 ms".into(),
+            CommonAction::LyricsNudgeDown => {
+                "Lyrics edit mode: nudge the word's time down by 10 ms".into()
+            }
+            CommonAction::LyricsSave => "Lyrics edit mode: save the edited timings".into(),
+            CommonAction::LyricsDeleteWord => {
+                "Lyrics edit mode: delete the selected word (d)".into()
+            }
+            CommonAction::LyricsEditLine => {
+                "Lyrics edit mode: edit the current line's text".into()
+            }
+            CommonAction::LyricsInsertBefore => {
+                "Lyrics edit mode: insert a new word before the selected word (i)".into()
+            }
+            CommonAction::LyricsInsertAfter => {
+                "Lyrics edit mode: insert a new word after the selected word (a)".into()
+            }
+            CommonAction::LyricsAddLineBefore => {
+                "Lyrics edit mode: add a new line before the current one (O)".into()
+            }
+            CommonAction::LyricsAddLineAfter => {
+                "Lyrics edit mode: add a new line after the current one (o)".into()
+            }
+            CommonAction::LyricsLineTime => {
+                "Lyrics edit mode: set the current line's timestamp".into()
+            }
+            CommonAction::LyricsSaveAndExit => {
+                "Lyrics edit mode: save and exit (Ctrl+C)".into()
             }
             CommonAction::FocusInput => {
                 "Focuses textbox if any is on the screen and is not focused".into()
@@ -1224,6 +1298,17 @@ impl TryFrom<CommonActionFile> for CommonAction {
             CommonActionFile::Close => CommonAction::Close,
             CommonActionFile::Confirm => CommonAction::Confirm,
             CommonActionFile::FocusInput => CommonAction::FocusInput,
+            CommonActionFile::NudgeUp => CommonAction::LyricsNudgeUp,
+            CommonActionFile::NudgeDown => CommonAction::LyricsNudgeDown,
+            CommonActionFile::SaveLyrics => CommonAction::LyricsSave,
+            CommonActionFile::DeleteLyricsWord => CommonAction::LyricsDeleteWord,
+            CommonActionFile::EditLyricsLine => CommonAction::LyricsEditLine,
+            CommonActionFile::InsertLyricsLineBefore => CommonAction::LyricsInsertBefore,
+            CommonActionFile::InsertLyricsLineAfter => CommonAction::LyricsInsertAfter,
+            CommonActionFile::AddLyricsLineBefore => CommonAction::LyricsAddLineBefore,
+            CommonActionFile::AddLyricsLineAfter => CommonAction::LyricsAddLineAfter,
+            CommonActionFile::SetLyricsLineTime => CommonAction::LyricsLineTime,
+            CommonActionFile::SaveLyricsAndExit => CommonAction::LyricsSaveAndExit,
             CommonActionFile::PaneUp => CommonAction::PaneUp,
             CommonActionFile::PaneDown => CommonAction::PaneDown,
             CommonActionFile::PaneLeft => CommonAction::PaneLeft,
@@ -1333,6 +1418,17 @@ impl From<CommonAction> for CommonActionFile {
             CommonAction::DeleteFromPlaylist { kind } => {
                 CommonActionFile::DeleteFromPlaylist { kind }
             }
+            CommonAction::LyricsNudgeUp => CommonActionFile::NudgeUp,
+            CommonAction::LyricsNudgeDown => CommonActionFile::NudgeDown,
+            CommonAction::LyricsSave => CommonActionFile::SaveLyrics,
+            CommonAction::LyricsDeleteWord => CommonActionFile::DeleteLyricsWord,
+            CommonAction::LyricsEditLine => CommonActionFile::EditLyricsLine,
+            CommonAction::LyricsInsertBefore => CommonActionFile::InsertLyricsLineBefore,
+            CommonAction::LyricsInsertAfter => CommonActionFile::InsertLyricsLineAfter,
+            CommonAction::LyricsAddLineBefore => CommonActionFile::AddLyricsLineBefore,
+            CommonAction::LyricsAddLineAfter => CommonActionFile::AddLyricsLineAfter,
+            CommonAction::LyricsLineTime => CommonActionFile::SetLyricsLineTime,
+            CommonAction::LyricsSaveAndExit => CommonActionFile::SaveLyricsAndExit,
         }
     }
 }

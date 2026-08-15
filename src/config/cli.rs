@@ -28,6 +28,13 @@ pub struct Args {
     #[arg(short, long)]
     /// Override the MPD password
     pub password: Option<String>,
+    #[arg(long, value_enum)]
+    /// Where lyrics come from: local-first (default — colocated .lrc
+    /// sidecar, then the lyrics_dir mirror, then the index, then the
+    /// on_song_change network fetch as the last fallback) or local-only
+    /// (local files only — the network fetch is never spawned).
+    /// Overrides the config file's `lyrics_source` key.
+    pub lyrics_source: Option<LyricsSource>,
 
     #[command(flatten)]
     pub partition: Partition,
@@ -332,6 +339,32 @@ pub enum Command {
         channel: String,
         content: String,
     },
+    /// Control the standalone rqbit engine (start / stop / open the web
+    /// UI). Shares the engine with Settings -> torrent.
+    Rq {
+        #[command(subcommand)]
+        cmd: RqCmd,
+    },
+}
+
+#[derive(Subcommand, Clone, Debug, PartialEq)]
+#[clap(rename_all = "lower")]
+pub enum RqCmd {
+    /// Start the standalone rqbit engine (idempotent: reuses a running
+    /// engine) and print the web UI URL.
+    Start,
+    /// Stop the standalone rqbit engine.
+    Stop,
+    /// Open the rqbit web UI in the browser (engine must be running).
+    Open,
+    /// Verify the engine + the auth-injecting proxy work end-to-end
+    /// (proxy serves the web UI + API without credentials while the
+    /// engine port itself still rejects unauthenticated requests).
+    Check,
+    /// Hidden daemon entry point for `rq start`: owns the engine + the
+    /// auth proxy and stays alive until stopped (never typed by users).
+    #[clap(hide = true)]
+    Serve,
 }
 
 #[derive(Subcommand, Clone, Debug, PartialEq, strum::EnumDiscriminants, strum::Display)]
@@ -473,6 +506,20 @@ pub enum OnOffOneshot {
     Oneshot,
 }
 
+/// Round 38: where the lyrics come from. `LocalFirst` (default) resolves
+/// the colocated .lrc sidecar, then the `lyrics_dir` mirror, then the
+/// lyrics index, and only then falls back to the network fetch via the
+/// `on_song_change` hook. `LocalOnly` keeps the first three steps and
+/// never spawns the fetch (the `on_song_change` hook is skipped), so
+/// lyrics only ever come from local files.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
+#[clap(rename_all = "kebab-case")]
+pub enum LyricsSource {
+    #[default]
+    LocalFirst,
+    LocalOnly,
+}
+
 impl Args {
     /// Split a shell-like command line into tokens (argv).
     ///
@@ -556,5 +603,40 @@ impl Args {
         }
         argv.insert(0, "rmpc".to_string()); // clap expects argv[0]
         <Self as Parser>::try_parse_from(argv)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rq_subcommand_parses() {
+        for (line, want) in [
+            ("rq start", RqCmd::Start),
+            ("rq stop", RqCmd::Stop),
+            ("rq open", RqCmd::Open),
+            ("rq check", RqCmd::Check),
+        ] {
+            let args = Args::parse_from(["s2udio", "rq", line.split_whitespace().nth(1).unwrap()]);
+            match args.command {
+                Some(Command::Rq { cmd }) => assert_eq!(cmd, want, "{line}"),
+                other => panic!("expected Command::Rq for {line}, got {other:?}"),
+            }
+        }
+        assert!(Args::try_parse_from(["s2udio", "rq", "bogus"]).is_err());
+    }
+
+    #[test]
+    fn lyrics_source_cli_flag_parses() {
+        // Round 38: --lyrics-source accepts both modes (kebab-case) and
+        // is absent by default.
+        let args = Args::parse_from(["s2udio", "--lyrics-source", "local-only"]);
+        assert_eq!(args.lyrics_source, Some(LyricsSource::LocalOnly));
+        let args = Args::parse_from(["s2udio", "--lyrics-source", "local-first"]);
+        assert_eq!(args.lyrics_source, Some(LyricsSource::LocalFirst));
+        let args = Args::parse_from(["s2udio"]);
+        assert_eq!(args.lyrics_source, None);
+        assert!(Args::try_parse_from(["s2udio", "--lyrics-source", "bogus"]).is_err());
     }
 }
