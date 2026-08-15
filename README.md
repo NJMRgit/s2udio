@@ -134,3 +134,35 @@ uses `systemctl --user`, which only exists on systemd targets. Verify with
 
 ## Settings & Config
 Configuration is stored at ~/.config/s2udio and separate from rmpc
+
+## rqbit — torrent web UI & commands
+
+Torrent streaming runs through **rqbit** (`cargo install rqbit` or a static
+binary; not installed by setup.sh). Besides streaming torrents to mpv,
+rqbit serves a **web UI** (torrent management + peer/VPN-route
+verification) that s2udio exposes through a small localhost proxy, so the
+browser needs no credentials:
+
+```
+s2udio rq start    start the standalone engine (idempotent; prints the web UI URL)
+s2udio rq stop     stop the standalone engine
+s2udio rq open     open the web UI in the browser
+s2udio rq check    verify the proxy: /web/ + API answer without credentials
+                   (200) while the engine port still rejects them (401)
+```
+
+- `rq start` spawns a detached daemon that owns the engine and the
+  auth-injecting proxy; it reuses an engine the Settings panel started,
+  and Settings → torrent → `web ui` reuses one the CLI started — the CLI
+  and the GUI always share a single engine (registration:
+  `~/.cache/s2udio/rqbit.json`).
+- The web UI opens at `http://127.0.0.1:<port>/web/` (no credentials in
+  the URL). The engine port itself stays protected by a random per-launch
+  token — `rq check` verifies this split.
+- **VPN routing**: set a SOCKS5 proxy via Settings → torrent → `socks
+  proxy` (or the `torrent.socks_proxy` config key, e.g.
+  `socks5://127.0.0.1:1080`) — all rqbit traffic then goes through it
+  (`--socks-url`, incoming connections disabled). The web UI itself has
+  no VPN settings (it is torrent management only); restart the engine
+  after changing the proxy.
+- Shorthand (fish): `alias s2rq 's2udio rq'` → `s2rq start|stop|open|check`.
