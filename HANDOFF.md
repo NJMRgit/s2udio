@@ -125,7 +125,8 @@ the user's decisions win. Locked in across sessions (details in the docs):
   docs/agent files).
 - **Branch**: `working` (tracks `s2udio-working/working`) — **rounds 42 +
   43 below committed and pushed 2026-08-15** (round 41 tip `c5f65e4` +
-  1 commit; rounds 33–41 = the lyrics edit-mode series). Full suite
+  commit `da0df5d`; rounds 33–41 = the lyrics edit-mode series). Full
+  suite
   host-side: **1451/1453 pass** (2 pre-existing environment-dependent
   failures, also fail on the clean tree), warnings 3 baseline.
   **Round 42 (2026-08-15, host-implemented)**: Settings → **torrent**
