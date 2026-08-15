@@ -1182,6 +1182,15 @@ impl Ui {
                 state.appearance = Some(
                     modals::settings::persisted_appearance(&config),
                 );
+                // rqbit SOCKS5 proxy (Settings -> torrent): applied to the
+                // engine config (the next engine spawn routes through it)
+                // and persisted to state.ron.
+                config.torrent.socks_proxy = if staged.torrent_socks_proxy.trim().is_empty() {
+                    None
+                } else {
+                    Some(staged.torrent_socks_proxy.clone())
+                };
+                state.torrent_socks_proxy = Some(staged.torrent_socks_proxy.clone());
                 if let Err(err) = state.save() {
                     status_warn!("Failed to save state: {err}");
                 }

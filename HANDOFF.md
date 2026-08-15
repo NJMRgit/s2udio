@@ -123,9 +123,46 @@ the user's decisions win. Locked in across sessions (details in the docs):
   (five clean-subset commits on top of round-30 `bc6e69f`); validated
   **1386/1386**, warnings 3 baseline. Tree = clean subset (14 paths; no
   docs/agent files).
-- **Branch**: `working` (tracks `s2udio-working/working`), at `0b1a22d`
-  + doc updates (round-32 host follow-up on top of round 32; **1386/1386**
-  host-validated 2026-08-13, warnings 3 baseline, binary installed).
+- **Branch**: `working` (tracks `s2udio-working/working`) — **rounds 42 +
+  43 below committed and pushed 2026-08-15** (round 41 tip `c5f65e4` +
+  1 commit; rounds 33–41 = the lyrics edit-mode series). Full suite
+  host-side: **1451/1453 pass** (2 pre-existing environment-dependent
+  failures, also fail on the clean tree), warnings 3 baseline.
+  **Round 42 (2026-08-15, host-implemented)**: Settings → **torrent**
+  section — **web ui** (starts a standalone rqbit engine if needed and
+  opens the web UI in the browser via xdg-open), **stop engine** (kills
+  the standalone engine), **socks proxy** (SOCKS5 URL — the VPN route;
+  staged + persisted to state.ron on Save, restored at startup). New
+  `torrent.socks_proxy` config option (config.ron + both example
+  configs); every engine spawn passes it as rqbit GLOBAL `--socks-url` +
+  `--disable-tcp-listen` (no incoming connections while proxied).
+  Standalone engine in `Ctx.torrent_webui_engine` (independent of the
+  per-play engine, dies with the app). **Round 42 follow-up (401 fix)**:
+  the web UI is an SPA whose fetch() calls can't carry URL-userinfo
+  basic auth (browsers don't replay it — verified with headless
+  Chromium), so each engine now spawns a tiny auth-injecting loopback
+  proxy (`src/core/torrent_proxy.rs`); `web_url()` = clean
+  `http://127.0.0.1:<proxy port>/web/`, engine port stays
+  auth-protected (401s without creds — verified). Verified e2e: real
+  rqbit + proxy + headless Chromium loads the SPA. Tests: +3 engine
+  tests (socks spawn flags, proxy auth injection, real-rqbit proxy e2e),
+  settings sidebar test covers the torrent section. Full suite 1447/1447
+  minus 2 pre-existing env failures. See `docs/design/Sessions/2026-08-15.md`
+  + `backend/torrent-streaming.md` §9.2.
+  **Round 43 (2026-08-15, host-implemented)**: shell control of the
+  standalone engine — **`s2udio rq start|stop|open`** (clap subcommand,
+  `src/core/rqctl.rs`): `start` is idempotent and spawns a detached
+  **daemon** (`s2udio rq serve`, hidden; new process group, SIGTERM/SIGINT
+  shutdown loop, self-heals when rqbit dies), `stop` SIGTERM→SIGKILLs the
+  registered pid, `open` xdg-opens the web UI. Engine + GUI share one
+  registration file (`~/.cache/s2udio/rqbit.json`: pid + proxy web URL);
+  the Settings web-UI rows reuse/register through it, so GUI and CLI
+  never run two standalone engines. User alias added:
+  `alias s2rq 's2udio rq'` in `~/.config/fish/config.fish`. Tests: +1
+  cli parse test, +3 rqctl tests; full suite 1451/1451 minus 2
+  pre-existing env failures; live-verified end-to-end (start→open→stop,
+  idempotency, self-heal) with the installed binary + the alias. See
+  `docs/design/Backend/torrent-streaming.md` §9.3.
   **Round 32 host follow-up (2026-08-13, host-implemented)**: (1) the
   queue wheel can now scroll the viewport past the selection —
   `VirtualizedTable::render` restored state via `DirState::select` which
@@ -610,6 +647,34 @@ Toolchain env (container): `export PATH="$HOME/.cargo/bin:$PATH"`
 
 ## Pending
 
+- **Round 43 (2026-08-15 user request) — `s2udio rq start|stop|open`
+  + personal aliases: IMPLEMENTED host-side, VALIDATED 1451/1453 (2
+  pre-existing env failures), binary installed (md5-verified), fish
+  alias `s2rq` added, live-verified, COMMITTED + PUSHED 2026-08-15.** Shell control
+  of the standalone rqbit engine, sharing one engine with Settings ->
+  torrent via `~/.cache/s2udio/rqbit.json`. `s2udio rq start` spawns a
+  detached daemon (`s2udio rq serve`, hidden) owning the engine + auth
+  proxy; `stop` kills the registered pid (SIGTERM→SIGKILL); `open` opens
+  the web UI. Note: `s2rq start` also works while the s2udio GUI is
+  running (same engine). COMMITTED + PUSHED to `s2udio-working/working`
+  (2026-08-15); merge to master remains optional.
+- **Round 42 (2026-08-15 user request) — rqbit web UI from Settings +
+  VPN (SOCKS5) config: IMPLEMENTED host-side, VALIDATED 1447/1447 minus
+  2 pre-existing env failures, docs + handoff + session log updated,
+  binary installed + md5-verified, COMMITTED + PUSHED 2026-08-15.** Settings → **torrent**:
+  `web ui` `[start]`/`[open]` (standalone engine + browser at
+  `http://127.0.0.1:<proxy port>/web/` — the auth-injecting loopback
+  proxy, no credentials in the URL), `stop engine` `[stop]`, `socks
+  proxy` `[edit]` (`socks5://…`, persisted to state.ron on Save).
+  `torrent.socks_proxy` config option → rqbit `--socks-url` +
+  `--disable-tcp-listen` (global flags, before `server start`). **401
+  fixed**: browsers don't replay userinfo auth on SPA fetch(), hence the
+  proxy. NOTE for the user: the rqbit web UI itself cannot configure the
+  VPN (verified — it's torrent management only); set the proxy in
+  Settings, then stop/start the engine. **The user's running s2udio
+  (PID 8105) is the pre-fix binary — restart to get the 401 fix.**
+  COMMITTED + PUSHED to `s2udio-working/working` (2026-08-15); merge to
+  master remains optional.
 - **Round 29 (2026-08-12 user request) — IMPLEMENTED host-side,
   VALIDATED 1364/1364, binary installed + live-checked (see
   FEEDBACK-2026-08-12-2.md).** Name the cava PipeWire node via a new

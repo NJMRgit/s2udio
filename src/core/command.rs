@@ -483,6 +483,9 @@ impl Command {
                 client.send_message(&channel, &content)?;
                 Ok(())
             })),
+            // Handled in main() before the MPD-based commands (no MPD
+            // needed); unreachable here.
+            Command::Rq { .. } => unreachable!("`rq` is dispatched in main"),
         }
     }
 }
