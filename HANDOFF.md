@@ -149,7 +149,9 @@ the user's decisions win. Locked in across sessions (details in the docs):
   proxy (`src/core/torrent_proxy.rs`); `web_url()` = clean
   `http://127.0.0.1:<proxy port>/web/`, engine port stays
   auth-protected (401s without creds — verified). Verified e2e: real
-  rqbit + proxy + headless Chromium loads the SPA. Tests: +3 engine
+  rqbit + proxy + headless Chromium loads the SPA. **The user's running
+  instance is now the current binary (restarted 2026-08-15; running md5
+  == installed md5 `1bafd72b`).** Tests: +3 engine
   tests (socks spawn flags, proxy auth injection, real-rqbit proxy e2e),
   settings sidebar test covers the torrent section. Full suite 1447/1447
   minus 2 pre-existing env failures. See `docs/design/Sessions/2026-08-15.md`
@@ -679,10 +681,10 @@ Toolchain env (container): `export PATH="$HOME/.cargo/bin:$PATH"`
   fixed**: browsers don't replay userinfo auth on SPA fetch(), hence the
   proxy. NOTE for the user: the rqbit web UI itself cannot configure the
   VPN (verified — it's torrent management only); set the proxy in
-  Settings, then stop/start the engine. **The user's running s2udio
-  (PID 8105) is the pre-fix binary — restart to get the 401 fix.**
-  COMMITTED + PUSHED to `s2udio-working/working` and **merged to master
-  (`e3ea655`)** 2026-08-15.
+  Settings, then stop/start the engine. **The user restarted — the
+  running instance is the current binary (md5 `1bafd72b`).** COMMITTED +
+  PUSHED to `s2udio-working/working` and **merged to master (`e3ea655`)**
+  2026-08-15.
 - **Round 29 (2026-08-12 user request) — IMPLEMENTED host-side,
   VALIDATED 1364/1364, binary installed + live-checked (see
   FEEDBACK-2026-08-12-2.md).** Name the cava PipeWire node via a new
