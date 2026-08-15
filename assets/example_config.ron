@@ -87,11 +87,12 @@
             "<S-+>":      NudgeUp,
             "-":          NudgeDown,
             "<C-s>":      SaveLyrics,
-            // Lyrics edit mode (round 35/40): d delete line, e edit text,
-            // i/a insert a new word into the line (before/after the
-            // selected word), o/O add a whole new line after/before, t
-            // set line timestamp.
-            "d":          DeleteLyricsLine,
+            // Lyrics edit mode (round 35/41): d delete the selected word
+            // (line removed only when empty), e edit text, i/a insert a
+            // new word into the line (before/after the selected word),
+            // o/O add a whole new line after/before, t set line
+            // timestamp.
+            "d":          DeleteLyricsWord,
             "e":          EditLyricsLine,
             "i":          InsertLyricsLineBefore,
             "a":          InsertLyricsLineAfter,

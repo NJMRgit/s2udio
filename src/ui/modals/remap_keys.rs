@@ -157,7 +157,7 @@ pub(crate) fn remap_description(action: &Actions) -> String {
             CommonAction::LyricsNudgeUp => "Nudge word time up",
             CommonAction::LyricsNudgeDown => "Nudge word time down",
             CommonAction::LyricsSave => "Save lyrics edit",
-            CommonAction::LyricsDeleteLine => "Delete lyric line",
+            CommonAction::LyricsDeleteWord => "Delete selected word",
             CommonAction::LyricsEditLine => "Edit lyric line text",
             CommonAction::LyricsInsertBefore => "Insert word before selected",
             CommonAction::LyricsInsertAfter => "Insert word after selected",

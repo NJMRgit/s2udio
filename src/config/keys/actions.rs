@@ -889,9 +889,10 @@ pub enum CommonActionFile {
     NudgeUp,
     NudgeDown,
     SaveLyrics,
-    // Lyrics edit mode (round 35): delete the current line, edit the
-    // line's text, split at the current word, set the line's timestamp.
-    DeleteLyricsLine,
+    // Lyrics edit mode (round 35/41): delete the selected word (the
+    // line itself is removed only when it ends up empty), edit the
+    // line's text, insert a word before/after, set the line's timestamp.
+    DeleteLyricsWord,
     EditLyricsLine,
     /// Round 39: split the line at the selected word (before/after the
     /// word).
@@ -973,10 +974,11 @@ pub enum CommonAction {
     LyricsNudgeUp,
     LyricsNudgeDown,
     LyricsSave,
-    /// Lyrics edit mode (round 35): line-level editing — delete the
-    /// current line, edit its text, split at the current word, set the
-    /// line's timestamp.
-    LyricsDeleteLine,
+    /// Lyrics edit mode (round 35/41): word-level editing — delete the
+    /// selected word (`d`; the line is removed only when it empties),
+    /// edit the line's text, insert a word before/after, set the line's
+    /// timestamp.
+    LyricsDeleteWord,
     LyricsEditLine,
     /// Round 40: insert a new word into the current line before/after
     /// the selected word (the word stays on the same line; its time
@@ -1056,8 +1058,8 @@ impl ToDescription for CommonAction {
                 "Lyrics edit mode: nudge the word's time down by 10 ms".into()
             }
             CommonAction::LyricsSave => "Lyrics edit mode: save the edited timings".into(),
-            CommonAction::LyricsDeleteLine => {
-                "Lyrics edit mode: delete the current line".into()
+            CommonAction::LyricsDeleteWord => {
+                "Lyrics edit mode: delete the selected word (d)".into()
             }
             CommonAction::LyricsEditLine => {
                 "Lyrics edit mode: edit the current line's text".into()
@@ -1299,7 +1301,7 @@ impl TryFrom<CommonActionFile> for CommonAction {
             CommonActionFile::NudgeUp => CommonAction::LyricsNudgeUp,
             CommonActionFile::NudgeDown => CommonAction::LyricsNudgeDown,
             CommonActionFile::SaveLyrics => CommonAction::LyricsSave,
-            CommonActionFile::DeleteLyricsLine => CommonAction::LyricsDeleteLine,
+            CommonActionFile::DeleteLyricsWord => CommonAction::LyricsDeleteWord,
             CommonActionFile::EditLyricsLine => CommonAction::LyricsEditLine,
             CommonActionFile::InsertLyricsLineBefore => CommonAction::LyricsInsertBefore,
             CommonActionFile::InsertLyricsLineAfter => CommonAction::LyricsInsertAfter,
@@ -1419,7 +1421,7 @@ impl From<CommonAction> for CommonActionFile {
             CommonAction::LyricsNudgeUp => CommonActionFile::NudgeUp,
             CommonAction::LyricsNudgeDown => CommonActionFile::NudgeDown,
             CommonAction::LyricsSave => CommonActionFile::SaveLyrics,
-            CommonAction::LyricsDeleteLine => CommonActionFile::DeleteLyricsLine,
+            CommonAction::LyricsDeleteWord => CommonActionFile::DeleteLyricsWord,
             CommonAction::LyricsEditLine => CommonActionFile::EditLyricsLine,
             CommonAction::LyricsInsertBefore => CommonActionFile::InsertLyricsLineBefore,
             CommonAction::LyricsInsertAfter => CommonActionFile::InsertLyricsLineAfter,

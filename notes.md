@@ -1,5 +1,32 @@
 # Notes for the container agent — round 40 IMPLEMENTED host-side (2026-08-15) — do not re-implement
 
+## ROUND 41 — d deletes the selected WORD (whole-line delete removed)
+
+**User (direct to the host):** "why is d delete a whole line now? I
+never asked for that." Round 35's "remove the lyric" had been
+over-interpreted as whole-line delete bound to `d`. The user never
+wanted line-level deletion — the editing model is per WORD. Fix on
+`working` on top of round 40: **1446/1446**, warnings 3 baseline.
+
+- **`d` now deletes the selected WORD** (`LyricsDeleteWord`, was
+  `DeleteLyricsLine`). Pending until save like the nudges; the LINE
+  itself is only removed when the deleted word was its last one (blank
+  lyric rows are never left behind). The selection moves to the word
+  that took its place (else the previous word / previous line).
+- `LrcEditSession::delete_word_at` — removes the word, rebuilds the
+  line's content, drops the deleted word's pending edit and shifts
+  same-line pending edits down; delegates to `delete_line` when the
+  line empties. `delete_line` stays as an internal op.
+- Legend: `d delete word`; descriptions / remap display / no-op arms /
+  example_config.ron + live config.ron updated.
+- Tests: +3 delete_word unit tests (mid-line, only-word-removes-line,
+  pending remap), pane test rewritten (word deleted, line + next line
+  intact, header/stamp preserved). Live-verified: d on "your" removes
+  just that word; Ctrl+C saves; the line survives. Binary `112ed552`
+  installed; running instance needs a restart.
+
+---
+
 
 ## ROUND 40 FOLLOW-UP — inserted words get their own karaoke timing (2026-08-15)
 
