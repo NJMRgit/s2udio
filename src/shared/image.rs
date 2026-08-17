@@ -2,9 +2,7 @@ use std::io::Cursor;
 
 use anyhow::{Context, Result};
 use image::{
-    AnimationDecoder,
-    DynamicImage,
-    ImageDecoder,
+    AnimationDecoder, DynamicImage, ImageDecoder,
     codecs::{gif::GifDecoder, jpeg::JpegEncoder},
 };
 use ratatui::layout::Rect;

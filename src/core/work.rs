@@ -17,11 +17,7 @@ pub(crate) fn set_expected_mpris_art(source: Option<String>) {
 
 /// Whether `source` is still the art the current stream expects.
 pub(crate) fn is_expected_mpris_art(source: &str) -> bool {
-    EXPECTED_MPRIS_ART
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .as_deref()
-        == Some(source)
+    EXPECTED_MPRIS_ART.lock().unwrap_or_else(|p| p.into_inner()).as_deref() == Some(source)
 }
 
 use crate::{
@@ -86,7 +82,9 @@ fn handle_work_request(
             }
             Ok(WorkDone::MpdCommandFinished {
                 id: crate::ui::panes::radio::RADIO_DIRECTORY,
-                target: Some(crate::config::tabs::PaneType::Radio { tree: crate::config::tabs::TreeBrowserArgs::default() }),
+                target: Some(crate::config::tabs::PaneType::Radio {
+                    tree: crate::config::tabs::TreeBrowserArgs::default(),
+                }),
                 data: crate::shared::mpd_query::MpdQueryResult::Any(Box::new(directory)),
             })
         }
@@ -97,7 +95,9 @@ fn handle_work_request(
             };
             Ok(WorkDone::MpdCommandFinished {
                 id: crate::ui::panes::radio::RADIO_STATES,
-                target: Some(crate::config::tabs::PaneType::Radio { tree: crate::config::tabs::TreeBrowserArgs::default() }),
+                target: Some(crate::config::tabs::PaneType::Radio {
+                    tree: crate::config::tabs::TreeBrowserArgs::default(),
+                }),
                 data: crate::shared::mpd_query::MpdQueryResult::Any(Box::new((country, states))),
             })
         }
@@ -105,22 +105,21 @@ fn handle_work_request(
             let stations = radio::fetch_country_top(&country_code);
             Ok(WorkDone::MpdCommandFinished {
                 id: crate::ui::panes::radio::RADIO_COUNTRY_STATIONS,
-                target: Some(crate::config::tabs::PaneType::Radio { tree: crate::config::tabs::TreeBrowserArgs::default() }),
-                data: crate::shared::mpd_query::MpdQueryResult::Any(Box::new((
-                    country,
-                    stations,
-                ))),
+                target: Some(crate::config::tabs::PaneType::Radio {
+                    tree: crate::config::tabs::TreeBrowserArgs::default(),
+                }),
+                data: crate::shared::mpd_query::MpdQueryResult::Any(Box::new((country, stations))),
             })
         }
         WorkRequest::FetchRadioStateStations { country, state } => {
             let stations = radio::fetch_state_stations(&country, &state);
             Ok(WorkDone::MpdCommandFinished {
                 id: crate::ui::panes::radio::RADIO_STATE_STATIONS,
-                target: Some(crate::config::tabs::PaneType::Radio { tree: crate::config::tabs::TreeBrowserArgs::default() }),
+                target: Some(crate::config::tabs::PaneType::Radio {
+                    tree: crate::config::tabs::TreeBrowserArgs::default(),
+                }),
                 data: crate::shared::mpd_query::MpdQueryResult::Any(Box::new((
-                    country,
-                    state,
-                    stations,
+                    country, state, stations,
                 ))),
             })
         }
@@ -143,10 +142,7 @@ fn handle_work_request(
             let event_tx = event_tx.clone();
             let torrent_config = torrent_config.clone();
             std::thread::Builder::new()
-                .name(format!(
-                    "torrent-play-{}",
-                    key.chars().take(24).collect::<String>()
-                ))
+                .name(format!("torrent-play-{}", key.chars().take(24).collect::<String>()))
                 .spawn(move || {
                     let result: Result<WorkDone> = (|| {
                         let engine = crate::core::torrent::start_engine(&torrent_config)
@@ -157,13 +153,13 @@ fn handle_work_request(
                         // delivered the metainfo; local .torrent files are
                         // instant. No deadline: the user decides how long a
                         // cold magnet may take.
-                        let details =
-                            crate::core::torrent::wait_for_files(&engine, &id, None)
-                                .map_err(|err| anyhow::anyhow!("{err}"))?;
+                        let details = crate::core::torrent::wait_for_files(&engine, &id, None)
+                            .map_err(|err| anyhow::anyhow!("{err}"))?;
                         let torrent_name = details.name.clone().unwrap_or_else(|| item.label());
-                        let (file_idx, file) =
-                            crate::core::torrent::pick_playable_file(&details.files)
-                                .ok_or_else(|| anyhow::anyhow!("No playable media in this torrent"))?;
+                        let (file_idx, file) = crate::core::torrent::pick_playable_file(
+                            &details.files,
+                        )
+                        .ok_or_else(|| anyhow::anyhow!("No playable media in this torrent"))?;
                         let file_length = file.length;
                         let stream_url = engine.stream_url(&id, file_idx as u64);
                         Ok(WorkDone::TorrentStreamPrepared {
@@ -198,10 +194,7 @@ fn handle_work_request(
             let event_tx = event_tx.clone();
             let torrent_config = torrent_config.clone();
             std::thread::Builder::new()
-                .name(format!(
-                    "torrent-dl-{}",
-                    key.chars().take(24).collect::<String>()
-                ))
+                .name(format!("torrent-dl-{}", key.chars().take(24).collect::<String>()))
                 .spawn(move || {
                     let result: Result<WorkDone> = (|| {
                         let engine = crate::core::torrent::start_engine(&torrent_config)
@@ -212,9 +205,8 @@ fn handle_work_request(
                         // delivered the metainfo; local .torrent files are
                         // instant. No deadline: the user decides how long a
                         // cold magnet may take.
-                        let details =
-                            crate::core::torrent::wait_for_files(&engine, &id, None)
-                                .map_err(|err| anyhow::anyhow!("{err}"))?;
+                        let details = crate::core::torrent::wait_for_files(&engine, &id, None)
+                            .map_err(|err| anyhow::anyhow!("{err}"))?;
                         let torrent_name = details.name.clone().unwrap_or_else(|| item.label());
                         let files: Vec<crate::core::torrent::ScannedFile> = if indices.is_empty() {
                             crate::core::torrent::pick_playable_file(&details.files)
@@ -228,9 +220,7 @@ fn handle_work_request(
                         } else {
                             indices
                                 .iter()
-                                .filter_map(|i| {
-                                    details.files.get(*i).map(|file| (*i, file))
-                                })
+                                .filter_map(|i| details.files.get(*i).map(|file| (*i, file)))
                                 .map(|(idx, file)| crate::core::torrent::ScannedFile {
                                     index: idx,
                                     name: file.name.clone(),
@@ -302,13 +292,15 @@ fn handle_work_request(
             }
         }
         WorkRequest::FetchJellyfinViews => {
-            let data = jellyfin_handle(jellyfin_config_file, |jf| jf.views().map(JellyfinResult::Views))
-                .unwrap_or_else(|err| JellyfinResult::Error(err.to_string()));
+            let data =
+                jellyfin_handle(jellyfin_config_file, |jf| jf.views().map(JellyfinResult::Views))
+                    .unwrap_or_else(|err| JellyfinResult::Error(err.to_string()));
             Ok(WorkDone::JellyfinFetched { id: crate::ui::panes::jellyfin::JF_VIEWS, data })
         }
         WorkRequest::FetchJellyfinFolder { parent_id } => {
             let data = jellyfin_handle(jellyfin_config_file, |jf| {
-                jf.folder_children(&parent_id).map(|items| JellyfinResult::Children { parent_id, items })
+                jf.folder_children(&parent_id)
+                    .map(|items| JellyfinResult::Children { parent_id, items })
             })
             .unwrap_or_else(|err| JellyfinResult::Error(err.to_string()));
             Ok(WorkDone::JellyfinFetched { id: crate::ui::panes::jellyfin::JF_FOLDER, data })
@@ -330,15 +322,10 @@ fn handle_work_request(
         }
         WorkRequest::FetchJellyfinChapters { item_id } => {
             let data = jellyfin_handle(jellyfin_config_file, |jf| {
-                jf.chapters(&item_id).map(|chapters| {
-                    JellyfinResult::Chapters { item_id, chapters }
-                })
+                jf.chapters(&item_id).map(|chapters| JellyfinResult::Chapters { item_id, chapters })
             })
             .unwrap_or_else(|err| JellyfinResult::Error(err.to_string()));
-            Ok(WorkDone::JellyfinFetched {
-                id: crate::ui::panes::jellyfin::JF_CHAPTERS,
-                data,
-            })
+            Ok(WorkDone::JellyfinFetched { id: crate::ui::panes::jellyfin::JF_CHAPTERS, data })
         }
         WorkRequest::FetchJellyfinSeason { season_id, episode_id } => {
             let data = jellyfin_handle(jellyfin_config_file, |jf| {
@@ -351,27 +338,18 @@ fn handle_work_request(
                         duration: ep.runtime_secs.map(|s| s as f64),
                     })
                     .collect();
-                let start_index = episodes
-                    .iter()
-                    .position(|ep| ep.id == episode_id)
-                    .unwrap_or(0);
+                let start_index = episodes.iter().position(|ep| ep.id == episode_id).unwrap_or(0);
                 Ok(JellyfinResult::SeasonPlaylist { entries, start_index })
             })
             .unwrap_or_else(|err| JellyfinResult::Error(err.to_string()));
-            Ok(WorkDone::JellyfinFetched {
-                id: crate::ui::panes::jellyfin::JF_SEASON_PLAY,
-                data,
-            })
+            Ok(WorkDone::JellyfinFetched { id: crate::ui::panes::jellyfin::JF_SEASON_PLAY, data })
         }
         WorkRequest::FetchFileChapters { file } => {
             let chapters = fetch_file_chapters(&file);
             Ok(WorkDone::MpdCommandFinished {
                 id: crate::ui::panes::queue::FILE_CHAPTERS,
                 target: Some(crate::config::tabs::PaneType::Queue),
-                data: crate::shared::mpd_query::MpdQueryResult::Any(Box::new((
-                    file,
-                    chapters,
-                ))),
+                data: crate::shared::mpd_query::MpdQueryResult::Any(Box::new((file, chapters))),
             })
         }
         WorkRequest::FetchYtThumbnail { url } => {
@@ -426,10 +404,7 @@ fn handle_work_request(
                 Ok(JellyfinResult::Mpris { item, image })
             })
             .unwrap_or_else(|err| JellyfinResult::Error(err.to_string()));
-            Ok(WorkDone::JellyfinFetched {
-                id: crate::ui::panes::jellyfin::JF_MPRIS,
-                data,
-            })
+            Ok(WorkDone::JellyfinFetched { id: crate::ui::panes::jellyfin::JF_MPRIS, data })
         }
         WorkRequest::FetchJellyfinSongs { album_id } => {
             let data = jellyfin_handle(jellyfin_config_file, |jf| {
@@ -443,10 +418,7 @@ fn handle_work_request(
                 jf.item(&item_id).map(JellyfinResult::Item)
             })
             .unwrap_or_else(|err| JellyfinResult::Error(err.to_string()));
-            Ok(WorkDone::JellyfinFetched {
-                id: crate::ui::panes::jellyfin::JF_ITEM,
-                data,
-            })
+            Ok(WorkDone::JellyfinFetched { id: crate::ui::panes::jellyfin::JF_ITEM, data })
         }
         WorkRequest::FetchJellyfinResume { item_id } => {
             let data = jellyfin_handle(jellyfin_config_file, |jf| {
@@ -454,10 +426,7 @@ fn handle_work_request(
                     .map(|seconds| JellyfinResult::ResumePosition { seconds })
             })
             .unwrap_or_else(|err| JellyfinResult::Error(err.to_string()));
-            Ok(WorkDone::JellyfinFetched {
-                id: crate::ui::panes::jellyfin::JF_RESUME,
-                data,
-            })
+            Ok(WorkDone::JellyfinFetched { id: crate::ui::panes::jellyfin::JF_RESUME, data })
         }
         WorkRequest::FetchJellyfinImage { item_id, fallback_item_id } => {
             let data = jellyfin_handle(jellyfin_config_file, |jf| {
@@ -478,20 +447,14 @@ fn handle_work_request(
                 }
             })
             .unwrap_or_else(|err| JellyfinResult::Error(err.to_string()));
-            Ok(WorkDone::JellyfinFetched {
-                id: crate::ui::panes::jellyfin::JF_IMAGE,
-                data,
-            })
+            Ok(WorkDone::JellyfinFetched { id: crate::ui::panes::jellyfin::JF_IMAGE, data })
         }
         WorkRequest::FetchJellyfinVideoArt { item_id } => {
             let data = jellyfin_handle(jellyfin_config_file, |jf| {
                 jf.fetch_image(&item_id, 600).map(|bytes| JellyfinResult::Image { item_id, bytes })
             })
             .unwrap_or_else(|err| JellyfinResult::Error(err.to_string()));
-            Ok(WorkDone::JellyfinFetched {
-                id: crate::ui::panes::album_art::JF_VIDEO_ART,
-                data,
-            })
+            Ok(WorkDone::JellyfinFetched { id: crate::ui::panes::album_art::JF_VIDEO_ART, data })
         }
         WorkRequest::Command(command) => {
             let callback = command.execute(config)?; // TODO log
@@ -556,9 +519,7 @@ fn handle_work_request(
 /// Chapter markers of a local file via ffprobe. The MPD song file is a
 /// relative path under the music directory; the absolute path is resolved
 /// from mpd.conf (the `config` command is TCP-restricted).
-fn fetch_file_chapters(
-    file: &str,
-) -> Result<Vec<crate::shared::chapters::Chapter>, String> {
+fn fetch_file_chapters(file: &str) -> Result<Vec<crate::shared::chapters::Chapter>, String> {
     let music_dir = crate::ui::modals::paste::music_directory()
         .ok_or_else(|| "cannot determine MPD music directory".to_owned())?;
     let path = std::path::Path::new(&music_dir).join(file);
@@ -591,16 +552,9 @@ fn fetch_file_chapters(
         serde_json::from_slice(&output.stdout).map_err(|e| e.to_string())?;
     let mut chapters = Vec::new();
     for (idx, chapter) in parsed.chapters.iter().enumerate() {
-        let start = chapter
-            .start_time
-            .as_deref()
-            .and_then(|s| s.parse::<f64>().ok())
-            .unwrap_or(0.0);
-        let end = chapter
-            .end_time
-            .as_deref()
-            .and_then(|s| s.parse::<f64>().ok())
-            .unwrap_or(start);
+        let start =
+            chapter.start_time.as_deref().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+        let end = chapter.end_time.as_deref().and_then(|s| s.parse::<f64>().ok()).unwrap_or(start);
         let title = chapter
             .tags
             .as_ref()
@@ -609,11 +563,7 @@ fn fetch_file_chapters(
             .filter(|t| !t.trim().is_empty())
             .map(str::to_owned)
             .unwrap_or_else(|| format!("Chapter {}", idx + 1));
-        chapters.push(crate::shared::chapters::Chapter {
-            title,
-            start_secs: start,
-            end_secs: end,
-        });
+        chapters.push(crate::shared::chapters::Chapter { title, start_secs: start, end_secs: end });
     }
     Ok(chapters)
 }
@@ -652,10 +602,7 @@ fn jellyfin_handle(
 ) -> Result<JellyfinResult> {
     let sidecar = crate::config::jellyfin::jellyfin_sidecar_path();
     let jf = Jellyfin::load(config_file, Some(&sidecar)).ok_or_else(|| {
-        anyhow::anyhow!(
-            "Jellyfin is not configured: cannot read {}",
-            config_file.display()
-        )
+        anyhow::anyhow!("Jellyfin is not configured: cannot read {}", config_file.display())
     })?;
     f(&jf)
 }

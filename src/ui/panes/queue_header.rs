@@ -62,8 +62,7 @@ impl QueueHeaderPane {
     fn album_sort_key(song: &Song, mode: u8) -> String {
         let album = song.metadata.get("album").map(|t| t.first()).unwrap_or_default();
         let title = song.metadata.get("title").map(|t| t.first()).unwrap_or_default();
-        let disc: u32 =
-            song.metadata.get("disc").and_then(|t| t.first().parse().ok()).unwrap_or(0);
+        let disc: u32 = song.metadata.get("disc").and_then(|t| t.first().parse().ok()).unwrap_or(0);
         let track: u32 = song
             .metadata
             .get("track")
@@ -84,11 +83,8 @@ impl QueueHeaderPane {
     /// disc/track order (mode 0) or title a-z / z-a (modes 1 / 2).
     fn sort_album(&self, ctx: &Ctx) -> Result<()> {
         let mode = self.album_sort_mode;
-        let evald: Vec<(u32, String)> = ctx
-            .queue
-            .iter()
-            .map(|song| (song.id, Self::album_sort_key(song, mode)))
-            .collect();
+        let evald: Vec<(u32, String)> =
+            ctx.queue.iter().map(|song| (song.id, Self::album_sort_key(song, mode))).collect();
         let swaps = Self::calculate_swaps_asc(evald, ctx)?;
         Self::apply_swaps(ctx, swaps);
         Ok(())
@@ -246,12 +242,8 @@ impl Pane for QueueHeaderPane {
     fn render(&mut self, frame: &mut Frame, mut area: Rect, ctx: &Ctx) -> Result<()> {
         // The divider under the labels spans the box's full inner width
         // (the pane's own row plus the empty columns beside it).
-        let divider_area = Rect {
-            x: area.x.saturating_sub(1),
-            y: area.y + 1,
-            width: area.width + 1,
-            height: 1,
-        };
+        let divider_area =
+            Rect { x: area.x.saturating_sub(1), y: area.y + 1, width: area.width + 1, height: 1 };
         // Reserve space for the queue scrollbar and padding on the right
         area.width = area.width.saturating_sub(2);
         self.area = area;
@@ -260,8 +252,8 @@ impl Pane for QueueHeaderPane {
         let mouse = ctx.mouse_pos();
 
         // Chapters mode: the queue is replaced by the chapter list.
-        let chapters_active = ctx.queue_tab.get() == crate::ctx::QueueTabMode::Chapters
-            && ctx.has_current_chapters();
+        let chapters_active =
+            ctx.queue_tab.get() == crate::ctx::QueueTabMode::Chapters && ctx.has_current_chapters();
         // Video mode: the queue is replaced by the mpv playlist.
         let video_active = ctx.queue_tab.get() == crate::ctx::QueueTabMode::Video;
         if video_active {
@@ -269,10 +261,7 @@ impl Pane for QueueHeaderPane {
             // like the queue's Duration column).
             let header_width = ctx.queue_table_width.get().unwrap_or(area.width);
             let header_area = Rect { x: area.x, y: area.y, width: header_width, height: 1 };
-            let labels = [
-                ("Title", Alignment::Left),
-                ("Duration", Alignment::Right),
-            ];
+            let labels = [("Title", Alignment::Left), ("Duration", Alignment::Right)];
             let header: Vec<Line> = labels
                 .iter()
                 .enumerate()
@@ -408,11 +397,7 @@ impl Pane for QueueHeaderPane {
                             self.album_sort_mode = (self.album_sort_mode + 1) % 3;
                             self.sort_album(ctx)?;
                         } else {
-                            Self::sort_by_column(
-                                self.column_formats.as_slice(),
-                                header_idx,
-                                ctx,
-                            )?;
+                            Self::sort_by_column(self.column_formats.as_slice(), header_idx, ctx)?;
                         }
                     }
                     ctx.render()?;

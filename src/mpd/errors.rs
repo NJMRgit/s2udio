@@ -88,20 +88,24 @@ pub enum ErrorCode {
 
 impl Display for ErrorCode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", match self {
-            ErrorCode::NotList => "not a list",
-            ErrorCode::Argument => "bad argument",
-            ErrorCode::Password => "invalid password",
-            ErrorCode::Permission => "no permission",
-            ErrorCode::UnknownCmd => "unknown command",
-            ErrorCode::NoExist => "resource does not exist",
-            ErrorCode::PlaylistMax => "maximum playlist size",
-            ErrorCode::System => "system error",
-            ErrorCode::PlaylistLoad => "unable to load playlist",
-            ErrorCode::UpdateAlready => "database update already in progress",
-            ErrorCode::PlayerSync => "player is in an inconsistent state",
-            ErrorCode::Exist => "resource already exists",
-        })
+        write!(
+            f,
+            "{}",
+            match self {
+                ErrorCode::NotList => "not a list",
+                ErrorCode::Argument => "bad argument",
+                ErrorCode::Password => "invalid password",
+                ErrorCode::Permission => "no permission",
+                ErrorCode::UnknownCmd => "unknown command",
+                ErrorCode::NoExist => "resource does not exist",
+                ErrorCode::PlaylistMax => "maximum playlist size",
+                ErrorCode::System => "system error",
+                ErrorCode::PlaylistLoad => "unable to load playlist",
+                ErrorCode::UpdateAlready => "database update already in progress",
+                ErrorCode::PlayerSync => "player is in an inconsistent state",
+                ErrorCode::Exist => "resource already exists",
+            }
+        )
     }
 }
 

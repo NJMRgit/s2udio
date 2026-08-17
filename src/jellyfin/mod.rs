@@ -75,8 +75,7 @@ impl JfItem {
     pub fn is_container(&self) -> bool {
         matches!(
             self.kind.as_str(),
-            "MusicArtist" | "MusicAlbum" | "Folder" | "CollectionFolder" | "Series"
-                | "Season"
+            "MusicArtist" | "MusicAlbum" | "Folder" | "CollectionFolder" | "Series" | "Season"
         )
     }
 
@@ -95,10 +94,22 @@ impl JfItem {
 #[derive(Debug)]
 pub enum JellyfinResult {
     Views(Vec<JfItem>),
-    Children { parent_id: String, items: Vec<JfItem> },
-    Artists { view_id: String, items: Vec<JfItem> },
-    Albums { artist_id: String, items: Vec<JfItem> },
-    Songs { album_id: String, items: Vec<JfItem> },
+    Children {
+        parent_id: String,
+        items: Vec<JfItem>,
+    },
+    Artists {
+        view_id: String,
+        items: Vec<JfItem>,
+    },
+    Albums {
+        artist_id: String,
+        items: Vec<JfItem>,
+    },
+    Songs {
+        album_id: String,
+        items: Vec<JfItem>,
+    },
     /// A single item's metadata (for the now-playing info).
     Item(JfItem),
     /// The saved resume position of an item (from Jellyfin's UserData).
@@ -106,14 +117,26 @@ pub enum JellyfinResult {
         seconds: f64,
     },
     /// Primary image bytes of an item (poster / episode preview).
-    Image { item_id: String, bytes: Vec<u8> },
+    Image {
+        item_id: String,
+        bytes: Vec<u8>,
+    },
     /// Item metadata + primary image, for the MPRIS bridge.
-    Mpris { item: JfItem, image: Vec<u8> },
+    Mpris {
+        item: JfItem,
+        image: Vec<u8>,
+    },
     /// Chapter markers of an item.
-    Chapters { item_id: String, chapters: Vec<crate::shared::chapters::Chapter> },
+    Chapters {
+        item_id: String,
+        chapters: Vec<crate::shared::chapters::Chapter>,
+    },
     /// The whole season's episodes as a playlist (built when an episode
     /// plays), with the index of the episode that was clicked.
-    SeasonPlaylist { entries: Vec<SeasonEntry>, start_index: usize },
+    SeasonPlaylist {
+        entries: Vec<SeasonEntry>,
+        start_index: usize,
+    },
     /// A fetch/config failure; the pane shows it as a notice row.
     Error(String),
 }
@@ -196,17 +219,15 @@ impl Jellyfin {
                 anyhow::bail!("cannot reach the server: {err}");
             }
         };
-        let data: serde_json::Value = response.into_json().context("Cannot parse the login response")?;
+        let data: serde_json::Value =
+            response.into_json().context("Cannot parse the login response")?;
         let token = data
             .get("AccessToken")
             .and_then(|v| v.as_str())
             .filter(|t| !t.is_empty())
             .context("Login failed (wrong username or password?)")?;
-        let user_id = data
-            .get("User")
-            .and_then(|u| u.get("Id"))
-            .and_then(|v| v.as_str())
-            .unwrap_or_default();
+        let user_id =
+            data.get("User").and_then(|u| u.get("Id")).and_then(|v| v.as_str()).unwrap_or_default();
         Ok((token.to_owned(), user_id.to_owned()))
     }
 
@@ -232,15 +253,9 @@ impl Jellyfin {
     /// The library views of the server (music libraries, movies, tv shows…).
     pub fn views(&self) -> Result<Vec<JfItem>> {
         let data = self.get(&format!("/Users/{}/Views", self.user_id))?;
-        let items = data
-            .get("Items")
-            .and_then(serde_json::Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        let views: Vec<JfItem> = items
-            .iter()
-            .filter_map(|v| item_from_value(v, false))
-            .collect();
+        let items =
+            data.get("Items").and_then(serde_json::Value::as_array).cloned().unwrap_or_default();
+        let views: Vec<JfItem> = items.iter().filter_map(|v| item_from_value(v, false)).collect();
         // Music libraries first, then the rest.
         let mut views = views;
         views.sort_by(|a, b| a.is_music_view.cmp(&b.is_music_view).then(a.name.cmp(&b.name)));
@@ -299,11 +314,8 @@ impl Jellyfin {
 
     fn list_items(&self, path: &str) -> Result<Vec<JfItem>> {
         let data = self.get(path)?;
-        let items = data
-            .get("Items")
-            .and_then(serde_json::Value::as_array)
-            .cloned()
-            .unwrap_or_default();
+        let items =
+            data.get("Items").and_then(serde_json::Value::as_array).cloned().unwrap_or_default();
         Ok(items.iter().filter_map(|v| item_from_value(v, false)).collect())
     }
 
@@ -322,20 +334,16 @@ impl Jellyfin {
     /// A single item's metadata (with chapter markers, people and the
     /// overview, so the queue tab's info box matches the Jellyfin tab's).
     pub fn item(&self, item_id: &str) -> Result<JfItem> {
-        let data = self.get(&format!(
-            "/Users/{}/Items/{item_id}?Fields=Chapters,People",
-            self.user_id
-        ))?;
+        let data =
+            self.get(&format!("/Users/{}/Items/{item_id}?Fields=Chapters,People", self.user_id))?;
         item_from_value(&data, false).context("Cannot parse item")
     }
 
     /// The chapter markers of an item (`Fields=Chapters`): named ranges with
     /// start/end positions in ticks (10 ms units).
     pub fn chapters(&self, item_id: &str) -> Result<Vec<crate::shared::chapters::Chapter>> {
-        let data = self.get(&format!(
-            "/Users/{}/Items/{item_id}?Fields=Chapters,People",
-            self.user_id
-        ))?;
+        let data =
+            self.get(&format!("/Users/{}/Items/{item_id}?Fields=Chapters,People", self.user_id))?;
         let mut chapters = Vec::new();
         let Some(items) = data.get("Chapters").and_then(serde_json::Value::as_array) else {
             return Ok(chapters);
@@ -376,19 +384,13 @@ impl Jellyfin {
     /// The saved resume position of an item in seconds (0 when new).
     pub fn resume_position_secs(&self, item_id: &str) -> Result<f64> {
         let data = self.get(&format!("/UserItems/{item_id}/UserData"))?;
-        Ok(data
-            .get("PlaybackPositionTicks")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0) as f64
+        Ok(data.get("PlaybackPositionTicks").and_then(|v| v.as_i64()).unwrap_or(0) as f64
             / 10_000_000.0)
     }
 
     /// The primary image (poster / episode preview) of an item, downscaled.
     pub fn fetch_image(&self, item_id: &str, max_width: u32) -> Result<Vec<u8>> {
-        let url = format!(
-            "{}/Items/{item_id}/Images/Primary?maxWidth={max_width}",
-            self.base
-        );
+        let url = format!("{}/Items/{item_id}/Images/Primary?maxWidth={max_width}", self.base);
         let response = Self::agent()
             .get(&url)
             .set("X-Emby-Token", &self.token)
@@ -473,19 +475,66 @@ fn stream_languages(value: &serde_json::Value, stream_type: &str) -> Vec<String>
 /// code. Falls back to `None` for unmapped languages (the raw code is used).
 fn iso639_2_to_1(code: &str) -> Option<&'static str> {
     Some(match code.to_ascii_lowercase().as_str() {
-        "eng" => "en", "spa" => "es", "fra" | "fre" => "fr", "deu" | "ger" => "de",
-        "jpn" => "ja", "kor" => "ko", "chi" | "zho" => "zh", "ita" => "it",
-        "por" => "pt", "rus" => "ru", "ara" => "ar", "hin" => "hi", "ben" => "bn",
-        "nld" | "dut" => "nl", "swe" => "sv", "nor" => "no", "dan" => "da", "fin" => "fi",
-        "pol" => "pl", "tur" => "tr", "ukr" => "uk", "ell" | "gre" => "el", "heb" => "he",
-        "tha" => "th", "vie" => "vi", "ind" => "id", "msa" | "may" => "ms", "ces" | "cze" => "cs",
-        "slk" | "slo" => "sk", "hun" => "hu", "ron" | "rum" => "ro", "bul" => "bg",
-        "hrv" => "hr", "srp" => "sr", "slv" => "sl", "cat" => "ca", "eus" | "baq" => "eu",
-        "glg" => "gl", "isl" => "is", "lav" => "lv", "lit" => "lt", "est" => "et",
-        "aze" => "az", "bel" => "be", "kaz" => "kk", "uzb" => "uz", "fas" | "per" => "fa",
-        "urd" => "ur", "tam" => "ta", "tel" => "te", "mar" => "mr", "pan" => "pa",
-        "guj" => "gu", "kan" => "kn", "mal" => "ml", "sin" => "si", "nep" => "ne",
-        "swa" => "sw", "amh" => "am", "afr" => "af",
+        "eng" => "en",
+        "spa" => "es",
+        "fra" | "fre" => "fr",
+        "deu" | "ger" => "de",
+        "jpn" => "ja",
+        "kor" => "ko",
+        "chi" | "zho" => "zh",
+        "ita" => "it",
+        "por" => "pt",
+        "rus" => "ru",
+        "ara" => "ar",
+        "hin" => "hi",
+        "ben" => "bn",
+        "nld" | "dut" => "nl",
+        "swe" => "sv",
+        "nor" => "no",
+        "dan" => "da",
+        "fin" => "fi",
+        "pol" => "pl",
+        "tur" => "tr",
+        "ukr" => "uk",
+        "ell" | "gre" => "el",
+        "heb" => "he",
+        "tha" => "th",
+        "vie" => "vi",
+        "ind" => "id",
+        "msa" | "may" => "ms",
+        "ces" | "cze" => "cs",
+        "slk" | "slo" => "sk",
+        "hun" => "hu",
+        "ron" | "rum" => "ro",
+        "bul" => "bg",
+        "hrv" => "hr",
+        "srp" => "sr",
+        "slv" => "sl",
+        "cat" => "ca",
+        "eus" | "baq" => "eu",
+        "glg" => "gl",
+        "isl" => "is",
+        "lav" => "lv",
+        "lit" => "lt",
+        "est" => "et",
+        "aze" => "az",
+        "bel" => "be",
+        "kaz" => "kk",
+        "uzb" => "uz",
+        "fas" | "per" => "fa",
+        "urd" => "ur",
+        "tam" => "ta",
+        "tel" => "te",
+        "mar" => "mr",
+        "pan" => "pa",
+        "guj" => "gu",
+        "kan" => "kn",
+        "mal" => "ml",
+        "sin" => "si",
+        "nep" => "ne",
+        "swa" => "sw",
+        "amh" => "am",
+        "afr" => "af",
         _ => return None,
     })
 }
@@ -534,10 +583,7 @@ fn item_from_value(value: &serde_json::Value, is_music_view: bool) -> Option<JfI
         series_id: str_field("SeriesId"),
         season_id: str_field("SeasonId"),
         index_number: value.get("IndexNumber").and_then(|v| v.as_i64()).map(|n| n as i32),
-        season_number: value
-            .get("ParentIndexNumber")
-            .and_then(|v| v.as_i64())
-            .map(|n| n as i32),
+        season_number: value.get("ParentIndexNumber").and_then(|v| v.as_i64()).map(|n| n as i32),
         overview: str_field("Overview"),
         director,
         writer,
@@ -648,10 +694,7 @@ mod tests {
             token: "tok".to_owned(),
             user_id: "u".to_owned(),
         };
-        assert_eq!(
-            jf.stream_url("abc"),
-            "http://x:8086/Audio/abc/stream?static=true&api_key=tok"
-        );
+        assert_eq!(jf.stream_url("abc"), "http://x:8086/Audio/abc/stream?static=true&api_key=tok");
     }
 }
 
@@ -662,9 +705,5 @@ pub fn item_id_from_url(url: &str) -> Option<String> {
     let mut segments = parsed.path_segments()?;
     let kind = segments.next()?;
     let id = segments.next()?;
-    if matches!(kind, "Audio" | "Videos") && id.len() == 32 {
-        Some(id.to_owned())
-    } else {
-        None
-    }
+    if matches!(kind, "Audio" | "Videos") && id.len() == 32 { Some(id.to_owned()) } else { None }
 }

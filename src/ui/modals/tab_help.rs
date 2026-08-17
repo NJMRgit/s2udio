@@ -64,12 +64,7 @@ impl TabHelpModal {
     /// navigation always, plus the pane-specific map of the tab's panes.
     fn rebuild(&mut self, ctx: &Ctx) {
         let keybinds: &KeyConfig = &ctx.config.keybinds;
-        let tab = ctx
-            .config
-            .tabs
-            .tabs
-            .get(&ctx.active_tab)
-            .map(|tab| &tab.panes);
+        let tab = ctx.config.tabs.tabs.get(&ctx.active_tab).map(|tab| &tab.panes);
         let mut include_directories = false;
         let mut include_queue = false;
         if let Some(panes) = tab {
@@ -115,13 +110,8 @@ impl TabHelpModal {
     /// The name of the tab `dir` steps away from the current one, skipping
     /// tabs hidden via the Settings panel.
     fn tab_at(&self, ctx: &Ctx, dir: i64) -> Option<crate::config::tabs::TabName> {
-        let visible: Vec<_> = ctx
-            .config
-            .tabs
-            .names
-            .iter()
-            .filter(|name| !ctx.config.is_tab_hidden(name))
-            .collect();
+        let visible: Vec<_> =
+            ctx.config.tabs.names.iter().filter(|name| !ctx.config.is_tab_hidden(name)).collect();
         if visible.is_empty() {
             return None;
         }
@@ -152,13 +142,20 @@ fn basic_rows() -> Vec<(String, String, Cow<'static, str>)> {
         ("Tab".to_owned(), "NextTab".to_owned(), "switch to the next tab".into()),
         ("Shift+E".to_owned(), "NextTab".to_owned(), "switch to the next tab".into()),
         ("Shift+Q".to_owned(), "PreviousTab".to_owned(), "switch to the previous tab".into()),
-        ("Esc".to_owned(), "Close / Settings".to_owned(), "close a menu, otherwise open settings".into()),
+        (
+            "Esc".to_owned(),
+            "Close / Settings".to_owned(),
+            "close a menu, otherwise open settings".into(),
+        ),
         ("q".to_owned(), "Quit".to_owned(), "exit rmpc".into()),
     ]
 }
 
-fn push_section<K, A>(rows: &mut Vec<(String, String, Cow<'static, str>)>, name: &str, map: &std::collections::HashMap<K, A>)
-where
+fn push_section<K, A>(
+    rows: &mut Vec<(String, String, Cow<'static, str>)>,
+    name: &str,
+    map: &std::collections::HashMap<K, A>,
+) where
     K: std::fmt::Display,
     A: std::fmt::Display + ToDescription,
 {
@@ -192,11 +189,8 @@ impl Modal for TabHelpModal {
             frame.render_widget(Block::default().style(Style::default().bg(bg_color)), popup_area);
         }
 
-        let base = ctx
-            .config
-            .theme
-            .text_color
-            .map_or_else(Style::default, |c| Style::default().fg(c));
+        let base =
+            ctx.config.theme.text_color.map_or_else(Style::default, |c| Style::default().fg(c));
         let dim = base.add_modifier(Modifier::DIM);
         let active = ctx.config.theme.current_item_style;
         let group = ctx.config.theme.preview_metadata_group_style;
@@ -211,17 +205,14 @@ impl Modal for TabHelpModal {
 
         // Basic | Advanced toggle header.
         let margin = Margin { horizontal: 1, vertical: 0 };
-        let [toggle_area, body_area, footer_area] =
-            Layout::vertical([Constraint::Length(1), Constraint::Percentage(100), Constraint::Length(1)])
-                .areas(inner.inner(margin));
-        let basic_label = Span::styled(
-            "  Basic  ",
-            if self.basic { active } else { dim },
-        );
-        let advanced_label = Span::styled(
-            "  Advanced  ",
-            if self.basic { dim } else { active },
-        );
+        let [toggle_area, body_area, footer_area] = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Percentage(100),
+            Constraint::Length(1),
+        ])
+        .areas(inner.inner(margin));
+        let basic_label = Span::styled("  Basic  ", if self.basic { active } else { dim });
+        let advanced_label = Span::styled("  Advanced  ", if self.basic { dim } else { active });
         let toggle_x = toggle_area.x;
         let basic_rect = Rect { x: toggle_x, y: toggle_area.y, width: 10, height: 1 };
         frame.render_widget(

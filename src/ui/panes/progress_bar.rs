@@ -1,4 +1,3 @@
-
 use anyhow::Result;
 use ratatui::{Frame, prelude::Rect, widgets::Paragraph};
 
@@ -46,19 +45,13 @@ impl Pane for ProgressBarPane {
                 } else {
                     (ctx.status.elapsed.as_secs(), ctx.status.duration.as_secs())
                 };
-                let value = if duration == 0 {
-                    0.0
-                } else {
-                    elapsed as f32 / duration as f32
-                };
+                let value = if duration == 0 { 0.0 } else { elapsed as f32 / duration as f32 };
                 // Hovering the seekbar lightens the colors left of the
                 // pointer (the "played-portion" highlight); the rest of
                 // the bar keeps its normal colors.
                 let hovered = ctx.mouse_pos().is_some_and(|p| self.area.contains(p));
-                let hover_col = ctx
-                    .mouse_pos()
-                    .filter(|_| hovered)
-                    .map(|p| p.x.saturating_sub(self.area.x));
+                let hover_col =
+                    ctx.mouse_pos().filter(|_| hovered).map(|p| p.x.saturating_sub(self.area.x));
                 // While the seekbar owns the keyboard (Ctrl+Tab on the
                 // Queue tab) the cursor renders at the seek position and
                 // the thumb + played-portion highlight follow it.

@@ -1,17 +1,16 @@
 use std::{collections::HashMap, path::PathBuf, str::FromStr, sync::Arc, time::Duration};
 
+use crate::config::mpv::{Mpv, MpvFile};
 use address::MpdPassword;
 use album_art::{AlbumArtConfig, AlbumArtConfigFile, ImageMethodFile};
 use anyhow::Result;
 use artists::{Artists, ArtistsFile};
 use cava::{Cava, CavaFile};
-use jellyfin::{Jellyfin, JellyfinFile};
-use radio::{Radio, RadioFile};
-use video::{Video, VideoFile};
-use crate::config::mpv::{Mpv, MpvFile};
 use clap::Parser;
 use cli::{Args, OnOff, OnOffOneshot};
 use itertools::Itertools;
+use jellyfin::{Jellyfin, JellyfinFile};
+use radio::{Radio, RadioFile};
 use search::SearchFile;
 use serde::{Deserialize, Serialize};
 use sort_mode::{SortMode, SortModeFile, SortOptions};
@@ -19,25 +18,26 @@ use tabs::{PaneType, PaneTypeDiscriminants, Tabs, TabsFile, TreeBrowserArgs, val
 use theme::properties::{SongProperty, SongPropertyFile};
 use torrent::{Torrent, TorrentFile};
 use utils::tilde_expand;
+use video::{Video, VideoFile};
 
 pub mod address;
 pub mod album_art;
 pub mod artists;
 pub mod cava;
-pub mod jellyfin;
-pub mod radio;
-pub mod mpv;
-pub mod video;
 pub mod cli;
 pub mod cli_config;
 mod defaults;
+pub mod jellyfin;
 pub mod keys;
+pub mod mpv;
+pub mod radio;
 mod search;
 pub mod sort_mode;
 pub mod state;
 pub mod tabs;
 pub mod theme;
 pub mod torrent;
+pub mod video;
 
 pub use address::MpdAddress;
 pub use cli::LyricsSource;
@@ -103,7 +103,10 @@ use crate::{
     tmux,
 };
 
-use ratatui::{prelude::IntoCrossterm, style::{Color, Style}};
+use ratatui::{
+    prelude::IntoCrossterm,
+    style::{Color, Style},
+};
 
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone)]
@@ -652,11 +655,9 @@ impl From<OnOffOneshot> for crate::mpd::commands::status::OnOffOneshot {
 /// Scale an RGB color by `f` (0..1) for derived accents.
 pub(crate) fn scale_color(color: Color, f: f64) -> Color {
     match color {
-        Color::Rgb(r, g, b) => Color::Rgb(
-            (f64::from(r) * f) as u8,
-            (f64::from(g) * f) as u8,
-            (f64::from(b) * f) as u8,
-        ),
+        Color::Rgb(r, g, b) => {
+            Color::Rgb((f64::from(r) * f) as u8, (f64::from(g) * f) as u8, (f64::from(b) * f) as u8)
+        }
         other => other,
     }
 }
@@ -720,8 +721,7 @@ pub(crate) fn derive_theme_accents(theme: &mut UiConfig) {
     // the selection (0.58) but not as bright as marked rows (0.65).
     theme.hovered_item_style = theme.current_item_style;
     theme.hovered_item_style.bg = Some(scale_color(base, 0.58));
-    theme.cava.bar_color =
-        crate::config::theme::cava::CavaColor::Single(base.into_crossterm());
+    theme.cava.bar_color = crate::config::theme::cava::CavaColor::Single(base.into_crossterm());
     // The active tab highlight reuses the selection highlight used
     // everywhere else (current_item_style), with the text color on top.
     theme.tab_bar.active_style.fg = Some(base);
@@ -852,7 +852,7 @@ pub mod utils {
 
         #[test]
         fn torrent_cache_dir_default_is_expanded() {
-        let _home_guard = crate::tests::fixtures::HOME_LOCK.lock().unwrap();
+            let _home_guard = crate::tests::fixtures::HOME_LOCK.lock().unwrap();
             use crate::config::{ConfigFile, UiConfig};
 
             let _guard = TEST_LOCK.lock().unwrap();
@@ -889,10 +889,10 @@ mod tests {
     use super::{UiConfig, derive_theme_accents, scale_color};
     #[cfg(debug_assertions)]
     use crate::config::keys::KeyConfigFile;
+    use crate::config::tabs::{PaneType, TabName};
     use crate::config::{
         Config, ConfigFile, LyricsSource, S2udioConfigFile, UiSettings, theme::UiConfigFile,
     };
-    use crate::config::tabs::{PaneType, TabName};
 
     #[test]
     fn lyrics_source_defaults_to_local_first() {
@@ -957,10 +957,9 @@ mod tests {
         // The shipped ~/.config/s2udio/config.ron template must deserialize
         // as the overlay (all sections commented out = empty overlay) and
         // merge as a no-op over a base config.
-        let overlay: S2udioConfigFile = ron::de::from_str(include_str!(
-            "../../assets/example_s2udio_config.ron"
-        ))
-        .expect("example overlay parses");
+        let overlay: S2udioConfigFile =
+            ron::de::from_str(include_str!("../../assets/example_s2udio_config.ron"))
+                .expect("example overlay parses");
         let mut base = ConfigFile::default();
         overlay.merge_into(&mut base);
         // Torrent stays enabled-by-default (no overlay section).
@@ -975,11 +974,7 @@ mod tests {
         let mut base = ConfigFile::default();
         base.torrent.enabled = Some(false);
         overlay.merge_into(&mut base);
-        assert_eq!(
-            base.torrent.enabled,
-            Some(false),
-            "absent overlay leaves the base section"
-        );
+        assert_eq!(base.torrent.enabled, Some(false), "absent overlay leaves the base section");
     }
 
     #[test]
@@ -1044,10 +1039,7 @@ mod tests {
         let (mut current, mut hovered) = (theme.current_item_style, theme.hovered_item_style);
         current.bg = None;
         hovered.bg = None;
-        assert_eq!(
-            hovered, current,
-            "hover copies the selection effect, only the bg lightens"
-        );
+        assert_eq!(hovered, current, "hover copies the selection effect, only the bg lightens");
     }
 
     #[test]

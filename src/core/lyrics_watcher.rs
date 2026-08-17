@@ -3,16 +3,9 @@ use std::{path::Path, time::Duration};
 use anyhow::{Context, Result};
 use crossbeam::channel::Sender;
 use notify_debouncer_full::{
-    DebounceEventResult,
-    DebouncedEvent,
-    Debouncer,
-    RecommendedCache,
-    new_debouncer,
+    DebounceEventResult, DebouncedEvent, Debouncer, RecommendedCache, new_debouncer,
     notify::{
-        Event,
-        EventKind,
-        RecommendedWatcher,
-        RecursiveMode,
+        Event, EventKind, RecommendedWatcher, RecursiveMode,
         event::{AccessKind, AccessMode},
     },
 };
@@ -29,8 +22,9 @@ pub(crate) fn init(
     // fresh install gets hot reload right away.
     if !lyrics_directory.exists() {
         log::info!(path:? = lyrics_directory; "Creating the lyrics directory");
-        std::fs::create_dir_all(lyrics_directory)
-            .with_context(|| format!("Failed to create lyrics path {}", lyrics_directory.display()))?;
+        std::fs::create_dir_all(lyrics_directory).with_context(|| {
+            format!("Failed to create lyrics path {}", lyrics_directory.display())
+        })?;
     }
 
     let mut watcher = {

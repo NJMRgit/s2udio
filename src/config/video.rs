@@ -49,7 +49,6 @@ pub struct VideoFile {
     pub playback: Option<VideoPlaybackMode>,
 }
 
-
 impl From<VideoFile> for Video {
     fn from(value: VideoFile) -> Self {
         Self { playback: value.playback.unwrap_or_default() }

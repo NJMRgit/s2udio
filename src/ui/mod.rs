@@ -3,13 +3,8 @@ use std::collections::HashMap;
 use anyhow::{Context, Result, anyhow};
 use itertools::Itertools;
 use modals::{
-    add_random_modal::AddRandomModal,
-    decoders::DecodersModal,
-    info_list_modal::InfoListModal,
-    input_modal::InputModal,
-    tab_help::TabHelpModal,
-    menu::modal::MenuModal,
-    outputs::OutputsModal,
+    add_random_modal::AddRandomModal, decoders::DecodersModal, info_list_modal::InfoListModal,
+    input_modal::InputModal, menu::modal::MenuModal, outputs::OutputsModal, tab_help::TabHelpModal,
 };
 use panes::{PaneContainer, Panes, pane_call};
 use ratatui::{
@@ -21,12 +16,10 @@ use ratatui::{
 use tab_screen::TabScreen;
 
 use self::{modals::Modal, panes::Pane};
-use unicode_width::UnicodeWidthStr;
 use crate::{
     MpdQueryResult,
     config::{
-        Config,
-        UiSettings,
+        Config, UiSettings,
         cli::{Args, Command},
         keys::{CommonAction, GlobalAction, Key, KeyConfig, actions::RateKind},
         tabs::{PaneType, SizedPaneOrSplit, TabName, TreeBrowserArgs},
@@ -59,6 +52,7 @@ use crate::{
         modals::{downloads::DownloadsModal, menu::create_rating_modal},
     },
 };
+use unicode_width::UnicodeWidthStr;
 
 pub mod browser;
 pub mod dir_or_song;
@@ -227,8 +221,8 @@ impl Ui {
         const MIN_WIDTH_PX: u16 = 500;
         let size_px =
             crossterm::terminal::window_size().map(|s| (s.width, s.height)).unwrap_or((0, 0));
-        let too_small = frame.area().height < MIN_CONTENT_HEIGHT
-            || (size_px.0 > 0 && size_px.0 < MIN_WIDTH_PX);
+        let too_small =
+            frame.area().height < MIN_CONTENT_HEIGHT || (size_px.0 > 0 && size_px.0 < MIN_WIDTH_PX);
         let degraded = self.resizing || too_small;
         if degraded {
             if !self.overlays_hidden {
@@ -241,7 +235,9 @@ impl Ui {
             // The Jellyfin tab's poster is a terminal-side overlay too;
             // hide it while the window is in a transient size.
             let jellyfin_hidden = self.tabs.get(&ctx.active_tab).is_some_and(|tab| {
-                tab.panes.panes_iter().any(|p| p.pane == PaneType::Jellyfin { tree: TreeBrowserArgs::default() })
+                tab.panes
+                    .panes_iter()
+                    .any(|p| p.pane == PaneType::Jellyfin { tree: TreeBrowserArgs::default() })
             });
             if jellyfin_hidden {
                 let id = PaneType::Jellyfin { tree: TreeBrowserArgs::default() };
@@ -272,27 +268,20 @@ impl Ui {
                     "Terminal too small: need at least {MIN_CONTENT_HEIGHT} rows to show controls and seekbar"
                 )
             };
-            let style = ctx
+            let style =
+                ctx.config.theme.text_color.map_or_else(Style::default, |c| Style::default().fg(c));
+            let bg = ctx
                 .config
                 .theme
-                .text_color
-                .map_or_else(Style::default, |c| Style::default().fg(c));
-            let bg = ctx.config.theme.background_color.map_or_else(
-                Style::default,
-                |c| Style::default().bg(c),
-            );
+                .background_color
+                .map_or_else(Style::default, |c| Style::default().bg(c));
             // Wipe stale cells and the background so only the message shows
             // while the terminal is in a transient size.
             frame.render_widget(Clear, area);
             frame.render_widget(Block::default().style(bg), area);
             frame.render_widget(
                 ratatui::widgets::Paragraph::new(msg).alignment(Alignment::Center).style(style),
-                Rect {
-                    x: area.x,
-                    y: area.y + area.height / 2,
-                    width: area.width,
-                    height: 1,
-                },
+                Rect { x: area.x, y: area.y + area.height / 2, width: area.width, height: 1 },
             );
             return Ok(());
         }
@@ -301,16 +290,11 @@ impl Ui {
             // art overlay only belongs to the tab that contains it — never
             // redraw it (e.g. after a resize) while another tab is active,
             // or it paints over that tab's panes at the stale area.
-            let album_art_visible = self
-                .tabs
-                .get(&ctx.active_tab)
-                .is_some_and(|tab| {
+            let album_art_visible =
+                self.tabs.get(&ctx.active_tab).is_some_and(|tab| {
                     tab.panes.panes_iter().any(|pane| pane.pane == PaneType::AlbumArt)
-                })
-                || self.layout.panes_iter().any(|pane| pane.pane == PaneType::AlbumArt);
-            if self.overlays_hidden
-                && album_art_visible
-                && !ctx.is_pane_hidden(&PaneType::AlbumArt)
+                }) || self.layout.panes_iter().any(|pane| pane.pane == PaneType::AlbumArt);
+            if self.overlays_hidden && album_art_visible && !ctx.is_pane_hidden(&PaneType::AlbumArt)
             {
                 self.overlays_hidden = false;
                 self.panes.album_art.before_show(ctx)?;
@@ -337,7 +321,11 @@ impl Ui {
             &mut |pane, pane_area, block, block_area, bg_color, frame| {
                 match self.panes.get_mut(&pane.pane, ctx)? {
                     Panes::TabContent => {
-                        active_tab_call!(self, ctx, render(frame, pane_area, self.area.height, ctx))?;
+                        active_tab_call!(
+                            self,
+                            ctx,
+                            render(frame, pane_area, self.area.height, ctx)
+                        )?;
                     }
                     mut pane_instance => {
                         pane_call!(pane_instance, render(frame, pane_area, ctx))?;
@@ -464,10 +452,7 @@ impl Ui {
         // Esc, with nothing selected, opens the settings).
         if self.modals.is_empty()
             && !key.is_consumed()
-            && key
-                .actions
-                .iter()
-                .any(|a| matches!(a, Actions::Global(GlobalAction::ShowSettings)))
+            && key.actions.iter().any(|a| matches!(a, Actions::Global(GlobalAction::ShowSettings)))
         {
             let modal = modals::settings::SettingsModal::new(&*ctx);
             modal!(ctx, modal);
@@ -858,9 +843,7 @@ impl Ui {
                 // anywhere else it is a no-op (Tab/E/Q cycle tabs).
                 GlobalAction::ToggleMpdMode => {}
                 GlobalAction::SwitchToTab(name) => {
-                    if ctx.config.tabs.names.contains(name)
-                        && !ctx.config.is_tab_hidden(name)
-                    {
+                    if ctx.config.tabs.names.contains(name) && !ctx.config.is_tab_hidden(name) {
                         self.change_tab(name.clone(), ctx)?;
                         ctx.render()?;
                     } else {
@@ -1179,9 +1162,7 @@ impl Ui {
                     ctx.config.cache_dir.as_deref(),
                     staged.ui.mpdris2_notifications,
                 );
-                state.appearance = Some(
-                    modals::settings::persisted_appearance(&config),
-                );
+                state.appearance = Some(modals::settings::persisted_appearance(&config));
                 // rqbit SOCKS5 proxy (Settings -> torrent): applied to the
                 // engine config (the next engine spawn routes through it)
                 // and persisted to state.ron.
@@ -1199,10 +1180,8 @@ impl Ui {
                 // the sidecar (preferred over jellytui's config).
                 if let Some(creds) = &staged.jellyfin {
                     let path = crate::config::jellyfin::jellyfin_sidecar_write_path();
-                    let content = ron::ser::to_string_pretty(
-                        creds,
-                        ron::ser::PrettyConfig::default(),
-                    );
+                    let content =
+                        ron::ser::to_string_pretty(creds, ron::ser::PrettyConfig::default());
                     match content {
                         Ok(content) => {
                             if let Some(parent) = path.parent() {
@@ -1211,10 +1190,7 @@ impl Ui {
                             if let Err(err) = std::fs::write(&path, content) {
                                 status_warn!("Failed to save jellyfin credentials: {err}");
                             } else {
-                                status_info!(
-                                    "Jellyfin credentials saved to {}",
-                                    path.display()
-                                );
+                                status_info!("Jellyfin credentials saved to {}", path.display());
                             }
                         }
                         Err(err) => {
@@ -1330,16 +1306,16 @@ impl Ui {
                 // art (Jellyfin image or resolved YouTube thumbnail) is
                 // refreshed below.
                 if !item_id.is_empty() {
-                    let _ = ctx
-                        .work_sender
-                        .send(crate::shared::events::WorkRequest::FetchJellyfinMpris {
+                    let _ = ctx.work_sender.send(
+                        crate::shared::events::WorkRequest::FetchJellyfinMpris {
                             item_id: item_id.clone(),
-                        });
-                    let _ = ctx
-                        .work_sender
-                        .send(crate::shared::events::WorkRequest::FetchJellyfinChapters {
+                        },
+                    );
+                    let _ = ctx.work_sender.send(
+                        crate::shared::events::WorkRequest::FetchJellyfinChapters {
                             item_id: item_id.clone(),
-                        });
+                        },
+                    );
                 }
                 // The Queue tab follows the switched-to video (Chapters /
                 // Video list).
@@ -1359,12 +1335,10 @@ impl Ui {
             UiAppEvent::SeekbarReleaseCheck => {
                 seekbar::on_release_check(ctx);
             }
-            UiAppEvent::LyricsReleaseCheck => {
-                match self.panes.get_mut(&PaneType::Lyrics, ctx)? {
-                    Panes::Lyrics(lyrics) => lyrics.release_btn(ctx)?,
-                    _ => {}
-                }
-            }
+            UiAppEvent::LyricsReleaseCheck => match self.panes.get_mut(&PaneType::Lyrics, ctx)? {
+                Panes::Lyrics(lyrics) => lyrics.release_btn(ctx)?,
+                _ => {}
+            },
         }
         Ok(())
     }
@@ -1430,11 +1404,7 @@ impl Ui {
     /// (the flush would otherwise overwrite the overlay's terminal-side
     /// cells) with the flushed frame's buffer, so the facade can tell
     /// whether the art pane area actually changed.
-    pub fn flush_album_art(
-        &mut self,
-        buffer: &ratatui::buffer::Buffer,
-        ctx: &Ctx,
-    ) -> Result<()> {
+    pub fn flush_album_art(&mut self, buffer: &ratatui::buffer::Buffer, ctx: &Ctx) -> Result<()> {
         self.panes.album_art.flush_pending_display(buffer, ctx)
     }
 
@@ -1445,7 +1415,11 @@ impl Ui {
         let Some(tab) = self.tabs.get_mut(&ctx.active_tab) else {
             return Ok(());
         };
-        let Some(pane) = tab.panes.panes_iter().find(|p| p.pane == PaneType::Jellyfin { tree: TreeBrowserArgs::default() }) else {
+        let Some(pane) = tab
+            .panes
+            .panes_iter()
+            .find(|p| p.pane == PaneType::Jellyfin { tree: TreeBrowserArgs::default() })
+        else {
             return Ok(());
         };
         let mut pane = self.panes.get_mut(&pane.pane, ctx)?;
@@ -1462,11 +1436,10 @@ impl Ui {
     /// art pane is actually visible — `show_default` draws synchronously
     /// and must never paint over another tab.
     pub fn refresh_album_art(&mut self, ctx: &Ctx) -> Result<()> {
-        let visible = self
-            .tabs
-            .get(&ctx.active_tab)
-            .is_some_and(|tab| tab.panes.panes_iter().any(|pane| pane.pane == PaneType::AlbumArt))
-            || self.layout.panes_iter().any(|pane| pane.pane == PaneType::AlbumArt);
+        let visible =
+            self.tabs.get(&ctx.active_tab).is_some_and(|tab| {
+                tab.panes.panes_iter().any(|pane| pane.pane == PaneType::AlbumArt)
+            }) || self.layout.panes_iter().any(|pane| pane.pane == PaneType::AlbumArt);
         if !visible || ctx.is_pane_hidden(&PaneType::AlbumArt) {
             return Ok(());
         }
@@ -1573,12 +1546,11 @@ impl Ui {
         }
 
         for pane_type in &ctx.config.active_panes {
-            let visible = !ctx.is_pane_hidden(pane_type)
-                && (self
-                    .tabs
-                    .get(&ctx.active_tab)
-                    .is_some_and(|tab| tab.panes.panes_iter().any(|pane| pane.pane == *pane_type))
-                    || self.layout.panes_iter().any(|pane| pane.pane == *pane_type));
+            let visible =
+                !ctx.is_pane_hidden(pane_type)
+                    && (self.tabs.get(&ctx.active_tab).is_some_and(|tab| {
+                        tab.panes.panes_iter().any(|pane| pane.pane == *pane_type)
+                    }) || self.layout.panes_iter().any(|pane| pane.pane == *pane_type));
 
             match self.panes.get_mut(pane_type, ctx)? {
                 #[cfg(debug_assertions)]
@@ -1700,7 +1672,9 @@ pub enum UiAppEvent {
     /// The Settings panel was closed with Discard: restore the runtime
     /// keybinds to the snapshot taken when the panel opened (the only thing
     /// the panel mutates live while open).
-    DiscardSettings { keybinds: KeyConfig },
+    DiscardSettings {
+        keybinds: KeyConfig,
+    },
     /// The queue's context-menu Remove deleted the marked items; drop the
     /// (now stale) marked selection.
     ClearQueueMarked,

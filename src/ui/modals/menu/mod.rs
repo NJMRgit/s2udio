@@ -25,9 +25,7 @@ use crate::{
         macros::{modal, status_error, status_info, status_warn},
         mpd_client_ext::{Enqueue, MpdClientExt as _},
     },
-    ui::modals::{
-        confirm_modal::{Action, ConfirmModal},
-    },
+    ui::modals::confirm_modal::{Action, ConfirmModal},
 };
 
 mod input_section;
@@ -118,7 +116,6 @@ impl Section for SectionType<'_> {
             SectionType::Menu(s) => s.select(idx),
             SectionType::Multi(s) => s.select(idx),
             SectionType::Input(s) => s.select(idx),
-
         }
     }
 
@@ -127,7 +124,6 @@ impl Section for SectionType<'_> {
             SectionType::Menu(s) => s.unselect(ctx),
             SectionType::Multi(s) => s.unselect(ctx),
             SectionType::Input(s) => s.unselect(ctx),
-
         }
     }
 
@@ -136,7 +132,6 @@ impl Section for SectionType<'_> {
             SectionType::Menu(s) => s.unfocus(ctx),
             SectionType::Multi(s) => s.unfocus(ctx),
             SectionType::Input(s) => s.unfocus(ctx),
-
         }
     }
 
@@ -145,7 +140,6 @@ impl Section for SectionType<'_> {
             SectionType::Menu(s) => s.confirm(ctx),
             SectionType::Multi(s) => s.confirm(ctx),
             SectionType::Input(s) => s.confirm(ctx),
-
         }
     }
 
@@ -154,7 +148,6 @@ impl Section for SectionType<'_> {
             SectionType::Menu(s) => s.on_close(ctx),
             SectionType::Multi(s) => s.on_close(ctx),
             SectionType::Input(s) => s.on_close(ctx),
-
         }
     }
 
@@ -179,7 +172,6 @@ impl Section for SectionType<'_> {
             SectionType::Menu(s) => s.render(area, buf, filter, ctx),
             SectionType::Multi(s) => s.render(area, buf, filter, ctx),
             SectionType::Input(s) => s.render(area, buf, filter, ctx),
-
         }
     }
 
@@ -188,7 +180,6 @@ impl Section for SectionType<'_> {
             SectionType::Menu(s) => s.left_click(pos, ctx),
             SectionType::Multi(s) => s.left_click(pos, ctx),
             SectionType::Input(s) => s.left_click(pos, ctx),
-
         }
     }
 
@@ -197,7 +188,6 @@ impl Section for SectionType<'_> {
             SectionType::Menu(s) => s.double_click(pos, ctx),
             SectionType::Multi(s) => s.double_click(pos, ctx),
             SectionType::Input(s) => s.double_click(pos, ctx),
-
         }
     }
 

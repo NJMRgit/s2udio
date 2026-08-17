@@ -87,15 +87,7 @@ struct YtDlpChapter {
 
 fn resolve_one(bin: &str, input_url: &str) -> anyhow::Result<Vec<YtStreamInfo>> {
     let out = Command::new(bin)
-        .args([
-            "-J",
-            "-f",
-            "bestaudio/best",
-            "--no-playlist",
-            "--no-warnings",
-            "--",
-            input_url,
-        ])
+        .args(["-J", "-f", "bestaudio/best", "--no-playlist", "--no-warnings", "--", input_url])
         .output()?;
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
@@ -108,9 +100,10 @@ fn resolve_one(bin: &str, input_url: &str) -> anyhow::Result<Vec<YtStreamInfo>> 
             .to_owned();
         anyhow::bail!(line);
     }
-    let parsed: YtDlpJson = serde_json::from_slice(&out.stdout)
-        .context("Cannot parse yt-dlp output")?;
-    let Some(url) = parsed.url.as_deref().filter(|u| u.starts_with("http://") || u.starts_with("https://"))
+    let parsed: YtDlpJson =
+        serde_json::from_slice(&out.stdout).context("Cannot parse yt-dlp output")?;
+    let Some(url) =
+        parsed.url.as_deref().filter(|u| u.starts_with("http://") || u.starts_with("https://"))
     else {
         anyhow::bail!("yt-dlp produced no stream URL");
     };
@@ -209,7 +202,9 @@ fn parse_timestamp(s: &str) -> Option<f64> {
     let secs: f64 = match parts.as_slice() {
         [mm, ss] => mm.parse::<f64>().ok()? * 60.0 + ss.parse::<f64>().ok()?,
         [hh, mm, ss] => {
-            hh.parse::<f64>().ok()? * 3600.0 + mm.parse::<f64>().ok()? * 60.0 + ss.parse::<f64>().ok()?
+            hh.parse::<f64>().ok()? * 3600.0
+                + mm.parse::<f64>().ok()? * 60.0
+                + ss.parse::<f64>().ok()?
         }
         _ => return None,
     };
@@ -243,8 +238,6 @@ mod tests {
         let _ = std::process::Command::new("chmod").arg("+x").arg(&bin).status();
         bin
     }
-
-
 
     #[test]
     fn resolve_parses_json_fields() {

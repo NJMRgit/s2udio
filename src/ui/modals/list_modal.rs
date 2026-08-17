@@ -103,20 +103,14 @@ impl<'a, V: std::fmt::Debug> ListModal<'a, V> {
         options: Vec<V>,
         row_fn: fn(&V, bool, usize) -> String,
         size_fn: fn(usize) -> (u16, u16),
-        #[builder(default = vec!["Confirm", "Cancel"])]
-        buttons: Vec<&'a str>,
-        #[builder(default = 1)]
-        confirm_buttons: usize,
-        #[builder(default)]
-        multi_select: bool,
+        #[builder(default = vec!["Confirm", "Cancel"])] buttons: Vec<&'a str>,
+        #[builder(default = 1)] confirm_buttons: usize,
+        #[builder(default)] multi_select: bool,
         mark_id: Option<fn(&V) -> usize>,
         bottom_title: Option<fn(usize) -> String>,
-        #[builder(default)]
-        list_right_padding: u16,
-        #[builder(default)]
-        wheel_moves_selection: bool,
-        #[builder(default)]
-        scrollbar_drag: bool,
+        #[builder(default)] list_right_padding: u16,
+        #[builder(default)] wheel_moves_selection: bool,
+        #[builder(default)] scrollbar_drag: bool,
         on_confirm: impl FnOnce(&Ctx, ListConfirm<V>) -> Result<()> + Send + Sync + 'a,
     ) -> Self {
         let mut state = DirState::default();
@@ -160,7 +154,6 @@ impl<'a, V: std::fmt::Debug> ListModal<'a, V> {
             callback: Some(Box::new(on_confirm)),
         }
     }
-
 }
 
 impl<'a, V: std::fmt::Debug> ListModal<'a, V> {
@@ -249,9 +242,7 @@ impl<V: std::fmt::Debug> Modal for ListModal<'_, V> {
             FocusedComponent::Buttons => ctx.config.theme.current_item_style,
         });
 
-        let scrollbar_area = Block::default()
-            .padding(Padding::new(0, 0, 1, 0))
-            .inner(list_area);
+        let scrollbar_area = Block::default().padding(Padding::new(0, 0, 1, 0)).inner(list_area);
         self.scrollbar_area = scrollbar_area;
 
         frame.render_stateful_widget(list, list_area, self.state.as_render_state_ref());
@@ -276,11 +267,7 @@ impl<V: std::fmt::Debug> Modal for ListModal<'_, V> {
             match action {
                 CommonAction::Down => match self.focused {
                     FocusedComponent::List => {
-                        if self
-                            .state
-                            .get_selected()
-                            .is_some_and(|s| s == self.options.len() - 1)
-                        {
+                        if self.state.get_selected().is_some_and(|s| s == self.options.len() - 1) {
                             self.focused = FocusedComponent::Buttons;
                             self.button_group_state.first();
                         } else {
@@ -444,9 +431,8 @@ impl<V: std::fmt::Debug> Modal for ListModal<'_, V> {
                         }
                         ctx.render()?;
                     }
-                } else if let Some(btn) = self
-                    .button_group
-                    .get_button_idx_at(Position::new(event.x, event.y))
+                } else if let Some(btn) =
+                    self.button_group.get_button_idx_at(Position::new(event.x, event.y))
                 {
                     // Clicking a button selects it (and shows the focus).
                     self.focused = FocusedComponent::Buttons;
@@ -459,9 +445,8 @@ impl<V: std::fmt::Debug> Modal for ListModal<'_, V> {
                 // `button < confirm_buttons`, cancel otherwise (round-21
                 // user note). Double-clicking a multi-select row toggles
                 // its mark.
-                if let Some(btn) = self
-                    .button_group
-                    .get_button_idx_at(Position::new(event.x, event.y))
+                if let Some(btn) =
+                    self.button_group.get_button_idx_at(Position::new(event.x, event.y))
                 {
                     if btn < self.confirm_buttons {
                         self.confirm(ctx, btn)?;
@@ -480,11 +465,7 @@ impl<V: std::fmt::Debug> Modal for ListModal<'_, V> {
             MouseEventKind::ScrollUp => {
                 // Over the buttons: move the button selection. Over the
                 // list (or the scrollbar): move the list selection.
-                if self
-                    .button_group
-                    .get_button_idx_at(Position::new(event.x, event.y))
-                    .is_some()
-                {
+                if self.button_group.get_button_idx_at(Position::new(event.x, event.y)).is_some() {
                     self.focused = FocusedComponent::Buttons;
                     self.button_group_state.prev();
                     ctx.render()?;
@@ -499,11 +480,7 @@ impl<V: std::fmt::Debug> Modal for ListModal<'_, V> {
                 }
             }
             MouseEventKind::ScrollDown => {
-                if self
-                    .button_group
-                    .get_button_idx_at(Position::new(event.x, event.y))
-                    .is_some()
-                {
+                if self.button_group.get_button_idx_at(Position::new(event.x, event.y)).is_some() {
                     self.focused = FocusedComponent::Buttons;
                     self.button_group_state.next();
                     ctx.render()?;
@@ -537,11 +514,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
-    use crate::{
-        config::keys::CommonAction,
-        shared::keys::Actions,
-        ui::ActionEvent,
-    };
+    use crate::{config::keys::CommonAction, shared::keys::Actions, ui::ActionEvent};
 
     fn test_ctx() -> (Ctx, crossbeam::channel::Receiver<crate::AppEvent>) {
         let (app_tx, app_rx) = crossbeam::channel::unbounded();
@@ -562,9 +535,7 @@ mod tests {
     fn render_modal<V: std::fmt::Debug>(modal: &mut ListModal<'_, V>, ctx: &mut Ctx) {
         let backend = ratatui::backend::TestBackend::new(100, 30);
         let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
-        terminal
-            .draw(|frame| modal.render(frame, ctx).expect("modal renders"))
-            .expect("draw ok");
+        terminal.draw(|frame| modal.render(frame, ctx).expect("modal renders")).expect("draw ok");
     }
 
     /// Single-select (the legacy `SelectModal` shape): pressing Down moves
@@ -583,10 +554,9 @@ mod tests {
             .size_fn(|_| (80, 15))
             .on_confirm(move |ctx, confirm: ListConfirm<String>| {
                 *captured2.lock().unwrap() = Some(confirm);
-                ctx.app_event_sender
-                    .send(crate::AppEvent::UiEvent(crate::ui::UiAppEvent::PopModal(
-                        crate::shared::id::new(),
-                    )))?;
+                ctx.app_event_sender.send(crate::AppEvent::UiEvent(
+                    crate::ui::UiAppEvent::PopModal(crate::shared::id::new()),
+                ))?;
                 Ok(())
             })
             .build();
@@ -643,10 +613,9 @@ mod tests {
             .scrollbar_drag(true)
             .on_confirm(move |ctx, confirm: ListConfirm<(usize, String, u64)>| {
                 *captured2.lock().unwrap() = Some(confirm);
-                ctx.app_event_sender
-                    .send(crate::AppEvent::UiEvent(crate::ui::UiAppEvent::PopModal(
-                        crate::shared::id::new(),
-                    )))?;
+                ctx.app_event_sender.send(crate::AppEvent::UiEvent(
+                    crate::ui::UiAppEvent::PopModal(crate::shared::id::new()),
+                ))?;
                 Ok(())
             })
             .build();
@@ -701,10 +670,9 @@ mod tests {
             .size_fn(|_| (80, 15))
             .on_confirm(move |ctx, _confirm: ListConfirm<String>| {
                 *ran2.lock().unwrap() = true;
-                ctx.app_event_sender
-                    .send(crate::AppEvent::UiEvent(crate::ui::UiAppEvent::PopModal(
-                        crate::shared::id::new(),
-                    )))?;
+                ctx.app_event_sender.send(crate::AppEvent::UiEvent(
+                    crate::ui::UiAppEvent::PopModal(crate::shared::id::new()),
+                ))?;
                 Ok(())
             })
             .build();

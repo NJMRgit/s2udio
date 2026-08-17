@@ -10,10 +10,14 @@ pub static UEBERZUGPP: LazyLock<Dep> =
 pub static PYTHON3: LazyLock<Dep> =
     LazyLock::new(|| Dep::new("python3", "python3", &["--version"]));
 pub static PYTHON3MUTAGEN: LazyLock<Dep> = LazyLock::new(|| {
-    Dep::new("python-mutagen", "python3", &[
-        "-c",
-        "try:\n\timport mutagen\n\tprint(\"PRESENT\")\nexcept ImportError:\n\tprint(\"NOT PRESENT\")",
-    ])
+    Dep::new(
+        "python-mutagen",
+        "python3",
+        &[
+            "-c",
+            "try:\n\timport mutagen\n\tprint(\"PRESENT\")\nexcept ImportError:\n\tprint(\"NOT PRESENT\")",
+        ],
+    )
 });
 pub static CAVA: LazyLock<Dep> = LazyLock::new(|| Dep::new("cava", "cava", &["-v"]));
 
