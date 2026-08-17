@@ -26,6 +26,12 @@ through dbus-python's _method_lookup()) to no-op on CommandError and on
 stream statuses with no 'time' timeline (KeyError). The seekable-looking
 timeline is kept on purpose — seeks on the MPD path just no-op.
 
+Fourth extension — socket_callback() hardening: mpDris2 sets a 5 s socket
+timeout at connect(), and the official idle-event fetch has no handler,
+so a TimeoutError while MPD is busy kills the daemon (the MPRIS entry
+vanishes and media keys stop working). The shim wraps it to reconnect on
+any socket/MPD error instead of dying.
+
 Version-guarded: the find_cover/update_metadata/notify extensions are
 version-guarded (if the installed mpDris2 changes shape, the shim runs
 it unpatched rather than breaking MPRIS — unpatched also means the
@@ -323,6 +329,34 @@ def _patch_mpdris2(mod):
                     self.idle_enter()
 
         wrapper.seekid = seekid
+        patched = True
+
+    # Harden socket_callback(): the idle-event fetch reads MPD's "changed"
+    # reply from the socket, which mpDris2 set to a 5 s timeout at connect().
+    # When MPD is busy (s2udio drives it hard — re-tagging, art downloads,
+    # playlist churn — while media controls are pressed), the read can exceed
+    # 5 s and python-mpd2 raises TimeoutError. The official socket_callback
+    # has NO handler for it, so the exception escapes the GLib IO watch and
+    # kills the daemon (the MPRIS entry vanishes and media keys stop working
+    # until something restarts the service). Treat any socket/MPD error there
+    # as a disconnect and reconnect, exactly like the GLib.IO_HUP branch.
+    if wrapper is not None and hasattr(wrapper, "socket_callback"):
+        _orig_socket = wrapper.socket_callback
+
+        def socket_callback(self, fd, event, _orig=_orig_socket):
+            try:
+                return _orig(self, fd, event)
+            except (mod.socket.error, mod.socket.timeout,
+                    mod.mpd.MPDError, TimeoutError) as err:
+                mod.logger.warning(
+                    "socket_callback: %r — reconnecting" % (err,))
+                try:
+                    self.reconnect()
+                except Exception:
+                    pass
+                return True
+
+        wrapper.socket_callback = socket_callback
         patched = True
 
     iface = getattr(mod, "MPRISInterface", None)
