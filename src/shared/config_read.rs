@@ -7,19 +7,13 @@ use thiserror::Error;
 
 use crate::{
     config::{
-        Config,
-        ConfigFile,
-        S2udioConfigFile,
+        Config, ConfigFile, S2udioConfigFile,
         cli::Args,
         cli_config::{CliConfig, CliConfigFile},
         theme::{UiConfig, UiConfigFile},
     },
     shared::paths::{
-        config_paths,
-        legacy_config_dir,
-        s2udio_config_dir,
-        s2udio_config_path,
-        theme_paths,
+        config_paths, legacy_config_dir, s2udio_config_dir, s2udio_config_path, theme_paths,
     },
 };
 
@@ -180,9 +174,7 @@ fn looks_like_overlay(path: &Path) -> bool {
 /// (and/or the round-19 `~/.config/s2udio/config.ron` overlay) exists,
 /// the merged full config is written to the new path and the legacy
 /// sidecars/themes are copied over.
-pub fn resolve_config_path(
-    cli_arg_config_path: Option<&Path>,
-) -> Result<PathBuf, ConfigReadError> {
+pub fn resolve_config_path(cli_arg_config_path: Option<&Path>) -> Result<PathBuf, ConfigReadError> {
     if let Some(path) = cli_arg_config_path {
         return Ok(path.to_path_buf());
     }
@@ -266,7 +258,10 @@ fn migrate_sidecars_and_themes() {
         for entry in entries.flatten() {
             let from = entry.path();
             let name = from.file_name().unwrap_or_default().to_string_lossy().into_owned();
-            if !matches!(name.as_str(), "state.ron" | "keybinds.ron" | "cava.ron" | "jellyfin.ron" | "themes") {
+            if !matches!(
+                name.as_str(),
+                "state.ron" | "keybinds.ron" | "cava.ron" | "jellyfin.ron" | "themes"
+            ) {
                 continue;
             }
             let to = new_dir.join(&name);
@@ -283,7 +278,9 @@ fn migrate_sidecars_and_themes() {
                             ok = std::fs::create_dir_all(&dst).is_ok();
                             if ok && let Ok(deep) = std::fs::read_dir(inner_entry.path()) {
                                 for file in deep.flatten() {
-                                    if std::fs::copy(file.path(), dst.join(file.file_name())).is_err() {
+                                    if std::fs::copy(file.path(), dst.join(file.file_name()))
+                                        .is_err()
+                                    {
                                         ok = false;
                                     }
                                 }
@@ -341,11 +338,7 @@ mod tests {
 
         // Legacy base: a base-only setting (address) so the merge is
         // observable.
-        std::fs::write(
-            rmpc_dir.join("config.ron"),
-            "(address: \"1.2.3.4:9999\",)\n",
-        )
-        .unwrap();
+        std::fs::write(rmpc_dir.join("config.ron"), "(address: \"1.2.3.4:9999\",)\n").unwrap();
         // Round-19 overlay: the s2udio-only sections at the old overlay
         // path (same filename as the future full config).
         std::fs::write(
@@ -361,11 +354,7 @@ mod tests {
 
         let config = read_config_file(&resolved).unwrap();
         assert_eq!(config.address, "1.2.3.4:9999", "base setting survives");
-        assert_eq!(
-            config.radio.playlist.as_deref(),
-            Some("radio"),
-            "overlay section merged"
-        );
+        assert_eq!(config.radio.playlist.as_deref(), Some("radio"), "overlay section merged");
 
         // The legacy base is left for upstream rmpc; the sidecar was
         // copied into the new dir.

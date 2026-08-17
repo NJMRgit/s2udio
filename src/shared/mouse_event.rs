@@ -1,9 +1,7 @@
 use std::time::{Duration, Instant};
 
 use crossterm::event::{
-    MouseButton,
-    MouseEvent as CTMouseEvent,
-    MouseEventKind as CTMouseEventKind,
+    MouseButton, MouseEvent as CTMouseEvent, MouseEventKind as CTMouseEventKind,
 };
 use ratatui::layout::{Position, Rect};
 
@@ -58,15 +56,24 @@ impl MouseEventTracker {
                     })
                 }
             }
-            CTMouseEventKind::Down(MouseButton::Right) => {
-                Some(MouseEvent { x, y, kind: MouseEventKind::RightClick, modifiers: value.modifiers })
-            }
-            CTMouseEventKind::Down(MouseButton::Middle) => {
-                Some(MouseEvent { x, y, kind: MouseEventKind::MiddleClick, modifiers: value.modifiers })
-            }
-            CTMouseEventKind::ScrollDown => {
-                Some(MouseEvent { x, y, kind: MouseEventKind::ScrollDown, modifiers: value.modifiers })
-            }
+            CTMouseEventKind::Down(MouseButton::Right) => Some(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::RightClick,
+                modifiers: value.modifiers,
+            }),
+            CTMouseEventKind::Down(MouseButton::Middle) => Some(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::MiddleClick,
+                modifiers: value.modifiers,
+            }),
+            CTMouseEventKind::ScrollDown => Some(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::ScrollDown,
+                modifiers: value.modifiers,
+            }),
             CTMouseEventKind::ScrollUp => Some(MouseEvent {
                 x,
                 y,
@@ -89,12 +96,9 @@ impl MouseEventTracker {
                 modifiers: value.modifiers,
             }),
             CTMouseEventKind::Drag(_) => None,
-            CTMouseEventKind::Moved => Some(MouseEvent {
-                x,
-                y,
-                kind: MouseEventKind::Moved,
-                modifiers: value.modifiers,
-            }),
+            CTMouseEventKind::Moved => {
+                Some(MouseEvent { x, y, kind: MouseEventKind::Moved, modifiers: value.modifiers })
+            }
             CTMouseEventKind::ScrollLeft => None,
             CTMouseEventKind::ScrollRight => None,
         }
@@ -137,7 +141,9 @@ pub enum MouseEventKind {
     /// pressed-while-held visual (the `⭘` marker) — the marker shows only
     /// between `LeftClick` and `LeftRelease`, never persistently.
     LeftRelease,
-    Drag { drag_start_position: Position },
+    Drag {
+        drag_start_position: Position,
+    },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -224,12 +230,7 @@ impl ScrollbarGeometry {
     ) -> Self {
         let track_len = area.height.saturating_sub(begin_len).saturating_sub(end_len);
         if track_len == 0 {
-            return Self {
-                track_top: area.y,
-                track_len: 0,
-                thumb_size: 0,
-                thumb_offset: 0,
-            };
+            return Self { track_top: area.y, track_len: 0, thumb_size: 0, thumb_offset: 0 };
         }
         // Same math as ratatui's Scrollbar::part_lengths: positions run from
         // 0..=content_len-1, the viewport shares the track with the thumb.
@@ -238,12 +239,7 @@ impl ScrollbarGeometry {
         let max_viewport_position = max_position.saturating_add(viewport_len);
         let track_len_us = track_len as usize;
         if max_viewport_position == 0 {
-            return Self {
-                track_top: area.y,
-                track_len,
-                thumb_size: track_len,
-                thumb_offset: 0,
-            };
+            return Self { track_top: area.y, track_len, thumb_size: track_len, thumb_offset: 0 };
         }
         let thumb_size = rounding_divide(viewport_len * track_len_us, max_viewport_position)
             .clamp(1, track_len_us);
@@ -265,8 +261,7 @@ impl ScrollbarGeometry {
     /// The maximum y the thumb's first row can reach while staying inside
     /// the track.
     pub fn thumb_top_max(&self) -> u16 {
-        self.track_top
-            .saturating_add(self.track_len.saturating_sub(self.thumb_size))
+        self.track_top.saturating_add(self.track_len.saturating_sub(self.thumb_size))
     }
 }
 
@@ -302,9 +297,16 @@ impl ScrollbarDrag {
         begin_len: u16,
         end_len: u16,
     ) -> Option<f64> {
-        let Some(geometry) = (area.height > 0)
-            .then(|| ScrollbarGeometry::vertical(area, content_len, viewport_len, position, begin_len, end_len))
-        else {
+        let Some(geometry) = (area.height > 0).then(|| {
+            ScrollbarGeometry::vertical(
+                area,
+                content_len,
+                viewport_len,
+                position,
+                begin_len,
+                end_len,
+            )
+        }) else {
             return None;
         };
         if geometry.track_len == 0 || !is_scrollbar_interaction(event, area) {
@@ -340,9 +342,8 @@ impl ScrollbarDrag {
                     return Some(0.0);
                 }
                 Some(
-                    (f64::from(target_top.saturating_sub(geometry.track_top))
-                        / f64::from(travel))
-                    .clamp(0.0, 1.0),
+                    (f64::from(target_top.saturating_sub(geometry.track_top)) / f64::from(travel))
+                        .clamp(0.0, 1.0),
                 )
             }
             _ => {
@@ -373,10 +374,20 @@ mod tests {
         let scrollbar_area = Rect::new(10, 5, 1, 10);
         let scrollbar_x = scrollbar_area.right().saturating_sub(1); // x = 10
 
-        let click_event = MouseEvent { x: scrollbar_x, y: 7, kind: MouseEventKind::LeftClick , ..Default::default() };
+        let click_event = MouseEvent {
+            x: scrollbar_x,
+            y: 7,
+            kind: MouseEventKind::LeftClick,
+            ..Default::default()
+        };
         assert!(is_scrollbar_interaction(click_event, scrollbar_area,));
 
-        let click_event = MouseEvent { x: scrollbar_x + 1, y: 7, kind: MouseEventKind::LeftClick , ..Default::default() };
+        let click_event = MouseEvent {
+            x: scrollbar_x + 1,
+            y: 7,
+            kind: MouseEventKind::LeftClick,
+            ..Default::default()
+        };
         assert!(!is_scrollbar_interaction(click_event, scrollbar_area,));
 
         let drag_start = Position { x: scrollbar_x, y: 7 };
@@ -384,7 +395,7 @@ mod tests {
             x: scrollbar_x + 1,
             y: 9,
             kind: MouseEventKind::Drag { drag_start_position: drag_start },
-        modifiers: crossterm::event::KeyModifiers::NONE,
+            modifiers: crossterm::event::KeyModifiers::NONE,
         };
         assert!(is_scrollbar_interaction(drag_event, scrollbar_area));
 
@@ -393,7 +404,7 @@ mod tests {
             x: scrollbar_x + 1,
             y: 9,
             kind: MouseEventKind::Drag { drag_start_position: drag_start_off },
-        modifiers: crossterm::event::KeyModifiers::NONE,
+            modifiers: crossterm::event::KeyModifiers::NONE,
         };
         assert!(!is_scrollbar_interaction(drag_event, scrollbar_area));
 
@@ -401,7 +412,7 @@ mod tests {
             x: scrollbar_x,
             y: 9,
             kind: MouseEventKind::Drag { drag_start_position: drag_start },
-        modifiers: crossterm::event::KeyModifiers::NONE,
+            modifiers: crossterm::event::KeyModifiers::NONE,
         };
         assert!(is_scrollbar_interaction(drag_event, scrollbar_area));
     }
@@ -434,7 +445,9 @@ mod tests {
         let drag_event = MouseEvent {
             x: 10,
             y: geometry.thumb_top() + 2,
-            kind: MouseEventKind::Drag { drag_start_position: Position { x: 10, y: geometry.thumb_top() } },
+            kind: MouseEventKind::Drag {
+                drag_start_position: Position { x: 10, y: geometry.thumb_top() },
+            },
             modifiers: crossterm::event::KeyModifiers::NONE,
         };
         let frac = drag
@@ -446,7 +459,9 @@ mod tests {
         let bottom = MouseEvent {
             x: 10,
             y: 40,
-            kind: MouseEventKind::Drag { drag_start_position: Position { x: 10, y: geometry.thumb_top() } },
+            kind: MouseEventKind::Drag {
+                drag_start_position: Position { x: 10, y: geometry.thumb_top() },
+            },
             modifiers: crossterm::event::KeyModifiers::NONE,
         };
         assert_eq!(drag.handle(bottom, area, content_len, viewport_len, position, 1, 1), Some(1.0));
@@ -473,8 +488,8 @@ mod tests {
         let frac = drag
             .handle(click, area, content_len, viewport_len, position, 1, 1)
             .expect("track click jumps");
-        let expected = f64::from(geometry.track_top + travel / 2 - geometry.track_top)
-            / f64::from(travel);
+        let expected =
+            f64::from(geometry.track_top + travel / 2 - geometry.track_top) / f64::from(travel);
         assert!((frac - expected).abs() < 1e-9, "frac {frac}, expected {expected}");
     }
 }

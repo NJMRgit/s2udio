@@ -328,10 +328,9 @@ mod tests {
                 confirm_label: Some("OK"),
                 cancel_label: None,
                 on_confirm: Box::new(|ctx| {
-                    ctx.app_event_sender
-                        .send(crate::AppEvent::UiEvent(crate::ui::UiAppEvent::PopModal(
-                            crate::shared::id::new(),
-                        )))?;
+                    ctx.app_event_sender.send(crate::AppEvent::UiEvent(
+                        crate::ui::UiAppEvent::PopModal(crate::shared::id::new()),
+                    ))?;
                     Ok(())
                 }),
             })

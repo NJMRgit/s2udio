@@ -168,11 +168,15 @@ impl OnOffOneshot {
 
 impl std::fmt::Display for OnOffOneshot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", match self {
-            OnOffOneshot::On => "On",
-            OnOffOneshot::Off => "Off",
-            OnOffOneshot::Oneshot => "OS",
-        })?;
+        write!(
+            f,
+            "{}",
+            match self {
+                OnOffOneshot::On => "On",
+                OnOffOneshot::Off => "Off",
+                OnOffOneshot::Oneshot => "OS",
+            }
+        )?;
         Ok(())
     }
 }
@@ -192,11 +196,15 @@ impl std::str::FromStr for OnOffOneshot {
 
 impl std::fmt::Display for State {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", match self {
-            State::Play => "Playing",
-            State::Stop => "Stopped",
-            State::Pause => "Paused",
-        })
+        write!(
+            f,
+            "{}",
+            match self {
+                State::Play => "Playing",
+                State::Stop => "Stopped",
+                State::Pause => "Paused",
+            }
+        )
     }
 }
 impl std::str::FromStr for State {

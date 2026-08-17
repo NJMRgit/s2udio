@@ -3,8 +3,7 @@ use std::{fmt::Display, str::FromStr};
 use crossterm::event::{KeyCode, KeyEvent as CKeyEvent, KeyModifiers};
 use serde_with::{DeserializeFromStr, SerializeDisplay};
 use winnow::{
-    Parser,
-    Result,
+    Parser, Result,
     combinator::{alt, dispatch, empty, fail, opt, permutation, repeat, seq, trace},
     token::{any, literal},
 };
@@ -547,10 +546,7 @@ mod tests {
         assert_eq!(seq.to_string(), "<C-Tab>");
         // The modifier applies to the last key only (multi-key sequences).
         let seq = KeySequence::new().char('g').char('g').ctrl();
-        assert_eq!(
-            seq.0[1],
-            Key { key: KeyCode::Char('g'), modifiers: KeyModifiers::CONTROL }
-        );
+        assert_eq!(seq.0[1], Key { key: KeyCode::Char('g'), modifiers: KeyModifiers::CONTROL });
         assert_eq!(seq.0[0].modifiers, KeyModifiers::NONE);
     }
 }

@@ -12,10 +12,7 @@ use ratatui::{
 };
 
 use super::{
-    Section,
-    SectionType,
-    input_section::InputSection,
-    list_section::ListSection,
+    Section, SectionType, input_section::InputSection, list_section::ListSection,
     multi_action_section::MultiActionSection,
 };
 use crate::{
@@ -472,7 +469,6 @@ impl<'a> MenuModal<'a> {
         self
     }
 
-
     fn next(&mut self) {
         let result = self.sections[self.current_section_idx].down();
         if !result {
@@ -500,10 +496,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::{
-        config::keys::DirectoriesActions,
-        shared::keys::Actions,
-    };
+    use crate::{config::keys::DirectoriesActions, shared::keys::Actions};
 
     fn menu_with_items(ctx: &Ctx, labels: &[&str]) -> MenuModal<'static> {
         let labels = labels.to_vec();
@@ -553,9 +546,8 @@ mod tests {
         );
         let mut modal = menu_with_items(&ctx, &["Option one"]);
 
-        let mut action = ActionEvent::from(Arc::new(vec![Actions::Directories(
-            DirectoriesActions::PlayFile,
-        )]));
+        let mut action =
+            ActionEvent::from(Arc::new(vec![Actions::Directories(DirectoriesActions::PlayFile)]));
         modal.handle_key(&mut action, &mut ctx).unwrap();
 
         match app_rx.recv_timeout(std::time::Duration::from_millis(200)) {
@@ -581,8 +573,7 @@ mod tests {
         // The first item is highlighted after build().
         assert_eq!(modal.sections[0].selected(), Some(0));
 
-        let mut action =
-            ActionEvent::from(Arc::new(vec![Actions::Common(CommonAction::Down)]));
+        let mut action = ActionEvent::from(Arc::new(vec![Actions::Common(CommonAction::Down)]));
         modal.handle_key(&mut action, &mut ctx).unwrap();
         assert_eq!(modal.sections[0].selected(), Some(1), "s moves down");
 

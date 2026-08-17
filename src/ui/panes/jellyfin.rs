@@ -1,4 +1,7 @@
-use std::{collections::{HashMap, HashSet}, io::Write};
+use std::{
+    collections::{HashMap, HashSet},
+    io::Write,
+};
 
 use anyhow::Result;
 use ratatui::{
@@ -13,9 +16,7 @@ use ratatui::{
 use super::Pane;
 use crate::{
     MpdQueryResult,
-    config::{
-        tabs::{PaneType, PaneTypeDiscriminants, TreeBrowserArgs},
-    },
+    config::tabs::{PaneType, PaneTypeDiscriminants, TreeBrowserArgs},
     ctx::Ctx,
     jellyfin::{Jellyfin, JfItem},
     mpd::{commands::State, mpd_client::MpdClient},
@@ -220,7 +221,9 @@ impl JellyfinPane {
             let path = ctx.config.jellyfin.config_file.clone();
             let path_str = path.to_string_lossy().into_owned();
             let expanded = crate::config::utils::tilde_expand(&path_str);
-            if let Some(server) = Jellyfin::from_config_file(std::path::Path::new(expanded.as_ref())) {
+            if let Some(server) =
+                Jellyfin::from_config_file(std::path::Path::new(expanded.as_ref()))
+            {
                 self.server = Some(server);
             } else {
                 self.error = Some(format!(
@@ -284,9 +287,7 @@ impl JellyfinPane {
     /// Children of a node from whatever is loaded (None = still loading).
     fn children_of(&self, kind: &JfNodeKind) -> Option<Vec<JfItem>> {
         match kind {
-            JfNodeKind::View(item) if item.is_music_view => {
-                self.artists.get(&item.id).cloned()
-            }
+            JfNodeKind::View(item) if item.is_music_view => self.artists.get(&item.id).cloned(),
             JfNodeKind::View(item) => self.folders.get(&item.id).cloned(),
             JfNodeKind::Artist(item) => self.albums.get(&item.id).cloned(),
             JfNodeKind::Album(item) => self.songs.get(&item.id).cloned(),
@@ -302,12 +303,7 @@ impl JellyfinPane {
         for view in &self.views {
             let view_kind = JfNodeKind::View(view.clone());
             let expanded = self.expanded.contains(&view_kind.key());
-            tree.push(JfNode {
-                kind: view_kind.clone(),
-                depth: 0,
-                expandable: true,
-                expanded,
-            });
+            tree.push(JfNode { kind: view_kind.clone(), depth: 0, expandable: true, expanded });
             if !expanded {
                 continue;
             }
@@ -407,37 +403,28 @@ impl JellyfinPane {
                 .views
                 .iter()
                 .find(|view| {
-                    self.artists
-                        .get(&view.id)
-                        .is_some_and(|a| a.iter().any(|x| x.id == item.id))
+                    self.artists.get(&view.id).is_some_and(|a| a.iter().any(|x| x.id == item.id))
                 })
                 .cloned()
                 .map(JfNodeKind::View),
-            JfNodeKind::Album(item) => self
-                .views
-                .iter()
-                .find_map(|view| {
-                    self.artists.get(&view.id).into_iter().flatten().find_map(|artist| {
-                        self.albums
-                            .get(&artist.id)
-                            .is_some_and(|al| al.iter().any(|x| x.id == item.id))
-                            .then(|| JfNodeKind::Artist(artist.clone()))
-                    })
-                }),
+            JfNodeKind::Album(item) => self.views.iter().find_map(|view| {
+                self.artists.get(&view.id).into_iter().flatten().find_map(|artist| {
+                    self.albums
+                        .get(&artist.id)
+                        .is_some_and(|al| al.iter().any(|x| x.id == item.id))
+                        .then(|| JfNodeKind::Artist(artist.clone()))
+                })
+            }),
             JfNodeKind::Folder(item) => {
                 // Any children list (a view's or a folder's) containing the
                 // item names its parent.
                 for (parent_id, kids) in &self.folders {
                     if kids.iter().any(|x| x.id == item.id) {
-                        if let Some(view) =
-                            self.views.iter().find(|v| v.id == *parent_id)
-                        {
+                        if let Some(view) = self.views.iter().find(|v| v.id == *parent_id) {
                             return Some(JfNodeKind::View(view.clone()));
                         }
                         for kids in self.folders.values() {
-                            if let Some(folder) =
-                                kids.iter().find(|x| x.id == *parent_id)
-                            {
+                            if let Some(folder) = kids.iter().find(|x| x.id == *parent_id) {
                                 return Some(JfNodeKind::Folder(folder.clone()));
                             }
                         }
@@ -451,11 +438,7 @@ impl JellyfinPane {
     /// Highlight `id` in the right pane (the row we came from when backing
     /// out), falling back to the first row.
     fn select_items_item(&mut self, id: &str) {
-        let idx = self
-            .items
-            .iter()
-            .position(|item| item.id == id)
-            .unwrap_or(0);
+        let idx = self.items.iter().position(|item| item.id == id).unwrap_or(0);
         if !self.items.is_empty() {
             self.item_list.select(Some(idx));
         }
@@ -478,7 +461,6 @@ impl JellyfinPane {
             self.tree_list.select(Some(idx));
         }
     }
-
 
     fn select_node(&mut self, kind: &JfNodeKind, ctx: &Ctx) -> Result<()> {
         self.selected = Some(kind.clone());
@@ -506,9 +488,11 @@ impl JellyfinPane {
             JfNodeKind::View(_) => {}
             JfNodeKind::Artist(item) => {
                 for view in &self.views {
-                    if self.artists.get(&view.id).is_some_and(|a| {
-                        a.iter().any(|artist| artist.id == item.id)
-                    }) {
+                    if self
+                        .artists
+                        .get(&view.id)
+                        .is_some_and(|a| a.iter().any(|artist| artist.id == item.id))
+                    {
                         keys.push(JfNodeKind::View(view.clone()).key());
                         break;
                     }
@@ -517,9 +501,11 @@ impl JellyfinPane {
             JfNodeKind::Album(item) => {
                 'outer: for view in &self.views {
                     for artist in self.artists.get(&view.id).into_iter().flatten() {
-                        if self.albums.get(&artist.id).is_some_and(|albums| {
-                            albums.iter().any(|album| album.id == item.id)
-                        }) {
+                        if self
+                            .albums
+                            .get(&artist.id)
+                            .is_some_and(|albums| albums.iter().any(|album| album.id == item.id))
+                        {
                             keys.push(JfNodeKind::Artist(artist.clone()).key());
                             keys.push(JfNodeKind::View(view.clone()).key());
                             break 'outer;
@@ -595,11 +581,8 @@ impl JellyfinPane {
             self.poster.clear(ctx);
             self.poster.item_id = Some(target.id.clone());
             // A season without its own poster falls back to its series'.
-            self.poster.fallback_id = if target.kind == "Season" {
-                target.series_id.clone()
-            } else {
-                None
-            };
+            self.poster.fallback_id =
+                if target.kind == "Season" { target.series_id.clone() } else { None };
             let _ = ctx
                 .work_sender
                 .send(WorkRequest::FetchJellyfinImage {
@@ -630,17 +613,10 @@ impl JellyfinPane {
         Ok(())
     }
 
-
-
-
     /// The stream URL for an item id (audio vs video endpoint).
     fn stream_url(&self, item: &JfItem) -> Option<String> {
         self.server.as_ref().map(|s| {
-            if item.is_audio() {
-                s.stream_url(&item.id)
-            } else {
-                s.video_stream_url(&item.id)
-            }
+            if item.is_audio() { s.stream_url(&item.id) } else { s.video_stream_url(&item.id) }
         })
     }
 
@@ -788,8 +764,6 @@ impl JellyfinPane {
         Ok(())
     }
 
-
-
     /// Play the highlighted item. Audio plays through MPD (temporary entry,
     /// like radio stations); video launches per the configured playback mode
     /// (mpv / MPD audio / ask).
@@ -818,7 +792,12 @@ impl JellyfinPane {
         }
         if let Some(url) = self.stream_url(&item) {
             if item.is_audio() {
-                self.play_temp_url(ctx, JF_PLAY, PaneType::Jellyfin { tree: TreeBrowserArgs::default() }, url);
+                self.play_temp_url(
+                    ctx,
+                    JF_PLAY,
+                    PaneType::Jellyfin { tree: TreeBrowserArgs::default() },
+                    url,
+                );
                 status_info!("Playing {}", item.name);
             } else {
                 Self::play_video(
@@ -833,10 +812,7 @@ impl JellyfinPane {
         Ok(())
     }
 
-
     /// Drop the temporary play song once playback has moved on.
-
-
 
     /// Second (dim) line of an item row.
     fn item_subline(item: &JfItem) -> String {
@@ -896,9 +872,6 @@ impl JellyfinPane {
         }
         parts.join(" · ")
     }
-
-
-
 }
 
 impl JellyfinPane {
@@ -1077,11 +1050,7 @@ impl TreeBrowserCore for JellyfinPane {
 
     fn activate_selected(&mut self, ctx: &Ctx) -> Result<()> {
         let Some(item) = self.selected_item() else { return Ok(()) };
-        if item.is_playable() {
-            self.play_selected(ctx)
-        } else {
-            self.open_item(item, ctx)
-        }
+        if item.is_playable() { self.play_selected(ctx) } else { self.open_item(item, ctx) }
     }
 
     fn open_context_menu(&mut self, ctx: &Ctx) -> Result<()> {
@@ -1135,10 +1104,7 @@ impl TreeBrowserCore for JellyfinPane {
                 }
                 section = section.item("Add to queue", move |ctx| {
                     ctx.command(move |client| {
-                        client.add(
-                            &add_url,
-                            Some(crate::mpd::QueuePosition::RelativeAdd(0)),
-                        )?;
+                        client.add(&add_url, Some(crate::mpd::QueuePosition::RelativeAdd(0)))?;
                         Ok(())
                     });
                     Ok(())
@@ -1164,11 +1130,9 @@ impl TreeBrowserCore for JellyfinPane {
         let bold = ratatui::style::Style::default().add_modifier(Modifier::BOLD);
         // Explicit ANSI white, independent of the theme/blur accent.
         let white = ratatui::style::Style::default().fg(Color::White);
-        let base = ctx
-            .config
-            .theme
-            .text_color
-            .map_or_else(ratatui::style::Style::default, |c| ratatui::style::Style::default().fg(c));
+        let base = ctx.config.theme.text_color.map_or_else(ratatui::style::Style::default, |c| {
+            ratatui::style::Style::default().fg(c)
+        });
         let dim = base.add_modifier(Modifier::DIM);
         // Fixed header rows (title + time, episode, Description ↴), a
         // scrollable overview body, and the credits pinned at the bottom —
@@ -1189,9 +1153,9 @@ impl TreeBrowserCore for JellyfinPane {
         // box) is fetched when the selection changes and used once it
         // arrives.
         let selected = self.selected_item();
-        let display_item: Option<JfItem> = selected.clone().map(|item| {
-            self.full_item.clone().filter(|f| f.id == item.id).unwrap_or(item)
-        });
+        let display_item: Option<JfItem> = selected
+            .clone()
+            .map(|item| self.full_item.clone().filter(|f| f.id == item.id).unwrap_or(item));
         let video_layout = display_item
             .as_ref()
             .is_some_and(|item| matches!(item.kind.as_str(), "Movie" | "Episode"));
@@ -1213,19 +1177,14 @@ impl TreeBrowserCore for JellyfinPane {
                     None => header_title = Some(name),
                 }
                 if let Some(secs) = item.runtime_secs {
-                    header_time = format!(
-                        "Time: {}",
-                        crate::ui::panes::lyrics::format_clock(secs)
-                    );
+                    header_time = format!("Time: {}", crate::ui::panes::lyrics::format_clock(secs));
                 }
                 if item.kind == "Episode" {
                     // The episode row follows the theme color (the accent),
                     // like the queue tab's video info box.
                     header_episode_left.push(Span::styled("Episode: ", base));
                     header_episode_left.push(Span::styled(item.name.clone(), base));
-                    if let (Some(season), Some(episode)) =
-                        (item.season_number, item.index_number)
-                    {
+                    if let (Some(season), Some(episode)) = (item.season_number, item.index_number) {
                         header_episode_right
                             .push(Span::styled(format!("S{season:02}E{episode:02}"), base));
                     }
@@ -1238,9 +1197,8 @@ impl TreeBrowserCore for JellyfinPane {
                     // The text renders in the right 60% of the box (the
                     // poster takes the left 40%): wrap to that width so
                     // lines are not clipped.
-                    let text_width = (((area.width.saturating_sub(2)) * 3 / 5)
-                        .saturating_sub(3))
-                    .max(10) as usize;
+                    let text_width = (((area.width.saturating_sub(2)) * 3 / 5).saturating_sub(3))
+                        .max(10) as usize;
                     for line in crate::ui::widgets::wrap::wrap_to_width(
                         &crate::ui::panes::lyrics::scrub_emoji(overview),
                         text_width,
@@ -1391,10 +1349,9 @@ impl TreeBrowserCore for JellyfinPane {
             .as_ref()
             .is_some_and(|item| matches!(item.kind.as_str(), "CollectionFolder" | "Season"))
             || (selected.is_none()
-                && self
-                    .selected
-                    .as_ref()
-                    .is_some_and(|k| matches!(k.item().kind.as_str(), "CollectionFolder" | "Season")));
+                && self.selected.as_ref().is_some_and(|k| {
+                    matches!(k.item().kind.as_str(), "CollectionFolder" | "Season")
+                }));
         if image_only {
             if !self.is_modal_open {
                 self.poster.draw(inner, ctx);
@@ -1408,11 +1365,9 @@ impl TreeBrowserCore for JellyfinPane {
         // below. Drawn as a terminal-side overlay (Block backend) that
         // persists between frames; re-encoded only when the area changes.
         // Poster on the left, scrolling info text on the right.
-        let [poster_area, text_area] = Layout::horizontal([
-            Constraint::Percentage(40),
-            Constraint::Percentage(60),
-        ])
-        .areas(inner);
+        let [poster_area, text_area] =
+            Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)])
+                .areas(inner);
         // The poster is a terminal-side overlay: never draw it while a
         // modal (settings panel, ...) is on top of the tab.
         if !self.is_modal_open {
@@ -1425,49 +1380,39 @@ impl TreeBrowserCore for JellyfinPane {
             + usize::from(!header_episode_left.is_empty() || !header_episode_right.is_empty())
             + usize::from(header_desc);
         let credits_h = credits.len();
-        let (header_area, body_area, credits_area) = if header_h > 0
-            && header_h + credits_h < text_area.height as usize
-        {
-            let [a, b, c] = Layout::vertical([
-                Constraint::Length(header_h as u16),
-                Constraint::Min(0),
-                Constraint::Length(credits_h as u16),
-            ])
-            .areas(text_area);
-            (a, b, c)
-        } else {
-            (Rect::default(), text_area, Rect::default())
-        };
+        let (header_area, body_area, credits_area) =
+            if header_h > 0 && header_h + credits_h < text_area.height as usize {
+                let [a, b, c] = Layout::vertical([
+                    Constraint::Length(header_h as u16),
+                    Constraint::Min(0),
+                    Constraint::Length(credits_h as u16),
+                ])
+                .areas(text_area);
+                (a, b, c)
+            } else {
+                (Rect::default(), text_area, Rect::default())
+            };
 
         if header_h > 0 && header_area.height > 0 {
             // Title row: the "year -- " prefix fixed, the name
             // marquee-scrolled; the time bold and right-aligned with a gap.
             let time_w = (header_time.chars().count() + 4) as u16;
             let (title_area, time_area) = {
-                let [a, b] = Layout::horizontal([
-                    Constraint::Min(0),
-                    Constraint::Length(time_w),
-                ])
-                .areas(header_area);
+                let [a, b] = Layout::horizontal([Constraint::Min(0), Constraint::Length(time_w)])
+                    .areas(header_area);
                 (a, b)
             };
             let prefix = header_prefix.unwrap_or_default();
             let prefix_w = prefix.chars().count() as u16;
             let (prefix_area, marquee_area) = if prefix_w > 0 && prefix_w < title_area.width {
-                let [a, b] = Layout::horizontal([
-                    Constraint::Length(prefix_w),
-                    Constraint::Min(0),
-                ])
-                .areas(title_area);
+                let [a, b] = Layout::horizontal([Constraint::Length(prefix_w), Constraint::Min(0)])
+                    .areas(title_area);
                 (a, b)
             } else {
                 (Rect::default(), title_area)
             };
             if prefix_w > 0 {
-                frame.render_widget(
-                    Paragraph::new(Span::styled(prefix, base)),
-                    prefix_area,
-                );
+                frame.render_widget(Paragraph::new(Span::styled(prefix, base)), prefix_area);
             }
             let title = header_title.unwrap_or_default();
             // The marquee applies only when the title does not fit the area
@@ -1476,10 +1421,8 @@ impl TreeBrowserCore for JellyfinPane {
             // then wrap around (never reversing).
             let title_len = title.chars().count() as u16;
             let offset = if title_len > marquee_area.width {
-                let elapsed_ms = self
-                    .info_song_shown_at
-                    .map(|t| t.elapsed().as_millis())
-                    .unwrap_or(0) as u64;
+                let elapsed_ms =
+                    self.info_song_shown_at.map(|t| t.elapsed().as_millis()).unwrap_or(0) as u64;
                 crate::ui::widgets::marquee::marquee_offset(
                     elapsed_ms,
                     title_len,
@@ -1513,16 +1456,10 @@ impl TreeBrowserCore for JellyfinPane {
                 };
                 // "Episode: <name>" left, "S03E03" right-aligned under the
                 // time (same right column as the title row).
-                let [left_area, right_area] = Layout::horizontal([
-                    Constraint::Min(0),
-                    Constraint::Length(time_w),
-                ])
-                .areas(row);
+                let [left_area, right_area] =
+                    Layout::horizontal([Constraint::Min(0), Constraint::Length(time_w)]).areas(row);
                 if !header_episode_left.is_empty() {
-                    frame.render_widget(
-                        Paragraph::new(Line::from(header_episode_left)),
-                        left_area,
-                    );
+                    frame.render_widget(Paragraph::new(Line::from(header_episode_left)), left_area);
                 }
                 if !header_episode_right.is_empty() {
                     frame.render_widget(
@@ -1577,9 +1514,7 @@ impl TreeBrowserCore for JellyfinPane {
             {
                 let _ = ctx
                     .work_sender
-                    .send(crate::shared::events::WorkRequest::FetchJellyfinItem {
-                        item_id: id,
-                    });
+                    .send(crate::shared::events::WorkRequest::FetchJellyfinItem { item_id: id });
             }
         }
         if rows.is_empty() || body_area.height == 0 {
@@ -1589,14 +1524,10 @@ impl TreeBrowserCore for JellyfinPane {
             return;
         }
         let overflow = rows.len() > body_area.height as usize;
-        let (list_area, scrollbar_area) = if overflow
-            && ctx.config.as_styled_scrollbar().is_some()
+        let (list_area, scrollbar_area) = if overflow && ctx.config.as_styled_scrollbar().is_some()
         {
-            let [a, b] = Layout::horizontal([
-                Constraint::Percentage(100),
-                Constraint::Length(1),
-            ])
-            .areas(body_area);
+            let [a, b] = Layout::horizontal([Constraint::Percentage(100), Constraint::Length(1)])
+                .areas(body_area);
             (a, b)
         } else {
             (body_area, Rect::default())
@@ -1665,10 +1596,7 @@ impl TreeBrowserCore for JellyfinPane {
                 Span::styled("w/s · ↑/↓", base),
                 Span::styled("  libraries · items", dim),
             ]),
-            Line::from(vec![
-                Span::styled("d / a", base),
-                Span::styled("  expand · collapse", dim),
-            ]),
+            Line::from(vec![Span::styled("d / a", base), Span::styled("  expand · collapse", dim)]),
             Line::from(vec![
                 Span::styled("Enter · →", base),
                 Span::styled("  play track · open", dim),
@@ -1898,7 +1826,8 @@ impl Pane for JellyfinPane {
                     if ctx.mpv.active && ctx.mpv.item_id.as_deref() == Some(item_id.as_str()) {
                         ctx.chapters.borrow_mut().insert(item_id, chapters);
                     } else if let Some((_, song)) = ctx.find_current_song_in_queue()
-                        && crate::jellyfin::item_id_from_url(&song.file).as_deref() == Some(&item_id)
+                        && crate::jellyfin::item_id_from_url(&song.file).as_deref()
+                            == Some(&item_id)
                     {
                         ctx.chapters.borrow_mut().insert(song.file.clone(), chapters);
                         // The current song just gained markers: auto-open
@@ -1992,11 +1921,15 @@ impl Pane for JellyfinPane {
 /// the Ask menu's "Play audio with MPD" option, where the pane itself cannot
 /// be borrowed (the menu stores the closure for later).
 fn jellyfin_play_temp(ctx: &Ctx, url: String) {
-    ctx.query().id(JF_PLAY).replace_id(JF_PLAY).target(PaneType::Jellyfin { tree: TreeBrowserArgs::default() }).query(move |client| {
-        let id = client.add_id(&url, None)?;
-        client.play_id(id)?;
-        Ok(MpdQueryResult::Any(Box::new(id)))
-    });
+    ctx.query()
+        .id(JF_PLAY)
+        .replace_id(JF_PLAY)
+        .target(PaneType::Jellyfin { tree: TreeBrowserArgs::default() })
+        .query(move |client| {
+            let id = client.add_id(&url, None)?;
+            client.play_id(id)?;
+            Ok(MpdQueryResult::Any(Box::new(id)))
+        });
 }
 
 /// Poster / episode preview of the selected item, drawn as a terminal-side
@@ -2051,7 +1984,15 @@ impl JfPoster {
             crate::config::album_art::ImageMethod::Block => PosterBackend::Block(ImageBlock),
             crate::config::album_art::ImageMethod::None => PosterBackend::None,
         };
-        Self { backend, bytes: None, item_id: None, fallback_id: None, drawn_area: None, pending: None, pending_area: None }
+        Self {
+            backend,
+            bytes: None,
+            item_id: None,
+            fallback_id: None,
+            drawn_area: None,
+            pending: None,
+            pending_area: None,
+        }
     }
 
     /// Clear the current poster: hide the overlay and drop the bytes (used
@@ -2148,9 +2089,7 @@ impl JfPoster {
         let w = w.by_ref();
         match (&mut self.backend, data) {
             (PosterBackend::Kitty(b), EncodeData::Kitty(d)) => b.display(w, d, ctx).is_ok(),
-            (PosterBackend::Ueberzug(b), EncodeData::Ueberzug(d)) => {
-                b.display(w, d, ctx).is_ok()
-            }
+            (PosterBackend::Ueberzug(b), EncodeData::Ueberzug(d)) => b.display(w, d, ctx).is_ok(),
             (PosterBackend::Iterm2(b), EncodeData::Iterm2(d)) => b.display(w, d, ctx).is_ok(),
             (PosterBackend::Sixel(b), EncodeData::Sixel(d)) => b.display(w, d, ctx).is_ok(),
             (PosterBackend::Block(b), EncodeData::Block(d)) => b.display(w, d, ctx).is_ok(),
@@ -2231,15 +2170,19 @@ mod tests {
     use super::*;
     use crate::{
         MpdQueryResult,
+        config::keys::{CommonAction, DirectoriesActions},
         jellyfin::JellyfinResult,
         shared::events::WorkRequest,
+        shared::keys::{ActionEvent, Actions},
     };
 
     fn render_text(pane: &mut JellyfinPane, ctx: &crate::ctx::Ctx) -> String {
         let backend = ratatui::backend::TestBackend::new(100, 40);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
         terminal
-            .draw(|frame| pane.render(frame, ratatui::prelude::Rect::new(0, 0, 100, 40), ctx).unwrap())
+            .draw(|frame| {
+                pane.render(frame, ratatui::prelude::Rect::new(0, 0, 100, 40), ctx).unwrap()
+            })
             .unwrap();
         let buf = terminal.backend().buffer();
         (0..40u16)
@@ -2261,10 +2204,7 @@ mod tests {
             (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
         );
         let mut pane = JellyfinPane::new(&ctx);
-        pane.tree_args = TreeBrowserArgs {
-            tree_min_width: 60,
-            ..TreeBrowserArgs::default()
-        };
+        pane.tree_args = TreeBrowserArgs { tree_min_width: 60, ..TreeBrowserArgs::default() };
         let (tree, _right) = pane.split_tree(ratatui::prelude::Rect::new(0, 0, 160, 30));
         assert_eq!(tree.width, 60, "tree_min_width: 60 widens the tree at 160 cols");
         let (tree, _right) = pane.split_tree(ratatui::prelude::Rect::new(0, 0, 100, 30));
@@ -2543,11 +2483,7 @@ mod tests {
         pane.rebuild_tree();
         pane.move_items(1, &ctx).unwrap();
         assert_eq!(pane.items[0].id, "anim");
-        assert_eq!(
-            pane.item_list.selected(),
-            Some(1),
-            "cursor moved to the second library"
-        );
+        assert_eq!(pane.item_list.selected(), Some(1), "cursor moved to the second library");
         assert_eq!(pane.tree_list.selected(), Some(1), "tree follows the library cursor");
         pane.move_items(-1, &ctx).unwrap();
         assert_eq!(pane.tree_list.selected(), Some(0), "tree follows back");
@@ -2617,6 +2553,60 @@ mod tests {
         assert_eq!(pane.items.len(), 2);
     }
 
+    /// Regression: since rounds 35-41 bound `d`/`a` (and round 34 `→`) to
+    /// lyrics-edit-mode common actions, the key trie resolves those keys to
+    /// BOTH a Common and a Directories action. The Jellyfin browser must
+    /// still run the directories half (`d`/`→` → open/play, `a` → back out)
+    /// instead of swallowing the keypress on the unhandled common half.
+    #[test]
+    fn shared_lyrics_keys_still_drive_the_jellyfin_browser() {
+        let (app_tx, _app_rx) = crossbeam::channel::unbounded();
+        let mut ctx = crate::tests::fixtures::ctx(
+            (app_tx, _app_rx),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+        );
+        let mut pane = JellyfinPane::new(&ctx);
+
+        let animation = crate::jellyfin::JfItem {
+            id: "anim".to_owned(),
+            name: "Animation".to_owned(),
+            kind: "CollectionFolder".to_owned(),
+            ..Default::default()
+        };
+        let futurama = crate::jellyfin::JfItem {
+            id: "futu".to_owned(),
+            name: "Futurama".to_owned(),
+            kind: "Series".to_owned(),
+            ..Default::default()
+        };
+        pane.views = vec![animation.clone()];
+        pane.folders.insert("anim".to_owned(), vec![futurama.clone()]);
+        pane.selected = None;
+        pane.populate_items();
+        pane.item_list.select(Some(0));
+
+        // `d` = [Common(LyricsDeleteWord), Directories(FolderExpand)]:
+        // opens the library.
+        let mut ev = ActionEvent::from(std::sync::Arc::new(vec![
+            Actions::Common(CommonAction::LyricsDeleteWord),
+            Actions::Directories(DirectoriesActions::FolderExpand),
+        ]));
+        pane.handle_action(&mut ev, &mut ctx).unwrap();
+        assert_eq!(pane.selected.as_ref().unwrap().id(), "anim", "`d` opens the library");
+        assert_eq!(pane.items[0].id, "futu", "a library shows its shows");
+
+        // `a` = [Common(LyricsInsertAfter), Directories(FolderCollapse)]:
+        // backs out to the root.
+        let mut ev = ActionEvent::from(std::sync::Arc::new(vec![
+            Actions::Common(CommonAction::LyricsInsertAfter),
+            Actions::Directories(DirectoriesActions::FolderCollapse),
+        ]));
+        pane.handle_action(&mut ev, &mut ctx).unwrap();
+        assert!(pane.selected.is_none(), "`a` backs out to the root");
+        assert_eq!(pane.items.len(), 1, "root lists the libraries again");
+    }
+
     /// The left library-tree pane mirrors the MPD folder tree's width
     /// behavior: hidden entirely on TUIs ≤ 120 columns wide (the items
     /// pane gets the whole area and scroll lands on it), and a 50-column
@@ -2651,9 +2641,15 @@ mod tests {
         let backend = ratatui::backend::TestBackend::new(80, 30);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
         terminal
-            .draw(|frame| pane.render(frame, ratatui::prelude::Rect::new(0, 0, 80, 30), &ctx).unwrap())
+            .draw(|frame| {
+                pane.render(frame, ratatui::prelude::Rect::new(0, 0, 80, 30), &ctx).unwrap()
+            })
             .unwrap();
-        assert_eq!(pane.tree_area, ratatui::prelude::Rect::default(), "tree not rendered on a narrow TUI");
+        assert_eq!(
+            pane.tree_area,
+            ratatui::prelude::Rect::default(),
+            "tree not rendered on a narrow TUI"
+        );
         // The items pane spans the whole width (x=1 is its border offset).
         assert_eq!(pane.items_area.x, 1, "items pane starts at the left edge");
         assert_eq!(pane.items_area.width, 78, "items pane takes the whole width");
@@ -2692,11 +2688,12 @@ mod tests {
         let backend = ratatui::backend::TestBackend::new(160, 30);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
         terminal
-            .draw(|frame| pane.render(frame, ratatui::prelude::Rect::new(0, 0, 160, 30), &ctx).unwrap())
+            .draw(|frame| {
+                pane.render(frame, ratatui::prelude::Rect::new(0, 0, 160, 30), &ctx).unwrap()
+            })
             .unwrap();
         assert_eq!(
-            pane.tree_area.width,
-            48,
+            pane.tree_area.width, 48,
             "50-col tree pane minus its 2 border columns: {:?}",
             pane.tree_area
         );
@@ -2717,9 +2714,24 @@ mod tests {
         );
         let mut pane = JellyfinPane::new(&ctx);
         pane.items = vec![
-            crate::jellyfin::JfItem { id: "i1".to_owned(), name: "One".to_owned(), kind: "Episode".to_owned(), ..Default::default() },
-            crate::jellyfin::JfItem { id: "i2".to_owned(), name: "Two".to_owned(), kind: "Episode".to_owned(), ..Default::default() },
-            crate::jellyfin::JfItem { id: "i3".to_owned(), name: "Three".to_owned(), kind: "Episode".to_owned(), ..Default::default() },
+            crate::jellyfin::JfItem {
+                id: "i1".to_owned(),
+                name: "One".to_owned(),
+                kind: "Episode".to_owned(),
+                ..Default::default()
+            },
+            crate::jellyfin::JfItem {
+                id: "i2".to_owned(),
+                name: "Two".to_owned(),
+                kind: "Episode".to_owned(),
+                ..Default::default()
+            },
+            crate::jellyfin::JfItem {
+                id: "i3".to_owned(),
+                name: "Three".to_owned(),
+                kind: "Episode".to_owned(),
+                ..Default::default()
+            },
         ];
         let text = render_text(&mut pane, &ctx);
         assert!(

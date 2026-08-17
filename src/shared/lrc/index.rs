@@ -237,14 +237,17 @@ mod tests {
         offset: Option<i64>,
         path: Option<&str>,
     ) -> (PathBuf, LrcMetadata) {
-        (path.map(PathBuf::from).unwrap_or_default(), LrcMetadata {
-            title: title.map(|v| v.to_owned()),
-            artist: artist.map(|v| v.to_owned()),
-            album: album.map(|v| v.to_owned()),
-            author: author.map(|v| v.to_owned()),
-            length,
-            offset,
-        })
+        (
+            path.map(PathBuf::from).unwrap_or_default(),
+            LrcMetadata {
+                title: title.map(|v| v.to_owned()),
+                artist: artist.map(|v| v.to_owned()),
+                album: album.map(|v| v.to_owned()),
+                author: author.map(|v| v.to_owned()),
+                length,
+                offset,
+            },
+        )
     }
 
     #[test]

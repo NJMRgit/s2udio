@@ -103,8 +103,8 @@ impl KeyResolver {
                     // then Repeat events while held). Single-step actions
                     // (tab navigation: Tab / Shift+Q / Shift+E) must fire
                     // once per press-hold, so swallow the repeats.
-                    let repeat = kind == KeyEventKind::Repeat
-                        && action.iter().any(|a| a.steps_once());
+                    let repeat =
+                        kind == KeyEventKind::Repeat && action.iter().any(|a| a.steps_once());
                     if !repeat {
                         self.execute_action(action, ctx);
                     }

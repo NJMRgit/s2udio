@@ -13,14 +13,16 @@ use crate::{
         commands::Song,
         mpd_client::{Filter, MpdClient, Tag},
     },
-    shared::{cmp::StringCompare, keys::ActionEvent, mouse_event::MouseEvent, mpd_client_ext::Enqueue},
+    shared::{
+        cmp::StringCompare, keys::ActionEvent, mouse_event::MouseEvent, mpd_client_ext::Enqueue,
+    },
     ui::{
         UiEvent,
         browser::BrowserPane,
         dir_or_song::DirOrSong,
-        song_list::SongListCore,
         dirstack::{Dir, DirStack, DirStackItem},
         input::InputResultEvent,
+        song_list::SongListCore,
         widgets::browser::{Browser, BrowserArea},
     },
 };
@@ -160,7 +162,10 @@ impl SongListCore<DirOrSong, ListState> for AlbumsPane {
         BrowserPane::fetch_data_internal(self, ctx)
     }
 
-    fn enqueue<'a>(&self, items: impl Iterator<Item = &'a DirOrSong>) -> (Vec<Enqueue>, Option<usize>) {
+    fn enqueue<'a>(
+        &self,
+        items: impl Iterator<Item = &'a DirOrSong>,
+    ) -> (Vec<Enqueue>, Option<usize>) {
         BrowserPane::enqueue(self, items)
     }
 

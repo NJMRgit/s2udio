@@ -70,7 +70,6 @@ fn filter_button_label(raw: &str, row_width: u16) -> String {
     }
 }
 
-
 #[derive(derive_more::Debug)]
 #[allow(clippy::struct_excessive_bools)]
 pub(super) struct InputGroups {
@@ -590,13 +589,7 @@ pub(super) struct ButtonInput {
 }
 
 impl InputGroups {
-    pub fn render(
-        &mut self,
-        mut area: Rect,
-        buf: &mut Buffer,
-        ctx: &Ctx,
-        pane_focused: bool,
-    ) {
+    pub fn render(&mut self, mut area: Rect, buf: &mut Buffer, ctx: &Ctx, pane_focused: bool) {
         self.area = area;
         // The colon column aligns to the longest filter category among the
         // rows that are actually rendered (buttons and separators have no
@@ -653,15 +646,9 @@ impl InputGroups {
                             .input_style(self.text_style)
                             .build()
                     } else if mouse_hovered {
-                        widget
-                            .label_style(hover_style)
-                            .input_style(hover_style)
-                            .build()
+                        widget.label_style(hover_style).input_style(hover_style).build()
                     } else if is_focused {
-                        widget
-                            .label_style(focus_style)
-                            .input_style(focus_style)
-                            .build()
+                        widget.label_style(focus_style).input_style(focus_style).build()
                     } else {
                         widget.label_style(self.text_style).input_style(self.text_style).build()
                     };
@@ -683,15 +670,9 @@ impl InputGroups {
                             .input_style(self.text_style)
                             .build()
                     } else if mouse_hovered {
-                        widget
-                            .label_style(hover_style)
-                            .input_style(hover_style)
-                            .build()
+                        widget.label_style(hover_style).input_style(hover_style).build()
                     } else if is_focused {
-                        widget
-                            .label_style(focus_style)
-                            .input_style(focus_style)
-                            .build()
+                        widget.label_style(focus_style).input_style(focus_style).build()
                     } else {
                         widget.label_style(self.text_style).input_style(self.text_style).build()
                     };
@@ -719,20 +700,13 @@ impl InputGroups {
                         LIKE_KEY => self.liked_mode.into(),
                         _ => "",
                     };
-                    let inp = Input::new_static()
-                        .ctx(ctx)
-                        .text(text)
-                        .borderless(true)
-                        .label(&label);
+                    let inp =
+                        Input::new_static().ctx(ctx).text(text).borderless(true).label(&label);
 
                     let inp = if mouse_hovered {
-                        inp.label_style(hover_style)
-                            .input_style(hover_style)
-                            .call()
+                        inp.label_style(hover_style).input_style(hover_style).call()
                     } else if is_focused {
-                        inp.label_style(focus_style)
-                            .input_style(focus_style)
-                            .call()
+                        inp.label_style(focus_style).input_style(focus_style).call()
                     } else {
                         inp.label_style(self.text_style).input_style(self.text_style).call()
                     };

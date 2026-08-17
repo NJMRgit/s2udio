@@ -2,7 +2,10 @@ mod edit;
 mod index;
 mod lyrics;
 
-use std::{path::{Path, PathBuf}, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use anyhow::{Context, Result, bail};
 pub use edit::{EditableLine, LrcEditSession};

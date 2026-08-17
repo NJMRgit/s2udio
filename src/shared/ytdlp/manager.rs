@@ -10,8 +10,7 @@ use crate::{
         id::{self, Id},
         macros::{status_error, status_info},
         ytdlp::{
-            YtDlpDownloadError,
-            YtDlpDownloadResult,
+            YtDlpDownloadError, YtDlpDownloadResult,
             error::YtDlpParseError,
             ytdlp_item::{YtDlpContent, YtDlpItem},
         },
@@ -181,23 +180,29 @@ impl YtDlpManager {
     }
 
     pub fn queue_download(&self, item: YtDlpItem, position: Option<QueuePosition>) {
-        self.queue.borrow_mut().insert(DownloadId::new(), QueuedYtDlpItem {
-            state: DownloadState::Queued,
-            add_position: position,
-            inner: item,
-            spec: None,
-        });
+        self.queue.borrow_mut().insert(
+            DownloadId::new(),
+            QueuedYtDlpItem {
+                state: DownloadState::Queued,
+                add_position: position,
+                inner: item,
+                spec: None,
+            },
+        );
     }
 
     /// Queue a stream download (a `s2udio-downloads` save-as) and start it
     /// if nothing else is downloading.
     pub fn queue_stream_download(&self, item: YtDlpItem, spec: StreamDownloadSpec) {
-        self.queue.borrow_mut().insert(DownloadId::new(), QueuedYtDlpItem {
-            state: DownloadState::Queued,
-            add_position: None,
-            inner: item,
-            spec: Some(spec),
-        });
+        self.queue.borrow_mut().insert(
+            DownloadId::new(),
+            QueuedYtDlpItem {
+                state: DownloadState::Queued,
+                add_position: None,
+                inner: item,
+                spec: Some(spec),
+            },
+        );
         self.download_next();
     }
 

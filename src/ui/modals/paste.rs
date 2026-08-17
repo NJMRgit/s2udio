@@ -17,7 +17,10 @@
 use anyhow::Result;
 
 use crate::{
-    config::{tabs::{PaneType, TreeBrowserArgs}, utils::tilde_expand},
+    config::{
+        tabs::{PaneType, TreeBrowserArgs},
+        utils::tilde_expand,
+    },
     ctx::Ctx,
     mpd::{QueuePosition, mpd_client::MpdClient},
     shared::{
@@ -112,14 +115,14 @@ impl PastedItem {
 
 /// File extensions considered audio (lowercase, no dot).
 const AUDIO_EXTENSIONS: &[&str] = &[
-    "mp3", "flac", "ogg", "opus", "oga", "m4a", "m4b", "aac", "wav", "wma", "ape", "alac",
-    "aiff", "aif", "wv", "mka", "spx", "ac3",
+    "mp3", "flac", "ogg", "opus", "oga", "m4a", "m4b", "aac", "wav", "wma", "ape", "alac", "aiff",
+    "aif", "wv", "mka", "spx", "ac3",
 ];
 
 /// File extensions considered video (lowercase, no dot).
 const VIDEO_EXTENSIONS: &[&str] = &[
-    "mp4", "m4v", "mkv", "webm", "mov", "avi", "mpg", "mpeg", "ts", "m2ts", "mts",
-    "flv", "wmv", "vob", "ogv", "3gp", "divx",
+    "mp4", "m4v", "mkv", "webm", "mov", "avi", "mpg", "mpeg", "ts", "m2ts", "mts", "flv", "wmv",
+    "vob", "ogv", "3gp", "divx",
 ];
 
 /// Whether a path/URL carries an audio extension (query strings and
@@ -401,11 +404,7 @@ fn mpd_addable_path(path: &str) -> String {
         return path.to_owned();
     };
     let rel = rel.trim_start_matches('/');
-    if rel.is_empty() {
-        path.to_owned()
-    } else {
-        rel.to_owned()
-    }
+    if rel.is_empty() { path.to_owned() } else { rel.to_owned() }
 }
 
 /// Queue id of a temporary play entry (set by the Radio pane's result
@@ -476,10 +475,7 @@ fn queue_videos(ctx: &Ctx, vids: &[PastedItem], after_current: bool, play: bool)
         } else {
             YtAction::AppendVideoQueue
         };
-        let _ = ctx.work_sender.send(WorkRequest::ResolveYtStreams {
-            urls: yt_urls(vids),
-            action,
-        });
+        let _ = ctx.work_sender.send(WorkRequest::ResolveYtStreams { urls: yt_urls(vids), action });
         return;
     }
     let entries = video_entries_for(vids);
@@ -564,8 +560,7 @@ pub fn show_paste_modal(ctx: &Ctx, items: Vec<PastedItem>) {
     let menu = paste_menu(ctx, items);
     // Remember the popup's modal id so a nested flow (the "Select
     // files…" picker) can close it once playback starts.
-    ctx.paste_modal_id
-        .set(Some(crate::ui::modals::Modal::id(&menu)));
+    ctx.paste_modal_id.set(Some(crate::ui::modals::Modal::id(&menu)));
     modal!(ctx, menu);
 }
 
@@ -604,10 +599,7 @@ fn paste_menu(ctx: &Ctx, items: Vec<PastedItem>) -> MenuModal<'static> {
     let video: Vec<PastedItem> = items
         .iter()
         .filter(|item| {
-            matches!(
-                item,
-                PastedItem::VideoFile(_) | PastedItem::VideoUrl(_) | PastedItem::Yt(_)
-            )
+            matches!(item, PastedItem::VideoFile(_) | PastedItem::VideoUrl(_) | PastedItem::Yt(_))
         })
         .cloned()
         .collect();
@@ -632,13 +624,11 @@ fn paste_menu(ctx: &Ctx, items: Vec<PastedItem>) -> MenuModal<'static> {
                 // Add to queue and play: insert after the current track and
                 // start playing the first inserted item immediately.
                 let all = audio.clone();
-                section = section.item("Add to queue and play", move |ctx| {
-                    enqueue_items(ctx, &all, true, true)
-                });
+                section = section
+                    .item("Add to queue and play", move |ctx| enqueue_items(ctx, &all, true, true));
                 let append = audio.clone();
-                section = section.item("Append to queue", move |ctx| {
-                    enqueue_items(ctx, &append, false, false)
-                });
+                section = section
+                    .item("Append to queue", move |ctx| enqueue_items(ctx, &append, false, false));
                 // Add to playlist / Create Playlist: the audio URIs of the
                 // pasted items (local files relativized to the music
                 // directory, YouTube-style links resolved first).
@@ -828,9 +818,7 @@ fn paste_menu(ctx: &Ctx, items: Vec<PastedItem>) -> MenuModal<'static> {
                                             .borrow()
                                             .get(&all_key)
                                             .and_then(|r| r.as_ref().ok())
-                                            .map(|s| {
-                                                s.videos().iter().map(|f| f.index).collect()
-                                            })
+                                            .map(|s| s.videos().iter().map(|f| f.index).collect())
                                             .unwrap_or_default();
                                         play_scanned_or_fresh(
                                             ctx, &all_item, &all_key, indices, false,
@@ -844,9 +832,7 @@ fn paste_menu(ctx: &Ctx, items: Vec<PastedItem>) -> MenuModal<'static> {
                                             .borrow()
                                             .get(&dl_key)
                                             .and_then(|r| r.as_ref().ok())
-                                            .map(|s| {
-                                                s.videos().iter().map(|f| f.index).collect()
-                                            })
+                                            .map(|s| s.videos().iter().map(|f| f.index).collect())
                                             .unwrap_or_default();
                                         download_scanned_or_fresh(ctx, &dl_item, &dl_key, indices)
                                     });
@@ -866,14 +852,21 @@ fn paste_menu(ctx: &Ctx, items: Vec<PastedItem>) -> MenuModal<'static> {
                                     let play_key = key.clone();
                                     section = section.item("Stream", move |ctx| {
                                         play_scanned_or_fresh(
-                                            ctx, &play_item, &play_key, Vec::new(), false,
+                                            ctx,
+                                            &play_item,
+                                            &play_key,
+                                            Vec::new(),
+                                            false,
                                         )
                                     });
                                     let dl_item = item.clone();
                                     let dl_key = key.clone();
                                     section = section.item("Download", move |ctx| {
                                         download_scanned_or_fresh(
-                                            ctx, &dl_item, &dl_key, Vec::new(),
+                                            ctx,
+                                            &dl_item,
+                                            &dl_key,
+                                            Vec::new(),
                                         )
                                     });
                                 }
@@ -918,10 +911,9 @@ fn paste_menu(ctx: &Ctx, items: Vec<PastedItem>) -> MenuModal<'static> {
                                         .borrow_mut()
                                         .insert(key.clone(), cancel_tx);
                                     let item = torrent_item(item);
-                                    let _ = ctx.work_sender.send(WorkRequest::ScanTorrent {
-                                        item,
-                                        cancel: cancel_rx,
-                                    });
+                                    let _ = ctx
+                                        .work_sender
+                                        .send(WorkRequest::ScanTorrent { item, cancel: cancel_rx });
                                 }
                             }
                         }
@@ -1083,11 +1075,7 @@ fn play_scanned_or_fresh(
         return play_torrent(ctx, std::slice::from_ref(item), download);
     }
     ctx.app_event_sender
-        .send(crate::shared::events::AppEvent::TorrentScannedPlay {
-            scan,
-            file_indices,
-            download,
-        })
+        .send(crate::shared::events::AppEvent::TorrentScannedPlay { scan, file_indices, download })
         .map_err(|err| anyhow::anyhow!("Failed to start torrent playback: {err}"))?;
     Ok(())
 }
@@ -1120,11 +1108,8 @@ fn open_torrent_file_picker(ctx: &Ctx, item: &PastedItem, key: &str) -> Result<(
     let Some(scan) = scan else {
         return play_torrent(ctx, std::slice::from_ref(item), false);
     };
-    let mut videos: Vec<(usize, String, u64)> = scan
-        .videos()
-        .into_iter()
-        .map(|f| (f.index, f.name.clone(), f.length))
-        .collect();
+    let mut videos: Vec<(usize, String, u64)> =
+        scan.videos().into_iter().map(|f| (f.index, f.name.clone(), f.length)).collect();
     videos.sort_by(|a, b| a.1.to_lowercase().cmp(&b.1.to_lowercase()));
     // Round 22: the picker title starts with "▶" — "Select" was dropped
     // so long torrent names truncate cleanly ("▶…") instead of leaving a
@@ -1144,10 +1129,8 @@ fn open_torrent_file_picker(ctx: &Ctx, item: &PastedItem, key: &str) -> Result<(
                 // popup's other play actions; `Download & Play` sets the
                 // download flag so the engine keeps the picked files and
                 // the completed one is moved to `s2udio-downloads`.
-                let file_indices: Vec<usize> = indices
-                    .into_iter()
-                    .filter(|i| *i < scan.files.len())
-                    .collect();
+                let file_indices: Vec<usize> =
+                    indices.into_iter().filter(|i| *i < scan.files.len()).collect();
                 let download = action
                     == crate::ui::modals::torrent_file_picker::TorrentPickerAction::DownloadAndPlay;
                 let result = if file_indices.is_empty() {
@@ -1167,9 +1150,9 @@ fn open_torrent_file_picker(ctx: &Ctx, item: &PastedItem, key: &str) -> Result<(
                 // in-flight scans here (the played torrent's own scan
                 // stays in the map for reuse — round 20).
                 if let Some(id) = ctx.paste_modal_id.take() {
-                    let _ = ctx.app_event_sender.send(crate::AppEvent::UiEvent(
-                        crate::ui::UiAppEvent::PopModal(id),
-                    ));
+                    let _ = ctx
+                        .app_event_sender
+                        .send(crate::AppEvent::UiEvent(crate::ui::UiAppEvent::PopModal(id)));
                 }
                 ctx.paste_modal_items.borrow_mut().take();
                 cancel_in_flight_scans(ctx);
@@ -1236,24 +1219,28 @@ fn play_item(ctx: &Ctx, item: &PastedItem) -> Result<()> {
             }
             // addid+playid of a temporary entry, cleaned up on song change
             // by the Radio pane (which receives the result).
-            ctx.query().id(PASTE_PLAY).replace_id(PASTE_PLAY).target(PaneType::Radio { tree: TreeBrowserArgs::default() }).query(
-                move |client| {
+            ctx.query()
+                .id(PASTE_PLAY)
+                .replace_id(PASTE_PLAY)
+                .target(PaneType::Radio { tree: TreeBrowserArgs::default() })
+                .query(move |client| {
                     let id = client.add_id(&uri, None)?;
                     client.play_id(id)?;
                     Ok(crate::MpdQueryResult::Any(Box::new(id)))
-                },
-            );
+                });
             Ok(())
         }
         PastedItem::Url(url) => {
             let url = url.clone();
-            ctx.query().id(PASTE_PLAY).replace_id(PASTE_PLAY).target(PaneType::Radio { tree: TreeBrowserArgs::default() }).query(
-                move |client| {
+            ctx.query()
+                .id(PASTE_PLAY)
+                .replace_id(PASTE_PLAY)
+                .target(PaneType::Radio { tree: TreeBrowserArgs::default() })
+                .query(move |client| {
                     let id = client.add_id(&url, None)?;
                     client.play_id(id)?;
                     Ok(crate::MpdQueryResult::Any(Box::new(id)))
-                },
-            );
+                });
             Ok(())
         }
         // Video items play their audio track through MPD as a temporary
@@ -1318,10 +1305,7 @@ fn download_scanned_or_fresh(
         return download_torrent(ctx, std::slice::from_ref(item), Vec::new());
     }
     ctx.app_event_sender
-        .send(crate::shared::events::AppEvent::TorrentScannedDownload {
-            scan,
-            file_indices,
-        })
+        .send(crate::shared::events::AppEvent::TorrentScannedDownload { scan, file_indices })
         .map_err(|err| anyhow::anyhow!("Failed to start torrent download: {err}"))?;
     Ok(())
 }
@@ -1377,11 +1361,15 @@ fn play_torrent(ctx: &Ctx, items: &[PastedItem], download: bool) -> Result<()> {
 
 /// Play a pasted item's audio through MPD as a temporary entry.
 fn paste_play_temp(ctx: &Ctx, url: String) {
-    ctx.query().id(PASTE_PLAY).replace_id(PASTE_PLAY).target(PaneType::Radio { tree: TreeBrowserArgs::default() }).query(move |client| {
-        let id = client.add_id(&url, None)?;
-        client.play_id(id)?;
-        Ok(crate::MpdQueryResult::Any(Box::new(id)))
-    });
+    ctx.query()
+        .id(PASTE_PLAY)
+        .replace_id(PASTE_PLAY)
+        .target(PaneType::Radio { tree: TreeBrowserArgs::default() })
+        .query(move |client| {
+            let id = client.add_id(&url, None)?;
+            client.play_id(id)?;
+            Ok(crate::MpdQueryResult::Any(Box::new(id)))
+        });
 }
 
 /// Resolve a YouTube-style link to its direct stream and play it through MPD
@@ -1389,10 +1377,7 @@ fn paste_play_temp(ctx: &Ctx, url: String) {
 fn yt_play_audio(ctx: &Ctx, url: &str) -> Result<()> {
     let _ = ctx
         .work_sender
-        .send(WorkRequest::ResolveYtStreams {
-            urls: vec![url.to_owned()],
-            action: YtAction::Play,
-        })
+        .send(WorkRequest::ResolveYtStreams { urls: vec![url.to_owned()], action: YtAction::Play })
         .map_err(|err| anyhow::anyhow!("Failed to request stream resolution: {err}"))?;
     status_info!("Resolving YouTube link…");
     Ok(())
@@ -1405,18 +1390,14 @@ fn enqueue_items(ctx: &Ctx, items: &[PastedItem], after_current: bool, play: boo
     // "After the current track" needs a current track; with nothing playing
     // MPD rejects the relative position, so fall back to appending.
     let has_current = ctx.find_current_song_in_queue().is_some();
-    let position =
-        (after_current && has_current).then_some(QueuePosition::RelativeAdd(0));
+    let position = (after_current && has_current).then_some(QueuePosition::RelativeAdd(0));
     // The queue index the first inserted item lands at (played when `play`):
     // one past the current track, or the end when nothing plays.
     let autoplay_idx = play.then(|| {
-        ctx.find_current_song_in_queue()
-            .map(|(idx, _)| idx + 1)
-            .unwrap_or_else(|| ctx.queue.len())
+        ctx.find_current_song_in_queue().map(|(idx, _)| idx + 1).unwrap_or_else(|| ctx.queue.len())
     });
-    let (direct, yt): (Vec<String>, Vec<String>) = items.iter().fold(
-        (Vec::new(), Vec::new()),
-        |(mut direct, mut yt), item| match item {
+    let (direct, yt): (Vec<String>, Vec<String>) =
+        items.iter().fold((Vec::new(), Vec::new()), |(mut direct, mut yt), item| match item {
             PastedItem::File(path) => {
                 direct.push(mpd_addable_path(path));
                 (direct, yt)
@@ -1449,8 +1430,7 @@ fn enqueue_items(ctx: &Ctx, items: &[PastedItem], after_current: bool, play: boo
     }
 
     if !yt.is_empty() {
-        let action =
-            if play { YtAction::AddAfterCurrentAndPlay } else { YtAction::Append };
+        let action = if play { YtAction::AddAfterCurrentAndPlay } else { YtAction::Append };
         let count = yt.len();
         let _ = ctx
             .work_sender
@@ -1521,13 +1501,15 @@ pub fn apply_resolved_streams(
     match action {
         YtAction::Play => {
             let url = urls[0].clone();
-            ctx.query().id(PASTE_PLAY).replace_id(PASTE_PLAY).target(PaneType::Radio { tree: TreeBrowserArgs::default() }).query(
-                move |client| {
+            ctx.query()
+                .id(PASTE_PLAY)
+                .replace_id(PASTE_PLAY)
+                .target(PaneType::Radio { tree: TreeBrowserArgs::default() })
+                .query(move |client| {
                     let id = client.add_id(&url, None)?;
                     client.play_id(id)?;
                     Ok(crate::MpdQueryResult::Any(Box::new(id)))
-                },
-            );
+                });
         }
         // Launch mpv on the original links with the resolved titles (mpv
         // plays them itself; the session shows the real titles and the
@@ -1543,8 +1525,8 @@ pub fn apply_resolved_streams(
                         item.original_url.clone()
                     };
                     let mut entry = MpvPlaylistEntry::new(item.title.clone(), url, None);
-                    entry.original_url = (!item.original_url.is_empty())
-                        .then(|| item.original_url.clone());
+                    entry.original_url =
+                        (!item.original_url.is_empty()).then(|| item.original_url.clone());
                     entry
                 })
                 .collect();
@@ -1660,7 +1642,8 @@ pub fn apply_resolved_streams(
             status_info!("Created playlist '{playlist}' with {count} item(s)");
         }
         // Add/append to the persistent video playlist (the Video list).
-        YtAction::AddToVideoQueue | YtAction::AppendVideoQueue
+        YtAction::AddToVideoQueue
+        | YtAction::AppendVideoQueue
         | YtAction::AddToVideoQueueAndPlay => {
             let after_current = !matches!(action, YtAction::AppendVideoQueue);
             use crate::core::mpv::MpvPlaylistEntry;
@@ -1673,8 +1656,8 @@ pub fn apply_resolved_streams(
                         item.original_url.clone()
                     };
                     let mut entry = MpvPlaylistEntry::new(item.title.clone(), url, None);
-                    entry.original_url = (!item.original_url.is_empty())
-                        .then(|| item.original_url.clone());
+                    entry.original_url =
+                        (!item.original_url.is_empty()).then(|| item.original_url.clone());
                     entry
                 })
                 .collect();
@@ -1780,7 +1763,9 @@ fn s2udio_cache_path(cache_dir: Option<&std::path::Path>, file: &str) -> std::pa
         return dir.join(file);
     }
     let new = crate::shared::paths::s2udio_cache_dir()
-        .unwrap_or_else(|| crate::config::utils::tilde_expand("~/.cache/s2udio").into_owned().into())
+        .unwrap_or_else(|| {
+            crate::config::utils::tilde_expand("~/.cache/s2udio").into_owned().into()
+        })
         .join(file);
     let legacy: std::path::PathBuf =
         crate::config::utils::tilde_expand("~/.cache/rmpc").into_owned().into();
@@ -1853,7 +1838,9 @@ pub fn mpv_mpris_art_path(cache_dir: Option<&std::path::Path>) -> std::path::Pat
         return dir.join("mpris-mpv-art");
     }
     let new = crate::shared::paths::s2udio_cache_dir()
-        .unwrap_or_else(|| crate::config::utils::tilde_expand("~/.cache/s2udio").into_owned().into())
+        .unwrap_or_else(|| {
+            crate::config::utils::tilde_expand("~/.cache/s2udio").into_owned().into()
+        })
         .join("mpris-mpv-art");
     let legacy: std::path::PathBuf =
         crate::config::utils::tilde_expand("~/.cache/rmpc").into_owned().into();
@@ -1877,8 +1864,10 @@ pub fn clear_mpv_mpris_art(ctx: &Ctx) {
 /// 500 ms mpv poll).
 pub fn write_mpv_mpris_state(ctx: &Ctx) {
     let path = mpv_mpris_state_path(ctx.config.cache_dir.as_deref());
-    let art = ctx.mpv.art_path.as_ref().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
-    let socket = ctx.mpv.socket.as_ref().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+    let art =
+        ctx.mpv.art_path.as_ref().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+    let socket =
+        ctx.mpv.socket.as_ref().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
     // The playlist is serialized too: a later s2udio instance reattaching to
     // this session (mpv outlives the app; the tracker daemon keeps the file
     // fresh meanwhile) restores the Queue tab's Video view from it.
@@ -1954,9 +1943,7 @@ pub fn mpv_yt_info(ctx: &Ctx) -> Option<crate::shared::ytdlp::YtStreamInfo> {
         .lookup_url()
         .to_owned();
     let info = ctx.yt_info.borrow();
-    info.get(&url).cloned().or_else(|| {
-        info.values().find(|e| e.original_url == url).cloned()
-    })
+    info.get(&url).cloned().or_else(|| info.values().find(|e| e.original_url == url).cloned())
 }
 
 /// The resolved info of whatever is currently playing: the mpv video's
@@ -1971,9 +1958,9 @@ pub fn current_yt_info(ctx: &Ctx) -> Option<crate::shared::ytdlp::YtStreamInfo> 
     }
     let (_, song) = ctx.find_current_song_in_queue()?;
     let info = ctx.yt_info.borrow();
-    info.get(&song.file).cloned().or_else(|| {
-        info.values().find(|e| e.original_url == song.file).cloned()
-    })
+    info.get(&song.file)
+        .cloned()
+        .or_else(|| info.values().find(|e| e.original_url == song.file).cloned())
 }
 
 /// Queue a `s2udio-downloads` download of a ytdlp stream (yt-dlp needs the
@@ -2133,7 +2120,6 @@ pub fn ensure_mpris_metadata(ctx: &Ctx) {
     let _ = std::fs::remove_file(mpris_art_path(ctx.config.cache_dir.as_deref()));
 }
 
-
 /// The full popup flow from a paste event: parse, and when something
 /// recognized was found, show the popup. Returns true when a popup was
 /// opened.
@@ -2155,10 +2141,7 @@ mod tests {
     /// playlist / Create Playlist, then Cancel.
     #[test]
     fn paste_popup_labels_and_order() {
-        use crate::{
-            shared::events::AppEvent,
-            ui::UiAppEvent,
-        };
+        use crate::{shared::events::AppEvent, ui::UiAppEvent};
         let (app_tx, app_rx) = crossbeam::channel::unbounded();
         let mut ctx = crate::tests::fixtures::ctx(
             (app_tx.clone(), app_rx.clone()),
@@ -2207,7 +2190,10 @@ mod tests {
         // occurrences the [Video] section's.
         let at = |s: &str| text.find(s).unwrap_or_else(|| panic!("{s:?} missing in {text:?}"));
         let at2 = |s: &str| {
-            text.match_indices(s).nth(1).map(|(i, _)| i).unwrap_or_else(|| panic!("{s:?} missing in {text:?}"))
+            text.match_indices(s)
+                .nth(1)
+                .map(|(i, _)| i)
+                .unwrap_or_else(|| panic!("{s:?} missing in {text:?}"))
         };
         assert!(at("[Audio]") < at("Add to queue and play"));
         assert!(at("Add to queue and play") < at("Append to queue"));
@@ -2465,9 +2451,7 @@ https://example.com/movie.torrent",
     ) -> String {
         let backend = ratatui::backend::TestBackend::new(70, 20);
         let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
-        terminal
-            .draw(|frame| modal.render(frame, ctx).expect("modal renders"))
-            .expect("draw ok");
+        terminal.draw(|frame| modal.render(frame, ctx).expect("modal renders")).expect("draw ok");
         terminal.backend().buffer().content.iter().map(|cell| cell.symbol()).collect()
     }
 
@@ -2521,10 +2505,7 @@ https://example.com/movie.torrent",
         // engine alive). Pasting the same magnet again must NOT spawn a
         // second engine — the popup shows the play actions backed by the
         // existing scan.
-        use crate::{
-            shared::events::AppEvent,
-            ui::UiAppEvent,
-        };
+        use crate::{shared::events::AppEvent, ui::UiAppEvent};
         let (app_tx, app_rx) = crossbeam::channel::unbounded();
         let (work_tx, work_rx) = crossbeam::channel::unbounded();
         let mut ctx = crate::tests::fixtures::ctx(
@@ -2532,13 +2513,11 @@ https://example.com/movie.torrent",
             (work_tx, work_rx.clone()),
             (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
         );
-        let scan = crate::core::torrent::test_scan(vec![
-            crate::core::torrent::ScannedFile {
-                index: 0,
-                name: "Big Buck Bunny.mp4".to_owned(),
-                length: 276_000_000,
-            },
-        ]);
+        let scan = crate::core::torrent::test_scan(vec![crate::core::torrent::ScannedFile {
+            index: 0,
+            name: "Big Buck Bunny.mp4".to_owned(),
+            length: 276_000_000,
+        }]);
         ctx.torrent_scans.borrow_mut().insert(MAGNET_KEY.to_owned(), Ok(scan));
 
         show_paste_modal(&ctx, vec![PastedItem::Magnet(MAGNET.into())]);
@@ -2560,10 +2539,7 @@ https://example.com/movie.torrent",
         // Round 20 (duplicate-paste fix): the first paste's scan is still
         // in flight (wait window). A second paste of the same magnet shows
         // the wait window too but must not queue a second ScanTorrent.
-        use crate::{
-            shared::events::AppEvent,
-            ui::UiAppEvent,
-        };
+        use crate::{shared::events::AppEvent, ui::UiAppEvent};
         let (app_tx, app_rx) = crossbeam::channel::unbounded();
         let (work_tx, work_rx) = crossbeam::channel::unbounded();
         let mut ctx = crate::tests::fixtures::ctx(
@@ -2579,7 +2555,8 @@ https://example.com/movie.torrent",
             Ok(AppEvent::UiEvent(UiAppEvent::Modal(modal))) => modal,
             other => panic!("expected the paste modal, got {other:?}"),
         };
-        let first = work_rx.recv_timeout(std::time::Duration::from_millis(200)).expect("scan queued");
+        let first =
+            work_rx.recv_timeout(std::time::Duration::from_millis(200)).expect("scan queued");
         assert!(matches!(first, WorkRequest::ScanTorrent { .. }), "first scan request");
 
         // Second paste while the scan is in flight: the wait window shows
@@ -2599,10 +2576,7 @@ https://example.com/movie.torrent",
 
     #[test]
     fn torrent_popup_shows_loading_and_requests_a_scan() {
-        use crate::{
-            shared::events::AppEvent,
-            ui::UiAppEvent,
-        };
+        use crate::{shared::events::AppEvent, ui::UiAppEvent};
         let (app_tx, app_rx) = crossbeam::channel::unbounded();
         let (work_tx, work_rx) = crossbeam::channel::unbounded();
         let mut ctx = crate::tests::fixtures::ctx(
@@ -2653,10 +2627,7 @@ https://example.com/movie.torrent",
 
     #[test]
     fn torrent_popup_wait_block_renders_counter_and_cancel_hint_only() {
-        use crate::{
-            shared::events::AppEvent,
-            ui::UiAppEvent,
-        };
+        use crate::{shared::events::AppEvent, ui::UiAppEvent};
         let (app_tx, app_rx) = crossbeam::channel::unbounded();
         let mut ctx = crate::tests::fixtures::ctx(
             (app_tx.clone(), app_rx.clone()),
@@ -2686,10 +2657,7 @@ https://example.com/movie.torrent",
 
         // The trimmed wait window: the counter row, the esc-to-cancel hint
         // — and no DL-speed row (any speed value) and no play actions yet.
-        assert!(
-            text.contains("Loading magnet:01234567… 00:12"),
-            "counter row in {text:?}"
-        );
+        assert!(text.contains("Loading magnet:01234567… 00:12"), "counter row in {text:?}");
         assert!(text.contains("esc to cancel"), "cancel hint in {text:?}");
         assert!(!text.contains("DL "), "no DL-speed row in {text:?}");
         assert!(!text.contains("need ≥"), "no needed-speed check in {text:?}");
@@ -2698,10 +2666,7 @@ https://example.com/movie.torrent",
 
     #[test]
     fn torrent_popup_wait_block_never_shows_the_speed_check_row() {
-        use crate::{
-            shared::events::AppEvent,
-            ui::UiAppEvent,
-        };
+        use crate::{shared::events::AppEvent, ui::UiAppEvent};
         let (app_tx, app_rx) = crossbeam::channel::unbounded();
         let mut ctx = crate::tests::fixtures::ctx(
             (app_tx.clone(), app_rx.clone()),
@@ -2727,10 +2692,7 @@ https://example.com/movie.torrent",
         };
         let text = render_modal_text(&mut modal, &mut ctx);
 
-        assert!(
-            text.contains("Loading magnet:01234567… 00:30"),
-            "counter row in {text:?}"
-        );
+        assert!(text.contains("Loading magnet:01234567… 00:30"), "counter row in {text:?}");
         assert!(text.contains("esc to cancel"), "cancel hint in {text:?}");
         assert!(!text.contains("DL "), "no DL-speed row in {text:?}");
         assert!(!text.contains("need ≥"), "no needed-speed check in {text:?}");
@@ -2769,14 +2731,10 @@ https://example.com/movie.torrent",
 
         // Esc closes the popup: the close hook fires the scan's cancel
         // channel (round 18) and clears the scan bookkeeping.
-        let mut action =
-            ActionEvent::from(Arc::new(vec![Actions::Common(CommonAction::Close)]));
+        let mut action = ActionEvent::from(Arc::new(vec![Actions::Common(CommonAction::Close)]));
         modal.handle_key(&mut action, &mut ctx).unwrap();
 
-        assert!(
-            cancel_rx.try_recv().is_ok(),
-            "the close hook signalled the scan's cancel channel"
-        );
+        assert!(cancel_rx.try_recv().is_ok(), "the close hook signalled the scan's cancel channel");
         assert!(ctx.torrent_scan_cancels.borrow().is_empty(), "cancel map cleared");
         assert!(ctx.torrent_scan_progress.borrow().is_empty(), "progress map cleared");
         assert!(ctx.torrent_scans_pending.borrow().is_empty(), "pending cleared");
@@ -2785,23 +2743,18 @@ https://example.com/movie.torrent",
 
     #[test]
     fn torrent_popup_single_file_scan_shows_play_actions() {
-        use crate::{
-            shared::events::AppEvent,
-            ui::UiAppEvent,
-        };
+        use crate::{shared::events::AppEvent, ui::UiAppEvent};
         let (app_tx, app_rx) = crossbeam::channel::unbounded();
         let mut ctx = crate::tests::fixtures::ctx(
             (app_tx.clone(), app_rx.clone()),
             (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
             (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
         );
-        let scan = crate::core::torrent::test_scan(vec![
-            crate::core::torrent::ScannedFile {
-                index: 0,
-                name: "Big Buck Bunny.mp4".to_owned(),
-                length: 276_000_000,
-            },
-        ]);
+        let scan = crate::core::torrent::test_scan(vec![crate::core::torrent::ScannedFile {
+            index: 0,
+            name: "Big Buck Bunny.mp4".to_owned(),
+            length: 276_000_000,
+        }]);
         ctx.torrent_scans.borrow_mut().insert(MAGNET_KEY.to_owned(), Ok(scan));
         show_paste_modal(&ctx, vec![PastedItem::Magnet(MAGNET.into())]);
 
@@ -2821,10 +2774,7 @@ https://example.com/movie.torrent",
 
     #[test]
     fn torrent_popup_multi_video_scan_shows_stream_download_all_and_select() {
-        use crate::{
-            shared::events::AppEvent,
-            ui::UiAppEvent,
-        };
+        use crate::{shared::events::AppEvent, ui::UiAppEvent};
         let (app_tx, app_rx) = crossbeam::channel::unbounded();
         let mut ctx = crate::tests::fixtures::ctx(
             (app_tx.clone(), app_rx.clone()),
@@ -2884,10 +2834,7 @@ https://example.com/movie.torrent",
 
     #[test]
     fn torrent_popup_scan_failure_shows_the_notice_row() {
-        use crate::{
-            shared::events::AppEvent,
-            ui::UiAppEvent,
-        };
+        use crate::{shared::events::AppEvent, ui::UiAppEvent};
         let (app_tx, app_rx) = crossbeam::channel::unbounded();
         let mut ctx = crate::tests::fixtures::ctx(
             (app_tx.clone(), app_rx.clone()),
@@ -2907,19 +2854,13 @@ https://example.com/movie.torrent",
         let text = render_modal_text(&mut modal, &mut ctx);
 
         // A dead magnet: a dim notice, no actions.
-        assert!(
-            text.contains("No peers found — is the torrent alive?"),
-            "notice row in {text:?}"
-        );
+        assert!(text.contains("No peers found — is the torrent alive?"), "notice row in {text:?}");
         assert!(!text.contains("Stream"), "no action on failure in {text:?}");
     }
 
     #[test]
     fn torrent_popup_no_playable_media_shows_the_notice_row() {
-        use crate::{
-            shared::events::AppEvent,
-            ui::UiAppEvent,
-        };
+        use crate::{shared::events::AppEvent, ui::UiAppEvent};
         let (app_tx, app_rx) = crossbeam::channel::unbounded();
         let mut ctx = crate::tests::fixtures::ctx(
             (app_tx.clone(), app_rx.clone()),
@@ -2948,10 +2889,7 @@ https://example.com/movie.torrent",
         let text = render_modal_text(&mut modal, &mut ctx);
 
         // A data torrent: nothing to play.
-        assert!(
-            text.contains("No playable media in this torrent"),
-            "notice row in {text:?}"
-        );
+        assert!(text.contains("No playable media in this torrent"), "notice row in {text:?}");
         assert!(!text.contains("Stream"), "no action without media in {text:?}");
     }
 
@@ -3040,10 +2978,7 @@ https://example.com/movie.torrent",
         // the fresh single-file path. This mirrors the user flow: the
         // scan landed in `Ctx.torrent_scans`, the popup rendered the play
         // actions, and the click runs `play_scanned_or_fresh`.
-        use crate::{
-            shared::events::AppEvent,
-            ui::UiAppEvent,
-        };
+        use crate::{shared::events::AppEvent, ui::UiAppEvent};
         let (app_tx, app_rx) = crossbeam::channel::unbounded();
         let mut ctx = crate::tests::fixtures::ctx(
             (app_tx.clone(), app_rx.clone()),
@@ -3162,10 +3097,7 @@ https://example.com/movie.torrent",
             other => panic!("expected TorrentScannedDownload, got {other:?}"),
         }
         // The scan stays in Ctx for reuse (round 20 engine sharing).
-        assert!(
-            ctx.torrent_scans.borrow().get(&key).is_some(),
-            "the downloaded scan stays in Ctx"
-        );
+        assert!(ctx.torrent_scans.borrow().get(&key).is_some(), "the downloaded scan stays in Ctx");
     }
 
     #[test]
@@ -3244,10 +3176,7 @@ https://example.com/movie.torrent",
         // `play_scanned_or_fresh` found nothing and fell back to the fresh
         // single-file path. The picker now captures the scan when it opens;
         // confirm must emit `TorrentScannedPlay` with the marked indices.
-        use crate::{
-            shared::events::AppEvent,
-            ui::UiAppEvent,
-        };
+        use crate::{shared::events::AppEvent, ui::UiAppEvent};
         let (app_tx, app_rx) = crossbeam::channel::unbounded();
         let mut ctx = crate::tests::fixtures::ctx(
             (app_tx.clone(), app_rx.clone()),
@@ -3294,10 +3223,7 @@ https://example.com/movie.torrent",
         // starts with the name-sorted options selected at row 0; Space
         // toggles the mark on the highlighted row, so mark rows 0 and 1
         // (S01E01.mkv → positional 1, S01E02.mkv → positional 2).
-        use crate::{
-            shared::keys::Actions,
-            ui::ActionEvent,
-        };
+        use crate::{shared::keys::Actions, ui::ActionEvent};
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         // Render once so the picker's list selection is initialized.
         render_modal_text(&mut modal, &mut ctx);
@@ -3343,10 +3269,7 @@ https://example.com/movie.torrent",
 
     #[test]
     fn select_files_action_opens_the_picker_modal() {
-        use crate::{
-            shared::events::AppEvent,
-            ui::UiAppEvent,
-        };
+        use crate::{shared::events::AppEvent, ui::UiAppEvent};
         let (app_tx, app_rx) = crossbeam::channel::unbounded();
         let mut ctx = crate::tests::fixtures::ctx(
             (app_tx.clone(), app_rx.clone()),
@@ -3368,7 +3291,8 @@ https://example.com/movie.torrent",
         ctx.torrent_scans.borrow_mut().insert(MAGNET_KEY.to_owned(), Ok(scan));
         let item = PastedItem::Magnet(MAGNET.into());
         open_torrent_file_picker(&ctx, &item, &torrent_item_key(&item)).expect("picker opens");
-        let event = app_rx.recv_timeout(std::time::Duration::from_millis(200)).expect("picker queued");
+        let event =
+            app_rx.recv_timeout(std::time::Duration::from_millis(200)).expect("picker queued");
         match event {
             AppEvent::UiEvent(UiAppEvent::Modal(_)) => {}
             other => panic!("expected the picker modal, got {other:?}"),
@@ -3378,10 +3302,7 @@ https://example.com/movie.torrent",
     #[test]
     fn torrent_file_picker_lists_videos_with_sizes_and_toggles_marks() {
         use crate::ui::modals::torrent_file_picker::TorrentFilePicker;
-        use crate::{
-            shared::keys::Actions,
-            ui::ActionEvent,
-        };
+        use crate::{shared::keys::Actions, ui::ActionEvent};
         let (app_tx, _app_rx) = crossbeam::channel::unbounded();
         let mut ctx = crate::tests::fixtures::ctx(
             (app_tx, _app_rx),
@@ -3485,10 +3406,7 @@ https://example.com/movie.torrent",
     #[test]
     fn torrent_file_picker_raw_space_toggles_then_enter_moves_to_buttons() {
         use crate::ui::modals::torrent_file_picker::TorrentFilePicker;
-        use crate::{
-            shared::keys::Actions,
-            ui::ActionEvent,
-        };
+        use crate::{shared::keys::Actions, ui::ActionEvent};
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         use std::sync::Arc;
 
@@ -3597,10 +3515,7 @@ https://example.com/movie.torrent",
 
     #[test]
     fn select_files_downloads_and_play_sends_the_download_flag() {
-        use crate::{
-            shared::events::AppEvent,
-            ui::UiAppEvent,
-        };
+        use crate::{shared::events::AppEvent, ui::UiAppEvent};
         let (app_tx, app_rx) = crossbeam::channel::unbounded();
         let mut ctx = crate::tests::fixtures::ctx(
             (app_tx.clone(), app_rx.clone()),
@@ -3680,10 +3595,7 @@ https://example.com/movie.torrent",
         // Play (button 0); Down moves to Download & Play (button 1);
         // Enter then confirms the download-and-play action.
         use crate::ui::modals::torrent_file_picker::TorrentFilePicker;
-        use crate::{
-            shared::keys::Actions,
-            ui::ActionEvent,
-        };
+        use crate::{shared::keys::Actions, ui::ActionEvent};
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         use std::sync::Arc;
 
@@ -3717,10 +3629,7 @@ https://example.com/movie.torrent",
             crate::config::keys::CommonAction::Confirm,
         )]));
         modal.handle_key(&mut enter, &mut ctx).expect("enter moves to the buttons");
-        assert!(
-            confirmed.lock().unwrap().is_none(),
-            "Enter on the list must not confirm yet"
-        );
+        assert!(confirmed.lock().unwrap().is_none(), "Enter on the list must not confirm yet");
 
         // Down: Play -> Download & Play; Enter confirms the download flag.
         let mut down = ActionEvent::from(Arc::new(vec![Actions::Common(
@@ -3751,9 +3660,7 @@ https://example.com/movie.torrent",
     ) -> (u16, u16) {
         let backend = ratatui::backend::TestBackend::new(70, 20);
         let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
-        terminal
-            .draw(|frame| modal.render(frame, ctx).expect("modal renders"))
-            .expect("draw ok");
+        terminal.draw(|frame| modal.render(frame, ctx).expect("modal renders")).expect("draw ok");
         let buf = terminal.backend().buffer();
         let chars: Vec<String> = label.chars().map(|c| c.to_string()).collect();
         for (i, cell) in buf.content.iter().enumerate() {
@@ -3777,16 +3684,9 @@ https://example.com/movie.torrent",
     ) -> bool {
         let backend = ratatui::backend::TestBackend::new(70, 20);
         let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
-        terminal
-            .draw(|frame| modal.render(frame, ctx).expect("modal renders"))
-            .expect("draw ok");
-        let text: String = terminal
-            .backend()
-            .buffer()
-            .content
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect();
+        terminal.draw(|frame| modal.render(frame, ctx).expect("modal renders")).expect("draw ok");
+        let text: String =
+            terminal.backend().buffer().content.iter().map(|cell| cell.symbol()).collect();
         text.contains(needle)
     }
 
@@ -3796,10 +3696,7 @@ https://example.com/movie.torrent",
         // ←/→) move the selection — the minimal keybind set binds only
         // w/s/↑/↓, so the picker claims the horizontal keys raw.
         use crate::ui::modals::torrent_file_picker::TorrentFilePicker;
-        use crate::{
-            shared::keys::Actions,
-            ui::ActionEvent,
-        };
+        use crate::{shared::keys::Actions, ui::ActionEvent};
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         use std::sync::Arc;
 
@@ -3877,10 +3774,7 @@ https://example.com/movie.torrent",
             crate::config::keys::CommonAction::Confirm,
         )]));
         modal2.handle_key(&mut enter2, &mut ctx).expect("enter on Cancel closes");
-        assert!(
-            confirmed2.lock().unwrap().is_none(),
-            "a wrapped to Cancel: no confirm callback"
-        );
+        assert!(confirmed2.lock().unwrap().is_none(), "a wrapped to Cancel: no confirm callback");
     }
 
     #[test]
@@ -3888,8 +3782,8 @@ https://example.com/movie.torrent",
         // Round-21 user note: double-clicking a button activates it —
         // Play (0) confirms a play, Download & Play (1) confirms with the
         // download flag, Cancel (2) closes.
-        use crate::ui::modals::torrent_file_picker::TorrentFilePicker;
         use crate::shared::mouse_event::{MouseEvent, MouseEventKind};
+        use crate::ui::modals::torrent_file_picker::TorrentFilePicker;
         use crossterm::event::KeyModifiers;
         use std::sync::Arc;
 
@@ -4008,8 +3902,8 @@ https://example.com/movie.torrent",
     fn picker_wheel_scrolls_the_selection_and_scrollbar_click_jumps() {
         // Round-21 user note: the scroll wheel moves the list selection
         // and the scrollbar is mouse-interactive (click/drag scrolls).
-        use crate::ui::modals::torrent_file_picker::TorrentFilePicker;
         use crate::shared::mouse_event::{MouseEvent, MouseEventKind};
+        use crate::ui::modals::torrent_file_picker::TorrentFilePicker;
         use crossterm::event::KeyModifiers;
 
         let (app_tx, _app_rx) = crossbeam::channel::unbounded();
@@ -4019,9 +3913,8 @@ https://example.com/movie.torrent",
             (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
         );
         // 20 files overflow the 70x20 test terminal's ~14-row viewport.
-        let options: Vec<(usize, String, u64)> = (1..=20)
-            .map(|i| (i, format!("S01E{i:02}.mkv"), 1_000 + i as u64))
-            .collect();
+        let options: Vec<(usize, String, u64)> =
+            (1..=20).map(|i| (i, format!("S01E{i:02}.mkv"), 1_000 + i as u64)).collect();
         let mut modal: Box<dyn crate::ui::modals::Modal + Send + Sync> =
             Box::new(TorrentFilePicker::new(
                 &ctx,
@@ -4079,10 +3972,7 @@ https://example.com/movie.torrent",
 
     #[test]
     fn torrent_popup_shows_disabled_row_when_streaming_is_off() {
-        use crate::{
-            shared::events::AppEvent,
-            ui::UiAppEvent,
-        };
+        use crate::{shared::events::AppEvent, ui::UiAppEvent};
         let (app_tx, app_rx) = crossbeam::channel::unbounded();
         let mut ctx = crate::tests::fixtures::ctx(
             (app_tx.clone(), app_rx.clone()),
@@ -4092,10 +3982,7 @@ https://example.com/movie.torrent",
         let mut config = crate::config::Config::default();
         config.torrent.enabled = false;
         ctx.config = std::sync::Arc::new(config);
-        show_paste_modal(
-            &ctx,
-            vec![PastedItem::Torrent("/tmp/movie.torrent".into())],
-        );
+        show_paste_modal(&ctx, vec![PastedItem::Torrent("/tmp/movie.torrent".into())]);
 
         let mut modal = match app_rx.recv_timeout(std::time::Duration::from_millis(200)) {
             Ok(AppEvent::UiEvent(UiAppEvent::Modal(modal))) => modal,
@@ -4190,11 +4077,14 @@ https://example.com/movie.torrent",
         ctx.mpv.volume = Some(71);
         ctx.mpv.playlist_pos.set(Some(1));
         ctx.mpv.playlist.borrow_mut().push(crate::core::mpv::MpvPlaylistEntry::new(
-            "ep one", "https://s/Videos/0123456789abcdef0123456789abcdef/stream",
+            "ep one",
+            "https://s/Videos/0123456789abcdef0123456789abcdef/stream",
             Some(1200.0),
         ));
         ctx.mpv.playlist.borrow_mut().push(crate::core::mpv::MpvPlaylistEntry::new(
-            "ep two", "https://s/Videos/0123456789abcdef0123456789abcdef/stream?x=1", None,
+            "ep two",
+            "https://s/Videos/0123456789abcdef0123456789abcdef/stream?x=1",
+            None,
         ));
 
         write_mpv_mpris_state(&ctx);
@@ -4220,11 +4110,7 @@ https://example.com/movie.torrent",
         ]);
         assert_eq!(
             uris,
-            vec![
-                "/tmp/vid.mp4",
-                "https://example.com/movie.mkv?x=1",
-                "https://youtu.be/abc"
-            ]
+            vec!["/tmp/vid.mp4", "https://example.com/movie.mkv?x=1", "https://youtu.be/abc"]
         );
     }
 
@@ -4243,9 +4129,7 @@ https://example.com/movie.torrent",
     /// A minimal in-process fake MPD: a Unix listener answering every
     /// command with OK, recording the received command lines. Returns the
     /// received commands after `f` ran.
-    fn run_against_fake_mpd(
-        f: impl FnOnce(&mut crate::mpd::client::Client<'_>),
-    ) -> Vec<String> {
+    fn run_against_fake_mpd(f: impl FnOnce(&mut crate::mpd::client::Client<'_>)) -> Vec<String> {
         use std::{
             io::{BufRead, BufReader, Write},
             os::unix::net::UnixListener,
@@ -4370,12 +4254,7 @@ https://example.com/movie.torrent",
             title: "Some Mix".to_owned(),
             ..Default::default()
         }];
-        apply_resolved_streams(
-            &ctx,
-            info,
-            YtAction::CreatePlaylist("new mix".to_owned()),
-            vec![],
-        );
+        apply_resolved_streams(&ctx, info, YtAction::CreatePlaylist("new mix".to_owned()), vec![]);
 
         let req = client_rx
             .recv_timeout(std::time::Duration::from_millis(200))

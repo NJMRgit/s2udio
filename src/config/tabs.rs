@@ -10,10 +10,12 @@ use ratatui::{
     widgets::{Borders, TitlePosition},
 };
 use serde::{
-    Deserialize, Serialize, de::Error as _,
     // The versioned hidden module serde's own derive uses for untagged
     // deserialization (Content capture); pinned by the lockfile (1.0.228).
     __private228::de::{Content, ContentDeserializer, ContentVisitor},
+    Deserialize,
+    Serialize,
+    de::Error as _,
 };
 use thiserror::Error;
 use unicase::UniCase;
@@ -28,8 +30,7 @@ use crate::{
     config::{
         defaults,
         theme::{
-            ConfigColor,
-            StyleFile,
+            ConfigColor, StyleFile,
             borders::{BorderSetInherited, BorderSetLib, BorderSymbols, BorderSymbolsFile},
             properties::{Alignment, PropertyKindFileOrText, StatusPropertyFile},
             style::ToConfigOr,
@@ -355,11 +356,13 @@ impl<'de> Deserialize<'de> for PaneTypeFile {
             Content::String(name) => {
                 PaneTypeFile::from_unit_variant(&name).map_err(D::Error::custom)
             }
-            content => PaneTypeFileArgs::deserialize(ContentDeserializer::<serde::de::value::Error>::new(
-                fix_zero_tuple_variants(content),
-            ))
-            .map(Into::into)
-            .map_err(D::Error::custom),
+            content => {
+                PaneTypeFileArgs::deserialize(ContentDeserializer::<serde::de::value::Error>::new(
+                    fix_zero_tuple_variants(content),
+                ))
+                .map(Into::into)
+                .map_err(D::Error::custom)
+            }
         }
     }
 }
@@ -607,8 +610,10 @@ impl Default for PaneOrSplitFile {
             borders: BordersFile::NONE,
             panes: vec![
                 SubPaneFile {
-
-                        collapse_below: None, shrink_below: None, window_sizes: Vec::new(),size: "4".to_string(),
+                    collapse_below: None,
+                    shrink_below: None,
+                    window_sizes: Vec::new(),
+                    size: "4".to_string(),
                     background_color: None,
                     borders: BordersFile::NONE,
                     border_style: None,
@@ -622,8 +627,10 @@ impl Default for PaneOrSplitFile {
                         borders: BordersFile::NONE,
                         panes: vec![
                             SubPaneFile {
-
-                                    collapse_below: None, shrink_below: None, window_sizes: Vec::new(),size: "35".to_string(),
+                                collapse_below: None,
+                                shrink_below: None,
+                                window_sizes: Vec::new(),
+                                size: "35".to_string(),
                                 background_color: None,
                                 borders: BordersFile::LEFT | BordersFile::TOP | BordersFile::BOTTOM,
                                 border_style: None,
@@ -639,8 +646,10 @@ impl Default for PaneOrSplitFile {
                                 pane: PaneOrSplitFile::Component("header_left".to_string()),
                             },
                             SubPaneFile {
-
-                                    collapse_below: None, shrink_below: None, window_sizes: Vec::new(),size: "100%".to_string(),
+                                collapse_below: None,
+                                shrink_below: None,
+                                window_sizes: Vec::new(),
+                                size: "100%".to_string(),
                                 background_color: None,
                                 borders: BordersFile::ALL,
                                 border_style: None,
@@ -659,8 +668,10 @@ impl Default for PaneOrSplitFile {
                                 pane: PaneOrSplitFile::Component("header_center".to_string()),
                             },
                             SubPaneFile {
-
-                                    collapse_below: None, shrink_below: None, window_sizes: Vec::new(),size: "35".to_string(),
+                                collapse_below: None,
+                                shrink_below: None,
+                                window_sizes: Vec::new(),
+                                size: "35".to_string(),
                                 background_color: None,
                                 borders: BordersFile::RIGHT
                                     | BordersFile::TOP
@@ -681,8 +692,10 @@ impl Default for PaneOrSplitFile {
                     },
                 },
                 SubPaneFile {
-
-                        collapse_below: None, shrink_below: None, window_sizes: Vec::new(),size: "2".to_string(),
+                    collapse_below: None,
+                    shrink_below: None,
+                    window_sizes: Vec::new(),
+                    size: "2".to_string(),
                     background_color: None,
                     borders: BordersFile::LEFT | BordersFile::RIGHT | BordersFile::BOTTOM,
                     border_style: None,
@@ -694,8 +707,10 @@ impl Default for PaneOrSplitFile {
                     pane: PaneOrSplitFile::Pane(PaneTypeFile::Tabs),
                 },
                 SubPaneFile {
-
-                        collapse_below: Some(15), shrink_below: None, window_sizes: Vec::new(),size: "100%".to_string(),
+                    collapse_below: Some(15),
+                    shrink_below: None,
+                    window_sizes: Vec::new(),
+                    size: "100%".to_string(),
                     background_color: None,
                     borders: BordersFile::NONE,
                     border_style: None,
@@ -707,8 +722,10 @@ impl Default for PaneOrSplitFile {
                     pane: PaneOrSplitFile::Pane(PaneTypeFile::TabContent),
                 },
                 SubPaneFile {
-
-                        collapse_below: None, shrink_below: None, window_sizes: Vec::new(),size: "3".to_string(),
+                    collapse_below: None,
+                    shrink_below: None,
+                    window_sizes: Vec::new(),
+                    size: "3".to_string(),
                     background_color: None,
                     borders: BordersFile::NONE,
                     border_style: None,
@@ -722,8 +739,10 @@ impl Default for PaneOrSplitFile {
                         borders: BordersFile::NONE,
                         panes: vec![
                             SubPaneFile {
-
-                                    collapse_below: None, shrink_below: None, window_sizes: Vec::new(),size: "12".to_string(),
+                                collapse_below: None,
+                                shrink_below: None,
+                                window_sizes: Vec::new(),
+                                size: "12".to_string(),
                                 background_color: None,
                                 borders: BordersFile::ALL,
                                 border_style: None,
@@ -740,8 +759,10 @@ impl Default for PaneOrSplitFile {
                                 pane: PaneOrSplitFile::Component("input_mode".to_string()),
                             },
                             SubPaneFile {
-
-                                    collapse_below: None, shrink_below: None, window_sizes: Vec::new(),size: "100%".to_string(),
+                                collapse_below: None,
+                                shrink_below: None,
+                                window_sizes: Vec::new(),
+                                size: "100%".to_string(),
                                 background_color: None,
                                 borders: BordersFile::TOP
                                     | BordersFile::BOTTOM
@@ -1045,9 +1066,11 @@ impl PaneOrSplitFile {
                         let window_sizes = sub_pane
                             .window_sizes
                             .iter()
-                            .map(|(height, size)| -> Result<(u16, PercentOrLength), ParseSizeError> {
-                                Ok((*height, size.parse()?))
-                            })
+                            .map(
+                                |(height, size)| -> Result<(u16, PercentOrLength), ParseSizeError> {
+                                    Ok((*height, size.parse()?))
+                                },
+                            )
                             .try_collect()?;
 
                         Ok(SizedSubPane {
@@ -1126,8 +1149,10 @@ impl Default for TabsFile {
                     borders: BordersFile::NONE,
                     panes: vec![
                         SubPaneFile {
-
-                                collapse_below: None, shrink_below: None, window_sizes: Vec::new(),size: "35%".to_string(),
+                            collapse_below: None,
+                            shrink_below: None,
+                            window_sizes: Vec::new(),
+                            size: "35%".to_string(),
                             background_color: None,
                             borders: BordersFile::NONE,
                             border_style: None,
@@ -1141,8 +1166,10 @@ impl Default for TabsFile {
                                 borders: BordersFile::NONE,
                                 panes: vec![
                                     SubPaneFile {
-
-                                            collapse_below: None, shrink_below: None, window_sizes: Vec::new(),pane: PaneOrSplitFile::Pane(PaneTypeFile::AlbumArt),
+                                        collapse_below: None,
+                                        shrink_below: None,
+                                        window_sizes: Vec::new(),
+                                        pane: PaneOrSplitFile::Pane(PaneTypeFile::AlbumArt),
                                         background_color: None,
                                         size: "100%".to_string(),
                                         borders: BordersFile::TOP
@@ -1156,8 +1183,10 @@ impl Default for TabsFile {
                                         border_title: Vec::new(),
                                     },
                                     SubPaneFile {
-
-                                            collapse_below: None, shrink_below: None, window_sizes: Vec::new(),pane: PaneOrSplitFile::Pane(PaneTypeFile::Lyrics),
+                                        collapse_below: None,
+                                        shrink_below: None,
+                                        window_sizes: Vec::new(),
+                                        pane: PaneOrSplitFile::Pane(PaneTypeFile::Lyrics),
                                         background_color: None,
                                         size: "7".to_string(),
                                         border_title: vec![PropertyFile {
@@ -1185,8 +1214,10 @@ impl Default for TabsFile {
                             },
                         },
                         SubPaneFile {
-
-                                collapse_below: None, shrink_below: None, window_sizes: Vec::new(),size: "65%".to_string(),
+                            collapse_below: None,
+                            shrink_below: None,
+                            window_sizes: Vec::new(),
+                            size: "65%".to_string(),
                             background_color: None,
                             borders: BordersFile::NONE,
                             border_style: None,
@@ -1200,8 +1231,10 @@ impl Default for TabsFile {
                                 borders: BordersFile::NONE,
                                 panes: vec![
                                     SubPaneFile {
-
-                                            collapse_below: None, shrink_below: None, window_sizes: Vec::new(),size: "3".to_string(),
+                                        collapse_below: None,
+                                        shrink_below: None,
+                                        window_sizes: Vec::new(),
+                                        size: "3".to_string(),
                                         background_color: None,
                                         borders: BordersFile::ALL,
                                         border_style: None,
@@ -1222,8 +1255,10 @@ impl Default for TabsFile {
                                             borders: BordersFile::NONE,
                                             panes: vec![
                                                 SubPaneFile {
-
-                                                        collapse_below: None, shrink_below: None, window_sizes: Vec::new(),pane: PaneOrSplitFile::Pane(
+                                                    collapse_below: None,
+                                                    shrink_below: None,
+                                                    window_sizes: Vec::new(),
+                                                    pane: PaneOrSplitFile::Pane(
                                                         PaneTypeFile::Empty(),
                                                     ),
                                                     background_color: None,
@@ -1237,8 +1272,10 @@ impl Default for TabsFile {
                                                     border_symbols: BorderSymbolsFile::default(),
                                                 },
                                                 SubPaneFile {
-
-                                                        collapse_below: None, shrink_below: None, window_sizes: Vec::new(),size: "100%".to_string(),
+                                                    collapse_below: None,
+                                                    shrink_below: None,
+                                                    window_sizes: Vec::new(),
+                                                    size: "100%".to_string(),
                                                     background_color: None,
                                                     borders: BordersFile::NONE,
                                                     border_style: None,
@@ -1255,8 +1292,10 @@ impl Default for TabsFile {
                                         },
                                     },
                                     SubPaneFile {
-
-                                            collapse_below: None, shrink_below: None, window_sizes: Vec::new(),size: "100%".to_string(),
+                                        collapse_below: None,
+                                        shrink_below: None,
+                                        window_sizes: Vec::new(),
+                                        size: "100%".to_string(),
                                         background_color: None,
                                         borders: BordersFile::LEFT
                                             | BordersFile::RIGHT
@@ -1272,8 +1311,10 @@ impl Default for TabsFile {
                                             borders: BordersFile::NONE,
                                             panes: vec![
                                                 SubPaneFile {
-
-                                                        collapse_below: None, shrink_below: None, window_sizes: Vec::new(),pane: PaneOrSplitFile::Pane(
+                                                    collapse_below: None,
+                                                    shrink_below: None,
+                                                    window_sizes: Vec::new(),
+                                                    pane: PaneOrSplitFile::Pane(
                                                         PaneTypeFile::Empty(),
                                                     ),
                                                     background_color: None,
@@ -1287,8 +1328,10 @@ impl Default for TabsFile {
                                                     border_symbols: BorderSymbolsFile::default(),
                                                 },
                                                 SubPaneFile {
-
-                                                        collapse_below: None, shrink_below: None, window_sizes: Vec::new(),size: "100%".to_string(),
+                                                    collapse_below: None,
+                                                    shrink_below: None,
+                                                    window_sizes: Vec::new(),
+                                                    size: "100%".to_string(),
                                                     background_color: None,
                                                     borders: BordersFile::NONE,
                                                     border_style: None,
@@ -1319,8 +1362,10 @@ impl Default for TabsFile {
                     borders: BordersFile::NONE,
                     direction: DirectionFile::Vertical,
                     panes: vec![SubPaneFile {
-
-                            collapse_below: None, shrink_below: None, window_sizes: Vec::new(),size: "100%".to_string(),
+                        collapse_below: None,
+                        shrink_below: None,
+                        window_sizes: Vec::new(),
+                        size: "100%".to_string(),
                         background_color: None,
                         borders: BordersFile::ALL,
                         border_style: None,
@@ -1329,7 +1374,9 @@ impl Default for TabsFile {
                         border_title_position: BorderTitlePosition::Top,
                         border_title_alignment: Alignment::Left,
                         border_symbols: BorderSymbolsFile::Rounded,
-                        pane: PaneOrSplitFile::Pane(PaneTypeFile::Radio { tree: TreeBrowserArgs::default() }),
+                        pane: PaneOrSplitFile::Pane(PaneTypeFile::Radio {
+                            tree: TreeBrowserArgs::default(),
+                        }),
                     }],
                 },
             },
@@ -1342,8 +1389,10 @@ impl Default for TabsFile {
                     borders: BordersFile::NONE,
                     direction: DirectionFile::Vertical,
                     panes: vec![SubPaneFile {
-
-                            collapse_below: None, shrink_below: None, window_sizes: Vec::new(),size: "100%".to_string(),
+                        collapse_below: None,
+                        shrink_below: None,
+                        window_sizes: Vec::new(),
+                        size: "100%".to_string(),
                         background_color: None,
                         borders: BordersFile::ALL,
                         border_style: None,
@@ -1352,7 +1401,9 @@ impl Default for TabsFile {
                         border_title_position: BorderTitlePosition::Top,
                         border_title_alignment: Alignment::Left,
                         border_symbols: BorderSymbolsFile::Rounded,
-                        pane: PaneOrSplitFile::Pane(PaneTypeFile::Jellyfin { tree: TreeBrowserArgs::default() }),
+                        pane: PaneOrSplitFile::Pane(PaneTypeFile::Jellyfin {
+                            tree: TreeBrowserArgs::default(),
+                        }),
                     }],
                 },
             },
@@ -1363,8 +1414,10 @@ impl Default for TabsFile {
                     borders: BordersFile::NONE,
                     direction: DirectionFile::Vertical,
                     panes: vec![SubPaneFile {
-
-                            collapse_below: None, shrink_below: None, window_sizes: Vec::new(),size: "100%".to_string(),
+                        collapse_below: None,
+                        shrink_below: None,
+                        window_sizes: Vec::new(),
+                        size: "100%".to_string(),
                         background_color: None,
                         borders: BordersFile::ALL,
                         border_style: None,
@@ -1373,7 +1426,9 @@ impl Default for TabsFile {
                         border_title_position: BorderTitlePosition::Top,
                         border_title_alignment: Alignment::Left,
                         border_symbols: BorderSymbolsFile::Rounded,
-                        pane: PaneOrSplitFile::Pane(PaneTypeFile::Directories { tree: TreeBrowserArgs::default() }),
+                        pane: PaneOrSplitFile::Pane(PaneTypeFile::Directories {
+                            tree: TreeBrowserArgs::default(),
+                        }),
                     }],
                 },
             },
@@ -1384,8 +1439,10 @@ impl Default for TabsFile {
                     borders: BordersFile::NONE,
                     direction: DirectionFile::Vertical,
                     panes: vec![SubPaneFile {
-
-                            collapse_below: None, shrink_below: None, window_sizes: Vec::new(),size: "100%".to_string(),
+                        collapse_below: None,
+                        shrink_below: None,
+                        window_sizes: Vec::new(),
+                        size: "100%".to_string(),
                         background_color: None,
                         borders: BordersFile::ALL,
                         border_style: None,
@@ -1405,8 +1462,10 @@ impl Default for TabsFile {
                     borders: BordersFile::NONE,
                     direction: DirectionFile::Vertical,
                     panes: vec![SubPaneFile {
-
-                            collapse_below: None, shrink_below: None, window_sizes: Vec::new(),size: "100%".to_string(),
+                        collapse_below: None,
+                        shrink_below: None,
+                        window_sizes: Vec::new(),
+                        size: "100%".to_string(),
                         background_color: None,
                         borders: BordersFile::ALL,
                         border_style: None,
@@ -1426,8 +1485,10 @@ impl Default for TabsFile {
                     borders: BordersFile::NONE,
                     direction: DirectionFile::Vertical,
                     panes: vec![SubPaneFile {
-
-                            collapse_below: None, shrink_below: None, window_sizes: Vec::new(),size: "100%".to_string(),
+                        collapse_below: None,
+                        shrink_below: None,
+                        window_sizes: Vec::new(),
+                        size: "100%".to_string(),
                         background_color: None,
                         borders: BordersFile::ALL,
                         border_style: None,
@@ -1447,8 +1508,10 @@ impl Default for TabsFile {
                     borders: BordersFile::NONE,
                     direction: DirectionFile::Vertical,
                     panes: vec![SubPaneFile {
-
-                            collapse_below: None, shrink_below: None, window_sizes: Vec::new(),size: "100%".to_string(),
+                        collapse_below: None,
+                        shrink_below: None,
+                        window_sizes: Vec::new(),
+                        size: "100%".to_string(),
                         background_color: None,
                         borders: BordersFile::ALL,
                         border_style: None,
@@ -1457,7 +1520,9 @@ impl Default for TabsFile {
                         border_title_position: BorderTitlePosition::Top,
                         border_title_alignment: Alignment::Left,
                         border_symbols: BorderSymbolsFile::Rounded,
-                        pane: PaneOrSplitFile::Pane(PaneTypeFile::Playlists { tree: TreeBrowserArgs::default() }),
+                        pane: PaneOrSplitFile::Pane(PaneTypeFile::Playlists {
+                            tree: TreeBrowserArgs::default(),
+                        }),
                     }],
                 },
             },
@@ -1513,7 +1578,6 @@ pub(crate) fn validate_tabs(layout: &SizedPaneOrSplit, tabs: &Tabs) -> Result<()
 
     Ok(())
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -1588,9 +1652,7 @@ mod tests {
 "#,
         )
         .expect("explicit tree args must parse");
-        let PaneOrSplitFile::Pane(PaneTypeFile::Directories { tree }) =
-            &tabs.0[0].pane
-        else {
+        let PaneOrSplitFile::Pane(PaneTypeFile::Directories { tree }) = &tabs.0[0].pane else {
             panic!("expected a Directories pane");
         };
         assert_eq!(tree.tree_min_width, 60);
@@ -1598,8 +1660,7 @@ mod tests {
         assert_eq!(tree.info_box_cap, None);
 
         let serialized = ron::to_string(&tabs).expect("round-trip serialize");
-        let reparsed: TabsFile =
-            ron::from_str(&serialized).expect("round-trip reparse");
+        let reparsed: TabsFile = ron::from_str(&serialized).expect("round-trip reparse");
         assert_eq!(reparsed, tabs, "explicit tree args round-trip unchanged");
     }
 

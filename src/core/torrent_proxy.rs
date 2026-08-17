@@ -206,7 +206,10 @@ fn rewrite_head(head: &[u8], auth_header: &str) -> Vec<u8> {
         // prefix slices are exactly the name lengths ("Authorization" =
         // 13, "Proxy-Authorization" = 19, "Connection" = 10).
         if line.get(..13).map(|p| p.eq_ignore_ascii_case("authorization")).unwrap_or(false)
-            || line.get(..19).map(|p| p.eq_ignore_ascii_case("proxy-authorization")).unwrap_or(false)
+            || line
+                .get(..19)
+                .map(|p| p.eq_ignore_ascii_case("proxy-authorization"))
+                .unwrap_or(false)
         {
             has_auth = true;
         }

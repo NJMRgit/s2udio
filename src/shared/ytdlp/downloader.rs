@@ -222,10 +222,7 @@ impl YtDlp {
 
         let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
             .map(|rd| {
-                rd.flatten()
-                    .map(|e| e.path())
-                    .filter(|p| !before.contains(p))
-                    .collect::<Vec<_>>()
+                rd.flatten().map(|e| e.path()).filter(|p| !before.contains(p)).collect::<Vec<_>>()
             })
             .unwrap_or_default();
         files.sort();

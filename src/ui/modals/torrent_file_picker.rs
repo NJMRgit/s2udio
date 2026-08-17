@@ -4,11 +4,7 @@ use ratatui::Frame;
 use super::{ListConfirm, ListModal, Modal};
 use crate::{
     ctx::Ctx,
-    shared::{
-        id::Id,
-        keys::ActionEvent,
-        mouse_event::MouseEvent,
-    },
+    shared::{id::Id, keys::ActionEvent, mouse_event::MouseEvent},
     ui::input::InputResultEvent,
 };
 
@@ -31,7 +27,10 @@ pub enum TorrentPickerAction {
 /// focused one — Play and Download & Play play the marked files (all of
 /// them when none is marked), Cancel closes.
 #[derive(derive_more::Debug)]
-pub struct TorrentFilePicker<'a, Callback: FnOnce(&Ctx, Vec<usize>, TorrentPickerAction) -> Result<()> + Send + Sync + 'a> {
+pub struct TorrentFilePicker<
+    'a,
+    Callback: FnOnce(&Ctx, Vec<usize>, TorrentPickerAction) -> Result<()> + Send + Sync + 'a,
+> {
     #[debug(skip)]
     inner: ListModal<'a, (usize, String, u64)>,
     #[debug(skip)]
@@ -47,11 +46,7 @@ fn format_bytes(len: u64) -> String {
         value /= 1024.0;
         unit += 1;
     }
-    if unit == 0 {
-        format!("{len} B")
-    } else {
-        format!("{value:.1} {}", UNITS[unit])
-    }
+    if unit == 0 { format!("{len} B") } else { format!("{value:.1} {}", UNITS[unit]) }
 }
 
 impl<'a, Callback: FnOnce(&Ctx, Vec<usize>, TorrentPickerAction) -> Result<()> + Send + Sync + 'a>

@@ -158,17 +158,20 @@ mod test {
 
         let result = stack.walk_current().collect_vec();
 
-        assert_eq!(result, vec![
-            &song("songA1"),
-            &song("songA2"),
-            &song("songB1a"),
-            &song("songB1b"),
-            &song("song1"),
-            &song("song2"),
-            &song("songD1"),
-            &song("song3"),
-            &song("song4"),
-        ],);
+        assert_eq!(
+            result,
+            vec![
+                &song("songA1"),
+                &song("songA2"),
+                &song("songB1a"),
+                &song("songB1b"),
+                &song("song1"),
+                &song("song2"),
+                &song("songD1"),
+                &song("song3"),
+                &song("song4"),
+            ],
+        );
     }
 
     #[test]
@@ -203,10 +206,10 @@ mod test {
         ]);
 
         stack.insert(["dirA"].into(), vec![song("songA1"), song("songA2")]);
-        stack.insert(["dirB"].into(), vec![
-            DirOrSong::name_only("dirB1".to_owned()),
-            song("songBaa"),
-        ]);
+        stack.insert(
+            ["dirB"].into(),
+            vec![DirOrSong::name_only("dirB1".to_owned()), song("songBaa")],
+        );
         stack.insert(["dirB", "dirB1"].into(), vec![song("songB1a"), song("songB1b")]);
         stack.insert(["dirC"].into(), vec![]);
         stack.insert(["dirD"].into(), vec![song("songD1")]);
@@ -339,11 +342,10 @@ mod test {
             song("song1"),
             DirOrSong::name_only("dirB".to_owned()),
         ]);
-        stack.insert(["dirA"].into(), vec![
-            song("songA1"),
-            DirOrSong::name_only("dirA1".to_owned()),
-            song("songA2"),
-        ]);
+        stack.insert(
+            ["dirA"].into(),
+            vec![song("songA1"), DirOrSong::name_only("dirA1".to_owned()), song("songA2")],
+        );
         stack.insert(["dirA", "dirA1"].into(), vec![song("songA1a"), song("songA1b")]);
         stack.insert(["dirB"].into(), vec![song("songB1")]);
         stack.current_mut().select_idx(0, 0); // select dirA
@@ -352,11 +354,9 @@ mod test {
         let test = stack.current().selected().unwrap();
         let result = test.walk(&stack, stack.path().to_owned()).collect_vec();
 
-        assert_eq!(result, vec![
-            &song("songA1"),
-            &song("songA1a"),
-            &song("songA1b"),
-            &song("songA2"),
-        ]);
+        assert_eq!(
+            result,
+            vec![&song("songA1"), &song("songA1a"), &song("songA1b"), &song("songA2"),]
+        );
     }
 }

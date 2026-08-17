@@ -249,10 +249,8 @@ impl CavaOverridesFile {
     /// Read the sidecar file, if it exists and parses. Falls back to the
     /// legacy `~/.config/rmpc/cava.ron` when the s2udio file is absent.
     pub fn load() -> Option<Self> {
-        let path = Self::path()
-            .filter(|p| p.exists())
-            .or_else(Self::legacy_path)
-            .or_else(Self::path)?;
+        let path =
+            Self::path().filter(|p| p.exists()).or_else(Self::legacy_path).or_else(Self::path)?;
         let content = std::fs::read_to_string(&path).ok()?;
         match ron::de::from_str(&content) {
             Ok(overrides) => Some(overrides),
@@ -379,8 +377,7 @@ mod tests {
     /// to the PipeWire default capture source.
     #[test]
     fn legacy_fifo_input_falls_back_to_pipewire_auto() {
-        let content =
-            r#"(input: (method: Fifo, source: "/tmp/mpd-cava.fifo", sample_rate: Some(44100), sample_bits: Some(16), channels: Some(2)))"#;
+        let content = r#"(input: (method: Fifo, source: "/tmp/mpd-cava.fifo", sample_rate: Some(44100), sample_bits: Some(16), channels: Some(2)))"#;
         let parsed: CavaFile = ron::de::from_str(content).unwrap();
         let cava: Cava = parsed.into();
         assert_eq!(cava.input.source, "auto");
@@ -407,5 +404,4 @@ mod tests {
         overrides.apply_to(&mut cava);
         assert_eq!(cava.input.source, "auto");
     }
-
 }

@@ -285,7 +285,10 @@ mod tests {
         tests::fixtures::{app_event_channel, client_request_channel, ctx, work_request_channel},
         ui::{
             UiEvent,
-            panes::{Pane, album_art::{ALBUM_ART, JF_VIDEO_ART}},
+            panes::{
+                Pane,
+                album_art::{ALBUM_ART, JF_VIDEO_ART},
+            },
         },
     };
 
@@ -404,31 +407,24 @@ mod tests {
             (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
         );
         let item_id = "abcdef0123456789abcdef0123456789";
-        ctx.mpv = MpvSession {
-            active: true,
-            item_id: Some(item_id.to_owned()),
-            ..Default::default()
-        };
+        ctx.mpv =
+            MpvSession { active: true, item_id: Some(item_id.to_owned()), ..Default::default() };
         let mut screen = AlbumArtPane::new(&ctx);
         let bytes = vec![0u8; 64];
-        let result = MpdQueryResult::Any(Box::new(
-            crate::jellyfin::JellyfinResult::Image { item_id: item_id.to_owned(), bytes: bytes.clone() },
-        ));
+        let result = MpdQueryResult::Any(Box::new(crate::jellyfin::JellyfinResult::Image {
+            item_id: item_id.to_owned(),
+            bytes: bytes.clone(),
+        }));
         // The current item's image is accepted: the facade queues an encode.
         screen.on_query_finished(JF_VIDEO_ART, result, true, &ctx).unwrap();
-        assert!(matches!(
-            work_rx.try_recv(),
-            Ok(WorkRequest::ResizeImage(_))
-        ));
+        assert!(matches!(work_rx.try_recv(), Ok(WorkRequest::ResizeImage(_))));
         // A stale item's image is dropped (no encode queued).
         ctx.mpv.item_id = Some("deadbeefdeadbeefdeadbeefdeadbeef".to_owned());
-        let stale = MpdQueryResult::Any(Box::new(
-            crate::jellyfin::JellyfinResult::Image { item_id: item_id.to_owned(), bytes },
-        ));
+        let stale = MpdQueryResult::Any(Box::new(crate::jellyfin::JellyfinResult::Image {
+            item_id: item_id.to_owned(),
+            bytes,
+        }));
         screen.on_query_finished(JF_VIDEO_ART, stale, true, &ctx).unwrap();
-        assert!(matches!(
-            work_rx.try_recv(),
-            Err(crossbeam::channel::TryRecvError::Empty)
-        ));
+        assert!(matches!(work_rx.try_recv(), Err(crossbeam::channel::TryRecvError::Empty)));
     }
 }

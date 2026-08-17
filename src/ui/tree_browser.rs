@@ -116,11 +116,7 @@ pub(in crate::ui) trait TreeBrowserCore: Pane {
     /// The arrow glyph of a tree row ("▼ "/"▶ " expanded/collapsed;
     /// non-expandable rows get no arrow).
     fn tree_arrow(&self, row: &TreeRowView) -> &'static str {
-        if row.expandable {
-            if row.expanded { "▼ " } else { "▶ " }
-        } else {
-            ""
-        }
+        if row.expandable { if row.expanded { "▼ " } else { "▶ " } } else { "" }
     }
     fn tree_highlight(&self, hover_idx: Option<usize>, ctx: &Ctx) -> Style {
         if hover_idx == self.tree_list().selected() {
@@ -159,11 +155,9 @@ pub(in crate::ui) trait TreeBrowserCore: Pane {
         if w == 0 {
             (Rect::default(), area)
         } else {
-            let [tree, right] = Layout::horizontal([
-                Constraint::Length(w),
-                Constraint::Length(area.width - w),
-            ])
-            .areas(area);
+            let [tree, right] =
+                Layout::horizontal([Constraint::Length(w), Constraint::Length(area.width - w)])
+                    .areas(area);
             (tree, right)
         }
     }
@@ -236,7 +230,12 @@ pub(in crate::ui) trait TreeBrowserCore: Pane {
     }
     /// Plain left-click on an items row (default: select + follow). The
     /// MPD browser overrides with its ctrl/alt marking + anchor logic.
-    fn handle_items_left_click(&mut self, row: usize, _event: &MouseEvent, ctx: &Ctx) -> Result<()> {
+    fn handle_items_left_click(
+        &mut self,
+        row: usize,
+        _event: &MouseEvent,
+        ctx: &Ctx,
+    ) -> Result<()> {
         if row < self.items_len() {
             self.items_list_mut().select(Some(row));
             self.on_items_cursor_moved(ctx)?;
@@ -487,10 +486,7 @@ pub(in crate::ui) trait TreeBrowserCore: Pane {
     /// The keybinding hints strip between the items list and the info box.
     fn render_tips(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) {
         let dim = ctx.config.as_list_text_style();
-        frame.render_widget(
-            Paragraph::new(self.tips_lines(ctx)).style(dim),
-            self.tips_area(area),
-        );
+        frame.render_widget(Paragraph::new(self.tips_lines(ctx)).style(dim), self.tips_area(area));
     }
 
     /// Drop the temporary play entry once playback has moved on.
@@ -552,7 +548,11 @@ pub(in crate::ui) trait TreeBrowserCore: Pane {
 
     /// Record the queue id of a temp-play query result (shared by the
     /// panes' `on_query_finished` play arms).
-    fn handle_play_result(&mut self, any: Box<dyn std::any::Any + Send + Sync>, ctx: &Ctx) -> Result<()> {
+    fn handle_play_result(
+        &mut self,
+        any: Box<dyn std::any::Any + Send + Sync>,
+        ctx: &Ctx,
+    ) -> Result<()> {
         if let Ok(boxed) = any.downcast::<u32>() {
             self.set_temp_play_id(Some(*boxed));
             ctx.temp_play_id.set(Some(*boxed));
@@ -564,7 +564,12 @@ pub(in crate::ui) trait TreeBrowserCore: Pane {
     /// `PlaybackStateChanged`, `Player`, `Reconnected`) — the shared part
     /// of the three panes' `on_event` bodies. Returns whether the event
     /// was handled.
-    fn handle_tree_events(&mut self, event: &mut UiEvent, _is_visible: bool, ctx: &Ctx) -> Result<bool> {
+    fn handle_tree_events(
+        &mut self,
+        event: &mut UiEvent,
+        _is_visible: bool,
+        ctx: &Ctx,
+    ) -> Result<bool> {
         match event {
             UiEvent::SongChanged => self.cleanup_temp_play(ctx),
             UiEvent::PlaybackStateChanged | UiEvent::Player => self.temp_play_on_stop(ctx),
@@ -591,7 +596,8 @@ pub(in crate::ui) trait TreeBrowserCore: Pane {
     /// right-click opens the pane's tree menu, wheel moves the highlight.
     fn handle_tree_mouse(&mut self, event: MouseEvent, ctx: &Ctx) -> Result<()> {
         self.on_tree_focus();
-        let row = usize::from(event.y.saturating_sub(self.tree_area().y)) + self.tree_list().offset();
+        let row =
+            usize::from(event.y.saturating_sub(self.tree_area().y)) + self.tree_list().offset();
         match event.kind {
             MouseEventKind::LeftClick => self.highlight_tree_node(row, ctx),
             MouseEventKind::DoubleClick => self.on_tree_double_click(row, ctx),
@@ -658,16 +664,19 @@ pub(in crate::ui) trait TreeBrowserCore: Pane {
                     self.on_items_focus();
                     let dir = if matches!(action, CommonAction::Up) { -1 } else { 1 };
                     self.move_items(dir, ctx)?;
+                    return Ok(true);
                 }
                 CommonAction::Left => {
                     self.on_items_focus();
                     self.select_parent(ctx)?;
+                    return Ok(true);
                 }
                 CommonAction::Top => {
                     if self.items_len() > 0 {
                         self.items_list_mut().select(Some(0));
                         self.on_items_cursor_moved(ctx)?;
                     }
+                    return Ok(true);
                 }
                 CommonAction::Bottom => {
                     let len = self.items_len();
@@ -675,12 +684,14 @@ pub(in crate::ui) trait TreeBrowserCore: Pane {
                         self.items_list_mut().select(Some(len - 1));
                         self.on_items_cursor_moved(ctx)?;
                     }
+                    return Ok(true);
                 }
                 CommonAction::SelectUp | CommonAction::SelectDown => {
                     let dir = if matches!(action, CommonAction::SelectDown) { 1 } else { -1 };
                     if !self.on_select_range(dir, ctx)? {
                         event.abandon();
                     }
+                    return Ok(true);
                 }
                 CommonAction::SelectAll => {
                     // Ctrl+A marks every row of the right (items) pane —
@@ -689,19 +700,30 @@ pub(in crate::ui) trait TreeBrowserCore: Pane {
                     if !self.on_select_all(ctx)? {
                         event.abandon();
                     }
+                    return Ok(true);
                 }
-                CommonAction::Confirm => self.on_confirm(ctx)?,
-                CommonAction::ContextMenu => self.open_context_menu(ctx)?,
+                CommonAction::Confirm => {
+                    self.on_confirm(ctx)?;
+                    return Ok(true);
+                }
+                CommonAction::ContextMenu => {
+                    self.open_context_menu(ctx)?;
+                    return Ok(true);
+                }
                 CommonAction::Close => {
                     if self.on_close(ctx)? {
                         event.consume();
                     } else {
                         event.abandon();
                     }
+                    return Ok(true);
                 }
+                // Lyrics-edit-mode actions (d / a / …) and anything else the
+                // tree browser does not own fall through so the directories
+                // half of the same key (d → FolderExpand, a → FolderCollapse,
+                // → → PlayFile) still fires.
                 _ => event.abandon(),
             }
-            return Ok(true);
         }
         if let Some(action) = event.claim_directories() {
             match action {

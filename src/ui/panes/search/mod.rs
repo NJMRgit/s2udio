@@ -15,9 +15,7 @@ use crate::{
     MpdQueryResult,
     config::{
         keys::{
-            CommonAction,
-            DirectoriesActions,
-            GlobalAction,
+            CommonAction, DirectoriesActions, GlobalAction,
             actions::{AddKind, AutoplayKind, DeleteKind, Position, SaveKind},
         },
         tabs::{PaneType, TreeBrowserArgs},
@@ -40,20 +38,17 @@ use crate::{
     ui::{
         UiEvent,
         dirstack::Dir,
-        song_list::SongListCore,
         input::InputResultEvent,
         modals::{
             input_modal::InputModal,
             menu::{
-                add_to_playlist_or_show_modal,
-                create_delete_modal,
-                create_save_modal,
-                delete_from_playlist_or_show_confirmation,
-                modal::MenuModal,
+                add_to_playlist_or_show_modal, create_delete_modal, create_save_modal,
+                delete_from_playlist_or_show_confirmation, modal::MenuModal,
             },
             select_modal::SelectModal,
         },
         panes::search::inputs::{ActionResult, InputGroups, InputType, TextboxInput},
+        song_list::SongListCore,
         widgets::browser::BrowserArea,
     },
 };
@@ -281,8 +276,11 @@ impl SearchPane {
             // Round 28: the search UI folded into the MPD tab, so its
             // queries target the Directories pane (the results land in the
             // MPD tab's embedded search via `DirectoriesPane::on_query_finished`).
-            ctx.query().id(SEARCH).replace_id(SEARCH).target(PaneType::Directories { tree: TreeBrowserArgs::default() }).query(
-                move |client| {
+            ctx.query()
+                .id(SEARCH)
+                .replace_id(SEARCH)
+                .target(PaneType::Directories { tree: TreeBrowserArgs::default() })
+                .query(move |client| {
                     // empty URI returns all songs with the sticker
                     let uris = match (rating_filter, liked_filter) {
                         (Some(rf), Some(lf)) => {
@@ -327,16 +325,18 @@ impl SearchPane {
                     let data: Vec<Song> = client.read_response()?;
 
                     Ok(MpdQueryResult::SearchResult { data })
-                },
-            );
+                });
         } else if filter.is_empty() {
             // Filters are empty, stickers are either not supported or not set - clear
             // current results
             let _ = std::mem::take(&mut self.songs_dir);
         } else {
             // Search normally
-            ctx.query().id(SEARCH).replace_id(SEARCH).target(PaneType::Directories { tree: TreeBrowserArgs::default() }).query(
-                move |client| {
+            ctx.query()
+                .id(SEARCH)
+                .replace_id(SEARCH)
+                .target(PaneType::Directories { tree: TreeBrowserArgs::default() })
+                .query(move |client| {
                     let data = if fold_case {
                         client.search(&filter, strip_diacritics)
                     } else {
@@ -362,8 +362,7 @@ impl SearchPane {
                     };
 
                     Ok(MpdQueryResult::SearchResult { data })
-                },
-            );
+                });
         }
     }
 
@@ -560,7 +559,8 @@ impl SearchPane {
                     modal!(ctx, modal);
                 }
                 CommonAction::DeleteFromPlaylist { .. } => {}
-                CommonAction::LyricsNudgeUp | CommonAction::LyricsNudgeDown
+                CommonAction::LyricsNudgeUp
+                | CommonAction::LyricsNudgeDown
                 | CommonAction::LyricsSave
                 | CommonAction::LyricsDeleteWord
                 | CommonAction::LyricsEditLine
@@ -923,11 +923,9 @@ impl Pane for SearchPane {
     ) -> anyhow::Result<()> {
         // Same structure as the Directories / Playlists / Radio tabs: the
         // filter pane on the left, results + tips + info on the right.
-        let [search_area, right] = Layout::horizontal([
-            Constraint::Percentage(30),
-            Constraint::Percentage(70),
-        ])
-        .areas(area);
+        let [search_area, right] =
+            Layout::horizontal([Constraint::Percentage(30), Constraint::Percentage(70)])
+                .areas(area);
         let [list_area, tips_area, info_area] = Layout::vertical([
             Constraint::Percentage(60),
             Constraint::Length(3),
@@ -1100,10 +1098,8 @@ impl Pane for SearchPane {
                     }
                     self.phase = Phase::BrowseResults;
                 }
-                let clicked_row = event
-                    .y
-                    .saturating_sub(self.column_areas[BrowserArea::Current].y)
-                    .into();
+                let clicked_row =
+                    event.y.saturating_sub(self.column_areas[BrowserArea::Current].y).into();
                 if let Some(idx) = self.songs_dir.state.get_at_rendered_row(clicked_row) {
                     if event.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) {
                         // Additive selection: the row under the cursor
@@ -1400,9 +1396,7 @@ mod tests {
     ) -> Option<ratatui::style::Color> {
         let backend = ratatui::backend::TestBackend::new(100, 40);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
-        terminal
-            .draw(|frame| pane.render(frame, Rect::new(0, 0, 100, 40), ctx).unwrap())
-            .unwrap();
+        terminal.draw(|frame| pane.render(frame, Rect::new(0, 0, 100, 40), ctx).unwrap()).unwrap();
         let buf = terminal.backend().buffer();
         let current = pane.column_areas[BrowserArea::Current];
         buf[(current.x, current.y + row)].style().bg
@@ -1416,9 +1410,7 @@ mod tests {
     ) -> Option<ratatui::style::Color> {
         let backend = ratatui::backend::TestBackend::new(100, 40);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
-        terminal
-            .draw(|frame| pane.render(frame, Rect::new(0, 0, 100, 40), ctx).unwrap())
-            .unwrap();
+        terminal.draw(|frame| pane.render(frame, Rect::new(0, 0, 100, 40), ctx).unwrap()).unwrap();
         let buf = terminal.backend().buffer();
         buf[(area.x, area.y + row)].style().bg
     }
@@ -1432,9 +1424,7 @@ mod tests {
     ) -> ratatui::buffer::Buffer {
         let backend = ratatui::backend::TestBackend::new(w, h);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
-        terminal
-            .draw(|frame| pane.render(frame, Rect::new(0, 0, w, h), ctx).unwrap())
-            .unwrap();
+        terminal.draw(|frame| pane.render(frame, Rect::new(0, 0, w, h), ctx).unwrap()).unwrap();
         terminal.backend().buffer().clone()
     }
 
@@ -1442,9 +1432,7 @@ mod tests {
         let mut pane = SearchPane::new(ctx);
         let backend = ratatui::backend::TestBackend::new(100, 40);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
-        terminal
-            .draw(|frame| pane.render(frame, Rect::new(0, 0, 100, 40), ctx).unwrap())
-            .unwrap();
+        terminal.draw(|frame| pane.render(frame, Rect::new(0, 0, 100, 40), ctx).unwrap()).unwrap();
         pane
     }
 
@@ -1765,11 +1753,7 @@ mod tests {
 
         // No mouse position: nothing is hovered.
         ctx.set_mouse_pos(None);
-        assert_ne!(
-            input_bg(&mut pane, &ctx, inputs_area, 1),
-            hovered,
-            "no pointer, no hover"
-        );
+        assert_ne!(input_bg(&mut pane, &ctx, inputs_area, 1), hovered, "no pointer, no hover");
     }
 
     #[test]
@@ -1800,7 +1784,8 @@ mod tests {
 
     /// A ctx that keeps the app-event receiver, so tests can observe the
     /// modals the pane opens.
-    fn make_ctx_with_rx() -> (crate::ctx::Ctx, crossbeam::channel::Receiver<crate::shared::events::AppEvent>) {
+    fn make_ctx_with_rx()
+    -> (crate::ctx::Ctx, crossbeam::channel::Receiver<crate::shared::events::AppEvent>) {
         let (app_tx, app_rx) = crossbeam::channel::unbounded();
         let ctx = crate::tests::fixtures::ctx(
             (app_tx, app_rx.clone()),
@@ -1827,7 +1812,10 @@ mod tests {
 
         let got = app_rx.try_recv();
         assert!(
-            matches!(got, Ok(crate::shared::events::AppEvent::UiEvent(crate::ui::UiAppEvent::Modal(_)))),
+            matches!(
+                got,
+                Ok(crate::shared::events::AppEvent::UiEvent(crate::ui::UiAppEvent::Modal(_)))
+            ),
             "Enter in the results opens the options menu (got {got:?})"
         );
     }
@@ -1852,7 +1840,10 @@ mod tests {
 
         let got = app_rx.try_recv();
         assert!(
-            matches!(got, Ok(crate::shared::events::AppEvent::UiEvent(crate::ui::UiAppEvent::Modal(_)))),
+            matches!(
+                got,
+                Ok(crate::shared::events::AppEvent::UiEvent(crate::ui::UiAppEvent::Modal(_)))
+            ),
             "Space with a multi-selection opens the options menu (got {got:?})"
         );
     }

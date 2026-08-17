@@ -47,11 +47,7 @@ fn parse_hex(value: &str) -> Option<Color> {
         return None;
     }
     let v = u32::from_str_radix(hex, 16).ok()?;
-    Some(Color::Rgb(
-        ((v >> 16) & 0xff) as u8,
-        ((v >> 8) & 0xff) as u8,
-        (v & 0xff) as u8,
-    ))
+    Some(Color::Rgb(((v >> 16) & 0xff) as u8, ((v >> 8) & 0xff) as u8, (v & 0xff) as u8))
 }
 
 fn parse_rgb(value: &str) -> Option<Color> {
@@ -91,11 +87,7 @@ fn parse_tint(value: &str) -> Option<Color> {
         return None;
     }
     let v = u32::from_str_radix(&hex[2..], 16).ok()?;
-    Some(Color::Rgb(
-        ((v >> 16) & 0xff) as u8,
-        ((v >> 8) & 0xff) as u8,
-        (v & 0xff) as u8,
-    ))
+    Some(Color::Rgb(((v >> 16) & 0xff) as u8, ((v >> 8) & 0xff) as u8, (v & 0xff) as u8))
 }
 
 /// The mode's dominant color from blsw: the KWin `TINT` / outline color (the
@@ -107,9 +99,7 @@ pub fn read_mode_color(mode: &str) -> Option<Color> {
     let dominant = find_var(&content, &format!("{upper}_OUTLINE_COLOR_ACTIVE"))
         .and_then(parse_rgb)
         .or_else(|| find_var(&content, &format!("{upper}_TINT")).and_then(parse_tint))
-        .or_else(|| {
-            find_var(&content, &format!("{upper}_FF_LOGO_COLOR")).and_then(parse_hex)
-        })?;
+        .or_else(|| find_var(&content, &format!("{upper}_FF_LOGO_COLOR")).and_then(parse_hex))?;
     Some(greyish(dominant))
 }
 
@@ -162,21 +152,17 @@ NIGHT_FF_LOGO_COLOR="#07A761"
     #[test]
     fn finds_mode_color_in_blsw() {
         let content = BLSW_SAMPLE;
-        assert_eq!(
-            find_var(content, "FLWR_FF_LOGO_COLOR"),
-            Some("#FF6673")
-        );
-        assert_eq!(
-            find_var(content, "FLWR_OUTLINE_COLOR_ACTIVE"),
-            Some("255,127,153")
-        );
+        assert_eq!(find_var(content, "FLWR_FF_LOGO_COLOR"), Some("#FF6673"));
+        assert_eq!(find_var(content, "FLWR_OUTLINE_COLOR_ACTIVE"), Some("255,127,153"));
         assert_eq!(find_var(content, "MISSING_X"), None);
     }
 
     #[test]
     fn parse_hex_from_blsw() {
-        assert_eq!(parse_hex(find_var(BLSW_SAMPLE, "FLWR_FF_LOGO_COLOR").unwrap()),
-            Some(Color::Rgb(0xff, 0x66, 0x73)));
+        assert_eq!(
+            parse_hex(find_var(BLSW_SAMPLE, "FLWR_FF_LOGO_COLOR").unwrap()),
+            Some(Color::Rgb(0xff, 0x66, 0x73))
+        );
     }
 
     #[test]

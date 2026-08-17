@@ -19,19 +19,16 @@ use crate::{
         mpd_client::{Filter, FilterKind, MpdClient, Tag},
     },
     shared::{
-        cmp::StringCompare,
-        keys::ActionEvent,
-        mouse_event::MouseEvent,
+        cmp::StringCompare, keys::ActionEvent, mouse_event::MouseEvent, mpd_client_ext::Enqueue,
         string_util::StringExt,
-        mpd_client_ext::Enqueue,
     },
     ui::{
         UiEvent,
         browser::BrowserPane,
         dir_or_song::DirOrSong,
-        song_list::SongListCore,
         dirstack::{Dir, DirStack, DirStackItem, Path},
         input::InputResultEvent,
+        song_list::SongListCore,
         widgets::browser::{Browser, BrowserArea},
     },
 };
@@ -297,7 +294,10 @@ impl SongListCore<DirOrSong, ListState> for TagBrowserPane {
         BrowserPane::fetch_data_internal(self, ctx)
     }
 
-    fn enqueue<'a>(&self, items: impl Iterator<Item = &'a DirOrSong>) -> (Vec<Enqueue>, Option<usize>) {
+    fn enqueue<'a>(
+        &self,
+        items: impl Iterator<Item = &'a DirOrSong>,
+    ) -> (Vec<Enqueue>, Option<usize>) {
         BrowserPane::enqueue(self, items)
     }
 
@@ -468,12 +468,15 @@ mod tests {
 
         pane.process_songs(artist.clone(), songs, &ctx);
 
-        assert_eq!(pane.stack.contained_paths().sorted().collect_vec(), vec![
-            &Path::from([]),
-            &Path::from("artist"),
-            &Path::from(["artist", "album_a"]),
-            &Path::from(["artist", "album_b"]),
-        ]);
+        assert_eq!(
+            pane.stack.contained_paths().sorted().collect_vec(),
+            vec![
+                &Path::from([]),
+                &Path::from("artist"),
+                &Path::from(["artist", "album_a"]),
+                &Path::from(["artist", "album_b"]),
+            ]
+        );
         assert_eq!(pane_albums(&pane), vec!["album_a", "album_b"]);
     }
 
@@ -493,13 +496,16 @@ mod tests {
 
         pane.process_songs(artist.clone(), songs, &ctx);
 
-        assert_eq!(pane.stack.contained_paths().sorted().collect_vec(), vec![
-            &Path::from([]),
-            &Path::from("artist"),
-            &Path::from(["artist", "(2020) album_a"]),
-            &Path::from(["artist", "(2021) album_a"]),
-            &Path::from(["artist", "(2022) album_b"]),
-        ]);
+        assert_eq!(
+            pane.stack.contained_paths().sorted().collect_vec(),
+            vec![
+                &Path::from([]),
+                &Path::from("artist"),
+                &Path::from(["artist", "(2020) album_a"]),
+                &Path::from(["artist", "(2021) album_a"]),
+                &Path::from(["artist", "(2022) album_b"]),
+            ]
+        );
         assert_eq!(pane_albums(&pane), vec!["(2020) album_a", "(2021) album_a", "(2022) album_b"]);
     }
 
@@ -519,13 +525,16 @@ mod tests {
 
         pane.process_songs(artist.clone(), songs, &ctx);
 
-        assert_eq!(pane.stack.contained_paths().sorted().collect_vec(), vec![
-            &Path::from([]),
-            &Path::from("artist"),
-            &Path::from(["artist", "(2019) album_b"]),
-            &Path::from(["artist", "(2020) album_a"]),
-            &Path::from(["artist", "(2021) album_a"]),
-        ]);
+        assert_eq!(
+            pane.stack.contained_paths().sorted().collect_vec(),
+            vec![
+                &Path::from([]),
+                &Path::from("artist"),
+                &Path::from(["artist", "(2019) album_b"]),
+                &Path::from(["artist", "(2020) album_a"]),
+                &Path::from(["artist", "(2021) album_a"]),
+            ]
+        );
         assert_eq!(pane_albums(&pane), vec!["(2019) album_b", "(2020) album_a", "(2021) album_a"]);
     }
 
@@ -545,12 +554,15 @@ mod tests {
 
         pane.process_songs(artist.clone(), songs, &ctx);
 
-        assert_eq!(pane.stack.contained_paths().sorted().collect_vec(), vec![
-            &Path::from([]),
-            &Path::from("artist"),
-            &Path::from(["artist", "album_a"]),
-            &Path::from(["artist", "album_b"]),
-        ]);
+        assert_eq!(
+            pane.stack.contained_paths().sorted().collect_vec(),
+            vec![
+                &Path::from([]),
+                &Path::from("artist"),
+                &Path::from(["artist", "album_a"]),
+                &Path::from(["artist", "album_b"]),
+            ]
+        );
         assert_eq!(pane_albums(&pane), vec!["album_b", "album_a"]);
     }
 
@@ -571,12 +583,15 @@ mod tests {
 
         pane.process_songs(artist.clone(), songs, &ctx);
 
-        assert_eq!(pane.stack.contained_paths().sorted().collect_vec(), vec![
-            &Path::from([]),
-            &Path::from("artist"),
-            &Path::from(["artist", "(1969) album_a"]), // Uses originaldate, not date
-            &Path::from(["artist", "(1970) album_b"]), // Uses originaldate, not date
-        ]);
+        assert_eq!(
+            pane.stack.contained_paths().sorted().collect_vec(),
+            vec![
+                &Path::from([]),
+                &Path::from("artist"),
+                &Path::from(["artist", "(1969) album_a"]), // Uses originaldate, not date
+                &Path::from(["artist", "(1970) album_b"]), // Uses originaldate, not date
+            ]
+        );
         assert_eq!(pane_albums(&pane), vec!["(1969) album_a", "(1970) album_b"]);
     }
 
@@ -595,12 +610,15 @@ mod tests {
 
         pane.process_songs(artist.clone(), songs, &ctx);
 
-        assert_eq!(pane.stack.contained_paths().sorted().collect_vec(), vec![
-            &Path::from([]),
-            &Path::from("artist"),
-            &Path::from(["artist", "(1969) album_a"]), // Uses originaldate (first in list)
-            &Path::from(["artist", "(1990) album_b"]), // Falls back to date (second in list)
-        ]);
+        assert_eq!(
+            pane.stack.contained_paths().sorted().collect_vec(),
+            vec![
+                &Path::from([]),
+                &Path::from("artist"),
+                &Path::from(["artist", "(1969) album_a"]), // Uses originaldate (first in list)
+                &Path::from(["artist", "(1990) album_b"]), // Falls back to date (second in list)
+            ]
+        );
         assert_eq!(pane_albums(&pane), vec!["(1969) album_a", "(1990) album_b"]);
     }
 
@@ -618,11 +636,14 @@ mod tests {
 
         pane.process_songs(artist.clone(), songs, &ctx);
 
-        assert_eq!(pane.stack.contained_paths().sorted().collect_vec(), vec![
-            &Path::from([]),
-            &Path::from("artist"),
-            &Path::from(["artist", "(<no date>) album_a"]) // Falls back to default
-        ]);
+        assert_eq!(
+            pane.stack.contained_paths().sorted().collect_vec(),
+            vec![
+                &Path::from([]),
+                &Path::from("artist"),
+                &Path::from(["artist", "(<no date>) album_a"]) // Falls back to default
+            ]
+        );
         assert_eq!(pane_albums(&pane), vec!["(<no date>) album_a"]);
     }
 }

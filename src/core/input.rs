@@ -3,7 +3,10 @@ use std::time::Duration;
 use crossbeam::channel::Sender;
 use crossterm::event::Event;
 
-use crate::shared::{events::AppEvent, mouse_event::{MouseEvent, MouseEventKind, MouseEventTracker}};
+use crate::shared::{
+    events::AppEvent,
+    mouse_event::{MouseEvent, MouseEventKind, MouseEventTracker},
+};
 
 pub fn init(event_tx: Sender<AppEvent>) -> std::io::Result<std::thread::JoinHandle<()>> {
     std::thread::Builder::new().name("input".to_owned()).spawn(move || input_poll_task(&event_tx))
@@ -50,12 +53,8 @@ fn read_clipboard(primary: bool) -> Option<String> {
     } else {
         run("wl-paste", &["--no-newline"])
     }
-    .or_else(|| {
-        run("xclip", &["-selection", if primary { "primary" } else { "clipboard" }, "-o"])
-    })
-    .or_else(|| {
-        run("xsel", &[if primary { "--primary" } else { "--clipboard" }, "--output"])
-    })?;
+    .or_else(|| run("xclip", &["-selection", if primary { "primary" } else { "clipboard" }, "-o"]))
+    .or_else(|| run("xsel", &[if primary { "--primary" } else { "--clipboard" }, "--output"]))?;
     if text.trim().is_empty() { None } else { Some(text) }
 }
 
@@ -76,7 +75,9 @@ fn input_poll_task(event_tx: &Sender<AppEvent>) {
                     // same paste pipeline (the event is consumed here).
                     if matches!(
                         mouse.kind,
-                        crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Middle)
+                        crossterm::event::MouseEventKind::Down(
+                            crossterm::event::MouseButton::Middle
+                        )
                     ) {
                         read_clipboard_and_paste(event_tx.clone(), true);
                         continue;
@@ -93,11 +94,8 @@ fn input_poll_task(event_tx: &Sender<AppEvent>) {
                     // bare control code): read the clipboard and feed the
                     // paste pipeline.
                     let ctrl = key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL);
-                    let is_ctrl_v = ctrl
-                        && matches!(
-                            key.code,
-                            crossterm::event::KeyCode::Char('v' | '\x16')
-                        );
+                    let is_ctrl_v =
+                        ctrl && matches!(key.code, crossterm::event::KeyCode::Char('v' | '\x16'));
                     if is_ctrl_v {
                         read_clipboard_and_paste(event_tx.clone(), false);
                         continue;
