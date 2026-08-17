@@ -118,10 +118,14 @@ the user's decisions win. Locked in across sessions (details in the docs):
 
 ## Current state (verified)
 
-- **Master**: `NJMRgit/s2udio` **master @ `e3ea655`** (clean buildable
+- **Master**: `NJMRgit/s2udio` **master @ `b9ff877`** (clean buildable
   subset) — **rounds 34–43 merged + pushed 2026-08-15** (one clean-subset
   commit on top of round-33 `53efdd6`): lyrics edit mode (34–41) + rqbit
-  web UI/CLI (42–43) + the README rqbit section. Validated on the master
+  web UI/CLI (42–43) + the README rqbit section. **2026-08-17**: one more
+  fix commit `b9ff877` (rebased on 2 README-only web commits `f12a3ab` +
+  `4e107e8`): the mpDris2 `socket_callback` TimeoutError hardening — the
+  bridge now survives MPD read timeouts instead of dying (media keys stop
+  working on crash). Validated on the master
   tree: `cargo check` + `cargo build --release` clean, **1387/1389 tests
   pass** (the same 2 pre-existing env failures; the lyrics-lookup test is
   the known parallel-flaky one — passes alone). Tree = clean subset (no
@@ -133,6 +137,9 @@ the user's decisions win. Locked in across sessions (details in the docs):
   suite
   host-side: **1451/1453 pass** (2 pre-existing environment-dependent
   failures, also fail on the clean tree), warnings 3 baseline.
+  **2026-08-17: `a162704`** — mpDris2 `socket_callback` TimeoutError fix
+  (media keys no longer kill the bridge) + its regression test; pushed to
+  `s2udio-working/working`, merged to master (`b9ff877`).
   **Round 42 (2026-08-15, host-implemented)**: Settings → **torrent**
   section — **web ui** (starts a standalone rqbit engine if needed and
   opens the web UI in the browser via xdg-open), **stop engine** (kills
