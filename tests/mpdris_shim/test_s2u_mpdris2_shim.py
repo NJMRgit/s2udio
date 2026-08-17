@@ -123,6 +123,13 @@ class FakeWrapper(object):
     def find_cover(self, song_url):
         return None
 
+    def socket_callback(self, fd, event):
+        # Mirrors the official idle-event fetch: mpDris2 sets a 5 s socket
+        # timeout at connect(), so when MPD is busy the read raises
+        # TimeoutError — and the official code has no handler, killing the
+        # daemon. The shim must catch it and reconnect.
+        raise TimeoutError("timed out")
+
     def update_metadata(self):
         self._metadata = {"xesam:url": "https://rr4.example/audio.m3u8"}
 
@@ -321,6 +328,27 @@ def _test_patch_applies_and_metadata_injects():
     if result is not True or w2.client.seek_calls != [(5, 30.0)]:
         check("seekid forwards successful seeks", False, repr(result))
         ok = False
+
+    # socket_callback(): a TimeoutError in the idle-event fetch must
+    # reconnect instead of crashing the daemon (the official code has no
+    # handler, so it dies and the media keys stop working).
+    w = FakeWrapper()
+    try:
+        rc = mod.MPDWrapper.socket_callback(w, None, 0)
+    except Exception as err:
+        check("socket_callback catches TimeoutError", False, repr(err))
+        ok = False
+    else:
+        if rc is not True:
+            check("socket_callback re-arms after reconnect", False, repr(rc))
+            ok = False
+        if w.reconnected != 1:
+            check("socket_callback reconnects on TimeoutError", False,
+                  f"reconnected={w.reconnected}")
+            ok = False
+        if not mod.logger.warnings:
+            check("socket_callback logs the reconnect", False)
+            ok = False
 
     # Seek/SetPosition guards: the wrapped D-Bus handlers must no-op on
     # the KeyError an HLS stream status raises (no 'time' timeline) — and
