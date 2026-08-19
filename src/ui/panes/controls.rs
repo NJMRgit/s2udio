@@ -332,10 +332,14 @@ impl ControlsPane {
     /// the chosen preference: update the runtime config, persist it to
     /// state.ron and re-select the matching track on the live mpv instance.
     fn open_language_menu(ctx: &Ctx, title: &str, audio: bool) {
+<<<<<<< HEAD
         modal!(
             ctx,
             crate::ui::modals::language::LanguageModal::new(ctx, title, audio)
         );
+=======
+        modal!(ctx, crate::ui::modals::language::LanguageModal::new(title, audio));
+>>>>>>> bd3a7a7 (refactor: extract main() into handler functions + fix medium priority issues)
     }
 
     /// The Download button: open the save-as menu for the ytdlp stream
