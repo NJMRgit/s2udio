@@ -45,7 +45,7 @@ pub struct LanguageModal {
 }
 
 impl LanguageModal {
-    pub fn new(ctx: &Ctx, title: &str, audio: bool) -> Self {
+    pub fn new(title: &str, audio: bool) -> Self {
         let mut rows: Vec<(String, Option<LangChoice>)> = Vec::new();
         rows.push(("Preference".to_owned(), None));
         if audio {
