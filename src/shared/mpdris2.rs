@@ -56,7 +56,8 @@ mod tests {
 
     #[test]
     fn state_file_round_trips_the_toggle() {
-        let dir = std::env::temp_dir().join(format!("s2u-mpdris2-notify-test-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("s2u-mpdris2-notify-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
@@ -77,7 +78,8 @@ mod tests {
 
     #[test]
     fn configured_cache_dir_wins_over_default() {
-        let dir = std::env::temp_dir().join(format!("s2u-mpdris2-notify-path-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("s2u-mpdris2-notify-path-{}", std::process::id()));
         let path = notify_state_path(Some(&dir));
         assert_eq!(path, dir.join(NOTIFY_STATE_FILE));
     }

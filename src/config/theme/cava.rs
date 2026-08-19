@@ -190,26 +190,27 @@ impl CavaThemeFile {
                         .fold(HashMap::new(), |mut acc, ((a_key, a_val), (b_key, b_val))| {
                             if b_key - a_key == 0 {
                                 // range only includes start and end, simply include them in the map
-                                acc.insert(a_key, CrosstermColor::Rgb {
-                                    r: a_val.0,
-                                    g: a_val.1,
-                                    b: a_val.2,
-                                });
-                                acc.insert(b_key, CrosstermColor::Rgb {
-                                    r: b_val.0,
-                                    g: b_val.1,
-                                    b: b_val.2,
-                                });
+                                acc.insert(
+                                    a_key,
+                                    CrosstermColor::Rgb { r: a_val.0, g: a_val.1, b: a_val.2 },
+                                );
+                                acc.insert(
+                                    b_key,
+                                    CrosstermColor::Rgb { r: b_val.0, g: b_val.1, b: b_val.2 },
+                                );
                             } else {
                                 // interpolate values between start and end
                                 let total = f64::from(b_key - a_key);
                                 for i in a_key..=b_key {
                                     let progress = f64::from(i - a_key) / total;
-                                    acc.insert(i, CrosstermColor::Rgb {
-                                        r: lerp_u8(a_val.0, b_val.0, progress),
-                                        g: lerp_u8(a_val.1, b_val.1, progress),
-                                        b: lerp_u8(a_val.2, b_val.2, progress),
-                                    });
+                                    acc.insert(
+                                        i,
+                                        CrosstermColor::Rgb {
+                                            r: lerp_u8(a_val.0, b_val.0, progress),
+                                            g: lerp_u8(a_val.1, b_val.1, progress),
+                                            b: lerp_u8(a_val.2, b_val.2, progress),
+                                        },
+                                    );
                                 }
                             }
                             acc

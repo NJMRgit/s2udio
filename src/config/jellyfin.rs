@@ -22,7 +22,6 @@ pub struct JellyfinFile {
     pub config_file: Option<String>,
 }
 
-
 /// Jellyfin credentials written by the Settings panel
 /// (`~/.config/s2udio/jellyfin.ron`, round 19 — s2udio-only sidecar moved
 /// out of `~/.config/rmpc/`). When present it overrides jellytui's

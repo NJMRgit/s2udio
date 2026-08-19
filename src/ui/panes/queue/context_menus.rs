@@ -4,7 +4,7 @@
 // while each focus area lives in its own file.
 use itertools::Itertools;
 
-use super::{play_queue_song, QueuePane};
+use super::{QueuePane, play_queue_song};
 use crate::{
     ctx::Ctx,
     mpd::mpd_client::MpdClient,
@@ -16,11 +16,8 @@ use crate::{
     ui::{
         UiAppEvent,
         modals::{
-            confirm_modal::ConfirmModal,
-            info_list_modal::InfoListModal,
-            input_modal::InputModal,
-            menu::modal::MenuModal,
-            select_modal::SelectModal,
+            confirm_modal::ConfirmModal, info_list_modal::InfoListModal, input_modal::InputModal,
+            menu::modal::MenuModal, select_modal::SelectModal,
         },
     },
 };
@@ -60,9 +57,9 @@ impl QueuePane {
             .and_then(|i| playlist.get(i))
             .and_then(|entry| {
                 let info = ctx.yt_info.borrow();
-                info.get(&entry.url).cloned().or_else(|| {
-                    info.values().find(|e| e.original_url == entry.url).cloned()
-                })
+                info.get(&entry.url)
+                    .cloned()
+                    .or_else(|| info.values().find(|e| e.original_url == entry.url).cloned())
             })
             .map(|info| (info, selected_idx.unwrap_or(0)));
 
@@ -117,9 +114,8 @@ impl QueuePane {
                         if remove_uses_marks {
                             // The marked indices no longer exist after the
                             // removals; drop the selection.
-                            ctx.app_event_sender.send(crate::AppEvent::UiEvent(
-                                UiAppEvent::ClearQueueMarked,
-                            ))?;
+                            ctx.app_event_sender
+                                .send(crate::AppEvent::UiEvent(UiAppEvent::ClearQueueMarked))?;
                         }
                         ctx.render()?;
                         Ok(())
@@ -194,12 +190,15 @@ impl QueuePane {
         // A resolved YouTube-style stream row (the queue entry holds the
         // resolved stream URL, or the original link): offer Download, which
         // saves it into s2udio-downloads and replaces the row with the file.
-        let download_ctx = selected_song.as_ref().and_then(|song| {
-            let info = ctx.yt_info.borrow();
-            info.get(&song.file).cloned().or_else(|| {
-                info.values().find(|e| e.original_url == song.file).cloned()
+        let download_ctx = selected_song
+            .as_ref()
+            .and_then(|song| {
+                let info = ctx.yt_info.borrow();
+                info.get(&song.file)
+                    .cloned()
+                    .or_else(|| info.values().find(|e| e.original_url == song.file).cloned())
             })
-        }).map(|info| (info, selected_song_id.unwrap_or(u32::MAX)));
+            .map(|info| (info, selected_song_id.unwrap_or(u32::MAX)));
         // Marked ranges are deleted together when the menu's Remove is
         // picked (highest range first, so the indices stay valid).
         let marked_ranges: Vec<std::ops::RangeInclusive<usize>> =
@@ -210,10 +209,7 @@ impl QueuePane {
         // selected tracks land in the playlist; the whole-queue options
         // below stay separate).
         let selection_items: Vec<String> = if self.queue.marked().is_empty() {
-            selected_song
-                .as_ref()
-                .map(|song| vec![song.file.clone()])
-                .unwrap_or_default()
+            selected_song.as_ref().map(|song| vec![song.file.clone()]).unwrap_or_default()
         } else {
             self.queue
                 .marked()

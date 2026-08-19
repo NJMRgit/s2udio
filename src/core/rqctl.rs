@@ -87,21 +87,14 @@ pub fn pid_alive(pid: u32) -> bool {
 /// Used by the Settings panel (pid = the rqbit child; the GUI process
 /// owns the engine) and by the CLI daemon (pid = the daemon itself).
 pub fn register(engine: &crate::core::torrent::TorrentEngine) -> Result<(), String> {
-    let engine_port = engine
-        .base_url()
-        .rsplit(':')
-        .next()
-        .and_then(|p| p.parse::<u16>().ok())
-        .unwrap_or(0);
+    let engine_port =
+        engine.base_url().rsplit(':').next().and_then(|p| p.parse::<u16>().ok()).unwrap_or(0);
     let reg = RqEngineFile {
         pid: engine.pid(),
         web_url: engine.web_url(),
         engine_port,
         cache_dir: engine.cache_dir.display().to_string(),
-        started_at: SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0),
+        started_at: SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0),
     };
     write_registration(&reg)
 }
@@ -117,8 +110,7 @@ pub fn write_registration(reg: &RqEngineFile) -> Result<(), String> {
         std::fs::create_dir_all(parent)
             .map_err(|err| format!("Cannot create {}: {err}", parent.display()))?;
     }
-    std::fs::write(&path, content)
-        .map_err(|err| format!("Cannot write {}: {err}", path.display()))
+    std::fs::write(&path, content).map_err(|err| format!("Cannot write {}: {err}", path.display()))
 }
 
 /// Remove the registration file (missing file is not an error).
@@ -227,18 +219,11 @@ fn check() -> Result<(), String> {
                 .to_owned(),
         );
     };
-    println!(
-        "rqbit engine:   RUNNING (pid {}, web UI {})",
-        reg.pid, reg.web_url
-    );
+    println!("rqbit engine:   RUNNING (pid {}, web UI {})", reg.pid, reg.web_url);
 
     let mut ok = true;
     // Proxy base (the web URL minus the /web/ suffix).
-    let proxy_base = reg
-        .web_url
-        .trim_end_matches("/web/")
-        .trim_end_matches('/')
-        .to_owned();
+    let proxy_base = reg.web_url.trim_end_matches("/web/").trim_end_matches('/').to_owned();
 
     // 1. Web UI through the proxy, no credentials.
     match http_status(&format!("{proxy_base}/web/")) {
@@ -312,8 +297,8 @@ fn start() -> Result<(), String> {
         println!("rqbit web UI already running: {}", reg.web_url);
         return Ok(());
     }
-    let exe = std::env::current_exe()
-        .map_err(|err| format!("Cannot find the s2udio binary: {err}"))?;
+    let exe =
+        std::env::current_exe().map_err(|err| format!("Cannot find the s2udio binary: {err}"))?;
     let mut child = std::process::Command::new(&exe)
         .arg("rq")
         .arg("serve")
@@ -348,9 +333,8 @@ fn start() -> Result<(), String> {
         }
     }
     // The daemon registered itself; print its URL.
-    let reg = registered_running().ok_or_else(|| {
-        "rqbit daemon started but did not register".to_owned()
-    })?;
+    let reg = registered_running()
+        .ok_or_else(|| "rqbit daemon started but did not register".to_owned())?;
     println!("rqbit web UI: {}", reg.web_url);
     println!("stop it with `s2udio rq stop`");
     Ok(())
@@ -366,21 +350,14 @@ fn serve() -> Result<(), String> {
     }
     let config = torrent_config();
     let mut engine = crate::core::torrent::start_engine(&config)?;
-    let engine_port = engine
-        .base_url()
-        .rsplit(':')
-        .next()
-        .and_then(|p| p.parse::<u16>().ok())
-        .unwrap_or(0);
+    let engine_port =
+        engine.base_url().rsplit(':').next().and_then(|p| p.parse::<u16>().ok()).unwrap_or(0);
     let reg = RqEngineFile {
         pid: std::process::id(),
         web_url: engine.web_url(),
         engine_port,
         cache_dir: engine.cache_dir.display().to_string(),
-        started_at: SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0),
+        started_at: SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0),
     };
     write_registration(&reg)?;
     // Signal readiness to the parent (it waits for this line).

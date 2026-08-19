@@ -89,19 +89,15 @@ fn rqbit_bin() -> String {
 
 /// The resolved `Authorization: Basic …` header for a `user:pass` pair.
 fn basic_auth_header(user_pass: &str) -> String {
-    format!(
-        "Basic {}",
-        base64::engine::general_purpose::STANDARD.encode(user_pass.as_bytes())
-    )
+    format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(user_pass.as_bytes()))
 }
 
 /// Spawn a random `user:pass` pair for the engine's HTTP auth (defense in
 /// depth on 127.0.0.1; the engine gets it via `RQBIT_HTTP_BASIC_AUTH_USERPASS`).
 fn random_user_pass() -> String {
     // 4 × u64 gives 32 bytes of entropy for the token half.
-    let token: String = std::iter::repeat_with(|| format!("{:016x}", rand::random::<u64>()))
-        .take(2)
-        .collect();
+    let token: String =
+        std::iter::repeat_with(|| format!("{:016x}", rand::random::<u64>())).take(2).collect();
     format!("s2u:{token}")
 }
 
@@ -200,9 +196,7 @@ pub fn start_engine(config: &Torrent) -> Result<TorrentEngine, String> {
                 .unwrap_or(Stdio::null()),
         );
     // Keep the child in s2udio's session: the engine dies with the app.
-    let child = cmd
-        .spawn()
-        .map_err(|err| format!("Failed to launch rqbit ({bin}): {err}"))?;
+    let child = cmd.spawn().map_err(|err| format!("Failed to launch rqbit ({bin}): {err}"))?;
     let base_url = format!("http://127.0.0.1:{port}");
 
     let mut engine = TorrentEngine {
@@ -340,10 +334,7 @@ fn api_get(engine: &TorrentEngine, path: &str) -> Result<String, String> {
         .call()
         .map_err(|err| format!("GET {url}: {err}"))?;
     let mut body = String::new();
-    response
-        .into_reader()
-        .read_to_string(&mut body)
-        .map_err(|err| format!("Read {url}: {err}"))?;
+    response.into_reader().read_to_string(&mut body).map_err(|err| format!("Read {url}: {err}"))?;
     Ok(body)
 }
 
@@ -356,10 +347,7 @@ fn api_post(engine: &TorrentEngine, path: &str, body: &[u8]) -> Result<String, S
         .send(body)
         .map_err(|err| format!("POST {url}: {err}"))?;
     let mut body = String::new();
-    response
-        .into_reader()
-        .read_to_string(&mut body)
-        .map_err(|err| format!("Read {url}: {err}"))?;
+    response.into_reader().read_to_string(&mut body).map_err(|err| format!("Read {url}: {err}"))?;
     Ok(body)
 }
 
@@ -438,10 +426,7 @@ pub struct Speed {
 /// Add a torrent to the engine: `magnet` = raw magnet URI, `http` = a
 /// `.torrent` URL, `local` = a `.torrent` file path (binary body). Returns
 /// the engine's torrent id.
-pub fn add_torrent(
-    engine: &TorrentEngine,
-    source: TorrentSource<'_>,
-) -> Result<String, String> {
+pub fn add_torrent(engine: &TorrentEngine, source: TorrentSource<'_>) -> Result<String, String> {
     add_torrent_at(&engine.base_url, &engine.auth_header, source)
 }
 
@@ -458,8 +443,9 @@ fn add_torrent_at(
     let body: Vec<u8> = match source {
         TorrentSource::Magnet(magnet) => magnet.as_bytes().to_vec(),
         TorrentSource::Http(url) => url.as_bytes().to_vec(),
-        TorrentSource::Local(file) => std::fs::read(&file)
-            .map_err(|err| format!("Cannot read {}: {err}", file.display()))?,
+        TorrentSource::Local(file) => {
+            std::fs::read(&file).map_err(|err| format!("Cannot read {}: {err}", file.display()))?
+        }
     };
     // Round-18 host finding (2026-08-09): the engine runs with
     // `--disable-persistence`, so a re-added torrent whose files already
@@ -489,11 +475,7 @@ fn add_torrent_at(
     }
     parsed
         .get("id")
-        .and_then(|v| {
-            v.as_str()
-                .map(str::to_owned)
-                .or_else(|| v.as_i64().map(|n| n.to_string()))
-        })
+        .and_then(|v| v.as_str().map(str::to_owned).or_else(|| v.as_i64().map(|n| n.to_string())))
         .ok_or_else(|| "Add-torrent response had no id".to_owned())
 }
 
@@ -538,10 +520,8 @@ impl TorrentItem {
     /// paste reuses the scan.
     pub fn source_key(&self) -> String {
         match self {
-            Self::Magnet(magnet) => {
-                crate::ui::modals::paste::magnet_infohash_full(magnet)
-                    .unwrap_or_else(|| magnet.clone())
-            }
+            Self::Magnet(magnet) => crate::ui::modals::paste::magnet_infohash_full(magnet)
+                .unwrap_or_else(|| magnet.clone()),
             Self::Torrent(torrent) => torrent.clone(),
         }
     }
@@ -566,15 +546,13 @@ impl TorrentItem {
 /// Fetch the torrent's file list.
 pub fn torrent_details(engine: &TorrentEngine, id: &str) -> Result<TorrentDetails, String> {
     let response = api_get(engine, &format!("/torrents/{id}"))?;
-    serde_json::from_str(&response)
-        .map_err(|err| format!("Cannot parse torrent details: {err}"))
+    serde_json::from_str(&response).map_err(|err| format!("Cannot parse torrent details: {err}"))
 }
 
 /// Fetch the torrent's live stats (the bandwidth-gate input).
 pub fn torrent_stats(engine: &TorrentEngine, id: &str) -> Result<TorrentStats, String> {
     let response = api_get(engine, &format!("/torrents/{id}/stats/v1"))?;
-    serde_json::from_str(&response)
-        .map_err(|err| format!("Cannot parse torrent stats: {err}"))
+    serde_json::from_str(&response).map_err(|err| format!("Cannot parse torrent stats: {err}"))
 }
 
 /// Remove a torrent from the engine (stops seeding/downloading it).
@@ -758,10 +736,7 @@ pub fn scan_torrent(
     let add_item = item.clone();
     let key_for_add = item.source_key();
     let add_thread = std::thread::Builder::new()
-        .name(format!(
-            "torrent-add-{}",
-            key_for_add.chars().take(24).collect::<String>()
-        ))
+        .name(format!("torrent-add-{}", key_for_add.chars().take(24).collect::<String>()))
         .spawn(move || {
             let result = add_torrent_at(&add_base_url, &add_auth, add_item.source());
             let _ = add_tx.send(result);
@@ -829,7 +804,11 @@ pub fn scan_torrent(
                         .files
                         .iter()
                         .enumerate()
-                        .map(|(index, f)| ScannedFile { index, name: f.name.clone(), length: f.length })
+                        .map(|(index, f)| ScannedFile {
+                            index,
+                            name: f.name.clone(),
+                            length: f.length,
+                        })
                         .collect();
                     let torrent_name = details.name.clone().unwrap_or_else(|| item.label());
                     return Ok(TorrentScan {
@@ -941,12 +920,7 @@ pub struct TorrentDownloadFile {
 pub fn download_complete(stats: &TorrentStats, job: &TorrentDownload) -> bool {
     stats.finished
         && job.files.iter().all(|file| {
-            stats
-                .file_progress
-                .get(file.file_idx)
-                .copied()
-                .unwrap_or(0)
-                >= file.file_length
+            stats.file_progress.get(file.file_idx).copied().unwrap_or(0) >= file.file_length
         })
 }
 
@@ -1230,9 +1204,7 @@ PY
         // from its base URL): request /stats and /web/ WITHOUT
         // credentials — the proxy injects the Authorization header, so
         // both must answer.
-        let proxy_port = url
-            .trim_start_matches("http://127.0.0.1:")
-            .trim_end_matches("/web/");
+        let proxy_port = url.trim_start_matches("http://127.0.0.1:").trim_end_matches("/web/");
         let proxy_port: u16 = proxy_port.parse().expect("proxy port in web_url");
         for path in ["/stats", "/web/"] {
             let response = ureq::get(&format!("http://127.0.0.1:{proxy_port}{path}"))
@@ -1320,7 +1292,8 @@ PY
         unsafe {
             std::env::remove_var("S2UDIO_RQBIT_BIN");
         }
-        let id = add_torrent(&engine, TorrentSource::Magnet("magnet:?xt=urn:btih:aaaa")).expect("add must work");
+        let id = add_torrent(&engine, TorrentSource::Magnet("magnet:?xt=urn:btih:aaaa"))
+            .expect("add must work");
         assert_eq!(id, "1"); // rqbit v8+ returns a numeric id in an object
         let details = torrent_details(&engine, &id).expect("details must parse");
         assert_eq!(details.name.as_deref(), Some("fake.torrent"));
@@ -1380,7 +1353,8 @@ PY
         let port = 31430;
         let mut engine = start_engine(&test_config(port)).expect("engine must start");
         engine.kill().expect("kill must succeed");
-        let mut engine2 = start_engine(&test_config(port)).expect("engine must restart on the same port");
+        let mut engine2 =
+            start_engine(&test_config(port)).expect("engine must restart on the same port");
         assert_eq!(engine2.base_url(), format!("http://127.0.0.1:{port}"));
         engine2.kill().expect("kill must succeed");
         unsafe {
@@ -1402,7 +1376,8 @@ PY
             std::env::set_var("S2UDIO_RQBIT_BIN", &bin);
         }
         let mut engine_a = start_engine(&test_config(31530)).expect("first engine starts");
-        let mut engine_b = start_engine(&test_config(31540)).expect("second engine starts while the first is alive");
+        let mut engine_b = start_engine(&test_config(31540))
+            .expect("second engine starts while the first is alive");
         assert_ne!(engine_a.base_url(), engine_b.base_url(), "distinct API ports");
         assert!(engine_a.is_running() && engine_b.is_running(), "both engines alive");
         // The fake records each engine's spawn: the listen-port flags must
@@ -1540,7 +1515,11 @@ PY
             failures: 0,
         };
         // Finished but a kept file's progress is short → not complete.
-        let mut stats = super::TorrentStats { finished: true, file_progress: vec![0, 0, 0, 0, 0, 500, 0], ..Default::default() };
+        let mut stats = super::TorrentStats {
+            finished: true,
+            file_progress: vec![0, 0, 0, 0, 0, 500, 0],
+            ..Default::default()
+        };
         assert!(!super::download_complete(&stats, &job));
         // Finished and every kept file's index shows its full length.
         stats.file_progress[5] = 1000;
@@ -1597,7 +1576,8 @@ PY
 
     #[test]
     fn move_completed_file_reports_missing_source() {
-        let dir = std::env::temp_dir().join(format!("s2u-torrent-move-missing-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("s2u-torrent-move-missing-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let err = super::move_completed_file(&dir.join("nope.mp4"), &dir).unwrap_err();
@@ -1652,12 +1632,8 @@ PY
     #[test]
     fn scan_detects_multi_video_and_audio_fallback() {
         // Multi-video (a season pack).
-        let multi = fake_scan(&[
-            ("ep01.mkv", 1000),
-            ("ep02.mkv", 900),
-            ("ep03.mkv", 800),
-            ("subs.srt", 5),
-        ]);
+        let multi =
+            fake_scan(&[("ep01.mkv", 1000), ("ep02.mkv", 900), ("ep03.mkv", 800), ("subs.srt", 5)]);
         assert_eq!(multi.videos().len(), 3);
         assert!(multi.audios().is_empty());
         assert_eq!(multi.pick_playable().map(|f| f.name.clone()).as_deref(), Some("ep01.mkv"));
@@ -1727,8 +1703,7 @@ PY
         let config = test_config(port);
         let (cancel_tx, cancel_rx) = crossbeam::channel::unbounded();
         let (progress_tx, progress_rx) = crossbeam::channel::unbounded();
-        let item =
-            super::TorrentItem::Magnet("magnet:?xt=urn:btih:0123456789abcdef".to_owned());
+        let item = super::TorrentItem::Magnet("magnet:?xt=urn:btih:0123456789abcdef".to_owned());
         let item_key = item.source_key();
         let handle = std::thread::spawn(move || {
             super::scan_torrent(&item, &config, &cancel_rx, &progress_tx)
@@ -1786,8 +1761,7 @@ PY
         let config = test_config(port);
         let (cancel_tx, cancel_rx) = crossbeam::channel::unbounded();
         let (progress_tx, progress_rx) = crossbeam::channel::unbounded();
-        let item =
-            super::TorrentItem::Magnet("magnet:?xt=urn:btih:0123456789abcdef".to_owned());
+        let item = super::TorrentItem::Magnet("magnet:?xt=urn:btih:0123456789abcdef".to_owned());
         let handle = std::thread::spawn(move || {
             super::scan_torrent(&item, &config, &cancel_rx, &progress_tx)
         });
@@ -1833,9 +1807,8 @@ PY
         )
         .expect("add succeeds");
         let (cancel_tx, cancel_rx) = crossbeam::channel::unbounded();
-        let handle = std::thread::spawn(move || {
-            super::wait_for_files(&engine, &id, Some(&cancel_rx))
-        });
+        let handle =
+            std::thread::spawn(move || super::wait_for_files(&engine, &id, Some(&cancel_rx)));
         // Give the wait a moment — it must NOT fire an error on its own
         // (there is no deadline anymore).
         std::thread::sleep(std::time::Duration::from_millis(500));
@@ -1872,8 +1845,7 @@ PY
         let config = test_config(port);
         let (cancel_tx, cancel_rx) = crossbeam::channel::unbounded();
         let (progress_tx, progress_rx) = crossbeam::channel::unbounded();
-        let item =
-            super::TorrentItem::Magnet("magnet:?xt=urn:btih:0123456789abcdef".to_owned());
+        let item = super::TorrentItem::Magnet("magnet:?xt=urn:btih:0123456789abcdef".to_owned());
         let item_key = item.source_key();
         let handle = std::thread::spawn(move || {
             super::scan_torrent(&item, &config, &cancel_rx, &progress_tx)
@@ -1903,5 +1875,4 @@ PY
         }
         let _ = std::fs::remove_file(&marker);
     }
-
 }

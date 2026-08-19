@@ -11,11 +11,7 @@ use bon::bon;
 use crossbeam::channel::{SendError, Sender, bounded};
 
 use crate::{
-    AppEvent,
-    MpdCommand,
-    MpdQuery,
-    MpdQueryResult,
-    WorkRequest,
+    AppEvent, MpdCommand, MpdQuery, MpdQueryResult, WorkRequest,
     config::{
         Config,
         album_art::ImageMethod,
@@ -104,25 +100,19 @@ fn initial_tab_with(
             } else {
                 "Queue"
             };
-            if let Some(tab) = config
-                .tabs
-                .names
-                .iter()
-                .find(|name| {
-                    name.as_str().eq_ignore_ascii_case(kind) && !config.is_tab_hidden(name)
-                })
-            {
+            if let Some(tab) = config.tabs.names.iter().find(|name| {
+                name.as_str().eq_ignore_ascii_case(kind) && !config.is_tab_hidden(name)
+            }) {
                 return tab.clone();
             }
         }
     }
 
     if let Some(last) = last_tab {
-        if let Some(tab) = config
-            .tabs
-            .names
-            .iter()
-            .find(|name| name.as_str().eq_ignore_ascii_case(last) && !config.is_tab_hidden(name))
+        if let Some(tab) =
+            config.tabs.names.iter().find(|name| {
+                name.as_str().eq_ignore_ascii_case(last) && !config.is_tab_hidden(name)
+            })
         {
             return tab.clone();
         }
@@ -246,8 +236,7 @@ pub struct Ctx {
     /// the rqbit child when the app exits. M4 replaces this with the full
     /// torrent session (keep/cleanup policy).
     #[debug(skip)]
-    pub(crate) torrent_engine:
-        RefCell<Option<std::sync::Arc<crate::core::torrent::TorrentEngine>>>,
+    pub(crate) torrent_engine: RefCell<Option<std::sync::Arc<crate::core::torrent::TorrentEngine>>>,
     /// The active "Play and Download" job (None unless the user picked
     /// that action): the event loop polls the engine's stats once per
     /// second and moves the completed file to `s2udio-downloads`.
@@ -275,8 +264,8 @@ pub struct Ctx {
     /// a fresh rqbit. Cleared when the paste modal closes (engines killed
     /// via `Drop`).
     #[debug(skip)]
-    pub(crate)
-        torrent_scans: RefCell<HashMap<String, Result<crate::core::torrent::TorrentScan, String>>>,
+    pub(crate) torrent_scans:
+        RefCell<HashMap<String, Result<crate::core::torrent::TorrentScan, String>>>,
     /// Item source keys whose scan is still in flight (so reopening the
     /// paste modal does not re-scan; removed when `TorrentScanned` lands).
     pub(crate) torrent_scans_pending: RefCell<HashSet<String>>,
@@ -286,8 +275,7 @@ pub struct Ctx {
     /// the scan threads stop waiting and drop their engines promptly (no
     /// background leak); entries are removed when the scan lands.
     #[debug(skip)]
-    pub(crate) torrent_scan_cancels:
-        RefCell<HashMap<String, crossbeam::channel::Sender<()>>>,
+    pub(crate) torrent_scan_cancels: RefCell<HashMap<String, crossbeam::channel::Sender<()>>>,
     /// Round 18: the latest progress of each in-flight torrent scan (item
     /// source key -> elapsed seconds + live download speed), rendered by
     /// the paste popup's wait window. Cleared when the popup closes.
@@ -416,9 +404,7 @@ impl Ctx {
                     });
                 }
                 if !entry.chapters.is_empty() {
-                    ctx.chapters
-                        .borrow_mut()
-                        .insert(song.file.clone(), entry.chapters.clone());
+                    ctx.chapters.borrow_mut().insert(song.file.clone(), entry.chapters.clone());
                 }
             }
         }
@@ -442,9 +428,9 @@ impl Ctx {
         }
         // Restore the persistent video playlist (the Video list survives
         // mpv closing, audio playback and restarts).
-        if let Ok(content) = std::fs::read_to_string(
-            crate::ui::modals::paste::video_playlist_path(ctx.config.cache_dir.as_deref()),
-        ) && let Ok(entries) =
+        if let Ok(content) = std::fs::read_to_string(crate::ui::modals::paste::video_playlist_path(
+            ctx.config.cache_dir.as_deref(),
+        )) && let Ok(entries) =
             serde_json::from_str::<Vec<crate::core::mpv::MpvPlaylistEntry>>(&content)
         {
             *ctx.video_playlist.borrow_mut() =
@@ -610,9 +596,7 @@ impl Ctx {
     /// the current queue song's. When MPD playback takes over (the mutual
     /// exclusion pauses the video), the queue song's chapters apply even
     /// though the mpv session is still alive.
-    pub(crate) fn current_playback_chapters(
-        &self,
-    ) -> Vec<crate::shared::chapters::Chapter> {
+    pub(crate) fn current_playback_chapters(&self) -> Vec<crate::shared::chapters::Chapter> {
         if crate::core::mpv::mpv_is_ui_source(self) {
             if let Some(item_id) = self.mpv.item_id.as_deref() {
                 return self.chapters.borrow().get(item_id).cloned().unwrap_or_default();
@@ -710,9 +694,7 @@ impl Ctx {
             crate::shared::lrc::get_lrc_path(lyrics_dir, &song.file)
                 .ok()
                 .filter(|p| p.is_file())
-                .or_else(|| {
-                    self.lrc_index.find_entry(song).map(|(path, _)| path.to_path_buf())
-                })
+                .or_else(|| self.lrc_index.find_entry(song).map(|(path, _)| path.to_path_buf()))
         };
 
         let artist = song.metadata.get("artist").map(|v| v.last())?;
@@ -976,8 +958,7 @@ mod tests {
         let user_lrc = music.join("Artist/Album/01 Track.lrc");
         let s2udio_lrc = lyrics_dir.join("Artist/Album/01 Track.lrc");
         std::fs::write(&user_lrc, "[ti:01 Track]\n[ar:Artist]\n[00:01.00]user line\n").unwrap();
-        std::fs::write(&s2udio_lrc, "[ti:01 Track]\n[ar:Artist]\n[00:01.00]s2udio line\n")
-            .unwrap();
+        std::fs::write(&s2udio_lrc, "[ti:01 Track]\n[ar:Artist]\n[00:01.00]s2udio line\n").unwrap();
 
         let (app_tx, _app_rx) = crossbeam::channel::unbounded();
         let mut ctx = crate::tests::fixtures::ctx(

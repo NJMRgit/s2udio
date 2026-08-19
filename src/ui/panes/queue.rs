@@ -20,10 +20,7 @@ use crate::{
     MpdQueryResult,
     config::{
         keys::{
-            CommonAction,
-            DirectoriesActions,
-            GlobalAction,
-            QueueActions,
+            CommonAction, DirectoriesActions, GlobalAction, QueueActions,
             actions::{AddKind, AutoplayKind},
         },
         theme::{
@@ -50,24 +47,22 @@ use crate::{
     ui::{
         UiEvent,
         dirstack::{Dir, MarkState},
-        song_list::SongListCore,
         input::InputResultEvent,
         modals::{
             confirm_modal::{Action, ConfirmModal},
             info_list_modal::InfoListModal,
-            menu::{
-                create_add_modal,
-            },
+            menu::create_add_modal,
             select_modal::SelectModal,
         },
         panes::queue_header::QueueHeaderPane,
+        song_list::SongListCore,
         widgets::virtualized_table::VirtualizedTable,
     },
 };
 
+mod chapters;
 mod context_menus;
 mod video;
-mod chapters;
 
 #[derive(Debug)]
 pub struct QueuePane {
@@ -161,7 +156,9 @@ fn play_queue_song(song: &crate::mpd::commands::Song, ctx: &Ctx) {
                     urls: vec![original],
                     action: crate::ui::modals::paste::YtAction::ReplaceAndPlay(id),
                 })
-                .map_err(|err| log::error!(error:? = err; "Failed to request stream re-resolution"));
+                .map_err(
+                    |err| log::error!(error:? = err; "Failed to request stream re-resolution"),
+                );
             status_info!("Stream URL expired — re-resolving from the original link");
             return;
         }
@@ -363,9 +360,7 @@ impl QueuePane {
         let corner_x = block_area.x.saturating_sub(2);
         let border_y = {
             let buf = frame.buffer_mut();
-            (1..block_area.y).rev().find(|&row| {
-                is_box_corner_glyph(buf[(corner_x, row)].symbol())
-            })
+            (1..block_area.y).rev().find(|&row| is_box_corner_glyph(buf[(corner_x, row)].symbol()))
         };
         let Some(border_y) = border_y else { return };
         let y = border_y.saturating_sub(1);
@@ -395,17 +390,12 @@ impl QueuePane {
         // One cell right of the box corner (the leading space), matching
         // ` ● Audio ○ Video ○ Chapters` on its own row above the box.
         let right = block_area.right().saturating_sub(1);
-        let bar = crate::ui::widgets::sub_tab_bar::SubTabBar::new(
-            &segments,
-            corner_x + 1,
-            y,
-            right,
-        );
+        let bar =
+            crate::ui::widgets::sub_tab_bar::SubTabBar::new(&segments, corner_x + 1, y, right);
         for (idx, area) in bar.render(frame, ctx).into_iter().enumerate() {
             self.toggle_areas[idx] = area;
         }
     }
-
 }
 
 impl Pane for QueuePane {
@@ -500,23 +490,18 @@ impl Pane for QueuePane {
                     });
 
                     let mut line = if let Some(yt) = &yt {
-                        stream_column_line(
-                            &formats[i].prop,
-                            yt,
-                            max_len,
-                            &config.theme.symbols,
-                        )
-                        .unwrap_or_else(|| {
-                            song.as_line_ellipsized(
-                                &formats[i].prop,
-                                max_len,
-                                &config.theme.symbols,
-                                &config.theme.format_tag_separator,
-                                config.theme.multiple_tag_resolution_strategy,
-                                ctx,
-                            )
-                            .unwrap_or_default()
-                        })
+                        stream_column_line(&formats[i].prop, yt, max_len, &config.theme.symbols)
+                            .unwrap_or_else(|| {
+                                song.as_line_ellipsized(
+                                    &formats[i].prop,
+                                    max_len,
+                                    &config.theme.symbols,
+                                    &config.theme.format_tag_separator,
+                                    config.theme.multiple_tag_resolution_strategy,
+                                    ctx,
+                                )
+                                .unwrap_or_default()
+                            })
                     } else {
                         song.as_line_ellipsized(
                             &formats[i].prop,
@@ -646,8 +631,7 @@ impl Pane for QueuePane {
         if !self.startup_jump_done {
             self.startup_jump_done = true;
             self.should_center_cursor_on_current = false;
-            let to_select =
-                ctx.find_current_song_in_queue().map(|(idx, _)| idx).unwrap_or(0);
+            let to_select = ctx.find_current_song_in_queue().map(|(idx, _)| idx).unwrap_or(0);
             self.queue.select_at_top(to_select);
         } else if self.should_center_cursor_on_current {
             let to_select = ctx
@@ -768,10 +752,7 @@ impl Pane for QueuePane {
 
         // Audio / Video / Chapters toggle clicks.
         if matches!(event.kind, MouseEventKind::LeftClick | MouseEventKind::DoubleClick)
-            && self
-                .toggle_areas
-                .iter()
-                .any(|area| area.contains(position))
+            && self.toggle_areas.iter().any(|area| area.contains(position))
         {
             let mode = if self.toggle_areas[1].contains(position) {
                 crate::ctx::QueueTabMode::Video
@@ -790,7 +771,8 @@ impl Pane for QueuePane {
         // double click seeks to the chapter. The wheel moves the highlight.
         if Self::chapters_available(ctx)
             && ctx.queue_tab.get() == crate::ctx::QueueTabMode::Chapters
-        {            let table = self.areas[Areas::Table];
+        {
+            let table = self.areas[Areas::Table];
             if table.contains(position) {
                 match event.kind {
                     MouseEventKind::LeftClick => {
@@ -817,7 +799,8 @@ impl Pane for QueuePane {
                         // Round 32: the wheel scrolls the viewport only —
                         // the highlight stays put and may leave the visible
                         // area.
-                        let dir = if matches!(event.kind, MouseEventKind::ScrollUp) { -1 } else { 1 };
+                        let dir =
+                            if matches!(event.kind, MouseEventKind::ScrollUp) { -1 } else { 1 };
                         crate::ui::widgets::virtualized_list::scroll_viewport(
                             &mut self.chapters_state,
                             dir,
@@ -859,9 +842,7 @@ impl Pane for QueuePane {
                     // from the anchor (like the audio queue list); a plain
                     // click on a different row drops the multi-selection.
                     MouseEventKind::LeftClick
-                        if event.modifiers.contains(
-                            crossterm::event::KeyModifiers::CONTROL,
-                        ) =>
+                        if event.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) =>
                     {
                         let row = usize::from(position.y.saturating_sub(table.y));
                         let idx = self.video_state.offset() + row;
@@ -954,11 +935,8 @@ impl Pane for QueuePane {
                     self.chapters_state.offset(),
                 ),
                 crate::ctx::QueueTabMode::Audio => {
-                    let viewport = self
-                        .queue
-                        .state
-                        .viewport_len()
-                        .unwrap_or(scrollbar_area.height as usize);
+                    let viewport =
+                        self.queue.state.viewport_len().unwrap_or(scrollbar_area.height as usize);
                     (
                         self.queue.items.len().saturating_sub(viewport).saturating_add(1).max(1),
                         viewport,
@@ -1137,10 +1115,9 @@ impl Pane for QueuePane {
     ) -> Result<()> {
         match (id, data) {
             (FILE_CHAPTERS, MpdQueryResult::Any(any)) => {
-                if let Ok(boxed) = any.downcast::<(
-                    String,
-                    Result<Vec<crate::shared::chapters::Chapter>, String>,
-                )>() {
+                if let Ok(boxed) = any
+                    .downcast::<(String, Result<Vec<crate::shared::chapters::Chapter>, String>)>()
+                {
                     let (file, result) = *boxed;
                     if let Ok(chapters) = result
                         && !chapters.is_empty()
@@ -1647,7 +1624,6 @@ impl SongListCore<Song, TableState> for QueuePane {
 }
 
 impl QueuePane {
-
     fn scrollbar_area(&self) -> Option<Rect> {
         let area = self.areas[Areas::Scrollbar];
         if area.width > 0 { Some(area) } else { None }
@@ -1774,7 +1750,12 @@ mod stream_filter_tests {
             .collect()
     }
 
-    fn click(pane: &mut QueuePane, row: u16, modifiers: crossterm::event::KeyModifiers, ctx: &mut Ctx) {
+    fn click(
+        pane: &mut QueuePane,
+        row: u16,
+        modifiers: crossterm::event::KeyModifiers,
+        ctx: &mut Ctx,
+    ) {
         let area = pane.areas[Areas::Table];
         pane.handle_mouse_event(
             MouseEvent {
@@ -1788,7 +1769,12 @@ mod stream_filter_tests {
         .unwrap();
     }
 
-    fn double_click(pane: &mut QueuePane, row: u16, modifiers: crossterm::event::KeyModifiers, ctx: &mut Ctx) {
+    fn double_click(
+        pane: &mut QueuePane,
+        row: u16,
+        modifiers: crossterm::event::KeyModifiers,
+        ctx: &mut Ctx,
+    ) {
         let area = pane.areas[Areas::Table];
         pane.handle_mouse_event(
             MouseEvent {
@@ -1841,10 +1827,7 @@ mod stream_filter_tests {
             "the playing song is selected at start"
         );
         assert_eq!(pane.queue.state.offset(), 12, "the playing song is the first visible row");
-        assert!(
-            pane.startup_jump_done,
-            "the startup jump is one-shot"
-        );
+        assert!(pane.startup_jump_done, "the startup jump is one-shot");
 
         // A later show keeps the user's selection instead of re-jumping —
         // and the scroll position (the offset is not re-centered).
@@ -1965,8 +1948,18 @@ mod stream_filter_tests {
             (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
         );
         ctx.queue = vec![
-            Song { id: 1, file: "/mnt/music/a.flac".to_owned(), duration: Some(Duration::from_secs(10)), ..Default::default() },
-            Song { id: 2, file: "/mnt/music/b.flac".to_owned(), duration: Some(Duration::from_secs(20)), ..Default::default() },
+            Song {
+                id: 1,
+                file: "/mnt/music/a.flac".to_owned(),
+                duration: Some(Duration::from_secs(10)),
+                ..Default::default()
+            },
+            Song {
+                id: 2,
+                file: "/mnt/music/b.flac".to_owned(),
+                duration: Some(Duration::from_secs(20)),
+                ..Default::default()
+            },
         ];
         // A file played from Directories (right arrow / double-click) has a
         // temporary queue entry that must not show in the queue list.
@@ -1982,9 +1975,24 @@ mod stream_filter_tests {
     #[rstest::rstest]
     fn local_queue_filters_out_radio_streams(mut ctx: Ctx) {
         ctx.queue = vec![
-            Song { id: 1, file: "/mnt/music/a.flac".to_owned(), duration: Some(Duration::from_secs(10)), ..Default::default() },
-            Song { id: 2, file: "http://stream.example/live".to_owned(), duration: None, ..Default::default() },
-            Song { id: 3, file: "/mnt/music/b.flac".to_owned(), duration: Some(Duration::from_secs(20)), ..Default::default() },
+            Song {
+                id: 1,
+                file: "/mnt/music/a.flac".to_owned(),
+                duration: Some(Duration::from_secs(10)),
+                ..Default::default()
+            },
+            Song {
+                id: 2,
+                file: "http://stream.example/live".to_owned(),
+                duration: None,
+                ..Default::default()
+            },
+            Song {
+                id: 3,
+                file: "/mnt/music/b.flac".to_owned(),
+                duration: Some(Duration::from_secs(20)),
+                ..Default::default()
+            },
         ];
         let local = QueuePane::local_queue(&ctx);
         assert_eq!(local.len(), 2);
@@ -2000,11 +2008,26 @@ mod stream_filter_tests {
     fn local_queue_shows_resolved_youtube_streams(mut ctx: Ctx) {
         use crate::shared::ytdlp::YtStreamInfo;
         ctx.queue = vec![
-            Song { id: 1, file: "/mnt/music/a.flac".to_owned(), duration: Some(Duration::from_secs(10)), ..Default::default() },
+            Song {
+                id: 1,
+                file: "/mnt/music/a.flac".to_owned(),
+                duration: Some(Duration::from_secs(10)),
+                ..Default::default()
+            },
             // A resolved YouTube stream, keyed in the yt-info cache.
-            Song { id: 2, file: "https://rr4.example/audio.m4a".to_owned(), duration: None, ..Default::default() },
+            Song {
+                id: 2,
+                file: "https://rr4.example/audio.m4a".to_owned(),
+                duration: None,
+                ..Default::default()
+            },
             // A radio station (temp entry, never cached).
-            Song { id: 3, file: "http://stream.example/live".to_owned(), duration: None, ..Default::default() },
+            Song {
+                id: 3,
+                file: "http://stream.example/live".to_owned(),
+                duration: None,
+                ..Default::default()
+            },
         ];
         ctx.yt_info.borrow_mut().insert(
             "https://rr4.example/audio.m4a".to_owned(),
@@ -2056,14 +2079,10 @@ mod stream_filter_tests {
         let mut pane = QueuePane::new(&ctx);
         let backend = ratatui::backend::TestBackend::new(100, 20);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
-        terminal
-            .draw(|frame| pane.render(frame, Rect::new(0, 0, 100, 20), &ctx).unwrap())
-            .unwrap();
+        terminal.draw(|frame| pane.render(frame, Rect::new(0, 0, 100, 20), &ctx).unwrap()).unwrap();
         let buf = terminal.backend().buffer();
         let text: String = (0..20u16)
-            .map(|y| {
-                (0..100u16).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>()
-            })
+            .map(|y| (0..100u16).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>())
             .collect::<Vec<_>>()
             .join("\n");
         assert!(text.contains("Some Mix"), "cached title in the row: {text}");
@@ -2079,14 +2098,23 @@ mod stream_filter_tests {
             (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
             (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
         );
-        ctx.queue = vec![Song { id: 1, file: "/mnt/music/a.flac".to_owned(), ..Default::default() }];
+        ctx.queue =
+            vec![Song { id: 1, file: "/mnt/music/a.flac".to_owned(), ..Default::default() }];
         ctx.status.songid = Some(1);
         ctx.status.state = crate::mpd::commands::State::Play;
         ctx.chapters.borrow_mut().insert(
             "/mnt/music/a.flac".to_owned(),
             vec![
-                crate::shared::chapters::Chapter { title: "Intro".into(), start_secs: 0.0, end_secs: 65.0 },
-                crate::shared::chapters::Chapter { title: "Drop".into(), start_secs: 65.0, end_secs: 130.0 },
+                crate::shared::chapters::Chapter {
+                    title: "Intro".into(),
+                    start_secs: 0.0,
+                    end_secs: 65.0,
+                },
+                crate::shared::chapters::Chapter {
+                    title: "Drop".into(),
+                    start_secs: 65.0,
+                    end_secs: 130.0,
+                },
             ],
         );
         ctx.queue_tab.set(crate::ctx::QueueTabMode::Chapters);
@@ -2100,9 +2128,7 @@ mod stream_filter_tests {
 
         let backend = ratatui::backend::TestBackend::new(100, 40);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
-        terminal
-            .draw(|frame| pane.render(frame, Rect::new(0, 0, 100, 40), &ctx).unwrap())
-            .unwrap();
+        terminal.draw(|frame| pane.render(frame, Rect::new(0, 0, 100, 40), &ctx).unwrap()).unwrap();
 
         // A single click highlights only — even when the row is already
         // highlighted (e.g. by keyboard navigation), it never seeks.
@@ -2146,9 +2172,7 @@ mod stream_filter_tests {
         let mut pane = QueuePane::new(&ctx);
         let backend = ratatui::backend::TestBackend::new(100, 40);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
-        terminal
-            .draw(|frame| pane.render(frame, Rect::new(0, 0, 100, 40), &ctx).unwrap())
-            .unwrap();
+        terminal.draw(|frame| pane.render(frame, Rect::new(0, 0, 100, 40), &ctx).unwrap()).unwrap();
 
         fn act(pane: &mut QueuePane, ctx: &mut Ctx, actions: Vec<Actions>) {
             let mut event = ActionEvent::from(Arc::new(actions));
@@ -2220,16 +2244,19 @@ mod stream_filter_tests {
 
         // Cycling the toggle away and back re-selects the current chapter
         // (the cycle is Audio -> Video -> Chapters -> Audio).
-        let mut event =
-            ActionEvent::from(Arc::new(vec![Actions::Queue(crate::config::keys::QueueActions::ToggleChapters)]));
+        let mut event = ActionEvent::from(Arc::new(vec![Actions::Queue(
+            crate::config::keys::QueueActions::ToggleChapters,
+        )]));
         pane.handle_action(&mut event, &mut ctx).unwrap();
         assert_eq!(ctx.queue_tab.get(), crate::ctx::QueueTabMode::Audio);
-        let mut event =
-            ActionEvent::from(Arc::new(vec![Actions::Queue(crate::config::keys::QueueActions::ToggleChapters)]));
+        let mut event = ActionEvent::from(Arc::new(vec![Actions::Queue(
+            crate::config::keys::QueueActions::ToggleChapters,
+        )]));
         pane.handle_action(&mut event, &mut ctx).unwrap();
         assert_eq!(ctx.queue_tab.get(), crate::ctx::QueueTabMode::Video);
-        let mut event =
-            ActionEvent::from(Arc::new(vec![Actions::Queue(crate::config::keys::QueueActions::ToggleChapters)]));
+        let mut event = ActionEvent::from(Arc::new(vec![Actions::Queue(
+            crate::config::keys::QueueActions::ToggleChapters,
+        )]));
         pane.handle_action(&mut event, &mut ctx).unwrap();
         assert_eq!(ctx.queue_tab.get(), crate::ctx::QueueTabMode::Chapters);
         assert_eq!(pane.chapters_state.selected(), Some(1));
@@ -2282,10 +2309,11 @@ mod stream_filter_tests {
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 40)).unwrap();
         terminal
             .draw(|frame| {
-                let block = ratatui::widgets::Block::default()
-                    .borders(ratatui::widgets::Borders::LEFT
+                let block = ratatui::widgets::Block::default().borders(
+                    ratatui::widgets::Borders::LEFT
                         | ratatui::widgets::Borders::RIGHT
-                        | ratatui::widgets::Borders::BOTTOM);
+                        | ratatui::widgets::Borders::BOTTOM,
+                );
                 frame.render_widget(block, Rect::new(0, 1, 60, 8));
                 pane.render_toggle_on_border(
                     frame,
@@ -2323,17 +2351,11 @@ mod stream_filter_tests {
         // value ends in the same column as the label.
         assert_eq!(buf[(0, 0)].symbol(), "C"); // Chapter
         assert_eq!(buf[(0, 1)].symbol(), "❯"); // current chapter marker
-        let time_x = find_text(&buf, 0, "Time").unwrap_or_else(|| {
-            panic!("Time label not found in the chapters header")
-        });
-        assert_eq!(
-            buf[(time_x, 1)].symbol(),
-            "0",
-            "time does not start under the Time header"
-        );
-        let dur_x = find_text(&buf, 0, "Duration").unwrap_or_else(|| {
-            panic!("Duration label not found in the chapters header")
-        });
+        let time_x = find_text(&buf, 0, "Time")
+            .unwrap_or_else(|| panic!("Time label not found in the chapters header"));
+        assert_eq!(buf[(time_x, 1)].symbol(), "0", "time does not start under the Time header");
+        let dur_x = find_text(&buf, 0, "Duration")
+            .unwrap_or_else(|| panic!("Duration label not found in the chapters header"));
         let dur_right = dur_x + "Duration".len() as u16;
         assert_eq!(
             buf[(dur_right - 1, 1)].symbol(),
@@ -2344,7 +2366,8 @@ mod stream_filter_tests {
 
     /// Left-most x of a text run on row `y` of the buffer.
     fn find_text(buf: &ratatui::buffer::Buffer, y: u16, text: &str) -> Option<u16> {
-        let cells: Vec<String> = (0..buf.area.width).map(|x| buf[(x, y)].symbol().to_string()).collect();
+        let cells: Vec<String> =
+            (0..buf.area.width).map(|x| buf[(x, y)].symbol().to_string()).collect();
         (0..cells.len())
             .find(|x| {
                 cells[*x..].starts_with(&text.chars().map(|c| c.to_string()).collect::<Vec<_>>())
@@ -2397,9 +2420,7 @@ mod stream_filter_tests {
         let mut pane = QueuePane::new(&ctx);
         let backend = ratatui::backend::TestBackend::new(100, 40);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
-        terminal
-            .draw(|frame| pane.render(frame, Rect::new(0, 0, 100, 40), &ctx).unwrap())
-            .unwrap();
+        terminal.draw(|frame| pane.render(frame, Rect::new(0, 0, 100, 40), &ctx).unwrap()).unwrap();
         let buf = terminal.backend().buffer();
         let rows: Vec<String> = (0..40u16)
             .map(|y| (0..100).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>())
@@ -2412,11 +2433,7 @@ mod stream_filter_tests {
         assert!(body.contains("40:00"), "duration 40:00 missing: {body}");
         // The current entry gets the ❯ marker.
         let current_row = rows.iter().position(|r| r.contains("Second")).unwrap();
-        assert!(
-            rows[current_row].contains("❯"),
-            "current entry not marked: {}",
-            rows[current_row]
-        );
+        assert!(rows[current_row].contains("❯"), "current entry not marked: {}", rows[current_row]);
     }
 
     #[test]
@@ -2432,9 +2449,7 @@ mod stream_filter_tests {
         let mut pane = QueuePane::new(&ctx);
         let backend = ratatui::backend::TestBackend::new(100, 40);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
-        terminal
-            .draw(|frame| pane.render(frame, Rect::new(0, 0, 100, 40), &ctx).unwrap())
-            .unwrap();
+        terminal.draw(|frame| pane.render(frame, Rect::new(0, 0, 100, 40), &ctx).unwrap()).unwrap();
 
         // A single click highlights only — even on the currently playing
         // entry, which the list opens with already highlighted: the first
@@ -2505,9 +2520,7 @@ mod stream_filter_tests {
 
         let backend = ratatui::backend::TestBackend::new(100, 40);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
-        terminal
-            .draw(|frame| pane.render(frame, Rect::new(0, 0, 100, 40), &ctx).unwrap())
-            .unwrap();
+        terminal.draw(|frame| pane.render(frame, Rect::new(0, 0, 100, 40), &ctx).unwrap()).unwrap();
 
         assert_eq!(pane.queue.state.get_selected(), Some(0), "the list opens on the first row");
         wheel(&mut pane, 2, MouseEventKind::ScrollDown, &mut ctx);
@@ -2553,9 +2566,7 @@ mod stream_filter_tests {
 
         let backend = ratatui::backend::TestBackend::new(100, 40);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
-        terminal
-            .draw(|frame| pane.render(frame, Rect::new(0, 0, 100, 40), &ctx).unwrap())
-            .unwrap();
+        terminal.draw(|frame| pane.render(frame, Rect::new(0, 0, 100, 40), &ctx).unwrap()).unwrap();
 
         let viewport = pane.areas[Areas::Table].height as usize;
         // Selection stays on row 0; scroll far past it (the old restore
@@ -2566,11 +2577,7 @@ mod stream_filter_tests {
                 .draw(|frame| pane.render(frame, Rect::new(0, 0, 100, 40), &ctx).unwrap())
                 .unwrap();
         }
-        assert_eq!(
-            pane.queue.state.get_selected(),
-            Some(0),
-            "the highlight never moved"
-        );
+        assert_eq!(pane.queue.state.get_selected(), Some(0), "the highlight never moved");
         assert!(
             pane.queue.state.offset() > viewport,
             "the viewport scrolls past the selection (offset {} > viewport {})",
@@ -2599,9 +2606,7 @@ mod stream_filter_tests {
 
         let backend = ratatui::backend::TestBackend::new(100, 40);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
-        terminal
-            .draw(|frame| pane.render(frame, Rect::new(0, 0, 100, 40), &ctx).unwrap())
-            .unwrap();
+        terminal.draw(|frame| pane.render(frame, Rect::new(0, 0, 100, 40), &ctx).unwrap()).unwrap();
         pane.before_show(&ctx).unwrap();
         // Shrink the table area so the 3-entry playlist overflows the
         // viewport (the offset has room to move).
@@ -2746,9 +2751,7 @@ mod stream_filter_tests {
         let mut pane = QueuePane::new(&ctx);
         let backend = ratatui::backend::TestBackend::new(100, 40);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
-        terminal
-            .draw(|frame| pane.render(frame, Rect::new(0, 0, 100, 40), &ctx).unwrap())
-            .unwrap();
+        terminal.draw(|frame| pane.render(frame, Rect::new(0, 0, 100, 40), &ctx).unwrap()).unwrap();
         let buf = terminal.backend().buffer();
         let body: String = (0..40u16)
             .flat_map(|y| (0..100).map(move |x| buf[(x, y)].symbol().to_string()))
@@ -2841,9 +2844,7 @@ mod stream_filter_tests {
         ctx.queue_tab.set(crate::ctx::QueueTabMode::Chapters);
         let backend = ratatui::backend::TestBackend::new(100, 40);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
-        terminal
-            .draw(|frame| pane.render(frame, Rect::new(0, 0, 100, 40), &ctx).unwrap())
-            .unwrap();
+        terminal.draw(|frame| pane.render(frame, Rect::new(0, 0, 100, 40), &ctx).unwrap()).unwrap();
         let buf = terminal.backend().buffer();
         let body: String = (0..40u16)
             .flat_map(|y| (0..100).map(move |x| buf[(x, y)].symbol().to_string()))
@@ -2915,9 +2916,10 @@ mod stream_filter_tests {
         // persistent queue is untouched.
         let before = ctx.video_playlist.borrow().len();
         pane.video_state.select(Some(1));
-        let mut event = crate::ui::ActionEvent::from(std::sync::Arc::new(vec![
-            crate::ui::Actions::Common(crate::config::keys::CommonAction::Delete),
-        ]));
+        let mut event =
+            crate::ui::ActionEvent::from(std::sync::Arc::new(vec![crate::ui::Actions::Common(
+                crate::config::keys::CommonAction::Delete,
+            )]));
         pane.handle_action(&mut event, &mut ctx).unwrap();
         assert_eq!(ctx.video_playlist.borrow().len(), before, "queue untouched");
 
@@ -2939,8 +2941,7 @@ mod follow_video_tests {
         shared::{chapters::Chapter, events::WorkRequest},
         tests::fixtures::ctx,
         ui::panes::{
-            Pane,
-            QueuePane,
+            Pane, QueuePane,
             queue::{play_queue_song, resolved_stream_expired},
         },
     };
@@ -3122,10 +3123,8 @@ mod follow_video_tests {
 
     #[test]
     fn resolved_stream_expiry_detection() {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let now =
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
         let future = now as i64 + 86_400;
         // An expired googlevideo stream URL is flagged.
         assert!(resolved_stream_expired(
@@ -3154,11 +3153,8 @@ mod follow_video_tests {
             ctx((app_tx, _app_rx), (work_tx, work_rx.clone()), (client_tx, client_rx.clone()));
         let expired = "https://rr4.googlevideo.com/videoplayback?expire=1000&id=abc";
         let original = "https://www.youtube.com/watch?v=abc123";
-        let song = crate::mpd::commands::Song {
-            id: 1,
-            file: expired.to_owned(),
-            ..Default::default()
-        };
+        let song =
+            crate::mpd::commands::Song { id: 1, file: expired.to_owned(), ..Default::default() };
         ctx.queue = vec![song.clone()];
         // The cached info still knows the original link of the dead stream.
         ctx.yt_info.borrow_mut().insert(
@@ -3197,19 +3193,13 @@ mod follow_video_tests {
         let mut ctx =
             ctx((app_tx, _app_rx), (work_tx, work_rx.clone()), (client_tx, client_rx.clone()));
         let expired = "https://rr4.googlevideo.com/videoplayback?expire=1000&id=def";
-        let song = crate::mpd::commands::Song {
-            id: 2,
-            file: expired.to_owned(),
-            ..Default::default()
-        };
+        let song =
+            crate::mpd::commands::Song { id: 2, file: expired.to_owned(), ..Default::default() };
         ctx.queue = vec![song.clone()];
 
         play_queue_song(&song, &ctx);
         assert!(work_rx.try_recv().is_err(), "no re-resolution without the original link");
-        assert!(
-            matches!(client_rx.try_recv(), Ok(_)),
-            "the play command still goes to MPD"
-        );
+        assert!(matches!(client_rx.try_recv(), Ok(_)), "the play command still goes to MPD");
     }
 }
 
@@ -3243,7 +3233,9 @@ mod video_mark_tests {
 
     fn entries(n: usize) -> Vec<crate::core::mpv::MpvPlaylistEntry> {
         (0..n)
-            .map(|i| crate::core::mpv::MpvPlaylistEntry::new(format!("v{i}"), format!("url{i}"), None))
+            .map(|i| {
+                crate::core::mpv::MpvPlaylistEntry::new(format!("v{i}"), format!("url{i}"), None)
+            })
             .collect()
     }
 
@@ -3404,10 +3396,7 @@ mod video_mark_tests {
         // Ctrl+A (SelectAll) marks every row.
         let mut ev = action(vec![Actions::Common(CommonAction::SelectAll)]);
         pane.handle_action(&mut ev, &mut ctx).unwrap();
-        assert_eq!(
-            pane.video_marked.iter().collect::<Vec<_>>(),
-            vec![0, 1, 2, 3, 4, 5]
-        );
+        assert_eq!(pane.video_marked.iter().collect::<Vec<_>>(), vec![0, 1, 2, 3, 4, 5]);
 
         // Ctrl+A again keeps everything marked (no toggle-off).
         let mut ev = action(vec![Actions::Common(CommonAction::SelectAll)]);
@@ -3630,12 +3619,10 @@ mod hover_render_tests {
     use ratatui::layout::Rect;
 
     use super::{Areas, Pane, QueuePane};
-    use crate::{
-        shared::mouse_event::MouseEventKind,
-        tests::fixtures::ctx as fixture_ctx,
-    };
+    use crate::{shared::mouse_event::MouseEventKind, tests::fixtures::ctx as fixture_ctx};
 
-    fn queue_ctx() -> (crate::ctx::Ctx, crossbeam::channel::Sender<crate::shared::events::AppEvent>) {
+    fn queue_ctx() -> (crate::ctx::Ctx, crossbeam::channel::Sender<crate::shared::events::AppEvent>)
+    {
         let (app_tx, _app_rx) = crossbeam::channel::unbounded();
         let ctx = fixture_ctx(
             (app_tx.clone(), _app_rx),
@@ -3647,7 +3634,9 @@ mod hover_render_tests {
 
     fn entries(n: usize) -> Vec<crate::core::mpv::MpvPlaylistEntry> {
         (0..n)
-            .map(|i| crate::core::mpv::MpvPlaylistEntry::new(format!("v{i}"), format!("url{i}"), None))
+            .map(|i| {
+                crate::core::mpv::MpvPlaylistEntry::new(format!("v{i}"), format!("url{i}"), None)
+            })
             .collect()
     }
 

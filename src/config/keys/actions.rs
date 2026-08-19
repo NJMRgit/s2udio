@@ -223,10 +223,9 @@ impl From<GlobalAction> for GlobalActionFile {
             GlobalAction::Command { command, description } => {
                 GlobalActionFile::Command { command, description }
             }
-            GlobalAction::ExternalCommand { command, description } => GlobalActionFile::ExternalCommand {
-                command: command.to_vec(),
-                description,
-            },
+            GlobalAction::ExternalCommand { command, description } => {
+                GlobalActionFile::ExternalCommand { command: command.to_vec(), description }
+            }
         }
     }
 }
@@ -477,9 +476,7 @@ impl ToDescription for QueueActions {
             QueueActions::SortByColumn(idx) => {
                 format!("Sort the queue by the {idx}. column").into()
             }
-            QueueActions::ToggleChapters => {
-                "Cycle the queue list: Audio / Video / Chapters".into()
-            }
+            QueueActions::ToggleChapters => "Cycle the queue list: Audio / Video / Chapters".into(),
         }
     }
 }
@@ -530,31 +527,38 @@ impl std::fmt::Display for AddKind {
 impl Default for AddKind {
     fn default() -> Self {
         AddKind::Modal(vec![
-            ("At the end of queue".into(), AddOpts {
-                autoplay: AutoplayKind::None,
-                position: Position::EndOfQueue,
-                all: false,
-            }),
-            ("At the start of queue".into(), AddOpts {
-                autoplay: AutoplayKind::None,
-                position: Position::StartOfQueue,
-                all: false,
-            }),
-            ("After the current song".into(), AddOpts {
-                autoplay: AutoplayKind::None,
-                position: Position::AfterCurrentSong,
-                all: false,
-            }),
-            ("Replace the queue".into(), AddOpts {
-                autoplay: AutoplayKind::None,
-                position: Position::Replace,
-                all: false,
-            }),
-            ("Replace the queue and play".into(), AddOpts {
-                autoplay: AutoplayKind::First,
-                position: Position::Replace,
-                all: false,
-            }),
+            (
+                "At the end of queue".into(),
+                AddOpts {
+                    autoplay: AutoplayKind::None,
+                    position: Position::EndOfQueue,
+                    all: false,
+                },
+            ),
+            (
+                "At the start of queue".into(),
+                AddOpts {
+                    autoplay: AutoplayKind::None,
+                    position: Position::StartOfQueue,
+                    all: false,
+                },
+            ),
+            (
+                "After the current song".into(),
+                AddOpts {
+                    autoplay: AutoplayKind::None,
+                    position: Position::AfterCurrentSong,
+                    all: false,
+                },
+            ),
+            (
+                "Replace the queue".into(),
+                AddOpts { autoplay: AutoplayKind::None, position: Position::Replace, all: false },
+            ),
+            (
+                "Replace the queue and play".into(),
+                AddOpts { autoplay: AutoplayKind::First, position: Position::Replace, all: false },
+            ),
         ])
     }
 }

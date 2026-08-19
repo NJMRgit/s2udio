@@ -8,8 +8,7 @@ use crate::{
     MpdQueryResult,
     config::{
         keys::{
-            CommonAction,
-            GlobalAction,
+            CommonAction, GlobalAction,
             actions::{AddKind, DeleteKind, RateKind, SaveKind},
         },
         theme::properties::{Property, SongProperty},
@@ -30,12 +29,8 @@ use crate::{
             confirm_modal::{Action, ConfirmModal},
             input_modal::InputModal,
             menu::{
-                add_to_playlist_or_show_modal,
-                create_add_modal,
-                create_delete_modal,
-                create_rating_modal,
-                create_save_modal,
-                delete_from_playlist_or_show_confirmation,
+                add_to_playlist_or_show_modal, create_add_modal, create_delete_modal,
+                create_rating_modal, create_save_modal, delete_from_playlist_or_show_confirmation,
                 modal::MenuModal,
             },
             select_modal::SelectModal,
@@ -124,20 +119,18 @@ where
     /// of the hovered item (if any) for autoplay positioning.
     fn enqueue<'a>(&self, items: impl Iterator<Item = &'a T>) -> (Vec<Enqueue>, Option<usize>) {
         let hovered = self.list().selected();
-        let (items, idx) = items
-            .enumerate()
-            .fold((Vec::new(), None), |mut acc, (idx, item)| {
-                let path = item.as_path().to_owned();
-                if let Some(hovered) = hovered
-                    && hovered.is_file()
-                    && hovered.as_path() == path
-                {
-                    acc.1 = Some(idx);
-                }
-                acc.0.push(Enqueue::File { path });
+        let (items, idx) = items.enumerate().fold((Vec::new(), None), |mut acc, (idx, item)| {
+            let path = item.as_path().to_owned();
+            if let Some(hovered) = hovered
+                && hovered.is_file()
+                && hovered.as_path() == path
+            {
+                acc.1 = Some(idx);
+            }
+            acc.0.push(Enqueue::File { path });
 
-                acc
-            });
+            acc
+        });
 
         (items, idx)
     }
@@ -224,9 +217,7 @@ where
 
         let config = &ctx.config;
         match &action {
-            GlobalAction::ExternalCommand { command, .. }
-                if !self.list().marked().is_empty() =>
-            {
+            GlobalAction::ExternalCommand { command, .. } if !self.list().marked().is_empty() => {
                 let marked_items: Vec<_> = self
                     .list()
                     .marked_items()
@@ -284,10 +275,15 @@ where
         // The immutable borrow (`current`) ends here; re-borrow mutably for
         // the drag.
         let state = &mut self.list_mut().state;
-        if let Some(perc) = state
-            .scrollbar_drag
-            .handle(event, scrollbar_area, content_len, viewport_len, position, begin_len, end_len)
-        {
+        if let Some(perc) = state.scrollbar_drag.handle(
+            event,
+            scrollbar_area,
+            content_len,
+            viewport_len,
+            position,
+            begin_len,
+            end_len,
+        ) {
             let before = self.list().selected_with_idx().map(|(i, _)| i);
             self.list_mut().scroll_to(perc, ctx.config.scrolloff);
             if before != self.list().selected_with_idx().map(|(i, _)| i) {
@@ -792,7 +788,8 @@ where
                 let modal = create_delete_modal(song_paths, confirmation, ctx)?;
                 modal!(ctx, modal);
             }
-            CommonAction::LyricsNudgeUp | CommonAction::LyricsNudgeDown
+            CommonAction::LyricsNudgeUp
+            | CommonAction::LyricsNudgeDown
             | CommonAction::LyricsSave
             | CommonAction::LyricsDeleteWord
             | CommonAction::LyricsEditLine
@@ -817,12 +814,7 @@ where
                 Box::new(std::iter::empty::<(usize, &T)>())
             }
         } else {
-            Box::new(
-                self.list()
-                    .marked()
-                    .iter()
-                    .map(|idx| (*idx, &self.list().items[*idx])),
-            )
+            Box::new(self.list().marked().iter().map(|idx| (*idx, &self.list().items[*idx])))
         }
     }
 
@@ -957,9 +949,12 @@ where
 
                 if section.items.is_empty() { None } else { Some(section) }
             })
-            .list_section(ctx, |mut section| {
-                if section.items.is_empty() { None } else { Some(section) }
-            })
+            .list_section(
+                ctx,
+                |mut section| {
+                    if section.items.is_empty() { None } else { Some(section) }
+                },
+            )
             .list_section(ctx, |section| {
                 let section = section.item("Cancel", |_ctx| Ok(()));
                 Some(section)

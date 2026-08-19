@@ -2,11 +2,7 @@ use std::time::Instant;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
-use crate::{
-    ctx::Ctx,
-    mpd::mpd_client::MpdClient,
-    shared::id::Id,
-};
+use crate::{ctx::Ctx, mpd::mpd_client::MpdClient, shared::id::Id};
 
 /// Seek direction latched while the user holds Space + an arrow key in
 /// interactive-seek mode.

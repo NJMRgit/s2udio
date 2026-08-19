@@ -14,7 +14,7 @@ use crate::{
     config::{Config, LyricsSource, cli::RemoteCommandQuery},
     ctx::Ctx,
     mpd::{
-        commands::{volume::Bound as _, IdleEvent, State},
+        commands::{IdleEvent, State, volume::Bound as _},
         mpd_client::{MpdClient, SaveMode},
     },
     shared::{
@@ -25,21 +25,12 @@ use crate::{
         macros::{modal, status_error, status_info, status_warn},
         mpd_client_ext::MpdClientExt,
         mpd_query::{
-            EXTERNAL_COMMAND,
-            GLOBAL_QUEUE_UPDATE,
-            GLOBAL_STATUS_UPDATE,
-            GLOBAL_STICKERS_UPDATE,
-            GLOBAL_VOLUME_UPDATE,
-            MpdQueryResult,
-            run_status_update,
+            EXTERNAL_COMMAND, GLOBAL_QUEUE_UPDATE, GLOBAL_STATUS_UPDATE, GLOBAL_STICKERS_UPDATE,
+            GLOBAL_VOLUME_UPDATE, MpdQueryResult, run_status_update,
         },
     },
     ui::{
-        KeyHandleResult,
-        StatusMessage,
-        Ui,
-        UiAppEvent,
-        UiEvent,
+        KeyHandleResult, StatusMessage, Ui, UiAppEvent, UiEvent,
         modals::{downloads::DownloadsModal, info_modal::InfoModal, select_modal::SelectModal},
     },
 };
@@ -120,13 +111,11 @@ fn main_task<B: Backend + std::io::Write>(
         // which keeps the controls-bar title carousel, the progress bar and
         // the info-box marquee smooth (a 500ms poll stepped the carousel
         // ~3.75 columns per frame).
-        mpv_poll_guard = Some(ctx.scheduler.repeated(
-            Duration::from_millis(100),
-            move |(tx, _)| {
+        mpv_poll_guard =
+            Some(ctx.scheduler.repeated(Duration::from_millis(100), move |(tx, _)| {
                 let _ = tx.send(AppEvent::MpvPoll);
                 Ok(())
-            },
-        ));
+            }));
         // A video on the Queue tab pauses MPD, so the cava visualizer goes
         // flat: hide it while the video plays (same as MpvSessionStarted).
         if ctx.cava_hidden_on(ctx.active_tab.as_str())
@@ -161,12 +150,11 @@ fn main_task<B: Backend + std::io::Write>(
         // The saved resume position is *not* re-applied: the video is
         // already playing (the tracker applied it at launch).
         if let Some(item_id) = ctx.mpv.item_id.clone() {
-            let _ = ctx.work_sender.send(
-                WorkRequest::FetchJellyfinMpris { item_id: item_id.clone() },
-            );
-            let _ = ctx.work_sender.send(WorkRequest::FetchJellyfinChapters {
-                item_id: item_id.clone(),
-            });
+            let _ =
+                ctx.work_sender.send(WorkRequest::FetchJellyfinMpris { item_id: item_id.clone() });
+            let _ = ctx
+                .work_sender
+                .send(WorkRequest::FetchJellyfinChapters { item_id: item_id.clone() });
             let _ = ctx.work_sender.send(WorkRequest::FetchJellyfinVideoArt { item_id });
         }
         // The Queue tab follows the playing video (Chapters / Video list).
@@ -410,10 +398,7 @@ fn main_task<B: Backend + std::io::Write>(
                     // URL is a resolved stream that carries one.
                     let lookup = {
                         let playlist = ctx.mpv.playlist.borrow();
-                        playlist
-                            .iter()
-                            .find(|e| e.url == url)
-                            .map(|e| e.lookup_url().to_owned())
+                        playlist.iter().find(|e| e.url == url).map(|e| e.lookup_url().to_owned())
                     };
                     if let Some(info) = lookup
                         .as_deref()
@@ -452,18 +437,17 @@ fn main_task<B: Backend + std::io::Write>(
                     // chapter markers (Queue tab's Chapters view) and the
                     // primary image (shown as album art while it plays).
                     if let Some(item_id) = ctx.mpv.item_id.clone() {
-                        let _ = ctx.work_sender.send(
-                            WorkRequest::FetchJellyfinMpris { item_id: item_id.clone() },
-                        );
+                        let _ = ctx
+                            .work_sender
+                            .send(WorkRequest::FetchJellyfinMpris { item_id: item_id.clone() });
                         let _ = ctx
                             .work_sender
                             .send(WorkRequest::FetchJellyfinResume { item_id: item_id.clone() });
-                        let _ = ctx.work_sender.send(WorkRequest::FetchJellyfinChapters {
-                            item_id: item_id.clone(),
-                        });
-                        let _ = ctx.work_sender.send(WorkRequest::FetchJellyfinVideoArt {
-                            item_id,
-                        });
+                        let _ = ctx
+                            .work_sender
+                            .send(WorkRequest::FetchJellyfinChapters { item_id: item_id.clone() });
+                        let _ =
+                            ctx.work_sender.send(WorkRequest::FetchJellyfinVideoArt { item_id });
                     }
                     // The album art box belongs to the video now: refresh
                     // it so the Queue tab shows the video's thumbnail
@@ -526,9 +510,7 @@ fn main_task<B: Backend + std::io::Write>(
                             .map(|job| job.engine_base_url.clone())
                             .unwrap_or_default();
                         let engine = ctx.torrent_engine.borrow();
-                        if let Some(engine) =
-                            engine.as_ref().filter(|e| e.base_url() == base_url)
-                        {
+                        if let Some(engine) = engine.as_ref().filter(|e| e.base_url() == base_url) {
                             finish_torrent_download(&ctx, engine);
                         }
                         *ctx.torrent_download.borrow_mut() = None;
@@ -578,8 +560,7 @@ fn main_task<B: Backend + std::io::Write>(
                             // play: the download died with it.
                             PollOutcome::Abandon("Torrent download interrupted".to_owned())
                         } else {
-                            match crate::core::torrent::torrent_stats(engine, &job.torrent_id)
-                            {
+                            match crate::core::torrent::torrent_stats(engine, &job.torrent_id) {
                                 Ok(stats)
                                     if crate::core::torrent::download_complete(&stats, job) =>
                                 {
@@ -591,15 +572,9 @@ fn main_task<B: Backend + std::io::Write>(
                                     // file, not just the first).
                                     let playing = ctx.mpv.active
                                         && ctx.mpv.playlist.borrow().iter().any(|entry| {
-                                            job.files
-                                                .iter()
-                                                .any(|f| f.stream_url == entry.url)
+                                            job.files.iter().any(|f| f.stream_url == entry.url)
                                         });
-                                    if playing {
-                                        PollOutcome::Defer
-                                    } else {
-                                        PollOutcome::Complete
-                                    }
+                                    if playing { PollOutcome::Defer } else { PollOutcome::Complete }
                                 }
                                 Ok(_) => PollOutcome::InProgress,
                                 Err(err) => {
@@ -761,139 +736,131 @@ fn main_task<B: Backend + std::io::Write>(
                         continue;
                     };
                     mpv_stale_ticks = 0;
-                        // The mpv video / MPD audio UI-source switch (MPD
-                        // playback started and the mutual exclusion paused
-                        // the video, or the video resumed): the album art
-                        // box follows whichever source is active, so refresh
-                        // it when the source flips (nothing else repaints it
-                        // — a SongChanged may never fire for a resumed
-                        // track).
-                        let source_before = ctx.mpv.active
-                            && (!ctx.mpv.paused
-                                || ctx.status.state != crate::mpd::commands::State::Play);
-                        ctx.mpv.position = position;
-                        ctx.mpv.paused = paused;
-                        ctx.mpv.duration = duration;
-                        ctx.mpv.volume = volume;
-                        let source_after = ctx.mpv.active
-                            && (!paused
-                                || ctx.status.state != crate::mpd::commands::State::Play);
-                        if source_before != source_after
-                            && let Err(err) = ui.refresh_album_art(&ctx)
-                        {
-                            log::error!(error:? = err; "Failed to refresh album art after the playback source switched");
-                        }
-                        // The video resumed while MPD plays: pause the
-                        // music (the other side of the mutual exclusion;
-                        // MPD-start -> pause-mpv is handled on the status
-                        // update). Only on the paused->playing transition:
-                        // the user unpaused the video, so the music gives
-                        // way.
-                        if let Some(prev) = mpv_prev_paused
-                            && prev
-                            && !paused
-                            && ctx.status.state == State::Play
-                        {
-                            log::debug!("mpv resumed while MPD plays; pausing MPD");
-                            let _ = ctx.client_request_sender.send(
-                                ClientRequest::Command(crate::MpdCommand {
-                                    callback: Box::new(|client| {
-                                        client.pause()?;
-                                        Ok(())
-                                    }),
+                    // The mpv video / MPD audio UI-source switch (MPD
+                    // playback started and the mutual exclusion paused
+                    // the video, or the video resumed): the album art
+                    // box follows whichever source is active, so refresh
+                    // it when the source flips (nothing else repaints it
+                    // — a SongChanged may never fire for a resumed
+                    // track).
+                    let source_before = ctx.mpv.active
+                        && (!ctx.mpv.paused
+                            || ctx.status.state != crate::mpd::commands::State::Play);
+                    ctx.mpv.position = position;
+                    ctx.mpv.paused = paused;
+                    ctx.mpv.duration = duration;
+                    ctx.mpv.volume = volume;
+                    let source_after = ctx.mpv.active
+                        && (!paused || ctx.status.state != crate::mpd::commands::State::Play);
+                    if source_before != source_after
+                        && let Err(err) = ui.refresh_album_art(&ctx)
+                    {
+                        log::error!(error:? = err; "Failed to refresh album art after the playback source switched");
+                    }
+                    // The video resumed while MPD plays: pause the
+                    // music (the other side of the mutual exclusion;
+                    // MPD-start -> pause-mpv is handled on the status
+                    // update). Only on the paused->playing transition:
+                    // the user unpaused the video, so the music gives
+                    // way.
+                    if let Some(prev) = mpv_prev_paused
+                        && prev
+                        && !paused
+                        && ctx.status.state == State::Play
+                    {
+                        log::debug!("mpv resumed while MPD plays; pausing MPD");
+                        let _ = ctx.client_request_sender.send(ClientRequest::Command(
+                            crate::MpdCommand {
+                                callback: Box::new(|client| {
+                                    client.pause()?;
+                                    Ok(())
                                 }),
-                            );
-                        }
-                        mpv_prev_paused = Some(paused);
-                        // mpv advanced to another playlist entry: follow it
-                        // in the session (title + Jellyfin item id switch to
-                        // the new entry so progress/resume stay correct).
-                        // Only when mpv's own playlist still matches the
-                        // recorded one: after a `loadfile ... replace` (a
-                        // video picked from the Queue Video view, a
-                        // cross-season switch) mpv's playlist is a single
-                        // entry at position 0, and the session state was
-                        // already set by the load action.
-                        let playlist_matches = playlist_count
-                            .is_some_and(|count| count == ctx.mpv.playlist.borrow().len());
-                        if playlist_matches
-                            && playlist_pos.is_some()
-                            && ctx.mpv.playlist_pos.get() != playlist_pos
-                        {
-                            // Confirm the recorded entry at mpv's reported
-                            // position is the entry mpv is actually playing:
-                            // `loadfile … replace` splices into the old
-                            // playlist, so when the old and new lengths
-                            // coincide the count gate alone cannot detect a
-                            // diverged mpv playlist (following would surface
-                            // the next episode's metadata while mpv plays
-                            // the selected one). A confirmed mismatch skips
-                            // the advance entirely and keeps the recorded
-                            // position; the JF_SEASON_PLAY rebuild (or the
-                            // pending-loadfile reload) already corrected the
-                            // actual playlist, so the next matching poll
-                            // adopts it.
-                            let advanced = crate::core::mpv::recorded_entry_for_mpv_pos(
-                                &ctx.mpv.playlist.borrow(),
-                                playlist_pos.unwrap_or(0),
-                                crate::core::mpv::read_mpv_path(&socket).as_deref(),
-                            );
-                            // A confirmed mismatch leaves the recorded
-                            // position untouched and skips only the advance
-                            // (the rest of the poll — pending seek, title
-                            // refresh, MPRIS — still runs this tick); the
-                            // next matching poll adopts the entry once the
-                            // playlist rebuild landed.
-                            if let Some(entry) = advanced {
-                                ctx.mpv.playlist_pos.set(playlist_pos);
-                                ctx.mpv.title = entry.title.clone();
-                                ctx.mpv.item_id =
-                                    crate::jellyfin::item_id_from_url(&entry.url);
-                                ctx.mpv.item = None;
-                                // A YouTube-style entry: the resolved info
-                                // supplies the real title/channel, and the
-                                // MPRIS poster is re-fetched for the new
-                                // entry.
-                                if let Some(info) =
-                                    ctx.yt_info.borrow().get(&entry.lookup_url().to_owned())
-                                {
-                                    ctx.mpv.title = info.title.clone();
-                                    ctx.mpv.artist =
-                                        info.channel.clone().unwrap_or_default();
-                                }
-                                ctx.mpv.art_path = None;
-                                // Don't serve the previous entry's poster
-                                // until the new art is fetched.
-                                crate::ui::modals::paste::clear_mpv_mpris_art(&ctx);
-                                // The new entry is another Jellyfin item: refresh
-                                // its metadata and chapters.
-                                if let Some(item_id) = ctx.mpv.item_id.clone() {
-                                    let _ = ctx.work_sender.send(
-                                        WorkRequest::FetchJellyfinMpris {
-                                            item_id: item_id.clone(),
-                                        },
-                                    );
-                                    let _ = ctx.work_sender.send(
-                                        WorkRequest::FetchJellyfinChapters {
-                                            item_id: item_id.clone(),
-                                        },
-                                    );
-                                    let _ = ctx.work_sender.send(
-                                        WorkRequest::FetchJellyfinVideoArt { item_id },
-                                    );
-                                }
-                                // A YouTube-style entry: refresh the album art
-                                // thumbnail for the new entry.
-                                if let Some(info) = crate::ui::modals::paste::mpv_yt_info(&ctx)
-                                    && let Some(thumb) = info.thumbnail
-                                {
-                                    let _ =
-                                        ctx.work_sender.send(WorkRequest::FetchYtThumbnail {
-                                            url: thumb,
-                                        });
-                                }
+                            },
+                        ));
+                    }
+                    mpv_prev_paused = Some(paused);
+                    // mpv advanced to another playlist entry: follow it
+                    // in the session (title + Jellyfin item id switch to
+                    // the new entry so progress/resume stay correct).
+                    // Only when mpv's own playlist still matches the
+                    // recorded one: after a `loadfile ... replace` (a
+                    // video picked from the Queue Video view, a
+                    // cross-season switch) mpv's playlist is a single
+                    // entry at position 0, and the session state was
+                    // already set by the load action.
+                    let playlist_matches = playlist_count
+                        .is_some_and(|count| count == ctx.mpv.playlist.borrow().len());
+                    if playlist_matches
+                        && playlist_pos.is_some()
+                        && ctx.mpv.playlist_pos.get() != playlist_pos
+                    {
+                        // Confirm the recorded entry at mpv's reported
+                        // position is the entry mpv is actually playing:
+                        // `loadfile … replace` splices into the old
+                        // playlist, so when the old and new lengths
+                        // coincide the count gate alone cannot detect a
+                        // diverged mpv playlist (following would surface
+                        // the next episode's metadata while mpv plays
+                        // the selected one). A confirmed mismatch skips
+                        // the advance entirely and keeps the recorded
+                        // position; the JF_SEASON_PLAY rebuild (or the
+                        // pending-loadfile reload) already corrected the
+                        // actual playlist, so the next matching poll
+                        // adopts it.
+                        let advanced = crate::core::mpv::recorded_entry_for_mpv_pos(
+                            &ctx.mpv.playlist.borrow(),
+                            playlist_pos.unwrap_or(0),
+                            crate::core::mpv::read_mpv_path(&socket).as_deref(),
+                        );
+                        // A confirmed mismatch leaves the recorded
+                        // position untouched and skips only the advance
+                        // (the rest of the poll — pending seek, title
+                        // refresh, MPRIS — still runs this tick); the
+                        // next matching poll adopts the entry once the
+                        // playlist rebuild landed.
+                        if let Some(entry) = advanced {
+                            ctx.mpv.playlist_pos.set(playlist_pos);
+                            ctx.mpv.title = entry.title.clone();
+                            ctx.mpv.item_id = crate::jellyfin::item_id_from_url(&entry.url);
+                            ctx.mpv.item = None;
+                            // A YouTube-style entry: the resolved info
+                            // supplies the real title/channel, and the
+                            // MPRIS poster is re-fetched for the new
+                            // entry.
+                            if let Some(info) =
+                                ctx.yt_info.borrow().get(&entry.lookup_url().to_owned())
+                            {
+                                ctx.mpv.title = info.title.clone();
+                                ctx.mpv.artist = info.channel.clone().unwrap_or_default();
+                            }
+                            ctx.mpv.art_path = None;
+                            // Don't serve the previous entry's poster
+                            // until the new art is fetched.
+                            crate::ui::modals::paste::clear_mpv_mpris_art(&ctx);
+                            // The new entry is another Jellyfin item: refresh
+                            // its metadata and chapters.
+                            if let Some(item_id) = ctx.mpv.item_id.clone() {
+                                let _ = ctx.work_sender.send(WorkRequest::FetchJellyfinMpris {
+                                    item_id: item_id.clone(),
+                                });
+                                let _ = ctx.work_sender.send(WorkRequest::FetchJellyfinChapters {
+                                    item_id: item_id.clone(),
+                                });
+                                let _ = ctx
+                                    .work_sender
+                                    .send(WorkRequest::FetchJellyfinVideoArt { item_id });
+                            }
+                            // A YouTube-style entry: refresh the album art
+                            // thumbnail for the new entry.
+                            if let Some(info) = crate::ui::modals::paste::mpv_yt_info(&ctx)
+                                && let Some(thumb) = info.thumbnail
+                            {
+                                let _ = ctx
+                                    .work_sender
+                                    .send(WorkRequest::FetchYtThumbnail { url: thumb });
                             }
                         }
+                    }
                     // Apply a pending resume seek now that the socket is
                     // reachable.
                     if let Some(seconds) = ctx.mpv.pending_seek.take() {
@@ -928,33 +895,30 @@ fn main_task<B: Backend + std::io::Write>(
                         && let Some(title) = crate::core::mpv::read_mpv_title(&socket)
                     {
                         if !crate::core::mpv::is_provisional_title(&title) {
-                                ctx.mpv.title = title;
-                            } else {
-                                // mpv's media-title is just the stream URL / a
-                                // basename: fall back to the cached resolved
-                                // info (title + channel), then to the playlist
-                                // entry title, rather than pushing the
-                                // basename into MPRIS.
-                                if let Some(info) =
-                                    crate::ui::modals::paste::mpv_yt_info(&ctx)
-                                {
-                                    if !info.title.is_empty() {
-                                        ctx.mpv.title = info.title.clone();
-                                    }
-                                    if !info.channel.as_deref().unwrap_or("").is_empty() {
-                                        ctx.mpv.artist =
-                                            info.channel.clone().unwrap_or_default();
-                                    }
-                                } else if let Some(entry) = ctx
-                                    .mpv
-                                    .playlist
-                                    .borrow()
-                                    .get(ctx.mpv.playlist_pos.get().unwrap_or(0))
-                                    && !entry.title.is_empty()
-                                {
-                                    ctx.mpv.title = entry.title.clone();
+                            ctx.mpv.title = title;
+                        } else {
+                            // mpv's media-title is just the stream URL / a
+                            // basename: fall back to the cached resolved
+                            // info (title + channel), then to the playlist
+                            // entry title, rather than pushing the
+                            // basename into MPRIS.
+                            if let Some(info) = crate::ui::modals::paste::mpv_yt_info(&ctx) {
+                                if !info.title.is_empty() {
+                                    ctx.mpv.title = info.title.clone();
                                 }
+                                if !info.channel.as_deref().unwrap_or("").is_empty() {
+                                    ctx.mpv.artist = info.channel.clone().unwrap_or_default();
+                                }
+                            } else if let Some(entry) = ctx
+                                .mpv
+                                .playlist
+                                .borrow()
+                                .get(ctx.mpv.playlist_pos.get().unwrap_or(0))
+                                && !entry.title.is_empty()
+                            {
+                                ctx.mpv.title = entry.title.clone();
                             }
+                        }
                     }
                     // MPRIS art for a YouTube (etc.) video playing in mpv:
                     // fetch its resolved thumbnail into the mpv-mpris poster
@@ -965,14 +929,12 @@ fn main_task<B: Backend + std::io::Write>(
                         && let Some(thumb) = info.thumbnail
                     {
                         let cache_dir = ctx.config.cache_dir.clone();
-                        let _ = ctx.work_sender.send(WorkRequest::SaveMpvMprisArt {
-                            url: thumb,
-                            cache_dir,
-                        });
-                        ctx.mpv.art_path =
-                            Some(crate::ui::modals::paste::mpv_mpris_art_path(
-                                ctx.config.cache_dir.as_deref(),
-                            ));
+                        let _ = ctx
+                            .work_sender
+                            .send(WorkRequest::SaveMpvMprisArt { url: thumb, cache_dir });
+                        ctx.mpv.art_path = Some(crate::ui::modals::paste::mpv_mpris_art_path(
+                            ctx.config.cache_dir.as_deref(),
+                        ));
                     }
                     // Report progress to Jellyfin: on pause changes and
                     // otherwise at most every 10 seconds.
@@ -989,8 +951,7 @@ fn main_task<B: Backend + std::io::Write>(
                                 if let Some(jf) =
                                     crate::jellyfin::Jellyfin::load(&config_file, Some(&sidecar))
                                 {
-                                    let _ =
-                                        jf.report_playing_progress(&item_id, position, paused);
+                                    let _ = jf.report_playing_progress(&item_id, position, paused);
                                 }
                             });
                         }
@@ -1226,9 +1187,7 @@ fn main_task<B: Backend + std::io::Write>(
                                     // still shows the URL-derived title
                                     // ("stream"): use the real name.
                                     crate::core::mpv::update_jellyfin_entry_title(
-                                        &ctx,
-                                        &item.id,
-                                        &item.name,
+                                        &ctx, &item.id, &item.name,
                                     );
                                 }
                                 // The Jellyfin tab's info box shows the full
@@ -1239,7 +1198,9 @@ fn main_task<B: Backend + std::io::Write>(
                                 ));
                                 if let Err(err) = ui.on_command_finished(
                                     crate::ui::panes::jellyfin::JF_ITEM,
-                                    Some(crate::config::tabs::PaneType::Jellyfin { tree: crate::config::tabs::TreeBrowserArgs::default() }),
+                                    Some(crate::config::tabs::PaneType::Jellyfin {
+                                        tree: crate::config::tabs::TreeBrowserArgs::default(),
+                                    }),
                                     data,
                                     &mut ctx,
                                 ) {
@@ -1247,7 +1208,10 @@ fn main_task<B: Backend + std::io::Write>(
                                 }
                                 render_wanted = true;
                             }
-                            (crate::ui::panes::jellyfin::JF_MPRIS, JellyfinResult::Mpris { item, image }) => {
+                            (
+                                crate::ui::panes::jellyfin::JF_MPRIS,
+                                JellyfinResult::Mpris { item, image },
+                            ) => {
                                 // mpv video session: title/artist for the
                                 // media controls + the poster written where
                                 // the MPRIS bridge can serve it.
@@ -1268,9 +1232,7 @@ fn main_task<B: Backend + std::io::Write>(
                                     // still shows the URL-derived title
                                     // ("stream"): use the real name.
                                     crate::core::mpv::update_jellyfin_entry_title(
-                                        &ctx,
-                                        &item.id,
-                                        &item.name,
+                                        &ctx, &item.id, &item.name,
                                     );
                                     if !image.is_empty() {
                                         let path = crate::ui::modals::paste::mpv_mpris_art_path(
@@ -1364,9 +1326,8 @@ fn main_task<B: Backend + std::io::Write>(
                                     // mpv's playlist to the rotated season so
                                     // it equals the recorded one).
                                     let mut entries = entries;
-                                    if let Some(idx) = start_index
-                                        .checked_rem(entries.len())
-                                        .filter(|i| *i > 0)
+                                    if let Some(idx) =
+                                        start_index.checked_rem(entries.len()).filter(|i| *i > 0)
                                     {
                                         entries.rotate_left(idx);
                                     }
@@ -1390,34 +1351,28 @@ fn main_task<B: Backend + std::io::Write>(
                                         // may report the path with
                                         // different query params), falling
                                         // back to the exact URL.
-                                        let current_is_first =
-                                            crate::core::mpv::read_mpv_path(&socket)
-                                                .is_some_and(|p| {
-                                                    let a = crate::jellyfin::item_id_from_url(&p);
-                                                    let b = crate::jellyfin::item_id_from_url(
-                                                        &first.url,
-                                                    );
-                                                    match (a, b) {
-                                                        (Some(a), Some(b)) => a == b,
-                                                        _ => p == first.url,
-                                                    }
-                                                });
+                                        let current_is_first = crate::core::mpv::read_mpv_path(
+                                            &socket,
+                                        )
+                                        .is_some_and(|p| {
+                                            let a = crate::jellyfin::item_id_from_url(&p);
+                                            let b = crate::jellyfin::item_id_from_url(&first.url);
+                                            match (a, b) {
+                                                (Some(a), Some(b)) => a == b,
+                                                _ => p == first.url,
+                                            }
+                                        });
                                         if current_is_first {
                                             for entry in entries.iter().skip(1) {
                                                 crate::core::mpv::mpv_append_load(
-                                                    &socket,
-                                                    &entry.url,
+                                                    &socket, &entry.url,
                                                 );
                                             }
                                         } else {
-                                            crate::core::mpv::mpv_loadfile(
-                                                &socket,
-                                                &first.url,
-                                            );
+                                            crate::core::mpv::mpv_loadfile(&socket, &first.url);
                                             for entry in entries.iter().skip(1) {
                                                 crate::core::mpv::mpv_append_load(
-                                                    &socket,
-                                                    &entry.url,
+                                                    &socket, &entry.url,
                                                 );
                                             }
                                         }
@@ -1457,7 +1412,9 @@ fn main_task<B: Backend + std::io::Write>(
                                 let data = crate::MpdQueryResult::Any(Box::new(data));
                                 if let Err(err) = ui.on_command_finished(
                                     crate::ui::panes::jellyfin::JF_CHAPTERS,
-                                    Some(crate::config::tabs::PaneType::Jellyfin { tree: crate::config::tabs::TreeBrowserArgs::default() }),
+                                    Some(crate::config::tabs::PaneType::Jellyfin {
+                                        tree: crate::config::tabs::TreeBrowserArgs::default(),
+                                    }),
                                     data,
                                     &mut ctx,
                                 ) {
@@ -1472,7 +1429,9 @@ fn main_task<B: Backend + std::io::Write>(
                                 let data = crate::MpdQueryResult::Any(Box::new(data));
                                 if let Err(err) = ui.on_command_finished(
                                     id,
-                                    Some(crate::config::tabs::PaneType::Jellyfin { tree: crate::config::tabs::TreeBrowserArgs::default() }),
+                                    Some(crate::config::tabs::PaneType::Jellyfin {
+                                        tree: crate::config::tabs::TreeBrowserArgs::default(),
+                                    }),
                                     data,
                                     &mut ctx,
                                 ) {
@@ -1696,8 +1655,8 @@ fn main_task<B: Backend + std::io::Write>(
                             // follows the active source (the same switch
                             // the mpv poll catches on the pause side).
                             if previous_state != ctx.status.state && ctx.mpv.active {
-                                let source_before = !ctx.mpv.paused
-                                    || previous_state != State::Play;
+                                let source_before =
+                                    !ctx.mpv.paused || previous_state != State::Play;
                                 let source_after =
                                     !ctx.mpv.paused || ctx.status.state != State::Play;
                                 if source_before != source_after
@@ -1944,8 +1903,7 @@ fn main_task<B: Backend + std::io::Write>(
                                     log::info!(mode:?; "Applying blur mode colors");
                                     ctx.config = std::sync::Arc::new(config);
                                     last_blur_mode = Some(mode.clone());
-                                    if let Err(err) =
-                                        ui.on_event(UiEvent::ConfigChanged, &mut ctx)
+                                    if let Err(err) = ui.on_event(UiEvent::ConfigChanged, &mut ctx)
                                     {
                                         log::error!(
                                             error:? = err; "UI failed to handle blur theme change"
@@ -2162,13 +2120,11 @@ fn start_torrent_download(
         deferred: false,
         failures: 0,
     });
-    *torrent_download_guard = Some(ctx.scheduler.repeated(
-        Duration::from_secs(1),
-        move |(tx, _)| {
+    *torrent_download_guard =
+        Some(ctx.scheduler.repeated(Duration::from_secs(1), move |(tx, _)| {
             let _ = tx.send(AppEvent::TorrentDownloadPoll);
             Ok(())
-        },
-    ));
+        }));
 }
 
 /// Move a completed "Play and Download" torrent file into
@@ -2177,17 +2133,16 @@ fn start_torrent_download(
 /// the remaining cache files — subtitles, poster, partials). Called when
 /// the download's poll reports completion while mpv is not using the
 /// stream, or from MpvSessionEnded for a deferred completion.
-fn finish_torrent_download(
-    ctx: &Ctx,
-    engine: &crate::core::torrent::TorrentEngine,
-) {
+fn finish_torrent_download(ctx: &Ctx, engine: &crate::core::torrent::TorrentEngine) {
     let (torrent_id, files) = {
         let job = ctx.torrent_download.borrow();
         let Some(job) = job.as_ref() else { return };
         (job.torrent_id.clone(), job.files.clone())
     };
     let Some(dest_dir) = crate::ui::modals::paste::downloads_dir() else {
-        status_warn!("Cannot determine the downloads folder (~/Downloads) — the downloaded file stays in the torrent cache");
+        status_warn!(
+            "Cannot determine the downloads folder (~/Downloads) — the downloaded file stays in the torrent cache"
+        );
         return;
     };
     // No MPD update needed: the folder lives outside the MPD library and
@@ -2201,10 +2156,7 @@ fn finish_torrent_download(
                 moved += 1;
             }
             Err(err) => {
-                status_warn!(
-                    "Failed to keep downloaded file '{}': {err}",
-                    file.file_name
-                );
+                status_warn!("Failed to keep downloaded file '{}': {err}", file.file_name);
             }
         }
     }
@@ -2247,9 +2199,8 @@ fn complete_stream_download(
     // ~/Downloads/s2udio-downloads) cannot enter the MPD queue or a
     // stored playlist: keep the stream entry and just report the save.
     let files_in_library = files.iter().all(|file| {
-        crate::ui::modals::paste::music_directory().is_some_and(|music_dir| {
-            file.starts_with(std::path::Path::new(&music_dir))
-        })
+        crate::ui::modals::paste::music_directory()
+            .is_some_and(|music_dir| file.starts_with(std::path::Path::new(&music_dir)))
     });
     match &spec.on_complete {
         ReplaceAction::None => {

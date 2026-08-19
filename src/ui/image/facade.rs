@@ -229,8 +229,7 @@ impl AlbumArtFacade {
             return;
         }
         let snapshot = |buffer: &Buffer, area: Rect| {
-            let mut region =
-                Vec::with_capacity(usize::from(area.width) * usize::from(area.height));
+            let mut region = Vec::with_capacity(usize::from(area.width) * usize::from(area.height));
             for y in area.top()..area.bottom() {
                 for x in area.left()..area.right() {
                     region.push(buffer.cell((x, y)).cloned().unwrap_or_default());

@@ -4,12 +4,10 @@ mod remote_ipc_tests {
     use crossterm::event::KeyCode;
 
     use crate::{
-        AppEvent,
-        WorkRequest,
+        AppEvent, WorkRequest,
         config::{Config, cli::RemoteCmd},
         shared::ipc::{
-            SocketCommand,
-            SocketCommandExecute,
+            SocketCommand, SocketCommandExecute,
             commands::{keybind::KeybindCommand, switch_tab::SwitchTabCommand},
         },
         tests::fixtures::ipc_stream,

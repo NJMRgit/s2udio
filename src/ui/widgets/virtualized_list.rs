@@ -21,12 +21,7 @@ pub struct VirtualizedList<'a> {
 
 impl<'a> VirtualizedList<'a> {
     pub fn new(items: Vec<ListItem<'a>>) -> Self {
-        Self {
-            items,
-            highlight_style: Style::default(),
-            style: Style::default(),
-            row_height: 1,
-        }
+        Self { items, highlight_style: Style::default(), style: Style::default(), row_height: 1 }
     }
 
     pub fn highlight_style(mut self, style: Style) -> Self {
@@ -60,19 +55,13 @@ impl<'a> StatefulWidget for VirtualizedList<'a> {
         let visible_selected = original_selected
             .and_then(|s| s.checked_sub(original_offset))
             .filter(|s| *s < viewport);
-        let visible: Vec<ListItem> = self
-            .items
-            .into_iter()
-            .skip(original_offset)
-            .take(viewport)
-            .collect();
+        let visible: Vec<ListItem> =
+            self.items.into_iter().skip(original_offset).take(viewport).collect();
 
         let mut render_state = ListState::default();
         render_state.select(visible_selected);
         StatefulWidget::render(
-            List::new(visible)
-                .highlight_style(self.highlight_style)
-                .style(self.style),
+            List::new(visible).highlight_style(self.highlight_style).style(self.style),
             area,
             buf,
             &mut render_state,
@@ -144,12 +133,7 @@ pub fn scroll_selection_into_view(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::{
-        backend::TestBackend,
-        layout::Rect,
-        text::Line,
-        widgets::StatefulWidget as _,
-    };
+    use ratatui::{backend::TestBackend, layout::Rect, text::Line, widgets::StatefulWidget as _};
 
     fn items(n: usize) -> Vec<ListItem<'static>> {
         (0..n).map(|i| ListItem::new(Line::from(format!("row {i}")))).collect()
@@ -180,10 +164,7 @@ mod tests {
         // The buffer shows rows 5..8.
         let content = terminal.backend().buffer().content();
         let row_text = |row: usize| -> String {
-            content[row * 30..row * 30 + 30]
-                .iter()
-                .map(|cell| cell.symbol())
-                .collect::<String>()
+            content[row * 30..row * 30 + 30].iter().map(|cell| cell.symbol()).collect::<String>()
         };
         assert!(row_text(0).contains("row 5"), "first line shows row 5: {:?}", row_text(0));
         assert!(row_text(2).contains("row 7"), "third line shows row 7: {:?}", row_text(2));
