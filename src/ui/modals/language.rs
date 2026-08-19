@@ -45,7 +45,7 @@ pub struct LanguageModal {
 }
 
 impl LanguageModal {
-    pub fn new(ctx: &Ctx, title: &str, audio: bool) -> Self {
+    pub fn new(title: &str, audio: bool) -> Self {
         let mut rows: Vec<(String, Option<LangChoice>)> = Vec::new();
         rows.push(("Preference".to_owned(), None));
         if audio {
@@ -56,9 +56,9 @@ impl LanguageModal {
         }
         rows.push(("Languages".to_owned(), None));
         rows.extend(
-            crate::ui::modals::settings::language_options().iter().map(|(name, code)| {
-                (name.to_string(), Some(LangChoice::Custom((*code).to_owned())))
-            }),
+            crate::ui::modals::settings::language_options()
+                .iter()
+                .map(|(name, code)| (name.to_string(), Some(LangChoice::Custom((*code).to_owned())))),
         );
 
         let mut list_state = ListState::default();
@@ -123,8 +123,11 @@ impl Modal for LanguageModal {
             frame.render_widget(Block::default().style(Style::default().bg(bg_color)), popup_area);
         }
 
-        let base =
-            ctx.config.theme.text_color.map_or_else(Style::default, |c| Style::default().fg(c));
+        let base = ctx
+            .config
+            .theme
+            .text_color
+            .map_or_else(Style::default, |c| Style::default().fg(c));
         let dim = base.add_modifier(Modifier::DIM);
         let active = ctx.config.theme.current_item_style;
         let group = ctx.config.theme.preview_metadata_group_style;

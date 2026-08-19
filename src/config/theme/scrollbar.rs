@@ -68,7 +68,10 @@ mod tests {
     use test_case::test_case;
 
     use crate::config::theme::{
-        Style, StyleFile, scrollbar::ScrollbarConfigFile, style::Modifiers,
+        Style,
+        StyleFile,
+        scrollbar::ScrollbarConfigFile,
+        style::Modifiers,
     };
 
     #[test]

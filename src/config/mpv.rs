@@ -7,8 +7,12 @@ use serde::{Deserialize, Serialize};
 pub fn os_language_code() -> Option<String> {
     for var in ["LC_ALL", "LC_MESSAGES", "LANG", "LC_CTYPE"] {
         if let Ok(value) = std::env::var(var) {
-            let code =
-                value.split(['_', '.', '@']).next().unwrap_or("").trim().to_ascii_lowercase();
+            let code = value
+                .split(['_', '.', '@'])
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_ascii_lowercase();
             if !code.is_empty() && code != "c" && code != "posix" {
                 return Some(code);
             }
@@ -31,7 +35,9 @@ pub enum MpvAudioLang {
     System,
     /// 1st: the chosen language; 2nd: original.
     #[serde(rename = "custom")]
-    Custom { lang: String },
+    Custom {
+        lang: String,
+    },
 }
 
 impl MpvAudioLang {
@@ -94,7 +100,9 @@ pub enum MpvSubtitleMode {
     SystemLanguage,
     /// Signs first; else subtitles in a specific language.
     #[serde(rename = "custom")]
-    Custom { lang: String },
+    Custom {
+        lang: String,
+    },
 }
 
 impl MpvSubtitleMode {
@@ -123,9 +131,10 @@ impl MpvSubtitleMode {
             // both become the "signs > hidden" chain.
             "signs" | "off" | "hidden" => Some(Self::Hidden),
             "system" | "system language" => Some(Self::SystemLanguage),
-            _ => {
-                s.trim().strip_prefix("custom:").map(|lang| Self::Custom { lang: lang.to_owned() })
-            }
+            _ => s
+                .trim()
+                .strip_prefix("custom:")
+                .map(|lang| Self::Custom { lang: lang.to_owned() }),
         }
     }
 }
@@ -161,6 +170,7 @@ pub struct MpvFile {
     pub svp: Option<bool>,
 }
 
+
 impl From<MpvFile> for Mpv {
     fn from(value: MpvFile) -> Self {
         Self {
@@ -175,6 +185,7 @@ impl From<MpvFile> for Mpv {
         }
     }
 }
+
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]

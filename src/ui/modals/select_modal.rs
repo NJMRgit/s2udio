@@ -7,7 +7,11 @@ use ratatui::Frame;
 use super::{ListConfirm, ListModal, Modal};
 use crate::{
     ctx::Ctx,
-    shared::{id::Id, keys::ActionEvent, mouse_event::MouseEvent},
+    shared::{
+        id::Id,
+        keys::ActionEvent,
+        mouse_event::MouseEvent,
+    },
     ui::input::InputResultEvent,
 };
 
@@ -16,11 +20,7 @@ use crate::{
 /// the focus to the buttons where a second Enter confirms, Esc closes,
 /// wheel scrolls, click/double-click select/confirm.
 #[derive(derive_more::Debug)]
-pub struct SelectModal<
-    'a,
-    V: Display,
-    Callback: FnOnce(&Ctx, V, usize) -> Result<()> + Send + Sync + 'a,
-> {
+pub struct SelectModal<'a, V: Display, Callback: FnOnce(&Ctx, V, usize) -> Result<()> + Send + Sync + 'a> {
     #[debug(skip)]
     inner: ListModal<'a, V>,
     #[debug(skip)]
@@ -28,11 +28,8 @@ pub struct SelectModal<
 }
 
 #[bon]
-impl<
-    'a,
-    V: Display + std::fmt::Debug,
-    Callback: FnOnce(&Ctx, V, usize) -> Result<()> + Send + Sync + 'a,
-> SelectModal<'a, V, Callback>
+impl<'a, V: Display + std::fmt::Debug, Callback: FnOnce(&Ctx, V, usize) -> Result<()> + Send + Sync + 'a>
+    SelectModal<'a, V, Callback>
 {
     #[builder]
     pub fn new(
@@ -64,8 +61,8 @@ impl<
     }
 }
 
-impl<V: Display + std::fmt::Debug, Callback: FnOnce(&Ctx, V, usize) -> Result<()> + Send + Sync>
-    Modal for SelectModal<'_, V, Callback>
+impl<V: Display + std::fmt::Debug, Callback: FnOnce(&Ctx, V, usize) -> Result<()> + Send + Sync> Modal
+    for SelectModal<'_, V, Callback>
 {
     fn id(&self) -> Id {
         self.inner.id()

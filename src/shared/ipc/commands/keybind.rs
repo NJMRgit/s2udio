@@ -4,7 +4,8 @@ use crossterm::event::KeyEvent;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AppEvent, WorkRequest,
+    AppEvent,
+    WorkRequest,
     config::{Config, keys::key::KeySequence},
     shared::ipc::{IpcStream, SocketCommandExecute},
 };

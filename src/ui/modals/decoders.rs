@@ -5,7 +5,11 @@ use super::{InfoListModal, Modal};
 use crate::{
     ctx::Ctx,
     mpd::commands::Decoder,
-    shared::{id::Id, keys::ActionEvent, mouse_event::MouseEvent},
+    shared::{
+        id::Id,
+        keys::ActionEvent,
+        mouse_event::MouseEvent,
+    },
     ui::input::InputResultEvent,
 };
 

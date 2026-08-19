@@ -7,7 +7,7 @@ use anyhow::Result;
 use itertools::Itertools;
 
 use crate::{
-    config::keys::{Key, KeyConfig, KeySequence, QueueActions},
+    config::keys::{Key, KeySequence, KeyConfig, QueueActions},
     ctx::Ctx,
     shared::keys::{Actions, KeyResolver},
 };

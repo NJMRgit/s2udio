@@ -3,9 +3,11 @@ use crossbeam::channel::Sender;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AppEvent, WorkRequest,
+    AppEvent,
+    WorkRequest,
     config::{
-        Config, ConfigFile,
+        Config,
+        ConfigFile,
         theme::{UiConfig, UiConfigFile},
     },
     shared::ipc::{IpcStream, SocketCommandExecute},

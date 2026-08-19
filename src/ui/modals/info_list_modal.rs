@@ -285,7 +285,10 @@ impl From<Vec<Song>> for KeyValues {
             .count();
 
         result.push(vec!["Songs".to_owned(), value.len().to_string()]);
-        result.push(vec!["Total duration".to_owned(), total_duration.to_string()]);
+        result.push(vec![
+            "Total duration".to_owned(),
+            total_duration.to_string(),
+        ]);
         result.push(vec!["Artists".to_owned(), total_artists.to_string()]);
         result.push(vec!["Albums".to_owned(), total_albums.to_string()]);
         result.push(vec!["Genres".to_owned(), total_genres.to_string()]);
@@ -303,15 +306,27 @@ impl From<&Song> for KeyValues {
         }
 
         if let Some(title) = song.metadata.get("title") {
-            result.extend(title.iter().map(|item| vec!["Title".to_owned(), item.to_owned()]));
+            result.extend(
+                title
+                    .iter()
+                    .map(|item| vec!["Title".to_owned(), item.to_owned()]),
+            );
         }
 
         if let Some(artist) = song.metadata.get("artist") {
-            result.extend(artist.iter().map(|item| vec!["Artist".to_owned(), item.to_owned()]));
+            result.extend(
+                artist
+                    .iter()
+                    .map(|item| vec!["Artist".to_owned(), item.to_owned()]),
+            );
         }
 
         if let Some(album) = song.metadata.get("album") {
-            result.extend(album.iter().map(|item| vec!["Album".to_owned(), item.to_owned()]));
+            result.extend(
+                album
+                    .iter()
+                    .map(|item| vec!["Album".to_owned(), item.to_owned()]),
+            );
         }
 
         let duration = song.duration.as_ref().map(|d| d.as_secs().to_string()).unwrap_or_default();
@@ -325,7 +340,9 @@ impl From<&Song> for KeyValues {
                 .filter(|(key, _)| {
                     !["title", "album", "artist", "duration"].contains(&(*key).as_str())
                 })
-                .flat_map(|(k, v)| v.iter().map(|item| vec![k.to_owned(), item.to_owned()])),
+                .flat_map(|(k, v)| {
+                    v.iter().map(|item| vec![k.to_owned(), item.to_owned()])
+                }),
         );
 
         KeyValues(result)
@@ -352,7 +369,9 @@ mod tests {
     fn render(modal: &mut InfoListModal, ctx: &mut Ctx) -> String {
         let backend = ratatui::backend::TestBackend::new(100, 30);
         let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
-        terminal.draw(|frame| modal.render(frame, ctx).expect("modal renders")).expect("draw ok");
+        terminal
+            .draw(|frame| modal.render(frame, ctx).expect("modal renders"))
+            .expect("draw ok");
         terminal.backend().buffer().content.iter().map(|c| c.symbol()).collect()
     }
 
@@ -406,8 +425,11 @@ mod tests {
         let (mut ctx, _rx) = test_ctx();
         let rows =
             vec![vec!["Key".to_owned(), "a very long value that wraps across lines".to_owned()]];
-        let mut modal =
-            InfoListModal::builder().title("Song info").column_widths(&[30, 70]).rows(rows).build();
+        let mut modal = InfoListModal::builder()
+            .title("Song info")
+            .column_widths(&[30, 70])
+            .rows(rows)
+            .build();
         let out = render(&mut modal, &mut ctx);
         assert!(out.contains("Key"), "first row renders after wrapping");
         assert!(out.contains("wraps"), "wrapped continuation renders");

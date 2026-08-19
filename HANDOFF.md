@@ -158,7 +158,7 @@ the user's decisions win. Locked in across sessions (details in the docs):
   auth-protected (401s without creds — verified). Verified e2e: real
   rqbit + proxy + headless Chromium loads the SPA. **The user's running
   instance is now the current binary (restarted 2026-08-15; running md5
-  == installed md5 `1bafd72b`).** Tests: +3 engine
+  == installed md5 `83de6f70`).** Tests: +3 engine
   tests (socks spawn flags, proxy auth injection, real-rqbit proxy e2e),
   settings sidebar test covers the torrent section. Full suite 1447/1447
   minus 2 pre-existing env failures. See `docs/design/Sessions/2026-08-15.md`
@@ -689,7 +689,7 @@ Toolchain env (container): `export PATH="$HOME/.cargo/bin:$PATH"`
   proxy. NOTE for the user: the rqbit web UI itself cannot configure the
   VPN (verified — it's torrent management only); set the proxy in
   Settings, then stop/start the engine. **The user restarted — the
-  running instance is the current binary (md5 `1bafd72b`).** COMMITTED +
+  running instance is the current binary (md5 `83de6f70`).** COMMITTED +
   PUSHED to `s2udio-working/working` and **merged to master (`e3ea655`)**
   2026-08-15.
 - **Round 29 (2026-08-12 user request) — IMPLEMENTED host-side,

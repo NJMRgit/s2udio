@@ -28,7 +28,6 @@
             // Round 30: cava is PipeWire-only — capture the default output
             // ("auto") or a specific sink monitor / virtual source. A
             // legacy `method: Fifo` in an old config is ignored.
-            method: Pipewire,
             source: "auto",
             // Round 29: name the node s2udio creates (node.name/media.name
             // in pw-dump/pavucontrol). Requires the cava node-name shim
@@ -194,8 +193,6 @@
         ),
         (
             name: "Radio",
-            borders: "ALL",
-            border_symbols: Rounded,
             pane: Split(
                 size: "100%",
                 direction: Vertical,
@@ -204,8 +201,6 @@
         ),
         (
             name: "Jellyfin",
-            borders: "ALL",
-            border_symbols: Rounded,
             pane: Split(
                 size: "100%",
                 direction: Vertical,

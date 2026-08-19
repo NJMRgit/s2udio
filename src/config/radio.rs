@@ -42,6 +42,7 @@ pub struct RadioFile {
     pub max_favourites: Option<usize>,
 }
 
+
 impl From<RadioFile> for Radio {
     fn from(value: RadioFile) -> Self {
         Self {

@@ -1,7 +1,4 @@
-use std::{
-    collections::{BTreeSet, HashMap, HashSet},
-    sync::Arc,
-};
+use std::{collections::{BTreeSet, HashMap, HashSet}, sync::Arc};
 
 use anyhow::{Context, Result};
 use enum_map::EnumMap;
@@ -16,10 +13,7 @@ use ratatui::{
 use super::Pane;
 use crate::{
     MpdQueryResult,
-    config::{
-        keys::{CommonAction, DirectoriesActions},
-        tabs::{PaneType, PaneTypeDiscriminants, TreeBrowserArgs},
-    },
+    config::{keys::{CommonAction, DirectoriesActions}, tabs::{PaneType, PaneTypeDiscriminants, TreeBrowserArgs}},
     ctx::Ctx,
     mpd::{
         client::Client,
@@ -39,16 +33,19 @@ use crate::{
         UiEvent,
         browser::{BrowserPane, MoveDirection},
         dir_or_song::DirOrSong,
+        song_list::SongListCore,
         dirstack::{Dir, DirStack, DirStackItem},
         input::InputResultEvent,
         modals::{
             confirm_modal::{Action, ConfirmModal},
             info_list_modal::InfoListModal,
             input_modal::InputModal,
-            menu::{delete_from_playlist_or_show_confirmation, modal::MenuModal},
+            menu::{
+                delete_from_playlist_or_show_confirmation,
+                modal::MenuModal,
+            },
             select_modal::SelectModal,
         },
-        song_list::SongListCore,
         widgets::browser::{Browser, BrowserArea},
     },
 };
@@ -119,13 +116,9 @@ fn playlist_items(
                     }));
                     ListItem::from(Line::from(spans))
                 }
-                DirOrSong::Dir { name, .. } => {
-                    ListItem::from(Line::from(vec![Span::from(if name.is_empty() {
-                        "Untitled".to_owned()
-                    } else {
-                        name.clone()
-                    })]))
-                }
+                DirOrSong::Dir { name, .. } => ListItem::from(Line::from(vec![Span::from(
+                    if name.is_empty() { "Untitled".to_owned() } else { name.clone() },
+                )])),
             };
             if marked.contains(&idx) {
                 list_item.style(config.theme.marked_item_style)
@@ -221,14 +214,18 @@ pub(crate) fn is_video_uri(uri: &str) -> bool {
 /// box and the row titles.
 pub(crate) fn stream_info(ctx: &Ctx, uri: &str) -> Option<crate::shared::ytdlp::YtStreamInfo> {
     let info = ctx.yt_info.borrow();
-    info.get(uri).cloned().or_else(|| info.values().find(|e| e.original_url == uri).cloned())
+    info.get(uri).cloned().or_else(|| {
+        info.values().find(|e| e.original_url == uri).cloned()
+    })
 }
 
 /// The cached title of a stream (a resolved YouTube-style URL, or the
 /// original link) so playlist rows show the video name instead of a long
 /// random URL. `None` for local files / uncached streams.
 pub(crate) fn stream_display_title(ctx: &Ctx, uri: &str) -> Option<String> {
-    stream_info(ctx, uri).filter(|entry| !entry.title.is_empty()).map(|entry| entry.title)
+    stream_info(ctx, uri)
+        .filter(|entry| !entry.title.is_empty())
+        .map(|entry| entry.title)
 }
 
 impl PlaylistsPane {
@@ -328,8 +325,13 @@ impl PlaylistsPane {
                 items_snapshot.len(),
                 1,
             );
-            let items =
-                playlist_items(&items_snapshot, &marked, hover_idx, ctx, &self.playlist_kinds);
+            let items = playlist_items(
+                &items_snapshot,
+                &marked,
+                hover_idx,
+                ctx,
+                &self.playlist_kinds,
+            );
             ratatui::widgets::StatefulWidget::render(
                 crate::ui::widgets::virtualized_list::VirtualizedList::new(items)
                     .highlight_style(if hover_idx == state.get_selected() {
@@ -353,8 +355,13 @@ impl PlaylistsPane {
                 items_snapshot.len(),
                 1,
             );
-            let items =
-                playlist_items(&items_snapshot, &marked, hover_idx, ctx, &self.playlist_kinds);
+            let items = playlist_items(
+                &items_snapshot,
+                &marked,
+                hover_idx,
+                ctx,
+                &self.playlist_kinds,
+            );
             // Inside a playlist the keyboard cursor is on the songs pane:
             // its selection renders with the hover highlight so the active
             // pane is visible while navigating.
@@ -423,7 +430,10 @@ impl PlaylistsPane {
                     ])));
                 }
                 let (left, right, body) = crate::ui::panes::lyrics::yt_stream_info_parts(
-                    &yt, base, list_style, body_width,
+                    &yt,
+                    base,
+                    list_style,
+                    body_width,
                 );
                 if !left.is_empty() || !right.is_empty() {
                     let mut spans = left;
@@ -466,10 +476,14 @@ impl PlaylistsPane {
             .title(" Info ");
         let inner = block.inner(area);
         let overflow = items.len() > inner.height as usize;
-        let (list_area, scrollbar_area) = if overflow && ctx.config.as_styled_scrollbar().is_some()
+        let (list_area, scrollbar_area) = if overflow
+            && ctx.config.as_styled_scrollbar().is_some()
         {
-            let [a, b] = Layout::horizontal([Constraint::Percentage(100), Constraint::Length(1)])
-                .areas(inner);
+            let [a, b] = Layout::horizontal([
+                Constraint::Percentage(100),
+                Constraint::Length(1),
+            ])
+            .areas(inner);
             (a, b)
         } else {
             (inner, Rect::default())
@@ -509,11 +523,7 @@ impl PlaylistsPane {
 
     /// Select the dir displayed in the songs pane (current dir when inside a
     /// playlist, the next/preview dir at the root).
-    fn select_song_at(
-        &mut self,
-        row: usize,
-        select_fn: impl FnOnce(&mut Dir<DirOrSong, ListState>, usize),
-    ) {
+    fn select_song_at(&mut self, row: usize, select_fn: impl FnOnce(&mut Dir<DirOrSong, ListState>, usize)) {
         if self.stack.path().is_empty() {
             if let Some(dir) = self.stack.next_mut()
                 && let Some(idx) = dir.state.get_at_rendered_row(row)
@@ -617,98 +627,117 @@ impl PlaylistsPane {
         let playlist = name.to_owned();
         let menu = MenuModal::new(ctx)
             .list_section(ctx, |mut section| {
-                section.add_item("Add to Queue", {
-                    let playlist = playlist.clone();
-                    move |ctx| {
-                        ctx.command(move |client| {
-                            let songs = client.list_playlist_info(&playlist, None)?;
-                            let items: Vec<Enqueue> =
-                                songs.into_iter().map(|s| Enqueue::File { path: s.file }).collect();
-                            client.enqueue_multiple(items, None, None, false)?;
+                section.add_item(
+                    "Add to Queue",
+                    {
+                        let playlist = playlist.clone();
+                        move |ctx| {
+                            ctx.command(move |client| {
+                                let songs = client.list_playlist_info(&playlist, None)?;
+                                let items: Vec<Enqueue> = songs
+                                    .into_iter()
+                                    .map(|s| Enqueue::File { path: s.file })
+                                    .collect();
+                                client.enqueue_multiple(items, None, None, false)?;
+                                Ok(())
+                            });
                             Ok(())
-                        });
-                        Ok(())
-                    }
-                });
-                section.add_item("Replace Queue", {
-                    let playlist = playlist.clone();
-                    move |ctx| {
-                        ctx.command(move |client| {
-                            let songs = client.list_playlist_info(&playlist, None)?;
-                            let items: Vec<Enqueue> =
-                                songs.into_iter().map(|s| Enqueue::File { path: s.file }).collect();
-                            client.enqueue_multiple(items, None, None, true)?;
+                        }
+                    },
+                );
+                section.add_item(
+                    "Replace Queue",
+                    {
+                        let playlist = playlist.clone();
+                        move |ctx| {
+                            ctx.command(move |client| {
+                                let songs = client.list_playlist_info(&playlist, None)?;
+                                let items: Vec<Enqueue> = songs
+                                    .into_iter()
+                                    .map(|s| Enqueue::File { path: s.file })
+                                    .collect();
+                                client.enqueue_multiple(items, None, None, true)?;
+                                Ok(())
+                            });
                             Ok(())
-                        });
-                        Ok(())
-                    }
-                });
+                        }
+                    },
+                );
                 Some(section)
             })
             .list_section(ctx, |mut section| {
-                section.add_item("Rename Playlist", {
-                    let playlist = playlist.clone();
-                    move |ctx| {
-                        let current_name = playlist.clone();
-                        modal!(
-                            ctx,
-                            InputModal::new(ctx)
-                                .title("Rename playlist")
-                                .confirm_label("Rename")
-                                .input_label("New name:")
-                                .initial_value(current_name.clone())
-                                .on_confirm(move |ctx, new_value| {
-                                    if current_name != new_value {
-                                        let current_name = current_name.clone();
-                                        let new_value = new_value.to_owned();
-                                        ctx.command(move |client| {
-                                            client.rename_playlist(&current_name, &new_value)?;
-                                            status_info!(
-                                                "Playlist '{}' renamed to '{}'",
-                                                current_name,
-                                                new_value
-                                            );
-                                            Ok(())
-                                        });
-                                    }
-                                    Ok(())
-                                })
-                        );
-                        Ok(())
-                    }
-                });
-                section.add_item("Delete Playlist", {
-                    let playlist = playlist.clone();
-                    move |ctx| {
-                        modal!(
-                            ctx,
-                            ConfirmModal::builder()
-                                .ctx(ctx)
-                                .message(vec![
-                                    format!("Delete playlist '{}'?", playlist),
-                                    "This cannot be undone.".to_owned(),
-                                ])
-                                .action(Action::Single {
-                                    confirm_label: Some("Delete"),
-                                    cancel_label: None,
-                                    on_confirm: Box::new(move |ctx| {
-                                        let playlist = playlist.clone();
-                                        ctx.command(move |client| {
-                                            client.delete_multiple(vec![MpdDelete::Playlist {
-                                                name: playlist,
-                                            }])?;
-                                            Ok(())
-                                        });
-                                        status_info!("Playlist deleted");
+                section.add_item(
+                    "Rename Playlist",
+                    {
+                        let playlist = playlist.clone();
+                        move |ctx| {
+                            let current_name = playlist.clone();
+                            modal!(
+                                ctx,
+                                InputModal::new(ctx)
+                                    .title("Rename playlist")
+                                    .confirm_label("Rename")
+                                    .input_label("New name:")
+                                    .initial_value(current_name.clone())
+                                    .on_confirm(move |ctx, new_value| {
+                                        if current_name != new_value {
+                                            let current_name = current_name.clone();
+                                            let new_value = new_value.to_owned();
+                                            ctx.command(move |client| {
+                                                client.rename_playlist(
+                                                    &current_name,
+                                                    &new_value,
+                                                )?;
+                                                status_info!(
+                                                    "Playlist '{}' renamed to '{}'",
+                                                    current_name,
+                                                    new_value
+                                                );
+                                                Ok(())
+                                            });
+                                        }
                                         Ok(())
-                                    }),
-                                })
-                                .size((45, 6))
-                                .build()
-                        );
-                        Ok(())
-                    }
-                });
+                                    })
+                            );
+                            Ok(())
+                        }
+                    },
+                );
+                section.add_item(
+                    "Delete Playlist",
+                    {
+                        let playlist = playlist.clone();
+                        move |ctx| {
+                            modal!(
+                                ctx,
+                                ConfirmModal::builder()
+                                    .ctx(ctx)
+                                    .message(vec![
+                                        format!("Delete playlist '{}'?", playlist),
+                                        "This cannot be undone.".to_owned(),
+                                    ])
+                                    .action(Action::Single {
+                                        confirm_label: Some("Delete"),
+                                        cancel_label: None,
+                                        on_confirm: Box::new(move |ctx| {
+                                            let playlist = playlist.clone();
+                                            ctx.command(move |client| {
+                                                client.delete_multiple(vec![
+                                                    MpdDelete::Playlist { name: playlist },
+                                                ])?;
+                                                Ok(())
+                                            });
+                                            status_info!("Playlist deleted");
+                                            Ok(())
+                                        }),
+                                    })
+                                    .size((45, 6))
+                                    .build()
+                            );
+                            Ok(())
+                        }
+                    },
+                );
                 Some(section)
             });
 
@@ -742,58 +771,65 @@ impl PlaylistsPane {
         let remove_paths: HashSet<String> = files.iter().cloned().collect();
         // The playlist the songs pane is showing (the stack path is the
         // single playlist name inside a playlist).
-        let playlist_name = self.stack.path().as_slice().first().cloned().unwrap_or_default();
+        let playlist_name =
+            self.stack.path().as_slice().first().cloned().unwrap_or_default();
         // A stream song (the playlist entry is the resolved stream URL, or
         // the original link): offer Download, which saves it into
         // s2udio-downloads and replaces the entry in this playlist.
         let download_ctx = {
             let info = ctx.yt_info.borrow();
-            info.get(&highlighted_file)
-                .cloned()
-                .or_else(|| info.values().find(|e| e.original_url == highlighted_file).cloned())
+            info.get(&highlighted_file).cloned().or_else(|| {
+                info.values().find(|e| e.original_url == highlighted_file).cloned()
+            })
         }
         .map(|info| (info, playlist_name.clone(), highlighted_file.clone()));
         let menu = MenuModal::new(ctx)
             .list_section(ctx, |mut section| {
                 let files = files.clone();
-                section.add_item("Add to queue", {
-                    let files = files.clone();
-                    move |ctx| {
-                        ctx.command(move |client| {
-                            client.enqueue_multiple(
-                                files
-                                    .iter()
-                                    .cloned()
-                                    .map(|f| Enqueue::File { path: f })
-                                    .collect_vec(),
-                                None,
-                                None,
-                                false,
-                            )?;
+                section.add_item(
+                    "Add to queue",
+                    {
+                        let files = files.clone();
+                        move |ctx| {
+                            ctx.command(move |client| {
+                                client.enqueue_multiple(
+                                    files
+                                        .iter()
+                                        .cloned()
+                                        .map(|f| Enqueue::File { path: f })
+                                        .collect_vec(),
+                                    None,
+                                    None,
+                                    false,
+                                )?;
+                                Ok(())
+                            });
                             Ok(())
-                        });
-                        Ok(())
-                    }
-                });
-                section.add_item("Replace queue", {
-                    let files = files.clone();
-                    move |ctx| {
-                        ctx.command(move |client| {
-                            client.enqueue_multiple(
-                                files
-                                    .iter()
-                                    .cloned()
-                                    .map(|f| Enqueue::File { path: f })
-                                    .collect_vec(),
-                                None,
-                                None,
-                                true,
-                            )?;
+                        }
+                    },
+                );
+                section.add_item(
+                    "Replace queue",
+                    {
+                        let files = files.clone();
+                        move |ctx| {
+                            ctx.command(move |client| {
+                                client.enqueue_multiple(
+                                    files
+                                        .iter()
+                                        .cloned()
+                                        .map(|f| Enqueue::File { path: f })
+                                        .collect_vec(),
+                                    None,
+                                    None,
+                                    true,
+                                )?;
+                                Ok(())
+                            });
                             Ok(())
-                        });
-                        Ok(())
-                    }
-                });
+                        }
+                    },
+                );
                 if let Some((info, playlist_name, uri)) = download_ctx {
                     section.add_item("Download", move |ctx| {
                         crate::ui::modals::paste::open_stream_download_menu(
@@ -811,86 +847,95 @@ impl PlaylistsPane {
             })
             .list_section(ctx, |mut section| {
                 let files = files.clone();
-                section.add_item("Create playlist", {
-                    let files = files.clone();
-                    move |ctx| {
+                section.add_item(
+                    "Create playlist",
+                    {
                         let files = files.clone();
-                        let initial = files
-                            .first()
-                            .and_then(|f| f.rsplit('/').next())
-                            .unwrap_or_default()
-                            .to_owned();
-                        modal!(
-                            ctx,
-                            InputModal::new(ctx)
-                                .title("Create new playlist")
-                                .confirm_label("Save")
-                                .input_label("Playlist name:")
-                                .initial_value(initial)
-                                .on_confirm(move |ctx, value| {
-                                    let value = value.to_owned();
-                                    let files = files.clone();
-                                    ctx.command(move |client| {
-                                        client.create_playlist(&value, files)?;
+                        move |ctx| {
+                            let files = files.clone();
+                            let initial = files
+                                .first()
+                                .and_then(|f| f.rsplit('/').next())
+                                .unwrap_or_default()
+                                .to_owned();
+                            modal!(
+                                ctx,
+                                InputModal::new(ctx)
+                                    .title("Create new playlist")
+                                    .confirm_label("Save")
+                                    .input_label("Playlist name:")
+                                    .initial_value(initial)
+                                    .on_confirm(move |ctx, value| {
+                                        let value = value.to_owned();
+                                        let files = files.clone();
+                                        ctx.command(move |client| {
+                                            client.create_playlist(&value, files)?;
+                                            Ok(())
+                                        });
                                         Ok(())
-                                    });
-                                    Ok(())
-                                })
-                        );
-                        Ok(())
-                    }
-                });
-                section.add_item("Add to playlist", {
-                    let files = files.clone();
-                    move |ctx| {
+                                    })
+                            );
+                            Ok(())
+                        }
+                    },
+                );
+                section.add_item(
+                    "Add to playlist",
+                    {
                         let files = files.clone();
-                        // The radio favourites playlist is Radio-tab-owned:
-                        // it never appears as an add target.
-                        let radio_playlist = ctx.config.radio.playlist.clone();
-                        let (files, playlists) = ctx.query_sync(move |client| {
-                            let playlists = client
-                                .picker_playlists(&radio_playlist)?
-                                .into_iter()
-                                .map(|p| p.name)
-                                .collect_vec();
-                            Ok((files, playlists))
-                        })?;
-                        modal!(
-                            ctx,
-                            SelectModal::builder()
-                                .ctx(ctx)
-                                .options(playlists)
-                                .confirm_label("Add")
-                                .title("Select a playlist")
-                                .on_confirm(move |ctx, selected, _idx| {
-                                    let files = files.clone();
-                                    ctx.command(move |client| {
-                                        client.add_to_playlist_multiple(&selected, files)?;
+                        move |ctx| {
+                            let files = files.clone();
+                            // The radio favourites playlist is Radio-tab-owned:
+                            // it never appears as an add target.
+                            let radio_playlist = ctx.config.radio.playlist.clone();
+                            let (files, playlists) = ctx.query_sync(move |client| {
+                                let playlists = client
+                                    .picker_playlists(&radio_playlist)?
+                                    .into_iter()
+                                    .map(|p| p.name)
+                                    .collect_vec();
+                                Ok((files, playlists))
+                            })?;
+                            modal!(
+                                ctx,
+                                SelectModal::builder()
+                                    .ctx(ctx)
+                                    .options(playlists)
+                                    .confirm_label("Add")
+                                    .title("Select a playlist")
+                                    .on_confirm(move |ctx, selected, _idx| {
+                                        let files = files.clone();
+                                        ctx.command(move |client| {
+                                            client.add_to_playlist_multiple(&selected, files)?;
+                                            Ok(())
+                                        });
                                         Ok(())
-                                    });
-                                    Ok(())
-                                })
-                                .build()
-                        );
-                        Ok(())
-                    }
-                });
+                                    })
+                                    .build()
+                            );
+                            Ok(())
+                        }
+                    },
+                );
                 Some(section)
             })
             .list_section(ctx, |mut section| {
-                section.add_item("Remove from playlist", {
-                    let playlist_name = playlist_name.clone();
-                    let remove_paths = remove_paths.clone();
-                    move |ctx| {
-                        delete_from_playlist_or_show_confirmation(
-                            playlist_name,
-                            &remove_paths,
-                            true,
-                            ctx,
-                        )?;
-                        Ok(())
-                    }
-                });
+                section.add_item(
+                    "Remove from playlist",
+                    {
+                        let playlist_name = playlist_name.clone();
+                        let remove_paths = remove_paths.clone();
+                        move |ctx| {
+                            delete_from_playlist_or_show_confirmation(
+                                playlist_name,
+                                &remove_paths,
+                                true,
+                                ctx,
+                            )?;
+                            Ok(())
+                        }
+                    },
+                );
                 Some(section)
             });
 
@@ -898,7 +943,7 @@ impl PlaylistsPane {
         Ok(())
     }
 
-    fn open_selected_playlist(&mut self, ctx: &Ctx) -> Result<()> {
+fn open_selected_playlist(&mut self, ctx: &Ctx) -> Result<()> {
         self.stack_mut().enter();
         SongListCore::fetch_data_internal(self, ctx)?;
         ctx.render()?;
@@ -919,11 +964,8 @@ impl PlaylistsPane {
                 _ => None,
             })
             .collect();
-        ctx.query()
-            .id(PLAYLIST_KINDS)
-            .replace_id(PLAYLIST_KINDS)
-            .target(PaneType::Playlists { tree: TreeBrowserArgs::default() })
-            .query(move |client| {
+        ctx.query().id(PLAYLIST_KINDS).replace_id(PLAYLIST_KINDS).target(PaneType::Playlists { tree: TreeBrowserArgs::default() }).query(
+            move |client| {
                 // `listplaylistinfo` ranges need MPD >= 0.24; older servers
                 // fall back to fetching the whole playlist.
                 let ranged = client.version() >= crate::mpd::version::Version::new(0, 24, 0);
@@ -935,7 +977,8 @@ impl PlaylistsPane {
                     }
                 }
                 Ok(MpdQueryResult::Any(Box::new(kinds)))
-            });
+            },
+        );
     }
 }
 
@@ -986,7 +1029,10 @@ impl Pane for PlaylistsPane {
                 Span::styled("w/s · ↑/↓", base),
                 Span::styled("  playlists · songs", dim),
             ]),
-            Line::from(vec![Span::styled("d / a", base), Span::styled("  open · back out", dim)]),
+            Line::from(vec![
+                Span::styled("d / a", base),
+                Span::styled("  open · back out", dim),
+            ]),
             Line::from(vec![
                 Span::styled("Enter · →", base),
                 Span::styled("  menu · play track", dim),
@@ -1007,22 +1053,18 @@ impl Pane for PlaylistsPane {
         let id = if self.initialized { REINIT } else { INIT };
         let compare = StringCompare::from(ctx.config.browser_song_sort.as_ref());
         let radio_playlist = ctx.config.radio.playlist.clone();
-        ctx.query()
-            .id(id)
-            .target(PaneType::Playlists { tree: TreeBrowserArgs::default() })
-            .replace_id(id)
-            .query(move |client| {
-                let result: Vec<_> = client
-                    .list_playlists()
-                    .context("Cannot list playlists")?
-                    .into_iter()
-                    // The radio stations playlist is managed by the Radio tab.
-                    .filter(|playlist| playlist.name != radio_playlist)
-                    .sorted_by(|a, b| compare.compare(&a.name, &b.name))
-                    .map(|playlist| DirOrSong::playlist_name_only(playlist.name))
-                    .collect();
-                Ok(MpdQueryResult::DirOrSong { data: result, path: None })
-            });
+        ctx.query().id(id).target(PaneType::Playlists { tree: TreeBrowserArgs::default() }).replace_id(id).query(move |client| {
+            let result: Vec<_> = client
+                .list_playlists()
+                .context("Cannot list playlists")?
+                .into_iter()
+                // The radio stations playlist is managed by the Radio tab.
+                .filter(|playlist| playlist.name != radio_playlist)
+                .sorted_by(|a, b| compare.compare(&a.name, &b.name))
+                .map(|playlist| DirOrSong::playlist_name_only(playlist.name))
+                .collect();
+            Ok(MpdQueryResult::DirOrSong { data: result, path: None })
+        });
 
         self.initialized = true;
         Ok(())
@@ -1038,11 +1080,8 @@ impl Pane for PlaylistsPane {
                 };
                 let sort_opts = ctx.config.browser_song_sort.clone();
                 let radio_playlist = ctx.config.radio.playlist.clone();
-                ctx.query()
-                    .id(id)
-                    .replace_id(id)
-                    .target(PaneType::Playlists { tree: TreeBrowserArgs::default() })
-                    .query(move |client| {
+                ctx.query().id(id).replace_id(id).target(PaneType::Playlists { tree: TreeBrowserArgs::default() }).query(
+                    move |client| {
                         let result: Vec<_> = client
                             .list_playlists()
                             .context("Cannot list playlists")?
@@ -1055,7 +1094,8 @@ impl Pane for PlaylistsPane {
                             .map(|playlist| DirOrSong::playlist_name_only(playlist.name))
                             .collect();
                         Ok(MpdQueryResult::DirOrSong { data: result, path: None })
-                    });
+                    },
+                );
             }
             UiEvent::Reconnected => {
                 self.initialized = false;
@@ -1073,7 +1113,8 @@ impl Pane for PlaylistsPane {
         // the same list (the root's children), so both panes drive the
         // same selection.
         let at_root = self.stack.path().is_empty();
-        if self.playlists_area.contains(position) || (at_root && self.songs_area.contains(position))
+        if self.playlists_area.contains(position)
+            || (at_root && self.songs_area.contains(position))
         {
             let list_area = if self.playlists_area.contains(position) {
                 self.playlists_area
@@ -1196,7 +1237,8 @@ impl Pane for PlaylistsPane {
                         // multi-selection (ctrl/alt clicks above keep their
                         // marking behavior). Clicking the selected row keeps
                         // it.
-                        if !dir.state.marked.is_empty() && Some(idx) != dir.state.get_selected() {
+                        if !dir.state.marked.is_empty() && Some(idx) != dir.state.get_selected()
+                        {
                             dir.state.unmark_all();
                         }
                         dir.select_idx(idx, 0);
@@ -1238,7 +1280,8 @@ impl Pane for PlaylistsPane {
                     begin_len,
                     end_len,
                 ) {
-                    let new = ((perc.clamp(0.0, 1.0)) * max as f64).floor() as usize;
+                    let new =
+                        ((perc.clamp(0.0, 1.0)) * max as f64).floor() as usize;
                     if new != self.info_state.offset() {
                         *self.info_state.offset_mut() = new;
                         ctx.render()?;
@@ -1254,7 +1297,8 @@ impl Pane for PlaylistsPane {
                 MouseEventKind::ScrollDown => 1,
                 _ => return Ok(()),
             };
-            let max = self.info_items_len.saturating_sub(self.info_area.height as usize) as i64;
+            let max =
+                self.info_items_len.saturating_sub(self.info_area.height as usize) as i64;
             let current = self.info_state.offset() as i64;
             let new = (current + dir).clamp(0, max.max(0)) as usize;
             if new != self.info_state.offset() {
@@ -1314,7 +1358,8 @@ impl Pane for PlaylistsPane {
                 DirectoriesActions::FolderUp | DirectoriesActions::FolderDown => {
                     // Normally claimed by Common Up/Down above; keep a
                     // fallback for other bindings.
-                    let dir = if matches!(action, DirectoriesActions::FolderUp) { -1 } else { 1 };
+                    let dir =
+                        if matches!(action, DirectoriesActions::FolderUp) { -1 } else { 1 };
                     self.current_move(dir, ctx)
                 }
                 // `d` mirrors `→` (wasd = arrow keys): open the highlighted
@@ -1546,10 +1591,7 @@ impl SongListCore<DirOrSong, ListState> for PlaylistsPane {
         BrowserPane::fetch_data_internal(self, ctx)
     }
 
-    fn enqueue<'a>(
-        &self,
-        items: impl Iterator<Item = &'a DirOrSong>,
-    ) -> (Vec<Enqueue>, Option<usize>) {
+    fn enqueue<'a>(&self, items: impl Iterator<Item = &'a DirOrSong>) -> (Vec<Enqueue>, Option<usize>) {
         BrowserPane::enqueue(self, items)
     }
 

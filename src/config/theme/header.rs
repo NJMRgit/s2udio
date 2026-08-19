@@ -6,8 +6,14 @@ use crate::config::{
     defaults,
     theme::{
         properties::{
-            Property, PropertyFile, PropertyKind, PropertyKindFile, PropertyKindFileOrText,
-            SongPropertyFile, StatusPropertyFile, WidgetPropertyFile,
+            Property,
+            PropertyFile,
+            PropertyKind,
+            PropertyKindFile,
+            PropertyKindFileOrText,
+            SongPropertyFile,
+            StatusPropertyFile,
+            WidgetPropertyFile,
         },
         style::{Modifiers, StyleFile},
     },

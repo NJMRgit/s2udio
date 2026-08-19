@@ -6,9 +6,6 @@ pub mod event_loop;
 pub mod input;
 pub mod lyrics_watcher;
 pub mod mpv;
-/// `s2udio rq start|stop|open` — shell control of the standalone rqbit
-/// engine, sharing its registration with the Settings panel.
-pub mod rqctl;
 pub mod scheduler;
 pub mod socket;
 /// Torrent streaming engine (rqbit) — M1 bootstrap; the entry points
@@ -17,4 +14,7 @@ pub mod socket;
 pub mod torrent;
 /// Auth-injecting loopback proxy for the rqbit web UI (round 42 fix).
 pub mod torrent_proxy;
+/// `s2udio rq start|stop|open` — shell control of the standalone rqbit
+/// engine, sharing its registration with the Settings panel.
+pub mod rqctl;
 pub mod work;

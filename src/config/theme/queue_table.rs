@@ -10,8 +10,15 @@ use thiserror::Error;
 use super::{
     StyleFile,
     properties::{
-        Alignment, Property, PropertyFile, PropertyKindFileOrText, PropertyKindOrText,
-        SongProperty, SongPropertyFile, Transform, TransformFile,
+        Alignment,
+        Property,
+        PropertyFile,
+        PropertyKindFileOrText,
+        PropertyKindOrText,
+        SongProperty,
+        SongPropertyFile,
+        Transform,
+        TransformFile,
     },
     style::ToConfigOr,
 };

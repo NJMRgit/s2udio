@@ -18,7 +18,10 @@ use crate::{
         utils::tilde_expand,
     },
     ctx::Ctx,
-    mpd::{commands::State, mpd_client::MpdClient},
+    mpd::{
+        commands::State,
+        mpd_client::MpdClient,
+    },
     radio::{CountryGroup, DirectoryStation, RadioDirectory},
     shared::{
         events::WorkRequest,
@@ -66,10 +69,7 @@ pub enum RegionKind {
     Country(String),
     /// A state/province — the deepest category: selecting it filters the
     /// station list to all stations of that province.
-    State {
-        country: String,
-        state: String,
-    },
+    State { country: String, state: String },
 }
 
 impl RegionKind {
@@ -152,7 +152,8 @@ fn parse_m3u(content: &str) -> Vec<RadioStation> {
             continue;
         }
         if let Some(rest) = line.strip_prefix("#EXTINF:") {
-            pending_name = Some(rest.splitn(2, ',').nth(1).unwrap_or_default().trim().to_string());
+            pending_name =
+                Some(rest.splitn(2, ',').nth(1).unwrap_or_default().trim().to_string());
         } else if is_stream_url(line) {
             let name = pending_name
                 .take()
@@ -192,7 +193,11 @@ fn write_stations_file(playlist: &str, stations: &[RadioStation]) -> Result<()> 
 /// "12 km", "3.4 km" etc.
 fn format_distance(km: Option<f64>) -> Option<String> {
     let km = km?;
-    if km < 10.0 { Some(format!("{km:.1} km")) } else { Some(format!("{km:.0} km")) }
+    if km < 10.0 {
+        Some(format!("{km:.1} km"))
+    } else {
+        Some(format!("{km:.0} km"))
+    }
 }
 
 /// Second (dim) line of a directory/local station row.
@@ -285,11 +290,9 @@ impl RadioPane {
 
     fn query_favourites(&self, ctx: &Ctx, id: &'static str) {
         let playlist = ctx.config.radio.playlist.clone();
-        ctx.query()
-            .id(id)
-            .replace_id(id)
-            .target(PaneType::Radio { tree: TreeBrowserArgs::default() })
-            .query(move |_client| Ok(MpdQueryResult::Any(Box::new(fetch_stations(&playlist)?))));
+        ctx.query().id(id).replace_id(id).target(PaneType::Radio { tree: TreeBrowserArgs::default() }).query(move |_client| {
+            Ok(MpdQueryResult::Any(Box::new(fetch_stations(&playlist)?)))
+        });
     }
 
     /// Ask the work thread for the station directory (local + countries).
@@ -345,8 +348,7 @@ impl RadioPane {
                 });
             }
             for country in &directory.countries {
-                let expanded =
-                    self.expanded.contains(&RegionKind::Country(country.name.clone()).key());
+                let expanded = self.expanded.contains(&RegionKind::Country(country.name.clone()).key());
                 regions.push(RegionRow {
                     kind: RegionKind::Country(country.name.clone()),
                     label: crate::radio::short_country_name(&country.name),
@@ -422,8 +424,7 @@ impl RadioPane {
         let Some(directory) = self.directory.as_mut() else { return };
         match kind {
             RegionKind::Country(country) => {
-                let Some(group) = directory.countries.iter_mut().find(|g| &g.name == country)
-                else {
+                let Some(group) = directory.countries.iter_mut().find(|g| &g.name == country) else {
                     return;
                 };
                 let country = country.clone();
@@ -448,22 +449,20 @@ impl RadioPane {
                     let _ = ctx
                         .work_sender
                         .send(WorkRequest::FetchRadioStates { country, country_code })
-                        .map_err(
-                            |err| log::error!(error:? = err; "Failed to request radio states"),
-                        );
+                        .map_err(|err| {
+                            log::error!(error:? = err; "Failed to request radio states")
+                        });
                 }
             }
             RegionKind::State { country, state } => {
-                let Some(group) = directory.countries.iter_mut().find(|g| &g.name == country)
-                else {
+                let Some(group) = directory.countries.iter_mut().find(|g| &g.name == country) else {
                     return;
                 };
                 // The state must exist in the tree (its stations load into
                 // the group); the actual fetch happens below.
-                let state_exists = group
-                    .states
-                    .as_ref()
-                    .is_some_and(|states| states.iter().any(|s| &s.name == state));
+                let state_exists = group.states.as_ref().is_some_and(|states| {
+                    states.iter().any(|s| &s.name == state)
+                });
                 if !state_exists {
                     return;
                 }
@@ -475,9 +474,9 @@ impl RadioPane {
                 let _ = ctx
                     .work_sender
                     .send(WorkRequest::FetchRadioStateStations { country, state })
-                    .map_err(
-                        |err| log::error!(error:? = err; "Failed to request radio state stations"),
-                    );
+                    .map_err(|err| {
+                        log::error!(error:? = err; "Failed to request radio state stations")
+                    });
             }
             _ => {}
         }
@@ -508,7 +507,9 @@ impl RadioPane {
                 self.stations = self
                     .directory
                     .as_ref()
-                    .map(|d| d.local.iter().cloned().map(StationRow::Directory).collect::<Vec<_>>())
+                    .map(|d| {
+                        d.local.iter().cloned().map(StationRow::Directory).collect::<Vec<_>>()
+                    })
                     .unwrap_or_default();
             }
             RegionKind::Country(country) => {
@@ -571,7 +572,10 @@ impl RadioPane {
     /// Toggle the selected tree row's expansion.
     /// Move the tree selection; keeps the right pane in sync.
 
+
     /// Move the station selection (right pane).
+
+
 
     /// URL of the currently playing stream, if any.
     fn playing_url(ctx: &Ctx) -> Option<String> {
@@ -585,15 +589,11 @@ impl RadioPane {
     fn play_selected(&mut self, ctx: &Ctx) -> Result<()> {
         let Some(station) = self.selected_station() else { return Ok(()) };
         let url = station.url;
-        ctx.query()
-            .id(PLAY)
-            .replace_id(PLAY)
-            .target(PaneType::Radio { tree: TreeBrowserArgs::default() })
-            .query(move |client| {
-                let id = client.add_id(&url, None)?;
-                client.play_id(id)?;
-                Ok(MpdQueryResult::Any(Box::new(id)))
-            });
+        ctx.query().id(PLAY).replace_id(PLAY).target(PaneType::Radio { tree: TreeBrowserArgs::default() }).query(move |client| {
+            let id = client.add_id(&url, None)?;
+            client.play_id(id)?;
+            Ok(MpdQueryResult::Any(Box::new(id)))
+        });
         Ok(())
     }
 
@@ -663,6 +663,7 @@ impl RadioPane {
 
     /// Drop the temporary play song once playback has moved on.
 
+
     /// Read the current favourites, apply `mutate`, write the file back and
     /// refresh the list.
     pub(crate) fn mutate_stations(
@@ -684,7 +685,9 @@ impl RadioPane {
             .id(REINIT)
             .replace_id(REINIT)
             .target(PaneType::Radio { tree: TreeBrowserArgs::default() })
-            .query(move |_client| Ok(MpdQueryResult::Any(Box::new(fetch_stations(&playlist)?))));
+            .query(move |_client| {
+                Ok(MpdQueryResult::Any(Box::new(fetch_stations(&playlist)?)))
+            });
         ctx.render()?;
         Ok(())
     }
@@ -704,86 +707,102 @@ impl RadioPane {
 
         let menu = MenuModal::new(ctx)
             .list_section(ctx, |mut section| {
-                section.add_item("Play now", {
-                    let url = url.clone();
-                    move |ctx| {
-                        ctx.command(move |client| {
-                            let id = client.add_id(&url, None)?;
-                            client.play_id(id)?;
+                section.add_item(
+                    "Play now",
+                    {
+                        let url = url.clone();
+                        move |ctx| {
+                            ctx.command(move |client| {
+                                let id = client.add_id(&url, None)?;
+                                client.play_id(id)?;
+                                Ok(())
+                            });
                             Ok(())
-                        });
-                        Ok(())
-                    }
-                });
+                        }
+                    },
+                );
                 if is_favourite {
-                    section.add_item("Remove from favourites", {
-                        let playlist = playlist.clone();
-                        let url = url.clone();
-                        move |ctx| {
-                            Self::mutate_stations(ctx, playlist, move |stations| {
-                                stations.retain(|station| station.url != url);
-                            })?;
-                            Ok(())
-                        }
-                    });
-                    section.add_item("Rename…", {
-                        let playlist = playlist.clone();
-                        let name = name.clone();
-                        let url = url.clone();
-                        move |ctx| {
-                            Self::prompt_rename(ctx, playlist, name, url);
-                            Ok(())
-                        }
-                    });
+                    section.add_item(
+                        "Remove from favourites",
+                        {
+                            let playlist = playlist.clone();
+                            let url = url.clone();
+                            move |ctx| {
+                                Self::mutate_stations(ctx, playlist, move |stations| {
+                                    stations.retain(|station| station.url != url);
+                                })?;
+                                Ok(())
+                            }
+                        },
+                    );
+                    section.add_item(
+                        "Rename…",
+                        {
+                            let playlist = playlist.clone();
+                            let name = name.clone();
+                            let url = url.clone();
+                            move |ctx| {
+                                Self::prompt_rename(ctx, playlist, name, url);
+                                Ok(())
+                            }
+                        },
+                    );
                 } else {
                     section.add_item(
                         "★ Add to favourites",
-                        Self::menu_add_favourite(
-                            playlist.clone(),
-                            station.clone(),
-                            favourites,
-                            max,
-                        ),
+                        Self::menu_add_favourite(playlist.clone(), station.clone(), favourites, max),
                     );
                 }
-                section.add_item("Add to queue", {
-                    let url = url.clone();
-                    move |ctx| {
-                        ctx.command(move |client| {
-                            client.add(&url, None)?;
+                section.add_item(
+                    "Add to queue",
+                    {
+                        let url = url.clone();
+                        move |ctx| {
+                            ctx.command(move |client| {
+                                client.add(&url, None)?;
+                                Ok(())
+                            });
                             Ok(())
-                        });
-                        Ok(())
-                    }
-                });
-                section.add_item("Replace queue with station", {
-                    let url = url.clone();
-                    move |ctx| {
-                        ctx.command(move |client| {
-                            client.clear()?;
-                            client.add(&url, None)?;
-                            client.play()?;
+                        }
+                    },
+                );
+                section.add_item(
+                    "Replace queue with station",
+                    {
+                        let url = url.clone();
+                        move |ctx| {
+                            ctx.command(move |client| {
+                                client.clear()?;
+                                client.add(&url, None)?;
+                                client.play()?;
+                                Ok(())
+                            });
                             Ok(())
-                        });
-                        Ok(())
-                    }
-                });
+                        }
+                    },
+                );
                 Some(section)
             })
             .list_section(ctx, |mut section| {
-                section.add_item("Add station by URL…", Self::menu_add_station(playlist.clone()));
-                section.add_item("Refresh stations from directory", move |ctx| {
-                    let location = ctx.config.radio.location.clone();
-                    let cache_dir = ctx.config.cache_dir.clone();
-                    let _ = ctx
-                        .work_sender
-                        .send(WorkRequest::FetchRadioDirectory { location, cache_dir })
-                        .map_err(
-                            |err| log::error!(error:? = err; "Failed to request radio directory"),
-                        );
-                    status_info!("Refreshing station directory…");
-                    Ok(())
-                });
+                section.add_item(
+                    "Add station by URL…",
+                    Self::menu_add_station(playlist.clone()),
+                );
+                section.add_item(
+                    "Refresh stations from directory",
+                    move |ctx| {
+                        let location = ctx.config.radio.location.clone();
+                        let cache_dir = ctx.config.cache_dir.clone();
+                        let _ = ctx
+                            .work_sender
+                            .send(WorkRequest::FetchRadioDirectory { location, cache_dir })
+                            .map_err(|err| {
+                                log::error!(error:? = err; "Failed to request radio directory")
+                            });
+                        status_info!("Refreshing station directory…");
+                        Ok(())
+                    },
+                );
                 Some(section)
             });
 
@@ -899,6 +918,9 @@ impl RadioPane {
                 .build()
         );
     }
+
+
+
 }
 
 impl TreeBrowserCore for RadioPane {
@@ -978,12 +1000,20 @@ impl TreeBrowserCore for RadioPane {
         let playing_url = Self::playing_url(ctx);
         let base = ctx.config.as_list_name_style();
         let dim = ctx.config.as_list_text_style();
-        let style = if hovered { ctx.config.theme.hovered_item_style } else { Style::new() };
+        let style = if hovered {
+            ctx.config.theme.hovered_item_style
+        } else {
+            Style::new()
+        };
         match &self.stations[idx] {
             StationRow::Favourite(station) => {
                 let is_playing = playing_url.as_deref() == Some(station.url.as_str());
                 let prefix = if is_playing { "▶ " } else { "  " };
-                let name_style = if is_playing { base.add_modifier(Modifier::BOLD) } else { base };
+                let name_style = if is_playing {
+                    base.add_modifier(Modifier::BOLD)
+                } else {
+                    base
+                };
                 ListItem::new(vec![
                     Line::from(Span::styled(format!("{prefix}{}", station.name), name_style)),
                     Line::from(Span::styled(format!("  {}", station.url), dim)),
@@ -993,10 +1023,17 @@ impl TreeBrowserCore for RadioPane {
             StationRow::Directory(station) => {
                 let is_playing = playing_url.as_deref() == Some(station.url.as_str());
                 let prefix = if is_playing { "▶ " } else { "  " };
-                let name_style = if is_playing { base.add_modifier(Modifier::BOLD) } else { base };
+                let name_style = if is_playing {
+                    base.add_modifier(Modifier::BOLD)
+                } else {
+                    base
+                };
                 ListItem::new(vec![
                     Line::from(Span::styled(format!("{prefix}{}", station.name), name_style)),
-                    Line::from(Span::styled(format!("  {}", station_subline(station)), dim)),
+                    Line::from(Span::styled(
+                        format!("  {}", station_subline(station)),
+                        dim,
+                    )),
                 ])
                 .style(style)
             }
@@ -1029,8 +1066,10 @@ impl TreeBrowserCore for RadioPane {
         self.open_menu(ctx)
     }
 
+    
     /// Keybinding hints, one line each, in the strip between the station list
     /// and the info panel (same spot as the Directories/Playlists tabs).
+
 
     fn render_info(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) {
         let key = ctx.config.theme.preview_label_style;
@@ -1054,10 +1093,13 @@ impl TreeBrowserCore for RadioPane {
                 ])));
             }
             Some(RadioStation { name, url }) => {
-                let station = self.stations.iter().find_map(|row| match row {
-                    StationRow::Directory(s) if s.url == url => Some(s.clone()),
-                    _ => None,
-                });
+                let station = self
+                    .stations
+                    .iter()
+                    .find_map(|row| match row {
+                        StationRow::Directory(s) if s.url == url => Some(s.clone()),
+                        _ => None,
+                    });
                 match station {
                     Some(station) => {
                         items.push(ListItem::new(Line::styled(" --- [Station]", group)));
@@ -1256,7 +1298,10 @@ impl TreeBrowserCore for RadioPane {
         let base = ctx.config.as_list_name_style();
         let dim = ctx.config.as_list_text_style();
         vec![
-            Line::from(vec![Span::styled("w/s · ↑/↓", base), Span::styled("  move list", dim)]),
+            Line::from(vec![
+                Span::styled("w/s · ↑/↓", base),
+                Span::styled("  move list", dim),
+            ]),
             Line::from(vec![
                 Span::styled("d / →", base),
                 Span::styled("  open region · play station", dim),
@@ -1284,9 +1329,11 @@ impl TreeBrowserCore for RadioPane {
     /// The radio region tree always takes its 30% share (no narrow-TUI
     /// collapse).
     fn split_tree(&self, area: Rect) -> (Rect, Rect) {
-        let [regions_area, right] =
-            Layout::horizontal([Constraint::Percentage(30), Constraint::Percentage(70)])
-                .areas(area);
+        let [regions_area, right] = Layout::horizontal([
+            Constraint::Percentage(30),
+            Constraint::Percentage(70),
+        ])
+        .areas(area);
         (regions_area, right)
     }
 
@@ -1458,7 +1505,8 @@ impl Pane for RadioPane {
         if let Some(action) = event.claim_directories() {
             return match action {
                 DirectoriesActions::FolderUp | DirectoriesActions::FolderDown => {
-                    let dir = if matches!(action, DirectoriesActions::FolderUp) { -1 } else { 1 };
+                    let dir =
+                        if matches!(action, DirectoriesActions::FolderUp) { -1 } else { 1 };
                     if self.focus == PaneFocus::Stations {
                         self.move_station(dir, ctx)
                     } else {
@@ -1598,9 +1646,10 @@ impl Pane for RadioPane {
                 }
             }
             (RADIO_STATES, MpdQueryResult::Any(any)) => {
-                if let Ok(boxed) =
-                    any.downcast::<(String, Result<Vec<crate::radio::StateGroup>, anyhow::Error>)>()
-                {
+                if let Ok(boxed) = any.downcast::<(
+                    String,
+                    Result<Vec<crate::radio::StateGroup>, anyhow::Error>,
+                )>() {
                     let (country, result) = *boxed;
                     match result {
                         Ok(states) => {
@@ -1619,9 +1668,10 @@ impl Pane for RadioPane {
                 }
             }
             (RADIO_COUNTRY_STATIONS, MpdQueryResult::Any(any)) => {
-                if let Ok(boxed) =
-                    any.downcast::<(String, Result<Vec<DirectoryStation>, anyhow::Error>)>()
-                {
+                if let Ok(boxed) = any.downcast::<(
+                    String,
+                    Result<Vec<DirectoryStation>, anyhow::Error>,
+                )>() {
                     let (country, result) = *boxed;
                     match result {
                         Ok(stations) => {
@@ -1639,19 +1689,20 @@ impl Pane for RadioPane {
                 }
             }
             (RADIO_STATE_STATIONS, MpdQueryResult::Any(any)) => {
-                if let Ok(boxed) =
-                    any.downcast::<(String, String, Result<Vec<DirectoryStation>, anyhow::Error>)>()
-                {
+                if let Ok(boxed) = any.downcast::<(
+                    String,
+                    String,
+                    Result<Vec<DirectoryStation>, anyhow::Error>,
+                )>() {
                     let (country, state, result) = *boxed;
                     match result {
                         Ok(stations) => {
                             if let Some(directory) = self.directory.as_mut()
                                 && let Some(group) =
                                     directory.countries.iter_mut().find(|g| g.name == country)
-                                && let Some(state_group) = group
-                                    .states
-                                    .as_mut()
-                                    .and_then(|states| states.iter_mut().find(|s| s.name == state))
+                                && let Some(state_group) = group.states.as_mut().and_then(
+                                    |states| states.iter_mut().find(|s| s.name == state),
+                                )
                             {
                                 state_group.stations = Some(stations);
                             }
@@ -1684,7 +1735,7 @@ mod tests {
     use rstest::rstest;
 
     use super::{
-        PaneFocus, RadioPane, RadioStation, RegionKind, StationRow, is_stream_url, m3u_content,
+        RadioPane, RadioStation, RegionKind, PaneFocus, StationRow, is_stream_url, m3u_content,
         parse_m3u,
     };
     use crate::{
@@ -1694,8 +1745,8 @@ mod tests {
         radio::{CountryGroup, DirectoryStation, RadioDirectory, StateGroup},
         shared::events::WorkRequest,
         tests::fixtures::ctx,
-        ui::panes::Pane,
         ui::tree_browser::TreeBrowserCore,
+        ui::panes::Pane,
     };
 
     fn station(name: &str, url: &str) -> RadioStation {
@@ -1724,8 +1775,13 @@ mod tests {
     }
 
     fn load_favourites(pane: &mut RadioPane, ctx: &Ctx, stations: Vec<RadioStation>) {
-        pane.on_query_finished(super::INIT, MpdQueryResult::Any(Box::new(stations)), true, ctx)
-            .unwrap();
+        pane.on_query_finished(
+            super::INIT,
+            MpdQueryResult::Any(Box::new(stations)),
+            true,
+            ctx,
+        )
+        .unwrap();
     }
 
     /// A directory with one country ("Germany", top 2 + full list) and a
@@ -1938,7 +1994,8 @@ mod tests {
         // Expanding the region only fetches the states — the country's
         // station list is NOT reloaded (caches refresh only for the
         // specific sub-region being highlighted).
-        pane.set_region_expanded(&RegionKind::Country("Germany".to_owned()), true, &ctx).unwrap();
+        pane.set_region_expanded(&RegionKind::Country("Germany".to_owned()), true, &ctx)
+            .unwrap();
         let requests: Vec<_> = work_rx.try_iter().collect();
         assert!(
             !requests.iter().any(|r| matches!(r, WorkRequest::FetchRadioCountryStations { .. })),
@@ -1993,7 +2050,8 @@ mod tests {
         let mut pane = RadioPane::new(&ctx);
         load_favourites(&mut pane, &ctx, Vec::new());
         load_directory(&mut pane, &ctx);
-        pane.set_region_expanded(&RegionKind::Country("Germany".to_owned()), true, &ctx).unwrap();
+        pane.set_region_expanded(&RegionKind::Country("Germany".to_owned()), true, &ctx)
+            .unwrap();
         // States are not loaded yet (the work request is in flight).
         assert_eq!(pane.regions.len(), 2); // [◎ Local, ▼ Germany]
         // The states result arrives from the work thread.
@@ -2013,9 +2071,7 @@ mod tests {
         .unwrap();
         // [◎ Local, ▼ Germany,   ▶ Berlin (collapsed)]
         assert_eq!(pane.regions.len(), 3);
-        assert!(
-            matches!(pane.regions[2].kind, RegionKind::State { ref country, .. } if country == "Germany")
-        );
+        assert!(matches!(pane.regions[2].kind, RegionKind::State { ref country, .. } if country == "Germany"));
         assert_eq!(pane.regions[2].depth, 1);
     }
 
@@ -2023,7 +2079,8 @@ mod tests {
         let mut pane = RadioPane::new(&ctx);
         load_favourites(&mut pane, &ctx, Vec::new());
         load_directory(&mut pane, &ctx);
-        pane.set_region_expanded(&RegionKind::Country("Germany".to_owned()), true, &ctx).unwrap();
+        pane.set_region_expanded(&RegionKind::Country("Germany".to_owned()), true, &ctx)
+            .unwrap();
         // Simulate the states result, then select the state (stations load).
         pane.on_query_finished(
             super::RADIO_STATES,
@@ -2040,13 +2097,14 @@ mod tests {
         )
         .unwrap();
         // Provinces are the deepest category: no arrow, no children.
-        let state_row = pane
-            .regions
-            .iter()
-            .find(|r| matches!(&r.kind, RegionKind::State { state, .. } if state == "Berlin"));
+        let state_row = pane.regions.iter().find(|r| {
+            matches!(&r.kind, RegionKind::State { state, .. } if state == "Berlin")
+        });
         assert!(state_row.is_some_and(|r| !r.expandable));
-        let state_kind =
-            RegionKind::State { country: "Germany".to_owned(), state: "Berlin".to_owned() };
+        let state_kind = RegionKind::State {
+            country: "Germany".to_owned(),
+            state: "Berlin".to_owned(),
+        };
         pane.select_region(&state_kind, &ctx).unwrap();
         // Stations not loaded yet -> empty right pane (fetch in flight).
         assert!(pane.stations.is_empty());
@@ -2101,8 +2159,8 @@ mod tests {
     }
 
     fn act(pane: &mut RadioPane, ctx: &mut Ctx, actions: Vec<crate::shared::keys::Actions>) {
-        use crate::shared::keys::ActionEvent;
         use std::sync::Arc;
+        use crate::shared::keys::ActionEvent;
         let mut event = ActionEvent::from(Arc::new(actions));
         pane.handle_action(&mut event, ctx).unwrap();
     }
@@ -2187,9 +2245,7 @@ mod tests {
         // Enter the Berlin leaf: the cursor moves to its (not yet loaded)
         // station list.
         act(&mut pane, &mut ctx, vec![Actions::Directories(DirectoriesActions::FolderDown)]);
-        assert!(
-            matches!(pane.regions[2].kind, RegionKind::State { ref state, .. } if state == "Berlin")
-        );
+        assert!(matches!(pane.regions[2].kind, RegionKind::State { ref state, .. } if state == "Berlin"));
         act(&mut pane, &mut ctx, vec![Actions::Common(CommonAction::Confirm)]);
         assert_eq!(pane.focus, PaneFocus::Stations);
         // `←` backs out: cursor to the parent country, branch collapsed.
@@ -2339,18 +2395,16 @@ mod tests {
         let backend = ratatui::backend::TestBackend::new(120, 30);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
         terminal
-            .draw(|frame| {
-                pane.render(frame, ratatui::prelude::Rect::new(0, 0, 120, 30), &ctx).unwrap()
-            })
+            .draw(|frame| pane.render(frame, ratatui::prelude::Rect::new(0, 0, 120, 30), &ctx).unwrap())
             .unwrap();
         let buffer = terminal.backend().buffer();
         let text: String = (0..30u16)
-            .map(|y| (0..120u16).map(|x| buffer[(x, y)].symbol().to_string()).collect::<String>())
+            .map(|y| {
+                (0..120u16).map(|x| buffer[(x, y)].symbol().to_string()).collect::<String>()
+            })
             .collect::<Vec<_>>()
-            .join(
-                "
-",
-            );
+            .join("
+");
         assert!(
             text.contains(" Stations (3) "),
             "the items-box title is ` Stations (3) `, not ` Stations(3) `: {text}"
@@ -2362,7 +2416,10 @@ mod tests {
 mod paste_play_tests {
     use super::{RadioPane, RadioStation, RegionKind, StationRow};
     use crate::{
-        MpdQueryResult, config::tabs::TreeBrowserArgs, tests::fixtures::ctx, ui::panes::Pane,
+        MpdQueryResult,
+        config::tabs::TreeBrowserArgs,
+        tests::fixtures::ctx,
+        ui::panes::Pane,
         ui::tree_browser::TreeBrowserCore,
     };
 
@@ -2408,8 +2465,13 @@ mod paste_play_tests {
             (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
         );
         let mut pane = RadioPane::new(&pane_ctx);
-        pane.on_query_finished(super::PLAY, MpdQueryResult::Any(Box::new(7u32)), true, &pane_ctx)
-            .unwrap();
+        pane.on_query_finished(
+            super::PLAY,
+            MpdQueryResult::Any(Box::new(7u32)),
+            true,
+            &pane_ctx,
+        )
+        .unwrap();
         assert_eq!(pane.temp_play_id, Some(7));
         assert_eq!(pane_ctx.temp_play_id.get(), Some(7), "the queue pane reads it via Ctx");
     }
@@ -2472,12 +2534,10 @@ mod paste_play_tests {
             .collect();
         pane.region_list.select(Some(0));
         pane.stations = (0..40)
-            .map(|i| {
-                StationRow::Favourite(RadioStation {
-                    name: format!("S{i}"),
-                    url: format!("http://s{i}"),
-                })
-            })
+            .map(|i| StationRow::Favourite(RadioStation {
+                name: format!("S{i}"),
+                url: format!("http://s{i}"),
+            }))
             .collect();
         pane.station_list.select(Some(0));
 
@@ -2518,11 +2578,7 @@ mod paste_play_tests {
         )
         .unwrap();
         assert_eq!(pane.station_list.offset(), 1, "wheel down scrolls the stations viewport");
-        assert_eq!(
-            pane.station_list.selected(),
-            station_sel,
-            "the station highlight does not move"
-        );
+        assert_eq!(pane.station_list.selected(), station_sel, "the station highlight does not move");
         pane.handle_mouse_event(
             MouseEvent {
                 x: stations_area.x + 5,

@@ -3,7 +3,8 @@ use crossbeam::channel::Sender;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AppEvent, WorkRequest,
+    AppEvent,
+    WorkRequest,
     config::{Config, cli::RemoteCommandQuery},
     shared::ipc::{IpcStream, SocketCommandExecute},
 };
