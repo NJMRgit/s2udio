@@ -3,7 +3,10 @@ use std::path::PathBuf;
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 
-use crate::{config::UiSettings, shared::paths::{legacy_config_dir, s2udio_config_dir}};
+use crate::{
+    config::UiSettings,
+    shared::paths::{legacy_config_dir, s2udio_config_dir},
+};
 
 /// Small runtime state persisted to `~/.config/s2udio/state.ron` (round 19
 /// — s2udio-only runtime state moved out of `~/.config/rmpc/` so the base
@@ -65,10 +68,8 @@ impl AppStateFile {
     /// defaults (never an error). Falls back to the legacy
     /// `~/.config/rmpc/state.ron` when the s2udio file is absent.
     pub fn load() -> Self {
-        let path = Self::path()
-            .filter(|p| p.exists())
-            .or_else(Self::legacy_path)
-            .or_else(Self::path);
+        let path =
+            Self::path().filter(|p| p.exists()).or_else(Self::legacy_path).or_else(Self::path);
         let Some(path) = path else { return Self::default() };
         match std::fs::read_to_string(path) {
             Ok(content) => ron::de::from_str(&content).unwrap_or_else(|err| {

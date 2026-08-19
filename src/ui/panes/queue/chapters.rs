@@ -12,7 +12,7 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthStr;
 
-use super::{truncate_to_width, Areas, QueuePane, CHAPTER_DURATION_COL, CHAPTER_TIME_COL};
+use super::{Areas, CHAPTER_DURATION_COL, CHAPTER_TIME_COL, QueuePane, truncate_to_width};
 use crate::{
     config::keys::{CommonAction, DirectoriesActions, GlobalAction, QueueActions},
     ctx::Ctx,
@@ -37,10 +37,7 @@ impl QueuePane {
         } else {
             ctx.status.elapsed.as_secs_f64()
         };
-        let current_idx = chapters
-            .iter()
-            .rposition(|c| position >= c.start_secs)
-            .unwrap_or(0);
+        let current_idx = chapters.iter().rposition(|c| position >= c.start_secs).unwrap_or(0);
         self.chapters_items_len = chapters.len();
 
         // The chapters table uses its own columns (matching the chapters
@@ -122,7 +119,8 @@ impl QueuePane {
         if let Some(scrollbar) = ctx.config.as_styled_scrollbar()
             && self.areas[Areas::Scrollbar].width > 0
         {
-            let max = self.chapters_items_len.saturating_sub(self.areas[Areas::Table].height as usize);
+            let max =
+                self.chapters_items_len.saturating_sub(self.areas[Areas::Table].height as usize);
             let position = self.chapters_state.offset().min(max);
             // content_length = max + 1 so the bottom position is reachable
             // (ratatui clamps positions to content_length - 1); the viewport
@@ -158,7 +156,11 @@ impl QueuePane {
     /// Keyboard handling for Chapters mode: navigate the chapter list
     /// (w/s/↑/↓, PageUp/PageDown, Home/End) and play a chapter with
     /// d/→/Enter. `c` still toggles back to the queue.
-    pub(super) fn handle_chapters_action(&mut self, event: &mut ActionEvent, ctx: &mut Ctx) -> Result<()> {
+    pub(super) fn handle_chapters_action(
+        &mut self,
+        event: &mut ActionEvent,
+        ctx: &mut Ctx,
+    ) -> Result<()> {
         if let Some(action) = event.claim_directories() {
             return match action {
                 DirectoriesActions::FolderUp => self.chapters_move(-1, ctx),
@@ -183,10 +185,7 @@ impl QueuePane {
                     } else {
                         ctx.status.elapsed.as_secs_f64()
                     };
-                    let idx = chapters
-                        .iter()
-                        .rposition(|c| position >= c.start_secs)
-                        .unwrap_or(0);
+                    let idx = chapters.iter().rposition(|c| position >= c.start_secs).unwrap_or(0);
                     self.chapters_jump(idx, ctx)?;
                 }
                 _ => {}
@@ -247,8 +246,7 @@ impl QueuePane {
 
     /// Scroll the chapters list to a scrollbar fraction (0.0..=1.0).
     pub(super) fn chapters_scroll_to(&mut self, perc: f64, ctx: &Ctx) {
-        let max =
-            self.chapters_items_len.saturating_sub(self.areas[Areas::Table].height as usize);
+        let max = self.chapters_items_len.saturating_sub(self.areas[Areas::Table].height as usize);
         let new = ((perc.clamp(0.0, 1.0)) * max as f64).floor() as usize;
         let _ = self.chapters_jump(new.min(max), ctx);
     }
@@ -327,10 +325,7 @@ impl QueuePane {
         } else {
             ctx.status.elapsed.as_secs_f64()
         };
-        let idx = chapters
-            .iter()
-            .rposition(|c| position >= c.start_secs)
-            .unwrap_or(0);
+        let idx = chapters.iter().rposition(|c| position >= c.start_secs).unwrap_or(0);
         self.chapters_state.select(Some(idx));
         crate::ui::widgets::virtualized_list::scroll_selection_into_view(
             &mut self.chapters_state,

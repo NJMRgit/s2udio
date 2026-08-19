@@ -122,7 +122,11 @@ fn wrap_edit_units(units: &[EditUnit], width: usize) -> Vec<Vec<usize>> {
 /// The wrapped display rows of a plain (non-word-timed) line, with the
 /// `[mm:ss.xx]` prefix when the timestamp flag is on (mirrors the normal
 /// karaoke view).
-fn plain_edit_chunks(line: &crate::shared::lrc::EditableLine, timestamp: bool, width: usize) -> Vec<String> {
+fn plain_edit_chunks(
+    line: &crate::shared::lrc::EditableLine,
+    timestamp: bool,
+    width: usize,
+) -> Vec<String> {
     let formatted = if timestamp && !line.content.is_empty() {
         format!("[{}] {}", LrcEditSession::format_time(line.time), line.content)
     } else {
@@ -325,9 +329,12 @@ impl LyricsPane {
         // right border.
         let glyph_of = |pressed: bool| if pressed { "⭘" } else { "●" };
         let hide_show = if self.is_wrong(ctx) { "show" } else { "hide" };
-        let full_wrong = format!("{} {hide_show} lyrics", glyph_of(self.pressed_btn == Some(LyricsBtn::Wrong)));
-        let full_fetch = format!("{} fetch lyrics", glyph_of(self.pressed_btn == Some(LyricsBtn::Fetch)));
-        let short_wrong = format!("{} {hide_show}", glyph_of(self.pressed_btn == Some(LyricsBtn::Wrong)));
+        let full_wrong =
+            format!("{} {hide_show} lyrics", glyph_of(self.pressed_btn == Some(LyricsBtn::Wrong)));
+        let full_fetch =
+            format!("{} fetch lyrics", glyph_of(self.pressed_btn == Some(LyricsBtn::Fetch)));
+        let short_wrong =
+            format!("{} {hide_show}", glyph_of(self.pressed_btn == Some(LyricsBtn::Wrong)));
         let short_fetch = format!("{} fetch", glyph_of(self.pressed_btn == Some(LyricsBtn::Fetch)));
 
         // Pick the longest form that fits (full > short > hidden). The
@@ -360,12 +367,7 @@ impl LyricsPane {
         // standard label-text brightening, applied to the **label text
         // only** (round 12): the marker glyph keeps its completely normal
         // style — no hover background, no bold, no brightening.
-        fn button_line(
-            label: &str,
-            hovered: bool,
-            base: Style,
-            hovered_style: Style,
-        ) -> Line<'_> {
+        fn button_line(label: &str, hovered: bool, base: Style, hovered_style: Style) -> Line<'_> {
             // The separator space is part of the glyph span (completely
             // normal style): only the text itself — `hide lyrics` /
             // `fetch lyrics` — gets the hover treatment (round 12
@@ -375,15 +377,9 @@ impl LyricsPane {
                 None => (label, ""),
             };
             let glyph_style = base;
-            let text_style = if hovered {
-                crate::config::hover_style(base).patch(hovered_style)
-            } else {
-                base
-            };
-            Line::from(vec![
-                Span::styled(glyph, glyph_style),
-                Span::styled(text, text_style),
-            ])
+            let text_style =
+                if hovered { crate::config::hover_style(base).patch(hovered_style) } else { base };
+            Line::from(vec![Span::styled(glyph, glyph_style), Span::styled(text, text_style)])
         }
         buf.set_line(
             self.wrong_btn_area.x,
@@ -452,11 +448,15 @@ impl LyricsPane {
         }
         let id = crate::shared::id::new();
         self.release_check = Some(id);
-        ctx.scheduler.schedule_replace(id, std::time::Duration::from_millis(300), move |(tx, _)| {
-            Ok(tx.send(crate::shared::events::AppEvent::UiEvent(
-                crate::ui::UiAppEvent::LyricsReleaseCheck,
-            ))?)
-        });
+        ctx.scheduler.schedule_replace(
+            id,
+            std::time::Duration::from_millis(300),
+            move |(tx, _)| {
+                Ok(tx.send(crate::shared::events::AppEvent::UiEvent(
+                    crate::ui::UiAppEvent::LyricsReleaseCheck,
+                ))?)
+            },
+        );
     }
 
     /// End the pressed-while-held marker: a real `LeftRelease` or the
@@ -497,8 +497,7 @@ impl LyricsPane {
         let work_sender = ctx.work_sender.clone();
 
         std::thread::spawn(move || {
-            let env_refs =
-                envs.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect::<Vec<_>>();
+            let env_refs = envs.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect::<Vec<_>>();
             if let Err(err) = run_external_blocking(&command, env_refs) {
                 status_error!("Failed to fetch lyrics: '{err}'");
                 return;
@@ -628,9 +627,8 @@ impl LyricsPane {
             before_line -= 1;
             let units = units_of(before_line);
             if units.is_empty() {
-                for chunk in plain_edit_chunks(&session.lines[before_line], timestamp, width)
-                    .iter()
-                    .rev()
+                for chunk in
+                    plain_edit_chunks(&session.lines[before_line], timestamp, width).iter().rev()
                 {
                     if before_row == 0 {
                         break;
@@ -725,11 +723,8 @@ impl LyricsPane {
             self.edit_selection = Some((anchor, word));
             return;
         }
-        self.edit_selection = lines
-            .iter()
-            .find(|&&l| l >= anchor)
-            .or_else(|| lines.first())
-            .map(|&l| (l, 0));
+        self.edit_selection =
+            lines.iter().find(|&&l| l >= anchor).or_else(|| lines.first()).map(|&l| (l, 0));
     }
 
     /// The anchor line's word current at the pause position: the last
@@ -918,14 +913,11 @@ impl LyricsPane {
         // content. A word target needs the word to exist; a line target
         // (word 0) needs the line to have words.
         if let Some((sel_line, sel_word)) = pending_select
-            && self
-                .edit_session
-                .as_ref()
-                .is_some_and(|s| {
-                    s.lines.get(sel_line).is_some_and(|ln| {
-                        !ln.words.is_empty() && (sel_word == 0 || sel_word < ln.words.len())
-                    })
+            && self.edit_session.as_ref().is_some_and(|s| {
+                s.lines.get(sel_line).is_some_and(|ln| {
+                    !ln.words.is_empty() && (sel_word == 0 || sel_word < ln.words.len())
                 })
+            })
         {
             self.edit_selection = Some((sel_line, sel_word));
             return Ok(());
@@ -1235,14 +1227,10 @@ impl LyricsPane {
         }
 
         let overflow = items.len() > area.height as usize;
-        let (list_area, scrollbar_area) = if overflow
-            && ctx.config.as_styled_scrollbar().is_some()
+        let (list_area, scrollbar_area) = if overflow && ctx.config.as_styled_scrollbar().is_some()
         {
-            let [a, b] = Layout::horizontal([
-                Constraint::Percentage(100),
-                Constraint::Length(1),
-            ])
-            .areas(area);
+            let [a, b] = Layout::horizontal([Constraint::Percentage(100), Constraint::Length(1)])
+                .areas(area);
             (a, b)
         } else {
             (area, Rect::default())
@@ -1311,12 +1299,7 @@ impl LyricsPane {
             if !yt.title.is_empty() {
                 title = yt.title.clone();
             }
-            let (left, right, body_parts) = yt_stream_info_parts(
-                &yt,
-                base,
-                list_style,
-                body_width,
-            );
+            let (left, right, body_parts) = yt_stream_info_parts(&yt, base, list_style, body_width);
             context_left.extend(left);
             context_right.extend(right);
             body.extend(body_parts);
@@ -1341,13 +1324,9 @@ impl LyricsPane {
                 if item.kind == "Episode" {
                     context_left.push(Span::styled("Episode: ", base));
                     context_left.push(Span::styled(item.name.clone(), base));
-                    if let (Some(season), Some(episode)) =
-                        (item.season_number, item.index_number)
-                    {
-                        context_right.push(Span::styled(
-                            format!("S{season:02}E{episode:02}"),
-                            base,
-                        ));
+                    if let (Some(season), Some(episode)) = (item.season_number, item.index_number) {
+                        context_right
+                            .push(Span::styled(format!("S{season:02}E{episode:02}"), base));
                     }
                 }
                 if let Some(overview) = item.overview.as_deref().filter(|d| !d.trim().is_empty()) {
@@ -1398,11 +1377,8 @@ impl LyricsPane {
         let time_text = format!("Time: {}", format_clock(duration as u64));
         let time_w = (time_text.chars().count() + 4) as u16;
         let (title_area, time_area) = {
-            let [a, b] = Layout::horizontal([
-                Constraint::Min(0),
-                Constraint::Length(time_w),
-            ])
-            .areas(header_area);
+            let [a, b] = Layout::horizontal([Constraint::Min(0), Constraint::Length(time_w)])
+                .areas(header_area);
             (a, b)
         };
         frame.render_widget(
@@ -1412,11 +1388,8 @@ impl LyricsPane {
         // The "year -- " prefix is fixed; only the name marquee-scrolls.
         let prefix_w = title_prefix.chars().count() as u16;
         let (prefix_area, marquee_area) = if prefix_w > 0 && prefix_w < title_area.width {
-            let [a, b] = Layout::horizontal([
-                Constraint::Length(prefix_w),
-                Constraint::Min(0),
-            ])
-            .areas(title_area);
+            let [a, b] = Layout::horizontal([Constraint::Length(prefix_w), Constraint::Min(0)])
+                .areas(title_area);
             (a, b)
         } else {
             (Rect::default(), title_area)
@@ -1431,15 +1404,9 @@ impl LyricsPane {
         // ANSI white, independent of the auto/blur accent.
         let title_len = title.chars().count() as u16;
         let offset = if title_len > marquee_area.width {
-            let elapsed_ms = self
-                .info_video_shown_at
-                .map(|t| t.elapsed().as_millis())
-                .unwrap_or(0) as u64;
-            crate::ui::widgets::marquee::marquee_offset(
-                elapsed_ms,
-                title_len,
-                marquee_area.width,
-            )
+            let elapsed_ms =
+                self.info_video_shown_at.map(|t| t.elapsed().as_millis()).unwrap_or(0) as u64;
+            crate::ui::widgets::marquee::marquee_offset(elapsed_ms, title_len, marquee_area.width)
         } else {
             0
         };
@@ -1460,11 +1427,8 @@ impl LyricsPane {
                 width: header_area.width,
                 height: 1,
             };
-            let [left_area, right_area] = Layout::horizontal([
-                Constraint::Min(0),
-                Constraint::Length(time_w),
-            ])
-            .areas(row);
+            let [left_area, right_area] =
+                Layout::horizontal([Constraint::Min(0), Constraint::Length(time_w)]).areas(row);
             if !context_left.is_empty() {
                 frame.render_widget(Paragraph::new(Line::from(context_left)), left_area);
             }
@@ -1534,11 +1498,8 @@ impl LyricsPane {
         let (list_area, scrollbar_area) = if body.len() > body_area.height as usize
             && ctx.config.as_styled_scrollbar().is_some()
         {
-            let [a, b] = Layout::horizontal([
-                Constraint::Percentage(100),
-                Constraint::Length(1),
-            ])
-            .areas(body_area);
+            let [a, b] = Layout::horizontal([Constraint::Percentage(100), Constraint::Length(1)])
+                .areas(body_area);
             (a, b)
         } else {
             (body_area, Rect::default())
@@ -1559,11 +1520,8 @@ impl LyricsPane {
             .iter()
             .enumerate()
             .map(|(idx, row)| {
-                let line = if Some(idx) == hovered_link {
-                    row.hovered().line
-                } else {
-                    row.line.clone()
-                };
+                let line =
+                    if Some(idx) == hovered_link { row.hovered().line } else { row.line.clone() };
                 ListItem::new(line)
             })
             .collect::<Vec<_>>();
@@ -1663,9 +1621,7 @@ impl Pane for LyricsPane {
                 // Playing or paused: the currently playing item (falling
                 // back to the highlighted row when there is no current
                 // song, e.g. paused with an empty status).
-                ctx.find_current_song_in_queue()
-                    .map(|(_, song)| song)
-                    .or_else(selected)
+                ctx.find_current_song_in_queue().map(|(_, song)| song).or_else(selected)
             };
             // A resolved YouTube-style stream playing as audio through MPD
             // gets the same video-style details as the mpv box (title +
@@ -1692,14 +1648,11 @@ impl Pane for LyricsPane {
         // to bring the lyrics back).
         let body_area = self.render_frame(frame, area, ctx);
         if self.is_wrong(ctx) {
-            let song = ctx
-                .find_current_song_in_queue()
-                .map(|(_, song)| song)
-                .or_else(|| {
-                    ctx.queue_selected_id
-                        .get()
-                        .and_then(|id| ctx.queue.iter().find(|song| song.id == id))
-                });
+            let song = ctx.find_current_song_in_queue().map(|(_, song)| song).or_else(|| {
+                ctx.queue_selected_id
+                    .get()
+                    .and_then(|id| ctx.queue.iter().find(|song| song.id == id))
+            });
             if let Some(song) = song {
                 self.render_info(frame, body_area, song, ctx);
             }
@@ -2128,8 +2081,7 @@ impl Pane for LyricsPane {
                 MouseEventKind::ScrollDown => 1,
                 _ => return Ok(()),
             };
-            let max =
-                self.info_items_len.saturating_sub(self.info_area.height as usize) as i64;
+            let max = self.info_items_len.saturating_sub(self.info_area.height as usize) as i64;
             let current = self.info_state.offset() as i64;
             let new = (current + dir).clamp(0, max.max(0)) as usize;
             if new != self.info_state.offset() {
@@ -2301,11 +2253,7 @@ pub(crate) fn yt_stream_info_parts(
     base: ratatui::style::Style,
     list_style: ratatui::style::Style,
     body_width: usize,
-) -> (
-    Vec<Span<'static>>,
-    Vec<Span<'static>>,
-    Vec<InfoBodyLine>,
-) {
+) -> (Vec<Span<'static>>, Vec<Span<'static>>, Vec<InfoBodyLine>) {
     let mut context_left: Vec<Span<'static>> = Vec::new();
     let mut context_right: Vec<Span<'static>> = Vec::new();
     let mut body: Vec<InfoBodyLine> = Vec::new();
@@ -2342,7 +2290,6 @@ pub(crate) fn format_clock(secs: u64) -> String {
     }
 }
 
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -2374,7 +2321,12 @@ mod tests {
         song
     }
 
-    fn rendered(pane: &mut LyricsPane, ctx: &mut crate::ctx::Ctx, width: u16, height: u16) -> String {
+    fn rendered(
+        pane: &mut LyricsPane,
+        ctx: &mut crate::ctx::Ctx,
+        width: u16,
+        height: u16,
+    ) -> String {
         let backend = ratatui::backend::TestBackend::new(width, height);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
         terminal
@@ -2467,7 +2419,6 @@ mod tests {
         terminal.backend().buffer()[(x, y)].style()
     }
 
-
     #[test]
     fn lyrics_mode_shows_the_button_cluster_unpressed() {
         let (mut ctx, mut pane) = lyrics_fixture();
@@ -2475,10 +2426,7 @@ mod tests {
         // No `Artist - Title` header (round 11): the top row carries only
         // the two-button cluster with the `|` separator.
         assert!(!text.contains("Test Artist - First"), "no title header: {text}");
-        assert!(
-            text.contains("● hide lyrics | ● fetch lyrics"),
-            "cluster with separator: {text}"
-        );
+        assert!(text.contains("● hide lyrics | ● fetch lyrics"), "cluster with separator: {text}");
         assert!(!text.contains("⭘"), "no pressed marker without interaction: {text}");
         assert!(text.contains("line one"), "the lyrics body is shown: {text}");
         assert!(
@@ -2498,11 +2446,7 @@ mod tests {
         // border.
         assert_eq!(pane.wrong_btn_area.y, 11, "buttons sit on the bottom row");
         let lines: Vec<&str> = text.lines().collect();
-        assert!(
-            lines[0].chars().all(char::is_whitespace),
-            "top row is blank: {:?}",
-            lines[0]
-        );
+        assert!(lines[0].chars().all(char::is_whitespace), "top row is blank: {:?}", lines[0]);
         assert!(
             lines[10].chars().all(|c| c == '─'),
             "bottom margin line spans the width: {:?}",
@@ -2586,25 +2530,18 @@ mod tests {
         let (mut ctx, mut pane) = lyrics_fixture();
         // A harmless external command (true) so the fetch thread exits
         // cleanly; the fetched result is irrelevant to this assertion.
-        ctx.config =
-            std::sync::Arc::new(crate::config::Config {
-                on_song_change: Some(std::sync::Arc::new(vec!["true".to_owned()])),
-                ..crate::config::Config::default()
-            });
+        ctx.config = std::sync::Arc::new(crate::config::Config {
+            on_song_change: Some(std::sync::Arc::new(vec!["true".to_owned()])),
+            ..crate::config::Config::default()
+        });
         rendered(&mut pane, &mut ctx, 60, 12);
         let wrong_area = pane.wrong_btn_area;
         click(&mut pane, &ctx, wrong_area);
-        assert!(
-            pane.wrong_song_file.is_some(),
-            "precondition: marked wrong"
-        );
+        assert!(pane.wrong_song_file.is_some(), "precondition: marked wrong");
         rendered(&mut pane, &mut ctx, 60, 12);
         let fetch_area = pane.fetch_btn_area;
         click_and_release(&mut pane, &ctx, fetch_area);
-        assert!(
-            pane.wrong_song_file.is_none(),
-            "fetch clears the wrong-mark immediately"
-        );
+        assert!(pane.wrong_song_file.is_none(), "fetch clears the wrong-mark immediately");
         assert!(pane.fetching, "fetch is in flight");
         let text = rendered(&mut pane, &mut ctx, 60, 12);
         // The fetch in-flight state has no persistent marker either: only a
@@ -2636,10 +2573,7 @@ mod tests {
 
         // Narrow: the full cluster no longer fits, the short labels do.
         let text = rendered(&mut pane, &mut ctx, 28, 12);
-        assert!(
-            text.contains("● hide | ● fetch"),
-            "collapsed labels at narrow width: {text}"
-        );
+        assert!(text.contains("● hide | ● fetch"), "collapsed labels at narrow width: {text}");
         assert!(!text.contains("hide lyrics"), "full label hidden when collapsed: {text}");
         assert!(pane.wrong_btn_area.width > 0, "collapsed click zones recorded");
 
@@ -2662,10 +2596,7 @@ mod tests {
         // `show lyrics`.
         click(&mut pane, &ctx, area);
         let text = rendered(&mut pane, &mut ctx, 60, 12);
-        assert!(
-            text.contains("⭘ show lyrics"),
-            "⭘ while held: {text}"
-        );
+        assert!(text.contains("⭘ show lyrics"), "⭘ while held: {text}");
         assert!(text.contains("● fetch lyrics"), "fetch stays unpressed: {text}");
 
         // Release: the marker reverts to ● (the wrong-mark stays hidden).
@@ -2742,11 +2673,10 @@ mod tests {
         let (mut ctx, mut pane) = lyrics_fixture();
         // A harmless external command (true) so the fetch thread exits
         // cleanly; the fetched result is irrelevant to these assertions.
-        ctx.config =
-            std::sync::Arc::new(crate::config::Config {
-                on_song_change: Some(std::sync::Arc::new(vec!["true".to_owned()])),
-                ..crate::config::Config::default()
-            });
+        ctx.config = std::sync::Arc::new(crate::config::Config {
+            on_song_change: Some(std::sync::Arc::new(vec!["true".to_owned()])),
+            ..crate::config::Config::default()
+        });
         rendered(&mut pane, &mut ctx, 60, 12);
         let area = pane.fetch_btn_area;
         click(&mut pane, &ctx, area);
@@ -2837,11 +2767,7 @@ mod tests {
         // ` hide lyrics` (round 12 follow-up).
         let space_style = cell_style(&mut pane, &mut ctx, 60, 12, area.x + 1, area.y);
         assert_eq!(space_style.fg, base.fg, "separator space keeps the normal fg");
-        assert_eq!(
-            space_style.bg,
-            Some(Color::Reset),
-            "separator space has no hover background"
-        );
+        assert_eq!(space_style.bg, Some(Color::Reset), "separator space has no hover background");
         assert!(
             !space_style.add_modifier.contains(Modifier::BOLD),
             "separator space is not bolded by the hover"
@@ -2849,11 +2775,7 @@ mod tests {
 
         let label_style = cell_style(&mut pane, &mut ctx, 60, 12, area.x + 2, area.y);
         assert_eq!(label_style.bg, highlight.bg, "label gets the hover bg");
-        assert_eq!(
-            label_style.fg,
-            crate::config::hover_style(base).fg,
-            "label text is brightened"
-        );
+        assert_eq!(label_style.fg, crate::config::hover_style(base).fg, "label text is brightened");
         assert!(
             label_style.add_modifier.contains(Modifier::BOLD),
             "label gets bold from the hover"
@@ -2905,12 +2827,8 @@ mod tests {
         let (mut ctx, mut pane) = fixture();
         ctx.status.state = State::Play;
         let stream_url = "https://rr4.example/audio.m4a".to_owned();
-        ctx.queue = vec![Song {
-            id: 9,
-            file: stream_url.clone(),
-            duration: None,
-            ..Default::default()
-        }];
+        ctx.queue =
+            vec![Song { id: 9, file: stream_url.clone(), duration: None, ..Default::default() }];
         ctx.status.songid = Some(9);
         ctx.status.duration = std::time::Duration::from_secs(710);
         ctx.yt_info.borrow_mut().insert(
@@ -2931,10 +2849,7 @@ mod tests {
         assert!(text.contains("Some Mix"), "cached title shown: {text}");
         assert!(text.contains("Some Channel"), "channel row shown: {text}");
         assert!(text.contains("Description"), "video-style description label: {text}");
-        assert!(
-            text.contains("wraps around"),
-            "description body shown: {text}"
-        );
+        assert!(text.contains("wraps around"), "description body shown: {text}");
         assert!(
             text.lines().all(|row| row.chars().count() <= 46),
             "description wraps, no row overflows the box"
@@ -2991,18 +2906,15 @@ mod tests {
 
         let backend = ratatui::backend::TestBackend::new(60, 12);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
-        terminal
-            .draw(|frame| pane.render(frame, Rect::new(0, 0, 60, 12), &ctx).unwrap())
-            .unwrap();
+        terminal.draw(|frame| pane.render(frame, Rect::new(0, 0, 60, 12), &ctx).unwrap()).unwrap();
         let buf = terminal.backend().buffer();
         let mut title_cell_white = false;
         for y in 0..2u16 {
-            let row: String = (0..60u16)
-                .map(|x| buf[(x, y)].symbol().chars().next().unwrap_or(' '))
-                .collect();
+            let row: String =
+                (0..60u16).map(|x| buf[(x, y)].symbol().chars().next().unwrap_or(' ')).collect();
             if let Some(x0) = row.find("Maglev Keyboard Test") {
-                title_cell_white = buf[(x0 as u16, y)].style().fg
-                    == Some(ratatui::style::Color::White);
+                title_cell_white =
+                    buf[(x0 as u16, y)].style().fg == Some(ratatui::style::Color::White);
                 break;
             }
         }
@@ -3018,15 +2930,12 @@ mod tests {
 
         let backend = ratatui::backend::TestBackend::new(60, 12);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
-        terminal
-            .draw(|frame| pane.render(frame, Rect::new(0, 0, 60, 12), &ctx).unwrap())
-            .unwrap();
+        terminal.draw(|frame| pane.render(frame, Rect::new(0, 0, 60, 12), &ctx).unwrap()).unwrap();
         let buf = terminal.backend().buffer();
         let mut title_cell_white = false;
         for y in 0..12u16 {
-            let row: String = (0..60u16)
-                .map(|x| buf[(x, y)].symbol().chars().next().unwrap_or(' '))
-                .collect();
+            let row: String =
+                (0..60u16).map(|x| buf[(x, y)].symbol().chars().next().unwrap_or(' ')).collect();
             if let Some(x0) = row.find("Title: Local Track") {
                 title_cell_white = buf[((x0 + "Title: ".len()) as u16, y)].style().fg
                     == Some(ratatui::style::Color::White);
@@ -3205,10 +3114,7 @@ mod tests {
         ctx.mpv.title = "Short Title".to_owned();
         pane.info_video_shown_at = Some(Instant::now() - Duration::from_secs(60));
         let fitting = rendered(&mut pane, &mut ctx, 60, 12);
-        assert!(
-            fitting.starts_with("Short Title"),
-            "fitting titles stay static: {fitting}"
-        );
+        assert!(fitting.starts_with("Short Title"), "fitting titles stay static: {fitting}");
     }
 
     #[test]
@@ -3291,8 +3197,8 @@ mod tests {
             "https://www.youtube.com/watch?v=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
             crate::shared::ytdlp::YtStreamInfo {
                 title: "A Video".to_owned(),
-                original_url:
-                    "https://www.youtube.com/watch?v=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+                original_url: "https://www.youtube.com/watch?v=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .to_owned(),
                 description: Some(long.to_owned()),
                 ..Default::default()
             },
@@ -3345,13 +3251,10 @@ mod tests {
 
         let backend = ratatui::backend::TestBackend::new(60, 20);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
-        terminal
-            .draw(|frame| pane.render(frame, Rect::new(0, 0, 60, 20), &ctx).unwrap())
-            .unwrap();
+        terminal.draw(|frame| pane.render(frame, Rect::new(0, 0, 60, 20), &ctx).unwrap()).unwrap();
         let buf = terminal.backend().buffer();
 
-        let col: Vec<String> =
-            (0..20u16).map(|y| buf[(59, y)].symbol().to_string()).collect();
+        let col: Vec<String> = (0..20u16).map(|y| buf[(59, y)].symbol().to_string()).collect();
         // The scrollbar keeps the theme's begin/end/track symbols (the
         // ratatui defaults would be ▲/║/▼ — `║` proves the reset bug).
         assert_eq!(col[0], "◤", "begin symbol: {col:?}");
@@ -3429,17 +3332,14 @@ mod tests {
         assert_eq!(spans[0].style, base);
         assert_eq!(spans[2].style, base);
     }
-// ---- Round 34: lyrics edit mode ----
+    // ---- Round 34: lyrics edit mode ----
 
     /// A pause fixture whose lyrics live in a real temp-dir file (the edit
     /// session writes back to it).
     fn edit_fixture() -> (crate::ctx::Ctx, LyricsPane, std::path::PathBuf) {
         static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!(
-            "s2u-lyrics-pane-{}-{n}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("s2u-lyrics-pane-{}-{n}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("First.lrc");
         std::fs::write(
@@ -3524,12 +3424,8 @@ mod tests {
         // word current at the pause position (1.5 s -> "world").
         let (_, sel_word) = pane.edit_selection.expect("selection after entering edit mode");
         assert_eq!(sel_word, 1, "the word current at the pause position is selected");
-        let sel_rect = pane
-            .word_areas
-            .iter()
-            .find(|w| w.line == 0 && w.word == sel_word)
-            .unwrap()
-            .rect;
+        let sel_rect =
+            pane.word_areas.iter().find(|w| w.line == 0 && w.word == sel_word).unwrap().rect;
         let selected = cell_style(&mut pane, &mut ctx, 60, 12, sel_rect.x, sel_rect.y);
         assert!(
             selected.add_modifier.contains(Modifier::BOLD),
@@ -3649,10 +3545,7 @@ mod tests {
         assert!(pane.edit_session.is_none(), "edit session dropped");
         assert!(!ctx.lyrics_edit_mode.get(), "legend flag cleared");
         let on_disk = std::fs::read_to_string(&path).unwrap();
-        assert!(
-            !on_disk.contains("<00:01.21>"),
-            "discarded edit NOT written: {on_disk}"
-        );
+        assert!(!on_disk.contains("<00:01.21>"), "discarded edit NOT written: {on_disk}");
         assert!(on_disk.contains("<00:01.20>hello"), "file unchanged: {on_disk}");
         std::fs::remove_dir_all(path.parent().unwrap()).ok();
     }
@@ -3727,10 +3620,7 @@ mod tests {
         pane.handle_action(&mut action(CommonAction::Confirm), &mut ctx).unwrap();
         let received = rx.try_recv().unwrap();
         assert!(
-            matches!(
-                received,
-                crate::AppEvent::UiEvent(crate::ui::UiAppEvent::Modal(_))
-            ),
+            matches!(received, crate::AppEvent::UiEvent(crate::ui::UiAppEvent::Modal(_))),
             "Confirm opens the input modal: {received:?}"
         );
     }
@@ -3767,7 +3657,8 @@ mod tests {
         pane.handle_action(&mut action(CommonAction::LyricsSaveAndExit), &mut ctx).unwrap();
         let on_disk = std::fs::read_to_string(&path).unwrap();
         assert!(
-            on_disk.contains("# lrcgen-gap-align:v1") && on_disk.contains("[00:01.00]<00:01.20>hello"),
+            on_disk.contains("# lrcgen-gap-align:v1")
+                && on_disk.contains("[00:01.00]<00:01.20>hello"),
             "word deleted in place, line + header/stamp intact: {on_disk}"
         );
         assert!(!on_disk.contains("world"), "deleted word gone: {on_disk}");
@@ -3861,9 +3752,7 @@ mod tests {
             "t opens the line-time modal: {received:?}"
         );
     }
-
 }
-
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
@@ -3905,15 +3794,11 @@ mod schedule_tests {
             (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
         );
         let mut pane = LyricsPane::new(&ctx);
-        let dir =
-            std::env::temp_dir().join(format!("s2u-lyrics-anchor-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("s2u-lyrics-anchor-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("song.lrc");
-        std::fs::write(
-            &path,
-            "[00:01.00]<00:01.10>one <00:01.30>two\n[00:03.00]<00:03.10>three\n",
-        )
-        .unwrap();
+        std::fs::write(&path, "[00:01.00]<00:01.10>one <00:01.30>two\n[00:03.00]<00:03.10>three\n")
+            .unwrap();
         let mut song = crate::mpd::commands::Song::default();
         song.id = 1;
         song.file = dir.join("song.flac").to_string_lossy().into_owned();
@@ -3953,15 +3838,11 @@ mod schedule_tests {
             (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
         );
         let mut pane = LyricsPane::new(&ctx);
-        let dir =
-            std::env::temp_dir().join(format!("s2u-lyrics-anchor2-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("s2u-lyrics-anchor2-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("song.lrc");
-        std::fs::write(
-            &path,
-            "[00:01.00]<00:01.10>one <00:01.30>two\n[00:03.00]<00:03.10>three\n",
-        )
-        .unwrap();
+        std::fs::write(&path, "[00:01.00]<00:01.10>one <00:01.30>two\n[00:03.00]<00:03.10>three\n")
+            .unwrap();
         let mut song = crate::mpd::commands::Song::default();
         song.id = 1;
         song.file = dir.join("song.flac").to_string_lossy().into_owned();

@@ -7,17 +7,10 @@ pub use actions::LogsActions;
 #[cfg(debug_assertions)]
 use actions::LogsActionsFile;
 pub use actions::{
-    AlbumsActions,
-    ArtistsActions,
-    CommonAction,
-    DirectoriesActions,
-    GlobalAction,
-    QueueActions,
+    AlbumsActions, ArtistsActions, CommonAction, DirectoriesActions, GlobalAction, QueueActions,
     SearchActions,
 };
-pub use actions::{
-    CommonActionFile, DirectoriesActionsFile, GlobalActionFile, QueueActionsFile,
-};
+pub use actions::{CommonActionFile, DirectoriesActionsFile, GlobalActionFile, QueueActionsFile};
 pub use key::{Key, KeySequence};
 use serde::{Deserialize, Serialize};
 
@@ -175,11 +168,7 @@ impl TryFrom<KeyConfigFile> for KeyConfig {
                     .collect::<anyhow::Result<_>>()?,
                 albums: HashMap::new(),
                 artists: HashMap::new(),
-                directories: value
-                    .directories
-                    .into_iter()
-                    .map(|(k, v)| (k, v.into()))
-                    .collect(),
+                directories: value.directories.into_iter().map(|(k, v)| (k, v.into())).collect(),
                 search: HashMap::new(),
                 #[cfg(debug_assertions)]
                 logs: value.logs.into_iter().map(|(k, v)| (k, v.into())).collect(),
@@ -202,11 +191,8 @@ impl TryFrom<KeyConfigFile> for KeyConfig {
                 .into_iter()
                 .map(|(k, v)| -> anyhow::Result<_> { Ok((k, v.try_into()?)) })
                 .collect::<anyhow::Result<_>>()?;
-            let directories: HashMap<KeySequence, DirectoriesActions> = value
-                .directories
-                .into_iter()
-                .map(|(k, v)| (k, v.into()))
-                .collect();
+            let directories: HashMap<KeySequence, DirectoriesActions> =
+                value.directories.into_iter().map(|(k, v)| (k, v.into())).collect();
             #[cfg(debug_assertions)]
             let logs: HashMap<KeySequence, LogsActions> =
                 value.logs.into_iter().map(|(k, v)| (k, v.into())).collect();
@@ -291,10 +277,8 @@ impl KeybindsOverrides {
     /// legacy `~/.config/rmpc/keybinds.ron` when the s2udio file is
     /// absent (migration).
     pub fn load() -> Option<Self> {
-        let path = Self::path()
-            .filter(|p| p.exists())
-            .or_else(Self::legacy_path)
-            .or_else(Self::path)?;
+        let path =
+            Self::path().filter(|p| p.exists()).or_else(Self::legacy_path).or_else(Self::path)?;
         let content = std::fs::read_to_string(&path).ok()?;
         match ron::de::from_str(&content) {
             Ok(overrides) => Some(overrides),
@@ -358,10 +342,7 @@ mod tests {
     #[cfg(debug_assertions)]
     use crate::config::keys::LogsActionsFile;
     use crate::config::keys::{
-        CommonAction,
-        DirectoriesActionsFile,
-        GlobalAction,
-        QueueActions,
+        CommonAction, DirectoriesActionsFile, GlobalAction, QueueActions,
         actions::{CommonActionFile, GlobalActionFile, QueueActionsFile},
     };
 
@@ -377,17 +358,33 @@ mod tests {
             Some(&DirectoriesActionsFile::FolderCollapse),
             "a collapses / steps out of the selected folder"
         );
+        assert_eq!(default.directories.get(&k("d")), Some(&DirectoriesActionsFile::FolderExpand));
+        assert_eq!(default.directories.get(&k("w")), Some(&DirectoriesActionsFile::FolderUp));
+        assert_eq!(default.directories.get(&k("s")), Some(&DirectoriesActionsFile::FolderDown));
+    }
+
+    #[test]
+    fn default_navigation_bindings_include_ctrl_a_select_all() {
+        let default = KeyConfigFile::default();
         assert_eq!(
-            default.directories.get(&k("d")),
-            Some(&DirectoriesActionsFile::FolderExpand)
+            default.navigation.get(&KeySequence::new().char('a').ctrl()),
+            Some(&CommonActionFile::SelectAll),
+            "Ctrl+A selects all items of the current list"
+        );
+    }
+
+    #[test]
+    fn default_navigation_bindings_include_o_O_for_adding_lyric_lines() {
+        let default = KeyConfigFile::default();
+        assert_eq!(
+            default.navigation.get(&KeySequence::new().char('o')),
+            Some(&CommonActionFile::AddLyricsLineAfter),
+            "o adds a whole new lyric line after the current one"
         );
         assert_eq!(
-            default.directories.get(&k("w")),
-            Some(&DirectoriesActionsFile::FolderUp)
-        );
-        assert_eq!(
-            default.directories.get(&k("s")),
-            Some(&DirectoriesActionsFile::FolderDown)
+            default.navigation.get(&KeySequence::new().char('O')),
+            Some(&CommonActionFile::AddLyricsLineBefore),
+            "O adds a whole new lyric line before the current one"
         );
     }
 
@@ -424,10 +421,7 @@ mod tests {
             Some(&QueueActionsFile::ToggleChapters),
             "<S-Tab> cycles the audio/video/chapters lists like c"
         );
-        assert_eq!(
-            default.queue.get(&k("c")),
-            Some(&QueueActionsFile::ToggleChapters)
-        );
+        assert_eq!(default.queue.get(&k("c")), Some(&QueueActionsFile::ToggleChapters));
     }
 
     #[test]

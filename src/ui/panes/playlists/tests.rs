@@ -624,10 +624,7 @@ mod playlist_kinds {
         );
         // The original link (a playlist may hold either) resolves by a
         // matching `original_url`.
-        assert_eq!(
-            stream_display_title(&ctx, "https://youtu.be/abc"),
-            Some("Some Mix".to_owned())
-        );
+        assert_eq!(stream_display_title(&ctx, "https://youtu.be/abc"), Some("Some Mix".to_owned()));
         // Uncached streams and local files have nothing to show.
         assert_eq!(stream_display_title(&ctx, "https://other.example/x"), None);
         assert_eq!(stream_display_title(&ctx, "music/a.flac"), None);
@@ -636,11 +633,7 @@ mod playlist_kinds {
     /// Reconstruct the rendered lines of a buffer for text assertions.
     fn buffer_rows(buffer: &ratatui::buffer::Buffer) -> Vec<String> {
         (0..buffer.area.height)
-            .map(|y| {
-                (0..buffer.area.width)
-                    .map(|x| buffer[(x, y)].symbol())
-                    .collect::<String>()
-            })
+            .map(|y| (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect::<String>())
             .collect()
     }
 
@@ -674,7 +667,10 @@ mod playlist_kinds {
         terminal.draw(|frame| pane.render(frame, Rect::new(0, 0, 80, 24), &ctx).unwrap()).unwrap();
         let rows = buffer_rows(terminal.backend().buffer());
         assert!(rows.iter().any(|r| r.contains("♪ mix")), "audio prefix missing: {rows:?}");
-        assert!(rows.iter().any(|r| r.contains("▶") && r.contains("films")), "video prefix missing: {rows:?}");
+        assert!(
+            rows.iter().any(|r| r.contains("▶") && r.contains("films")),
+            "video prefix missing: {rows:?}"
+        );
     }
 
     /// At the root the right pane lists every playlist (the root's
@@ -720,7 +716,10 @@ mod playlist_kinds {
             right_text.contains("♪ mix") && right_text.contains("films"),
             "right pane lists the playlists at the root: {right_text}"
         );
-        assert!(!right_text.contains("Songs"), "right pane title is Playlists at the root: {right_text}");
+        assert!(
+            !right_text.contains("Songs"),
+            "right pane title is Playlists at the root: {right_text}"
+        );
     }
 
     #[test]
@@ -822,11 +821,7 @@ mod playlist_kinds {
 /// the generic song preview.
 mod stream_info_box {
     use super::*;
-    use crate::{
-        MpdQueryResult,
-        shared::ytdlp::YtStreamInfo,
-        ui::panes::playlists::FETCH_DATA,
-    };
+    use crate::{MpdQueryResult, shared::ytdlp::YtStreamInfo, ui::panes::playlists::FETCH_DATA};
     use ratatui::prelude::Rect;
 
     #[test]
@@ -879,14 +874,10 @@ mod stream_info_box {
 
         let backend = ratatui::backend::TestBackend::new(60, 24);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
-        terminal
-            .draw(|frame| pane.render(frame, Rect::new(0, 0, 60, 24), &ctx).unwrap())
-            .unwrap();
+        terminal.draw(|frame| pane.render(frame, Rect::new(0, 0, 60, 24), &ctx).unwrap()).unwrap();
         let buf = terminal.backend().buffer();
         let text: String = (0..24u16)
-            .map(|y| {
-                (0..60u16).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>()
-            })
+            .map(|y| (0..60u16).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>())
             .collect::<Vec<_>>()
             .join("\n");
         assert!(text.contains("Some Mix"), "cached title in the info box: {text}");
@@ -971,9 +962,7 @@ mod info_scroll {
         // narrow TUI hides it entirely, so area snapshots would be empty).
         let backend = ratatui::backend::TestBackend::new(160, 24);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
-        terminal
-            .draw(|frame| pane.render(frame, Rect::new(0, 0, 160, 24), ctx).unwrap())
-            .unwrap();
+        terminal.draw(|frame| pane.render(frame, Rect::new(0, 0, 160, 24), ctx).unwrap()).unwrap();
     }
 
     #[test]
@@ -1080,12 +1069,7 @@ mod info_scroll {
 
         let wheel = |pane: &mut PlaylistsPane, kind: MouseEventKind| {
             pane.handle_mouse_event(
-                MouseEvent {
-                    x: area.x + 5,
-                    y: area.y + 2,
-                    kind,
-                    modifiers: KeyModifiers::NONE,
-                },
+                MouseEvent { x: area.x + 5, y: area.y + 2, kind, modifiers: KeyModifiers::NONE },
                 &ctx,
             )
             .unwrap();
@@ -1131,13 +1115,13 @@ mod multi_select {
 
     use super::*;
     use crate::{
+        MpdQueryResult,
         config::keys::{CommonAction, GlobalAction},
         shared::{
             keys::{ActionEvent, Actions},
             mouse_event::{MouseEvent, MouseEventKind},
         },
         ui::panes::playlists::FETCH_DATA,
-        MpdQueryResult,
     };
 
     /// A pane inside the playlist `mix` with songs s1..s4.
@@ -1179,12 +1163,15 @@ mod multi_select {
         // entirely on TUIs ≤ 120 cols wide) and its areas are real rects.
         let backend = ratatui::backend::TestBackend::new(160, 24);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
-        terminal
-            .draw(|frame| pane.render(frame, Rect::new(0, 0, 160, 24), ctx).unwrap())
-            .unwrap();
+        terminal.draw(|frame| pane.render(frame, Rect::new(0, 0, 160, 24), ctx).unwrap()).unwrap();
     }
 
-    fn click(pane: &mut PlaylistsPane, row: u16, modifiers: crossterm::event::KeyModifiers, ctx: &mut Ctx) {
+    fn click(
+        pane: &mut PlaylistsPane,
+        row: u16,
+        modifiers: crossterm::event::KeyModifiers,
+        ctx: &mut Ctx,
+    ) {
         let area = pane.songs_area;
         pane.handle_mouse_event(
             MouseEvent {
@@ -1211,11 +1198,7 @@ mod multi_select {
         let (app_tx, _app_rx) = crossbeam::channel::unbounded();
         let (work_tx, _work_rx) = crossbeam::channel::unbounded();
         let (client_tx, _client_rx) = crossbeam::channel::unbounded();
-        ctx(
-            (app_tx, _app_rx),
-            (work_tx, _work_rx),
-            (client_tx, _client_rx),
-        )
+        ctx((app_tx, _app_rx), (work_tx, _work_rx), (client_tx, _client_rx))
     }
 
     #[test]
@@ -1513,9 +1496,8 @@ mod left_pane_width_regimes {
         let mut pane = PlaylistsPane::new(&ctx);
         // Enough playlists that the right pane's list overflows the
         // viewport, so a scroll visibly moves its offset.
-        let playlists: Vec<DirOrSong> = (0..12)
-            .map(|i| DirOrSong::playlist_name_only(format!("pl{i}")))
-            .collect();
+        let playlists: Vec<DirOrSong> =
+            (0..12).map(|i| DirOrSong::playlist_name_only(format!("pl{i}"))).collect();
         pane.on_query_finished(
             super::super::INIT,
             MpdQueryResult::DirOrSong { data: playlists, path: None },
@@ -1570,14 +1552,15 @@ mod left_pane_width_regimes {
     fn tree_args_widen_the_tree() {
         let ctx = ctx();
         let mut pane = pane_with_playlist(&ctx);
-        pane.tree_args = TreeBrowserArgs {
-            tree_min_width: 60,
-            ..TreeBrowserArgs::default()
-        };
+        pane.tree_args = TreeBrowserArgs { tree_min_width: 60, ..TreeBrowserArgs::default() };
         render_at(&mut pane, &ctx, 160);
         assert_eq!(pane.playlists_area.width, 58, "60-col tree pane minus its 2 border columns");
         render_at(&mut pane, &ctx, 80);
-        assert_eq!(pane.playlists_area, Rect::default(), "default hide threshold still hides at 80 cols");
+        assert_eq!(
+            pane.playlists_area,
+            Rect::default(),
+            "default hide threshold still hides at 80 cols"
+        );
     }
 }
 

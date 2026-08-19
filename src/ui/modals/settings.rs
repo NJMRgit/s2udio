@@ -24,8 +24,7 @@ use super::{
 use crate::{
     AppEvent,
     config::{
-        Config,
-        UiSettings,
+        Config, UiSettings,
         cava::CavaOverridesFile,
         keys::{Key, KeyConfig, KeySequence},
         scale_color,
@@ -33,16 +32,13 @@ use crate::{
         theme::UiConfig,
     },
     ctx::Ctx,
-    mpd::{
-        commands::status::OnOffOneshot,
-        mpd_client::MpdClient,
-    },
+    mpd::{commands::status::OnOffOneshot, mpd_client::MpdClient},
     shared::{
         id::{self, Id},
         keys::{ActionEvent, Actions},
         macros::{modal, status_error, status_info, status_warn},
-        mpd_client_ext::MpdClientExt,
         mouse_event::{MouseEvent, MouseEventKind},
+        mpd_client_ext::MpdClientExt,
     },
     ui::{OPEN_OUTPUTS_MODAL, UiAppEvent},
 };
@@ -271,7 +267,6 @@ impl Section {
             Section::Torrent => "torrent",
         }
     }
-
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -541,11 +536,7 @@ fn parse_hex_color(s: &str) -> Option<Color> {
         return None;
     }
     let v = u32::from_str_radix(&expanded, 16).ok()?;
-    Some(Color::Rgb(
-        ((v >> 16) & 0xff) as u8,
-        ((v >> 8) & 0xff) as u8,
-        (v & 0xff) as u8,
-    ))
+    Some(Color::Rgb(((v >> 16) & 0xff) as u8, ((v >> 8) & 0xff) as u8, (v & 0xff) as u8))
 }
 
 fn color_hex(color: &Color) -> String {
@@ -675,11 +666,8 @@ impl ContentRow {
         matches!(
             self,
             ContentRow::General(
-                GeneralRow::FeaturesHeader
-                | GeneralRow::CavaHeader
-                | GeneralRow::AppearanceHeader,
-            )
-                | ContentRow::KeyTableHeader
+                GeneralRow::FeaturesHeader | GeneralRow::CavaHeader | GeneralRow::AppearanceHeader,
+            ) | ContentRow::KeyTableHeader
                 | ContentRow::KeyHeader(_)
                 | ContentRow::Mpd(
                     MpdRow::LibraryHeader | MpdRow::PlaybackHeader | MpdRow::DevicesHeader
@@ -871,7 +859,9 @@ fn jellyfin_current_url(ctx: &Ctx) -> String {
     let sidecar = crate::config::jellyfin::jellyfin_sidecar_path();
     let url = std::fs::read_to_string(&sidecar)
         .ok()
-        .and_then(|c| ron::de::from_str::<crate::config::jellyfin::JellyfinCredentialsFile>(&c).ok())
+        .and_then(|c| {
+            ron::de::from_str::<crate::config::jellyfin::JellyfinCredentialsFile>(&c).ok()
+        })
         .map(|c| c.server_url)
         .or_else(|| {
             crate::jellyfin::Jellyfin::from_config_file(&ctx.config.jellyfin.config_file)
@@ -894,8 +884,7 @@ impl SettingsModal {
             _ => crate::config::mpv::os_language_code().unwrap_or_else(|| "en".to_owned()),
         };
         let cava_initial = StagedCava::from_config(&ctx.config);
-        let torrent_socks_proxy =
-            ctx.config.torrent.socks_proxy.clone().unwrap_or_default();
+        let torrent_socks_proxy = ctx.config.torrent.socks_proxy.clone().unwrap_or_default();
         let mut modal = Self {
             id: id::new(),
             section: Section::General,
@@ -991,9 +980,7 @@ impl SettingsModal {
                 rows.push(ContentRow::General(GeneralRow::Waves));
                 rows.push(ContentRow::General(GeneralRow::AppearanceHeader));
                 rows.extend(
-                    AppearanceTarget::display_order()
-                        .into_iter()
-                        .map(ContentRow::Appearance),
+                    AppearanceTarget::display_order().into_iter().map(ContentRow::Appearance),
                 );
                 rows
             }
@@ -1142,22 +1129,19 @@ impl SettingsModal {
             ContentRow::General(g) => match g {
                 GeneralRow::VideoPlayback => {
                     let all = crate::config::video::VideoPlaybackMode::ALL;
-                    let idx = all
-                        .iter()
-                        .position(|m| *m == self.video_pending)
-                        .unwrap_or(0) as i64;
+                    let idx = all.iter().position(|m| *m == self.video_pending).unwrap_or(0) as i64;
                     self.video_pending = all[(idx + delta).rem_euclid(all.len() as i64) as usize];
                     ctx.render()?;
                     Ok(())
                 }
                 GeneralRow::Fps => {
                     let v = (i64::from(self.fps()) + delta * 5)
-                        .clamp(i64::from(FPS_MIN), i64::from(FPS_MAX)) as u16;
+                        .clamp(i64::from(FPS_MIN), i64::from(FPS_MAX))
+                        as u16;
                     self.set_cava(ctx, |c| c.framerate = v)
                 }
                 GeneralRow::Sensitivity => {
-                    let v = (i64::from(self.sensitivity()) + delta * 5)
-                        .clamp(1, 500) as u16;
+                    let v = (i64::from(self.sensitivity()) + delta * 5).clamp(1, 500) as u16;
                     self.set_cava(ctx, |c| c.sensitivity = v)
                 }
                 GeneralRow::FreqMin => {
@@ -1275,7 +1259,9 @@ impl SettingsModal {
                 MpdRow::Consume => Self::cycle_single_consume(ctx, false),
                 _ => Ok(()),
             },
-            ContentRow::KeyTableHeader | ContentRow::KeyHeader(_) | ContentRow::KeyItem(_) => Ok(()),
+            ContentRow::KeyTableHeader | ContentRow::KeyHeader(_) | ContentRow::KeyItem(_) => {
+                Ok(())
+            }
         }
     }
 
@@ -1383,10 +1369,7 @@ impl SettingsModal {
             Some(staged) => {
                 self.appearance_pending[target as usize] = staged;
                 self.editing_color = None;
-                status_info!(
-                    "{} staged — save when leaving settings",
-                    target.name()
-                );
+                status_info!("{} staged — save when leaving settings", target.name());
                 ctx.render()?;
             }
             None => {
@@ -1459,11 +1442,11 @@ impl SettingsModal {
             self.rows.get(idx),
             Some(ContentRow::General(
                 GeneralRow::Sensitivity
-                | GeneralRow::Fps
-                | GeneralRow::FreqMin
-                | GeneralRow::FreqMax
-                | GeneralRow::NoiseReduction
-                | GeneralRow::Device
+                    | GeneralRow::Fps
+                    | GeneralRow::FreqMin
+                    | GeneralRow::FreqMax
+                    | GeneralRow::NoiseReduction
+                    | GeneralRow::Device
             )) | Some(ContentRow::Mpd(MpdRow::Crossfade))
         )
     }
@@ -1506,8 +1489,12 @@ impl SettingsModal {
         let Some(row) = self.rows.get(self.selected).cloned() else { return Ok(()) };
         match &row {
             ContentRow::General(g) => match g {
-                GeneralRow::AlbumArt | GeneralRow::Lyrics | GeneralRow::Cava | GeneralRow::Radio
-                | GeneralRow::Jellyfin | GeneralRow::AutoChapters
+                GeneralRow::AlbumArt
+                | GeneralRow::Lyrics
+                | GeneralRow::Cava
+                | GeneralRow::Radio
+                | GeneralRow::Jellyfin
+                | GeneralRow::AutoChapters
                 | GeneralRow::Mpdris2Notifications => {
                     let value = match g {
                         GeneralRow::AlbumArt => !self.ui_pending.show_album_art,
@@ -1516,9 +1503,7 @@ impl SettingsModal {
                         GeneralRow::Radio => !self.ui_pending.show_radio_tab,
                         GeneralRow::Jellyfin => !self.ui_pending.show_jellyfin_tab,
                         GeneralRow::AutoChapters => !self.ui_pending.auto_show_chapters,
-                        GeneralRow::Mpdris2Notifications => {
-                            !self.ui_pending.mpdris2_notifications
-                        }
+                        GeneralRow::Mpdris2Notifications => !self.ui_pending.mpdris2_notifications,
                         _ => unreachable!(),
                     };
                     self.toggle_ui(ctx, *g, value)
@@ -1551,9 +1536,9 @@ impl SettingsModal {
                             location,
                             cache_dir,
                         })
-                        .map_err(|err| {
-                            log::error!(error:? = err; "Failed to request radio directory")
-                        });
+                        .map_err(
+                            |err| log::error!(error:? = err; "Failed to request radio directory"),
+                        );
                     status_warn!("Reloading radio stations…");
                     ctx.render()?;
                     Ok(())
@@ -1607,13 +1592,12 @@ impl SettingsModal {
                     // Blocking login (the panel is modal anyway).
                     match crate::jellyfin::Jellyfin::authenticate(&url, &username, &password) {
                         Ok((token, user_id)) => {
-                            self.jellyfin_credentials = Some(
-                                crate::config::jellyfin::JellyfinCredentialsFile {
+                            self.jellyfin_credentials =
+                                Some(crate::config::jellyfin::JellyfinCredentialsFile {
                                     server_url: url,
                                     access_token: token,
                                     user_id,
-                                },
-                            );
+                                });
                             status_info!("Signed in to Jellyfin as '{username}'");
                         }
                         Err(err) => {
@@ -1676,8 +1660,7 @@ impl SettingsModal {
                     // Stop the GUI's in-memory engine AND any engine the
                     // `s2udio rq` CLI registered (shared registration).
                     let stopped = ctx.torrent_webui_engine.borrow_mut().take().is_some();
-                    let stopped_registered =
-                        crate::core::rqctl::stop_registered().unwrap_or(false);
+                    let stopped_registered = crate::core::rqctl::stop_registered().unwrap_or(false);
                     if stopped || stopped_registered {
                         status_info!("rqbit engine stopped");
                     } else {
@@ -1731,12 +1714,8 @@ impl SettingsModal {
                                     .initial_value(current)
                                     .on_confirm(|ctx, value| {
                                         let mut state = AppStateFile::load();
-                                        state.last_tab = ctx
-                                            .config
-                                            .tabs
-                                            .names
-                                            .first()
-                                            .map(|t| t.to_string());
+                                        state.last_tab =
+                                            ctx.config.tabs.names.first().map(|t| t.to_string());
                                         state.mpd_library_path = Some(value.to_string());
                                         if let Err(err) = state.save() {
                                             status_warn!("Failed to save state: {err}");
@@ -1764,23 +1743,21 @@ impl SettingsModal {
                         }
                         Ok(())
                     });
-                    status_warn!("{}", if rescan {
-                        "Rescanning library…"
-                    } else {
-                        "Updating library…"
-                    });
+                    status_warn!(
+                        "{}",
+                        if rescan { "Rescanning library…" } else { "Updating library…" }
+                    );
                     ctx.render()?;
                     Ok(())
                 }
                 MpdRow::Outputs => {
                     let current_partition = ctx.status.partition.clone();
-                    ctx.query()
-                        .id(OPEN_OUTPUTS_MODAL)
-                        .replace_id(OPEN_OUTPUTS_MODAL)
-                        .query(move |client| {
+                    ctx.query().id(OPEN_OUTPUTS_MODAL).replace_id(OPEN_OUTPUTS_MODAL).query(
+                        move |client| {
                             let outputs = client.list_partitioned_outputs(&current_partition)?;
                             Ok(crate::MpdQueryResult::Outputs(outputs))
-                        });
+                        },
+                    );
                     Ok(())
                 }
                 MpdRow::Crossfade
@@ -1804,21 +1781,16 @@ impl SettingsModal {
             ctx,
             ConfirmModal::builder()
                 .ctx(ctx)
-                .message(vec![
-                    "You have unsaved settings changes.",
-                    "Save them, or discard them?",
-                ])
+                .message(vec!["You have unsaved settings changes.", "Save them, or discard them?",])
                 .action(Action::CustomButtons {
                     buttons: vec![
                         (
                             "Save",
                             Box::new(move |ctx| {
-                                ctx.app_event_sender.send(AppEvent::UiEvent(
-                                    UiAppEvent::ApplySettings(staged),
-                                ))?;
-                                ctx.app_event_sender.send(AppEvent::UiEvent(
-                                    UiAppEvent::PopModal(settings_id),
-                                ))?;
+                                ctx.app_event_sender
+                                    .send(AppEvent::UiEvent(UiAppEvent::ApplySettings(staged)))?;
+                                ctx.app_event_sender
+                                    .send(AppEvent::UiEvent(UiAppEvent::PopModal(settings_id)))?;
                                 Ok(())
                             }),
                         ),
@@ -1828,9 +1800,8 @@ impl SettingsModal {
                                 ctx.app_event_sender.send(AppEvent::UiEvent(
                                     UiAppEvent::DiscardSettings { keybinds: keybinds_snapshot },
                                 ))?;
-                                ctx.app_event_sender.send(AppEvent::UiEvent(
-                                    UiAppEvent::PopModal(settings_id),
-                                ))?;
+                                ctx.app_event_sender
+                                    .send(AppEvent::UiEvent(UiAppEvent::PopModal(settings_id)))?;
                                 Ok(())
                             }),
                         ),
@@ -1850,10 +1821,7 @@ impl SettingsModal {
             || self.mpv_subtitles_pending != self.mpv_subtitles_initial
             || self.mpv_svp_pending != self.mpv_svp_initial
             || self.cava_pending != self.cava_initial
-            || self
-                .appearance_pending
-                .iter()
-                .any(|c| !matches!(c, StagedColor::Unchanged))
+            || self.appearance_pending.iter().any(|c| !matches!(c, StagedColor::Unchanged))
             || !self.pending_remaps.is_empty()
             || self.jellyfin_credentials.is_some()
             || self.torrent_socks_proxy_pending != self.torrent_socks_proxy_initial
@@ -1886,24 +1854,15 @@ impl SettingsModal {
     // ---------- rendering ----------
 
     fn styles(&self, ctx: &Ctx) -> (Style, Style, Style) {
-        let base = ctx
-            .config
-            .theme
-            .text_color
-            .map_or_else(Style::default, |c| Style::default().fg(c));
+        let base =
+            ctx.config.theme.text_color.map_or_else(Style::default, |c| Style::default().fg(c));
         let dim = base.add_modifier(Modifier::DIM);
         let active = ctx.config.theme.current_item_style;
         (base, dim, active)
     }
 
     /// The row-wide click target covering the whole row.
-    fn row_click(
-        targets: &mut Vec<(Rect, Click)>,
-        x: u16,
-        y: u16,
-        width: u16,
-        click: Click,
-    ) {
+    fn row_click(targets: &mut Vec<(Rect, Click)>, x: u16, y: u16, width: u16, click: Click) {
         targets.push((Rect { x, y, width, height: 1 }, click));
     }
 
@@ -1955,9 +1914,7 @@ impl SettingsModal {
                         Some(Click::Toggle),
                     )
                 }
-                MpvRow::Svp => {
-                    Self::toggle_row("svp support", self.mpv_svp_pending, style)
-                }
+                MpvRow::Svp => Self::toggle_row("svp support", self.mpv_svp_pending, style),
             },
             ContentRow::General(g) => match g {
                 GeneralRow::AlbumArt
@@ -1983,10 +1940,9 @@ impl SettingsModal {
                             "If media contains chapters open to chapters list",
                             self.ui_pending.auto_show_chapters,
                         ),
-                        GeneralRow::Mpdris2Notifications => (
-                            "mpdris2 desktop notifications",
-                            self.ui_pending.mpdris2_notifications,
-                        ),
+                        GeneralRow::Mpdris2Notifications => {
+                            ("mpdris2 desktop notifications", self.ui_pending.mpdris2_notifications)
+                        }
                         GeneralRow::AutoSens => ("auto-sens", self.cava_pending.autosens),
                         GeneralRow::VirtualDevices => {
                             ("show virtual devices", self.ui_pending.show_virtual_devices)
@@ -2069,8 +2025,8 @@ impl SettingsModal {
                         });
                     // The device name is truncated so the [<] [>] buttons
                     // always fit on narrow terminals.
-                    let max_desc = avail
-                        .saturating_sub(1 + "device".len() + 2 + "[<] [>]".len() + 2);
+                    let max_desc =
+                        avail.saturating_sub(1 + "device".len() + 2 + "[<] [>]".len() + 2);
                     let description = truncate_col(&description, max_desc);
                     let d = description.chars().count();
                     (
@@ -2103,8 +2059,8 @@ impl SettingsModal {
                     } else {
                         self.library_path.clone()
                     };
-                    let max_path = avail
-                        .saturating_sub(1 + "library location".len() + 2 + "[edit]".len() + 2);
+                    let max_path =
+                        avail.saturating_sub(1 + "library location".len() + 2 + "[edit]".len() + 2);
                     let path = truncate_col(&path, max_path);
                     let p = path.chars().count();
                     (
@@ -2114,34 +2070,22 @@ impl SettingsModal {
                             Span::raw("  "),
                             Span::styled("[edit]", style.bold()),
                         ],
-                        vec![DeferredButton {
-                            offset: p + 2,
-                            label: "[edit]",
-                            click: Click::Edit,
-                        }],
+                        vec![DeferredButton { offset: p + 2, label: "[edit]", click: Click::Edit }],
                         Some(Click::Edit),
                     )
                 }
-                MpdRow::Update => Self::action_row(
-                    "update library",
-                    "scan for new / changed files",
-                    style,
-                    dim,
-                ),
-                MpdRow::Rescan => Self::action_row(
-                    "rescan library",
-                    "force re-read of all files",
-                    style,
-                    dim,
-                ),
+                MpdRow::Update => {
+                    Self::action_row("update library", "scan for new / changed files", style, dim)
+                }
+                MpdRow::Rescan => {
+                    Self::action_row("rescan library", "force re-read of all files", style, dim)
+                }
                 MpdRow::Outputs => {
                     Self::action_row("outputs", "list / toggle MPD outputs", style, dim)
                 }
-                MpdRow::Crossfade => self.stepper_row(
-                    "crossfade",
-                    ctx.status.xfade.unwrap_or(0).to_string(),
-                    style,
-                ),
+                MpdRow::Crossfade => {
+                    self.stepper_row("crossfade", ctx.status.xfade.unwrap_or(0).to_string(), style)
+                }
                 MpdRow::Repeat | MpdRow::Random | MpdRow::Single | MpdRow::Consume => {
                     let (label, enabled) = match m {
                         MpdRow::Repeat => ("repeat", ctx.status.repeat),
@@ -2164,10 +2108,9 @@ impl SettingsModal {
                     let (label, value) = match m {
                         JellyfinRow::ServerUrl => ("server url", self.jellyfin_url.clone()),
                         JellyfinRow::Username => ("username", self.jellyfin_username.clone()),
-                        JellyfinRow::Password => (
-                            "password",
-                            "•".repeat(self.jellyfin_password.chars().count().min(8)),
-                        ),
+                        JellyfinRow::Password => {
+                            ("password", "•".repeat(self.jellyfin_password.chars().count().min(8)))
+                        }
                         _ => unreachable!(),
                     };
                     let display = if self.editing_jellyfin_row == Some(*m) {
@@ -2187,11 +2130,7 @@ impl SettingsModal {
                             Span::raw("  "),
                             Span::styled("[edit]", style.bold()),
                         ],
-                        vec![DeferredButton {
-                            offset: d + 2,
-                            label: "[edit]",
-                            click: Click::Edit,
-                        }],
+                        vec![DeferredButton { offset: d + 2, label: "[edit]", click: Click::Edit }],
                         Some(Click::Edit),
                     )
                 }
@@ -2238,11 +2177,8 @@ impl SettingsModal {
                 }
                 TorrentRow::StopEngine => {
                     let running = self.torrent_webui_running(ctx);
-                    let desc = if running {
-                        "kill the standalone engine"
-                    } else {
-                        "no engine running"
-                    };
+                    let desc =
+                        if running { "kill the standalone engine" } else { "no engine running" };
                     let d = desc.chars().count();
                     (
                         vec![Span::styled(" stop engine", style)],
@@ -2261,12 +2197,9 @@ impl SettingsModal {
                 }
                 TorrentRow::SocksProxy => {
                     let value = self.torrent_socks_proxy_pending.clone();
-                    let display = if value.is_empty() {
-                        "(not set)".to_string()
-                    } else {
-                        value
-                    };
-                    let max_value = avail.saturating_sub(1 + "socks proxy".len() + 2 + "[edit]".len() + 2);
+                    let display = if value.is_empty() { "(not set)".to_string() } else { value };
+                    let max_value =
+                        avail.saturating_sub(1 + "socks proxy".len() + 2 + "[edit]".len() + 2);
                     let display = truncate_col(&display, max_value);
                     let d = display.chars().count();
                     (
@@ -2276,11 +2209,7 @@ impl SettingsModal {
                             Span::raw("  "),
                             Span::styled("[edit]", style.bold()),
                         ],
-                        vec![DeferredButton {
-                            offset: d + 2,
-                            label: "[edit]",
-                            click: Click::Edit,
-                        }],
+                        vec![DeferredButton { offset: d + 2, label: "[edit]", click: Click::Edit }],
                         Some(Click::Edit),
                     )
                 }
@@ -2299,10 +2228,7 @@ impl SettingsModal {
     ) -> (Vec<Span<'static>>, Vec<Span<'static>>, Vec<DeferredButton>, Option<Click>) {
         (
             vec![Span::styled(format!(" {label}"), style)],
-            vec![Span::styled(
-                format!("[{}]", if enabled { "x" } else { " " }),
-                style.bold(),
-            )],
+            vec![Span::styled(format!("[{}]", if enabled { "x" } else { " " }), style.bold())],
             Vec::new(),
             Some(Click::Toggle),
         )
@@ -2320,17 +2246,10 @@ impl SettingsModal {
             if i > 0 {
                 control.push(Span::styled("|", dim));
             }
-            control.push(Span::styled(
-                format!(" {text} "),
-                if *active { style.bold() } else { dim },
-            ));
+            control
+                .push(Span::styled(format!(" {text} "), if *active { style.bold() } else { dim }));
         }
-        (
-            vec![Span::styled(format!(" {label}"), style)],
-            control,
-            Vec::new(),
-            Some(Click::Toggle),
-        )
+        (vec![Span::styled(format!(" {label}"), style)], control, Vec::new(), Some(Click::Toggle))
     }
 
     /// A stepper row: label left, `value [-] [+]` right-aligned. The
@@ -2360,12 +2279,7 @@ impl SettingsModal {
             DeferredButton { offset: vw + 1, label: "[-]", click: Click::Dec },
             DeferredButton { offset: vw + 4, label: "[+]", click: Click::Inc },
         ];
-        (
-            vec![Span::styled(format!(" {label}"), style)],
-            control,
-            buttons,
-            Some(Click::Inc),
-        )
+        (vec![Span::styled(format!(" {label}"), style)], control, buttons, Some(Click::Inc))
     }
 
     /// A plain action row: label left, a dim description right-aligned.
@@ -2457,13 +2371,11 @@ impl SettingsModal {
             // Section header rows: title left, description right-aligned
             // (flush against the right edge, like the mockup).
             ContentRow::General(
-                GeneralRow::FeaturesHeader
-                | GeneralRow::CavaHeader
-                | GeneralRow::AppearanceHeader,
+                GeneralRow::FeaturesHeader | GeneralRow::CavaHeader | GeneralRow::AppearanceHeader,
             )
             | ContentRow::Mpv(MpvRow::Header)
             | ContentRow::Mpd(
-                MpdRow::LibraryHeader | MpdRow::PlaybackHeader | MpdRow::DevicesHeader
+                MpdRow::LibraryHeader | MpdRow::PlaybackHeader | MpdRow::DevicesHeader,
             )
             | ContentRow::Jellyfin(JellyfinRow::Header)
             | ContentRow::Torrent(TorrentRow::Header) => {
@@ -2585,11 +2497,7 @@ impl SettingsModal {
     /// in-memory engine OR an engine the `s2udio rq` CLI registered (the
     /// two share one registration file).
     fn torrent_webui_running(&self, ctx: &Ctx) -> bool {
-        ctx.torrent_webui_engine
-            .borrow_mut()
-            .as_mut()
-            .map(|e| e.is_running())
-            .unwrap_or(false)
+        ctx.torrent_webui_engine.borrow_mut().as_mut().map(|e| e.is_running()).unwrap_or(false)
             || crate::core::rqctl::registered_running().is_some()
     }
 
@@ -2655,10 +2563,8 @@ impl SettingsModal {
     /// and applied on the next render.
     fn open_language_picker(ctx: &mut Ctx, target: MpvLanguageTarget) {
         use crate::ui::modals::select_modal::SelectModal;
-        let options: Vec<String> = Self::subtitle_language_options()
-            .iter()
-            .map(|(name, _)| (*name).to_owned())
-            .collect();
+        let options: Vec<String> =
+            Self::subtitle_language_options().iter().map(|(name, _)| (*name).to_owned()).collect();
         modal!(
             ctx,
             SelectModal::builder()
@@ -2711,11 +2617,13 @@ impl Modal for SettingsModal {
         // Apply a language picked in the custom-language window (audio or
         // subtitles).
         if let Some(lang) = ctx.mpv_custom_subtitle_lang.borrow_mut().take() {
-            self.mpv_subtitles_pending = crate::config::mpv::MpvSubtitleMode::Custom { lang: lang.clone() };
+            self.mpv_subtitles_pending =
+                crate::config::mpv::MpvSubtitleMode::Custom { lang: lang.clone() };
             self.mpv_custom_lang = lang;
         }
         if let Some(lang) = ctx.mpv_custom_audio_lang.borrow_mut().take() {
-            self.mpv_audio_pending = crate::config::mpv::MpvAudioLang::Custom { lang: lang.clone() };
+            self.mpv_audio_pending =
+                crate::config::mpv::MpvAudioLang::Custom { lang: lang.clone() };
             self.mpv_custom_lang = lang;
         }
         // Value typed into the torrent socks-proxy input modal (written to
@@ -2743,19 +2651,14 @@ impl Modal for SettingsModal {
             .border_set(symbols::border::ROUNDED)
             .border_style(ctx.config.as_border_style())
             .title_alignment(ratatui::prelude::Alignment::Center)
-            .title(
-                if self.capturing {
-                    " Settings — keybinds: press a new key (Esc cancel) ".bold()
-                } else if let Some(target) = self.editing_color {
-                    format!(
-                        " Settings — {}: type a hex color (Enter save, Esc cancel) ",
-                        target.name()
-                    )
+            .title(if self.capturing {
+                " Settings — keybinds: press a new key (Esc cancel) ".bold()
+            } else if let Some(target) = self.editing_color {
+                format!(" Settings — {}: type a hex color (Enter save, Esc cancel) ", target.name())
                     .bold()
-                } else {
-                    " Settings ".bold()
-                },
-            );
+            } else {
+                " Settings ".bold()
+            });
         let inner = block.inner(popup_area).inner(Margin { horizontal: 1, vertical: 0 });
 
         let (base, dim, active) = self.styles(ctx);
@@ -2777,7 +2680,6 @@ impl Modal for SettingsModal {
         ])
         .areas(body_area);
         let _ = gap_area;
-
 
         // ---------- sidebar ----------
         self.sidebar_areas = Vec::new();
@@ -2832,9 +2734,8 @@ impl Modal for SettingsModal {
         if self.section == Section::Keybinds {
             for row in &self.rows {
                 if let ContentRow::KeyItem(item) = row {
-                    self.key_col_w = self
-                        .key_col_w
-                        .max(remap_keys::key_display(&item.keys).chars().count());
+                    self.key_col_w =
+                        self.key_col_w.max(remap_keys::key_display(&item.keys).chars().count());
                     self.action_col_w = self.action_col_w.max(item.display.chars().count());
                     self.desc_col_w = self
                         .desc_col_w
@@ -2855,17 +2756,11 @@ impl Modal for SettingsModal {
         for idx in self.scroll..self.scroll + visible {
             let row = &self.rows[idx];
             let y = content_area.y + (idx - self.scroll) as u16;
-            let row_area = Rect {
-                x: content_area.x,
-                y,
-                width: content_area.width,
-                height: 1,
-            };
+            let row_area = Rect { x: content_area.x, y, width: content_area.width, height: 1 };
             self.row_areas.push((idx, row_area));
             let hovered = mouse.is_some_and(|p| row_area.contains(p));
             let mut targets = Vec::new();
-            let content_selected =
-                idx == self.selected && self.focus == SettingsFocus::Content;
+            let content_selected = idx == self.selected && self.focus == SettingsFocus::Content;
             let line = self.render_row(
                 row,
                 content_selected,
@@ -2906,10 +2801,7 @@ impl Modal for SettingsModal {
         } else {
             " w/s ↑/↓  options · d/→/Enter  toggle · a/←  back to sidebar · Esc  close "
         };
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(footer, dim))),
-            footer_area,
-        );
+        frame.render_widget(Paragraph::new(Line::from(Span::styled(footer, dim))), footer_area);
 
         // The vertical divider between the two panes (drawn after the
         // widgets so it stays on top of the content).
@@ -2997,9 +2889,7 @@ impl Modal for SettingsModal {
         if self.editing_color.is_some() {
             use crossterm::event::KeyModifiers as KM;
             match key.code {
-                KeyCode::Char(c)
-                    if c.is_ascii_hexdigit() && key.modifiers == KM::NONE =>
-                {
+                KeyCode::Char(c) if c.is_ascii_hexdigit() && key.modifiers == KM::NONE => {
                     if self.edit_buffer.chars().count() < 6 {
                         self.edit_buffer.push(c);
                         ctx.render()?;
@@ -3159,10 +3049,8 @@ impl Modal for SettingsModal {
             if let Some((_, click)) =
                 self.click_targets.iter().rev().find(|(area, _)| area.contains(event.into()))
             {
-                if let Some((idx, _)) = self
-                    .row_areas
-                    .iter()
-                    .find(|(_, area)| area.contains(event.into()))
+                if let Some((idx, _)) =
+                    self.row_areas.iter().find(|(_, area)| area.contains(event.into()))
                 {
                     self.selected = *idx;
                 }
@@ -3283,7 +3171,10 @@ Source #165
             "alsa_output.usb-FiiO_FiiO_KA3_FiiO_KA3-00.analog-stereo.monitor"
         );
         assert!(!nodes[2].is_virtual, "a hardware sink monitor is real");
-        assert_eq!(nodes[3].name, "alsa_input.usb-BurrBrown_from_Texas_Instruments_USB_AUDIO_CODEC-00.analog-stereo");
+        assert_eq!(
+            nodes[3].name,
+            "alsa_input.usb-BurrBrown_from_Texas_Instruments_USB_AUDIO_CODEC-00.analog-stereo"
+        );
         assert!(!nodes[3].is_virtual);
         assert_eq!(nodes[4].name, "easyeffects_source");
         assert!(nodes[4].is_virtual);
@@ -3314,17 +3205,11 @@ Source #165
             },
         ];
         modal.ui_pending.show_virtual_devices = false;
-        let visible: Vec<String> =
-            modal.visible_nodes().into_iter().map(|n| n.name).collect();
-        assert_eq!(
-            visible,
-            vec!["auto"],
-            "off offers only real (non-virtual) capture points"
-        );
+        let visible: Vec<String> = modal.visible_nodes().into_iter().map(|n| n.name).collect();
+        assert_eq!(visible, vec!["auto"], "off offers only real (non-virtual) capture points");
 
         modal.ui_pending.show_virtual_devices = true;
-        let visible: Vec<String> =
-            modal.visible_nodes().into_iter().map(|n| n.name).collect();
+        let visible: Vec<String> = modal.visible_nodes().into_iter().map(|n| n.name).collect();
         assert_eq!(
             visible,
             vec!["auto", "Media.monitor", "easyeffects_source"],
@@ -3381,7 +3266,9 @@ Source #165
         // are always part of the cava block (the FIFO/pipewire method
         // toggle is gone).
         assert!(modal.rows.iter().any(|r| matches!(r, ContentRow::General(GeneralRow::Device))));
-        assert!(modal.rows.iter().any(|r| matches!(r, ContentRow::General(GeneralRow::VirtualDevices))));
+        assert!(
+            modal.rows.iter().any(|r| matches!(r, ContentRow::General(GeneralRow::VirtualDevices)))
+        );
         assert!(modal.rows.iter().any(|r| matches!(r, ContentRow::General(GeneralRow::Fps))));
         // Render so the click targets are computed; the FPS stepper has both.
         let backend = ratatui::backend::TestBackend::new(110, 30);
@@ -3393,9 +3280,6 @@ Source #165
     }
 
     #[test]
-
-
-
 
     fn stepper_buttons_decrement_and_increment() {
         // The `[-]` / `[+]` buttons must map to Dec / Inc respectively (and
@@ -3470,10 +3354,7 @@ Source #165
         // Round 30: cava is PipeWire-only — the method toggle and the
         // sample rate / bit depth rows are gone; the cava block keeps
         // channels (and always shows the PipeWire device rows).
-        assert!(modal
-            .rows
-            .iter()
-            .any(|r| matches!(r, ContentRow::General(GeneralRow::Channels))));
+        assert!(modal.rows.iter().any(|r| matches!(r, ContentRow::General(GeneralRow::Channels))));
         let cava_rows = [
             GeneralRow::AutoSens,
             GeneralRow::Sensitivity,
@@ -3503,11 +3384,8 @@ Source #165
             cava_rows.len(),
             "the cava block must hold exactly the rows above"
         );
-        let appearances: usize = modal
-            .rows
-            .iter()
-            .filter(|r| matches!(r, ContentRow::Appearance(_)))
-            .count();
+        let appearances: usize =
+            modal.rows.iter().filter(|r| matches!(r, ContentRow::Appearance(_))).count();
         assert_eq!(appearances, AppearanceTarget::all().len());
     }
 
@@ -3630,17 +3508,17 @@ Source #165
         modal.rows = vec![ContentRow::Mpv(MpvRow::AudioLang)];
         modal.selected = 0;
         modal.adjust(&mut ctx, 1).unwrap();
-        assert!(matches!(
-            modal.mpv_audio_pending,
-            crate::config::mpv::MpvAudioLang::Custom { .. }
-        ));
+        assert!(matches!(modal.mpv_audio_pending, crate::config::mpv::MpvAudioLang::Custom { .. }));
         modal.adjust(&mut ctx, 1).unwrap();
         assert_eq!(modal.mpv_audio_pending, crate::config::mpv::MpvAudioLang::System);
 
         // Subtitles cycle hidden -> system -> custom -> hidden.
         modal.rows = vec![ContentRow::Mpv(MpvRow::Subtitles)];
         modal.adjust(&mut ctx, 1).unwrap();
-        assert_eq!(modal.mpv_subtitles_pending, crate::config::mpv::MpvSubtitleMode::SystemLanguage);
+        assert_eq!(
+            modal.mpv_subtitles_pending,
+            crate::config::mpv::MpvSubtitleMode::SystemLanguage
+        );
         modal.adjust(&mut ctx, 1).unwrap();
         assert!(matches!(
             modal.mpv_subtitles_pending,
@@ -3689,14 +3567,17 @@ Source #165
         let backend = ratatui::backend::TestBackend::new(110, 30);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
         let mut ctx = ctx;
-        terminal
-            .draw(|frame| modal.render(frame, &mut ctx).unwrap())
-            .unwrap();
+        terminal.draw(|frame| modal.render(frame, &mut ctx).unwrap()).unwrap();
         // Click the "mpv" sidebar item (third row of the sidebar).
         let area = modal.sidebar_areas[2];
         modal
             .handle_mouse_event(
-                MouseEvent { x: area.x + 2, y: area.y, kind: MouseEventKind::LeftClick, modifiers: crossterm::event::KeyModifiers::NONE },
+                MouseEvent {
+                    x: area.x + 2,
+                    y: area.y,
+                    kind: MouseEventKind::LeftClick,
+                    modifiers: crossterm::event::KeyModifiers::NONE,
+                },
                 &mut ctx,
             )
             .unwrap();
@@ -3706,7 +3587,12 @@ Source #165
         let area = modal.sidebar_areas[3];
         modal
             .handle_mouse_event(
-                MouseEvent { x: area.x + 2, y: area.y, kind: MouseEventKind::LeftClick, modifiers: crossterm::event::KeyModifiers::NONE },
+                MouseEvent {
+                    x: area.x + 2,
+                    y: area.y,
+                    kind: MouseEventKind::LeftClick,
+                    modifiers: crossterm::event::KeyModifiers::NONE,
+                },
                 &mut ctx,
             )
             .unwrap();
@@ -3717,17 +3603,22 @@ Source #165
         let area = *modal.sidebar_areas.last().expect("torrent section is listed");
         modal
             .handle_mouse_event(
-                MouseEvent { x: area.x + 2, y: area.y, kind: MouseEventKind::LeftClick, modifiers: crossterm::event::KeyModifiers::NONE },
+                MouseEvent {
+                    x: area.x + 2,
+                    y: area.y,
+                    kind: MouseEventKind::LeftClick,
+                    modifiers: crossterm::event::KeyModifiers::NONE,
+                },
                 &mut ctx,
             )
             .unwrap();
         assert_eq!(modal.section, Section::Torrent);
         assert!(modal.rows.iter().any(|r| matches!(r, ContentRow::Torrent(TorrentRow::WebUi))));
-        assert!(modal.rows.iter().any(|r| matches!(r, ContentRow::Torrent(TorrentRow::SocksProxy))));
+        assert!(
+            modal.rows.iter().any(|r| matches!(r, ContentRow::Torrent(TorrentRow::SocksProxy)))
+        );
         // The torrent section renders (header + rows) without panicking.
-        terminal
-            .draw(|frame| modal.render(frame, &mut ctx).unwrap())
-            .unwrap();
+        terminal.draw(|frame| modal.render(frame, &mut ctx).unwrap()).unwrap();
         // With no proxy configured the row starts on "(not set)".
         assert_eq!(modal.torrent_socks_proxy_pending, "");
         let _ = app_rx;
@@ -3809,7 +3700,11 @@ mod nav_tests {
 
     /// Open the general section and move the highlight down until `want` is
     /// selected (headers are skipped by the navigation).
-    fn select_general_row(modal: &mut SettingsModal, ctx: &mut Ctx, want: &dyn Fn(&ContentRow) -> bool) {
+    fn select_general_row(
+        modal: &mut SettingsModal,
+        ctx: &mut Ctx,
+        want: &dyn Fn(&ContentRow) -> bool,
+    ) {
         modal.handle_raw_key(key(KeyCode::Char('d')), ctx).unwrap();
         loop {
             if want(&modal.rows[modal.selected]) {
@@ -3822,7 +3717,9 @@ mod nav_tests {
     #[test]
     fn space_enter_focuses_stepper_controls_and_a_d_adjust() {
         let (mut modal, mut ctx) = fixture();
-        select_general_row(&mut modal, &mut ctx, &|r| matches!(r, ContentRow::General(GeneralRow::Fps)));
+        select_general_row(&mut modal, &mut ctx, &|r| {
+            matches!(r, ContentRow::General(GeneralRow::Fps))
+        });
         let fps_before = modal.fps();
 
         // Space focuses the [-] [+] controls without stepping the value.
@@ -3845,11 +3742,9 @@ mod nav_tests {
     #[test]
     fn esc_cancels_the_stepper_adjustment() {
         let (mut modal, mut ctx) = fixture();
-        select_general_row(
-            &mut modal,
-            &mut ctx,
-            &|r| matches!(r, ContentRow::General(GeneralRow::Sensitivity)),
-        );
+        select_general_row(&mut modal, &mut ctx, &|r| {
+            matches!(r, ContentRow::General(GeneralRow::Sensitivity))
+        });
         let sens_before = modal.sensitivity();
 
         modal.handle_raw_key(key(KeyCode::Char(' ')), &mut ctx).unwrap();
@@ -3870,13 +3765,19 @@ mod nav_tests {
     #[test]
     fn device_row_enters_adjust_mode_and_cycles_like_other_steppers() {
         let (mut modal, mut ctx) = fixture();
-        select_general_row(&mut modal, &mut ctx, &|r| matches!(r, ContentRow::General(GeneralRow::Device)));
+        select_general_row(&mut modal, &mut ctx, &|r| {
+            matches!(r, ContentRow::General(GeneralRow::Device))
+        });
         let source_before = modal.source();
 
         // Enter enters adjust mode without changing the source.
         modal.handle_raw_key(key(KeyCode::Enter), &mut ctx).unwrap();
         assert_eq!(modal.adjusting, Some(modal.selected), "Enter focuses the device controls");
-        assert_eq!(modal.source(), source_before, "entering adjust mode must not change the source");
+        assert_eq!(
+            modal.source(),
+            source_before,
+            "entering adjust mode must not change the source"
+        );
 
         // d/→ walks the capture list while focused. The list is refreshed
         // from the live PipeWire session after each step, so compute the
@@ -3885,10 +3786,7 @@ mod nav_tests {
         let expected_next = {
             let mut visible: Vec<String> = vec!["auto".to_string()];
             visible.extend(
-                pipewire_sources()
-                    .iter()
-                    .filter(|n| !n.is_virtual)
-                    .map(|n| n.name.clone()),
+                pipewire_sources().iter().filter(|n| !n.is_virtual).map(|n| n.name.clone()),
             );
             visible.get(1).cloned().unwrap_or_else(|| "auto".to_string())
         };
@@ -3919,7 +3817,9 @@ mod nav_tests {
     #[test]
     fn right_on_a_stepper_row_enters_adjust_mode() {
         let (mut modal, mut ctx) = fixture();
-        select_general_row(&mut modal, &mut ctx, &|r| matches!(r, ContentRow::General(GeneralRow::Fps)));
+        select_general_row(&mut modal, &mut ctx, &|r| {
+            matches!(r, ContentRow::General(GeneralRow::Fps))
+        });
         let fps_before = modal.fps();
 
         // d on the row: enters adjust mode, does not step yet.
@@ -3937,18 +3837,12 @@ mod nav_tests {
     #[test]
     fn space_on_a_toggle_row_still_toggles() {
         let (mut modal, mut ctx) = fixture();
-        select_general_row(
-            &mut modal,
-            &mut ctx,
-            &|r| matches!(r, ContentRow::General(GeneralRow::AlbumArt)),
-        );
+        select_general_row(&mut modal, &mut ctx, &|r| {
+            matches!(r, ContentRow::General(GeneralRow::AlbumArt))
+        });
         let before = modal.ui_pending.show_album_art;
         modal.handle_raw_key(key(KeyCode::Char(' ')), &mut ctx).unwrap();
-        assert_eq!(
-            modal.ui_pending.show_album_art,
-            !before,
-            "non-stepper rows keep toggling"
-        );
+        assert_eq!(modal.ui_pending.show_album_art, !before, "non-stepper rows keep toggling");
         assert_eq!(modal.adjusting, None, "toggle rows do not enter adjust mode");
     }
 
@@ -4063,12 +3957,14 @@ mod nav_tests {
         // d/→ on a stepper row enters adjust mode without stepping yet.
         modal.handle_raw_key(key(KeyCode::Right), &mut ctx).unwrap();
         assert_eq!(modal.adjusting, Some(modal.selected), "d/→ focuses the stepper controls");
-        assert_eq!(modal.cava_pending.framerate, fps_before, "entering adjust mode must not step yet");
+        assert_eq!(
+            modal.cava_pending.framerate, fps_before,
+            "entering adjust mode must not step yet"
+        );
         modal.handle_raw_key(key(KeyCode::Right), &mut ctx).unwrap();
         assert_eq!(modal.cava_pending.framerate, fps_before + 5);
         assert_eq!(
-            ctx.config.cava.framerate,
-            fps_before,
+            ctx.config.cava.framerate, fps_before,
             "live cava config must not change while staged"
         );
         assert!(modal.has_changes());
@@ -4086,13 +3982,17 @@ mod nav_tests {
         let ui_before = ctx.config.ui;
 
         // The row lives in the features block.
-        assert!(modal
-            .rows
-            .iter()
-            .any(|r| matches!(r, ContentRow::General(GeneralRow::Mpdris2Notifications))));
+        assert!(
+            modal
+                .rows
+                .iter()
+                .any(|r| matches!(r, ContentRow::General(GeneralRow::Mpdris2Notifications)))
+        );
 
         // Activate flips the staged value; the live config is untouched.
-        select_row(&mut modal, |r| matches!(r, ContentRow::General(GeneralRow::Mpdris2Notifications)));
+        select_row(&mut modal, |r| {
+            matches!(r, ContentRow::General(GeneralRow::Mpdris2Notifications))
+        });
         modal.activate(&mut ctx).unwrap();
         assert_eq!(modal.ui_pending.mpdris2_notifications, false);
         assert_eq!(ctx.config.ui, ui_before, "live ui settings must not change while staged");
@@ -4128,8 +4028,7 @@ mod nav_tests {
 
         assert!(!modal.pending_remaps.is_empty(), "the remap is recorded for Save");
         assert_ne!(
-            ctx.config.keybinds,
-            keybinds_before,
+            ctx.config.keybinds, keybinds_before,
             "the runtime keybinds update live so the table shows the new key"
         );
         assert!(modal.has_changes());
@@ -4204,9 +4103,8 @@ mod nav_tests {
             (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
         );
         let mut ui = crate::ui::Ui::new(&ctx).unwrap();
-        let modal: Box<dyn Modal + Send + Sync> = Box::new(
-            InputModal::new(&ctx).title("test").on_confirm(|_ctx, _value| Ok(())),
-        );
+        let modal: Box<dyn Modal + Send + Sync> =
+            Box::new(InputModal::new(&ctx).title("test").on_confirm(|_ctx, _value| Ok(())));
         let id = modal.id();
         ui.on_ui_app_event(UiAppEvent::Modal(modal), &mut ctx).unwrap();
 
@@ -4251,11 +4149,9 @@ mod nav_tests {
         modal.handle_raw_key(key(KeyCode::Char('z')), &mut ctx).unwrap();
         assert_ne!(ctx.config.keybinds, snapshot, "the remap mutated the runtime keybinds");
 
-        ui.on_ui_app_event(UiAppEvent::DiscardSettings { keybinds: snapshot }, &mut ctx)
-            .unwrap();
+        ui.on_ui_app_event(UiAppEvent::DiscardSettings { keybinds: snapshot }, &mut ctx).unwrap();
         assert_eq!(
-            ctx.config.keybinds,
-            modal.keybinds_snapshot,
+            ctx.config.keybinds, modal.keybinds_snapshot,
             "discard restores the keybinds taken when the panel opened"
         );
     }
@@ -4345,10 +4241,7 @@ mod nav_tests {
         let values = persisted_appearance_with(&config, false);
         assert_eq!(values[AppearanceTarget::Text as usize].as_deref(), Some("#ffb454"));
         assert_eq!(values[AppearanceTarget::Ui as usize].as_deref(), Some("#112233"));
-        assert_eq!(
-            values[AppearanceTarget::Background as usize].as_deref(),
-            Some("#aabbcc")
-        );
+        assert_eq!(values[AppearanceTarget::Background as usize].as_deref(), Some("#aabbcc"));
 
         let mut fresh = crate::config::Config::default();
         apply_persisted_appearance(&mut fresh, &values, false);
@@ -4383,9 +4276,6 @@ mod nav_tests {
             Some(ratatui::style::Color::Rgb(0xff, 0xb4, 0x54)),
             "content text color is not blur-managed and restores"
         );
-        assert_eq!(
-            blur.theme.background_color,
-            Some(ratatui::style::Color::Rgb(0xaa, 0xbb, 0xcc))
-        );
+        assert_eq!(blur.theme.background_color, Some(ratatui::style::Color::Rgb(0xaa, 0xbb, 0xcc)));
     }
 }

@@ -264,11 +264,7 @@ impl<T: MpdClient + MpdCommand + ProtoClient> MpdClientExt for T {
         &mut self,
         radio_playlist: &str,
     ) -> Result<Vec<crate::mpd::commands::list_playlists::Playlist>, MpdError> {
-        Ok(self
-            .list_playlists()?
-            .into_iter()
-            .filter(|p| p.name != radio_playlist)
-            .collect())
+        Ok(self.list_playlists()?.into_iter().filter(|p| p.name != radio_playlist).collect())
     }
 
     fn list_partitioned_outputs(
@@ -352,11 +348,7 @@ impl<T: MpdClient + MpdCommand + ProtoClient> MpdClientExt for T {
             // Absolute paths (e.g. pasted video files outside the music
             // directory) need the `file://` prefix, like
             // `add_to_playlist_multiple`.
-            let uri = if item.starts_with('/') {
-                format!("file://{item}")
-            } else {
-                item.clone()
-            };
+            let uri = if item.starts_with('/') { format!("file://{item}") } else { item.clone() };
             self.send_add_to_playlist(name, &uri, None)?;
         }
         self.send_execute_cmd_list()?;
@@ -524,7 +516,8 @@ impl<T: MpdClient + MpdCommand + ProtoClient> MpdClientExt for T {
         path: PathBuf,
         cache_dir: Option<&Path>,
         position: Option<QueuePosition>,
-    ) -> Result<(), MpdError> {        let result = self.add(
+    ) -> Result<(), MpdError> {
+        let result = self.add(
             path.as_os_str().to_str().ok_or_else(|| {
                 MpdError::Generic(format!("Path '{}' is not valid UTF-8", path.display()))
             })?,
@@ -612,9 +605,9 @@ impl<T: MpdClient + MpdCommand + ProtoClient> MpdClientExt for T {
                 music_directory.display()
             ))
         })?;
-        rel.to_str()
-            .map(str::to_owned)
-            .ok_or_else(|| MpdError::Generic(format!("Path '{}' is not valid UTF-8", path.display())))
+        rel.to_str().map(str::to_owned).ok_or_else(|| {
+            MpdError::Generic(format!("Path '{}' is not valid UTF-8", path.display()))
+        })
     }
 
     /// Replace the queue entry of a downloaded stream with the downloaded
@@ -1088,12 +1081,8 @@ mod picker_playlists_tests {
             name: "radio".to_owned(),
             songs_indices: Vec::new(),
         });
-        let names: Vec<String> = client
-            .picker_playlists("radio")
-            .unwrap()
-            .into_iter()
-            .map(|p| p.name)
-            .collect();
+        let names: Vec<String> =
+            client.picker_playlists("radio").unwrap().into_iter().map(|p| p.name).collect();
         assert!(!names.iter().any(|n| n == "radio"), "radio playlist must be hidden: {names:?}");
         assert_eq!(names.len(), 4, "the other playlists stay: {names:?}");
 

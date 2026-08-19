@@ -13,10 +13,7 @@ use anyhow::Result;
 use log::debug;
 
 use super::{
-    commands::mpd_config::MpdConfig,
-    errors::MpdError,
-    proto_client::SocketClient,
-    version::Version,
+    commands::mpd_config::MpdConfig, errors::MpdError, proto_client::SocketClient, version::Version,
 };
 use crate::{
     config::{MpdAddress, address::MpdPassword},

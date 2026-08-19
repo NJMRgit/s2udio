@@ -447,7 +447,10 @@ mod tests {
     use std::time::Duration;
 
     use super::parse_metadata_only;
-    use crate::shared::lrc::{Lrc, LrcOffset, lyrics::{LrcLine, TimedWord}};
+    use crate::shared::lrc::{
+        Lrc, LrcOffset,
+        lyrics::{LrcLine, TimedWord},
+    };
 
     #[test]
     fn timed_words_plain_lines_return_none() {
@@ -462,10 +465,13 @@ mod tests {
         let lrc: Lrc =
             "[00:00.00]<00:00.50>hello <00:01.00>world\n[00:05.00]next line\n".parse().unwrap();
         let words = lrc.timed_words(0, LrcOffset::default()).unwrap();
-        assert_eq!(words, vec![
-            TimedWord { text: "hello".into(), time: Duration::from_millis(500) },
-            TimedWord { text: "world".into(), time: Duration::from_secs(1) },
-        ]);
+        assert_eq!(
+            words,
+            vec![
+                TimedWord { text: "hello".into(), time: Duration::from_millis(500) },
+                TimedWord { text: "world".into(), time: Duration::from_secs(1) },
+            ]
+        );
         // markers are stripped from the displayed content
         assert_eq!(lrc.lines[0].content, "hello world");
         assert_eq!(lrc.lines[1].content, "next line");
@@ -495,28 +501,38 @@ mod tests {
 
         let result: Lrc = input.parse().unwrap();
 
-        assert_eq!(result, Lrc {
-            title: Some("asdf".to_string()),
-            artist: Some("123".to_string()),
-            album: Some("333".to_string()),
-            author: Some("444".to_string()),
-            length: Some(Duration::from_secs(143)),
-            lines: vec![
-                LrcLine {
-                    time: Duration::from_millis(1860),
-                    content: "line with dot before hundredths".to_string(),
-                word_times: None},
-                LrcLine {
-                    time: Duration::from_millis(4730),
-                    content: "line with colon before hundredths".to_string(),
-                word_times: None},
-                LrcLine { time: Duration::from_millis(11240), content: String::new() , word_times: None},
-                LrcLine {
-                    time: Duration::from_millis(676_910),
-                    content: "line with long time".to_string(),
-                word_times: None},
-            ],
-        });
+        assert_eq!(
+            result,
+            Lrc {
+                title: Some("asdf".to_string()),
+                artist: Some("123".to_string()),
+                album: Some("333".to_string()),
+                author: Some("444".to_string()),
+                length: Some(Duration::from_secs(143)),
+                lines: vec![
+                    LrcLine {
+                        time: Duration::from_millis(1860),
+                        content: "line with dot before hundredths".to_string(),
+                        word_times: None
+                    },
+                    LrcLine {
+                        time: Duration::from_millis(4730),
+                        content: "line with colon before hundredths".to_string(),
+                        word_times: None
+                    },
+                    LrcLine {
+                        time: Duration::from_millis(11240),
+                        content: String::new(),
+                        word_times: None
+                    },
+                    LrcLine {
+                        time: Duration::from_millis(676_910),
+                        content: "line with long time".to_string(),
+                        word_times: None
+                    },
+                ],
+            }
+        );
     }
 
     #[test]
@@ -530,17 +546,28 @@ mod tests {
 
         let result: Lrc = input.parse().unwrap();
 
-        assert_eq!(result, Lrc {
-            title: None,
-            artist: None,
-            album: None,
-            author: None,
-            length: None,
-            lines: vec![
-                LrcLine { time: Duration::from_millis(860), content: "line1".to_string() , word_times: None},
-                LrcLine { time: Duration::from_millis(3730), content: "line2".to_string() , word_times: None},
-            ],
-        });
+        assert_eq!(
+            result,
+            Lrc {
+                title: None,
+                artist: None,
+                album: None,
+                author: None,
+                length: None,
+                lines: vec![
+                    LrcLine {
+                        time: Duration::from_millis(860),
+                        content: "line1".to_string(),
+                        word_times: None
+                    },
+                    LrcLine {
+                        time: Duration::from_millis(3730),
+                        content: "line2".to_string(),
+                        word_times: None
+                    },
+                ],
+            }
+        );
     }
 
     #[test]
@@ -554,17 +581,28 @@ mod tests {
 
         let result: Lrc = input.parse().unwrap();
 
-        assert_eq!(result, Lrc {
-            title: None,
-            artist: None,
-            album: None,
-            author: None,
-            length: None,
-            lines: vec![
-                LrcLine { time: Duration::from_millis(2860), content: "line1".to_string() , word_times: None},
-                LrcLine { time: Duration::from_millis(5730), content: "line2".to_string() , word_times: None},
-            ],
-        });
+        assert_eq!(
+            result,
+            Lrc {
+                title: None,
+                artist: None,
+                album: None,
+                author: None,
+                length: None,
+                lines: vec![
+                    LrcLine {
+                        time: Duration::from_millis(2860),
+                        content: "line1".to_string(),
+                        word_times: None
+                    },
+                    LrcLine {
+                        time: Duration::from_millis(5730),
+                        content: "line2".to_string(),
+                        word_times: None
+                    },
+                ],
+            }
+        );
     }
 
     #[test]
@@ -577,20 +615,43 @@ mod tests {
 
         let result: Lrc = input.parse().unwrap();
 
-        assert_eq!(result, Lrc {
-            title: None,
-            artist: None,
-            album: None,
-            author: None,
-            length: None,
-            lines: vec![
-                LrcLine { time: Duration::from_millis(1860), content: "line1".to_string() , word_times: None},
-                LrcLine { time: Duration::from_millis(4730), content: "line2".to_string() , word_times: None},
-                LrcLine { time: Duration::from_millis(5730), content: "line2".to_string() , word_times: None},
-                LrcLine { time: Duration::from_millis(6730), content: "line2".to_string() , word_times: None},
-                LrcLine { time: Duration::from_millis(7860), content: "line3".to_string() , word_times: None},
-            ],
-        });
+        assert_eq!(
+            result,
+            Lrc {
+                title: None,
+                artist: None,
+                album: None,
+                author: None,
+                length: None,
+                lines: vec![
+                    LrcLine {
+                        time: Duration::from_millis(1860),
+                        content: "line1".to_string(),
+                        word_times: None
+                    },
+                    LrcLine {
+                        time: Duration::from_millis(4730),
+                        content: "line2".to_string(),
+                        word_times: None
+                    },
+                    LrcLine {
+                        time: Duration::from_millis(5730),
+                        content: "line2".to_string(),
+                        word_times: None
+                    },
+                    LrcLine {
+                        time: Duration::from_millis(6730),
+                        content: "line2".to_string(),
+                        word_times: None
+                    },
+                    LrcLine {
+                        time: Duration::from_millis(7860),
+                        content: "line3".to_string(),
+                        word_times: None
+                    },
+                ],
+            }
+        );
     }
 
     #[test]
@@ -604,19 +665,38 @@ mod tests {
 
         let result: Lrc = input.parse().unwrap();
 
-        assert_eq!(result, Lrc {
-            title: None,
-            artist: None,
-            album: None,
-            author: None,
-            length: None,
-            lines: vec![
-                LrcLine { time: Duration::from_millis(800), content: "line1".to_string() , word_times: None},
-                LrcLine { time: Duration::from_millis(10730), content: "line2".to_string() , word_times: None},
-                LrcLine { time: Duration::from_millis(20563), content: "line3".to_string() , word_times: None},
-                LrcLine { time: Duration::from_millis(30285), content: "line4".to_string() , word_times: None},
-            ]
-        });
+        assert_eq!(
+            result,
+            Lrc {
+                title: None,
+                artist: None,
+                album: None,
+                author: None,
+                length: None,
+                lines: vec![
+                    LrcLine {
+                        time: Duration::from_millis(800),
+                        content: "line1".to_string(),
+                        word_times: None
+                    },
+                    LrcLine {
+                        time: Duration::from_millis(10730),
+                        content: "line2".to_string(),
+                        word_times: None
+                    },
+                    LrcLine {
+                        time: Duration::from_millis(20563),
+                        content: "line3".to_string(),
+                        word_times: None
+                    },
+                    LrcLine {
+                        time: Duration::from_millis(30285),
+                        content: "line4".to_string(),
+                        word_times: None
+                    },
+                ]
+            }
+        );
     }
 
     #[test]
@@ -630,21 +710,33 @@ mod tests {
 
         let result: Lrc = input.parse().unwrap();
 
-        assert_eq!(result, Lrc {
-            title: Some("Song Name [Explicit]".to_string()),
-            artist: None,
-            album: None,
-            author: None,
-            length: None,
-            lines: vec![
-                LrcLine { time: Duration::from_millis(9000), content: String::new() , word_times: None},
-                LrcLine { time: Duration::from_millis(10000), content: "[Drum Solo]".to_string() , word_times: None},
-                LrcLine {
-                    time: Duration::from_millis(11000),
-                    content: "Some text [with brackets] in lyrics".to_string(),
-                word_times: None},
-            ]
-        });
+        assert_eq!(
+            result,
+            Lrc {
+                title: Some("Song Name [Explicit]".to_string()),
+                artist: None,
+                album: None,
+                author: None,
+                length: None,
+                lines: vec![
+                    LrcLine {
+                        time: Duration::from_millis(9000),
+                        content: String::new(),
+                        word_times: None
+                    },
+                    LrcLine {
+                        time: Duration::from_millis(10000),
+                        content: "[Drum Solo]".to_string(),
+                        word_times: None
+                    },
+                    LrcLine {
+                        time: Duration::from_millis(11000),
+                        content: "Some text [with brackets] in lyrics".to_string(),
+                        word_times: None
+                    },
+                ]
+            }
+        );
     }
 
     #[test]

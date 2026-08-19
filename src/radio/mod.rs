@@ -91,8 +91,7 @@ pub fn radio_cache_path(cache_dir: Option<&Path>) -> PathBuf {
             crate::config::utils::tilde_expand("~/.cache/s2udio").into_owned().into()
         })
         .join("radio-directory.json");
-    let legacy: PathBuf =
-        crate::config::utils::tilde_expand("~/.cache/rmpc").into_owned().into();
+    let legacy: PathBuf = crate::config::utils::tilde_expand("~/.cache/rmpc").into_owned().into();
     if new.exists() {
         new
     } else if legacy.join("radio-directory.json").exists() {
@@ -139,16 +138,12 @@ fn station_from_value(value: &serde_json::Value) -> Option<DirectoryStation> {
     }
     fn list_field(value: &serde_json::Value, key: &str) -> Vec<String> {
         match value.get(key) {
-            Some(serde_json::Value::Array(items)) => items
-                .iter()
-                .filter_map(|item| item.as_str().map(str::to_owned))
-                .collect(),
-            Some(serde_json::Value::String(s)) => s
-                .split(',')
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(str::to_owned)
-                .collect(),
+            Some(serde_json::Value::Array(items)) => {
+                items.iter().filter_map(|item| item.as_str().map(str::to_owned)).collect()
+            }
+            Some(serde_json::Value::String(s)) => {
+                s.split(',').map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned).collect()
+            }
             _ => Vec::new(),
         }
     }
@@ -253,9 +248,7 @@ pub fn short_country_name(name: &str) -> String {
         "the united states of america" => "United States".to_owned(),
         "islamic republic of iran" => "Iran".to_owned(),
         "the russian federation" => "Russia".to_owned(),
-        "the united kingdom of great britain and northern ireland" => {
-            "United Kingdom".to_owned()
-        }
+        "the united kingdom of great britain and northern ireland" => "United Kingdom".to_owned(),
         "syrian arab republic" => "Syria".to_owned(),
         "the czech republic" => "Czechia".to_owned(),
         "the republic of korea" | "republic of korea" => "South Korea".to_owned(),
@@ -336,9 +329,8 @@ pub fn fetch_radio_directory(
             let country_name = user_stations[0].country.clone();
             if let Some(code) = &country_code {
                 let user_key = format!("code:{code}");
-                countries.retain(|group| {
-                    group.top.first().is_none_or(|s| group_key(s) != user_key)
-                });
+                countries
+                    .retain(|group| group.top.first().is_none_or(|s| group_key(s) != user_key));
             }
             countries.insert(
                 0,
@@ -473,8 +465,10 @@ pub fn fetch_country_states(country_code: &str, country_name: &str) -> Result<Ve
     // right province (Canada) or dropped, so the tree only shows real
     // provinces.
     let mut counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
-    let mut spellings: std::collections::BTreeMap<String, std::collections::BTreeMap<String, usize>> =
-        std::collections::BTreeMap::new();
+    let mut spellings: std::collections::BTreeMap<
+        String,
+        std::collections::BTreeMap<String, usize>,
+    > = std::collections::BTreeMap::new();
     for station in stations {
         let state = station.state.as_deref().unwrap_or("");
         // The country name stored as a state is junk, not a province.
@@ -570,9 +564,7 @@ fn ca_city_province(city: &str) -> Option<&'static str> {
         "winnipeg" | "brandon" => "Manitoba",
         "halifax" | "sydney" | "truro" => "Nova Scotia",
         "saskatoon" | "regina" | "prince albert" => "Saskatchewan",
-        "st. john's" | "st john's" | "saint john" | "fredericton" | "moncton" => {
-            "New Brunswick"
-        }
+        "st. john's" | "st john's" | "saint john" | "fredericton" | "moncton" => "New Brunswick",
         "charlottetown" => "Prince Edward Island",
         "whitehorse" => "Yukon",
         "yellowknife" => "Northwest Territories",
@@ -612,10 +604,6 @@ fn fetch_stations(agent: &ureq::Agent, url: &str) -> Result<Vec<DirectoryStation
 mod tests {
     use super::*;
     use serde_json::json;
-
-
-
-
 
     #[test]
     fn station_from_value_uses_url_resolved() {

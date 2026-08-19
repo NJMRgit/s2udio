@@ -12,8 +12,7 @@ use super::{
 };
 use crate::{
     config::{
-        Config,
-        Size,
+        Config, Size,
         cli::{Command, RemoteCommandQuery},
         keys::Key,
         tabs::PaneType,
@@ -24,14 +23,8 @@ use crate::{
         keys::ActionEvent,
         lrc::LrcMetadata,
         ytdlp::{
-            DownloadId,
-            StreamDownloadSpec,
-            YtDlpDownloadError,
-            YtDlpDownloadResult,
-            YtDlpHost,
-            YtDlpItem,
-            YtDlpPlaylist,
-            YtDlpSearchItem,
+            DownloadId, StreamDownloadSpec, YtDlpDownloadError, YtDlpDownloadResult, YtDlpHost,
+            YtDlpItem, YtDlpPlaylist, YtDlpSearchItem,
         },
     },
     ui::{UiAppEvent, image::facade::EncodeData},

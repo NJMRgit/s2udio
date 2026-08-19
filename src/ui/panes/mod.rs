@@ -8,6 +8,7 @@ use album_art::AlbumArtPane;
 use albums::AlbumsPane;
 use anyhow::{Context, Result};
 use cava::CavaPane;
+use controls::ControlsPane;
 use directories::DirectoriesPane;
 use either::Either;
 use header::HeaderPane;
@@ -33,7 +34,6 @@ use tag_browser::TagBrowserPane;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 use volume::VolumePane;
-use controls::ControlsPane;
 
 #[cfg(debug_assertions)]
 use self::{frame_count::FrameCountPane, logs::LogsPane};
@@ -46,17 +46,10 @@ use crate::{
     config::{
         tabs::{Pane as ConfigPane, PaneType, SizedPaneOrSplit, SizedSubPane},
         theme::{
-            PercentOrLength,
-            SymbolsConfig,
-            TagResolutionStrategy,
+            PercentOrLength, SymbolsConfig, TagResolutionStrategy,
             properties::{
-                Property,
-                PropertyKind,
-                PropertyKindOrText,
-                SongProperty,
-                StatusProperty,
-                Transform,
-                WidgetProperty,
+                Property, PropertyKind, PropertyKindOrText, SongProperty, StatusProperty,
+                Transform, WidgetProperty,
             },
         },
     },
@@ -86,9 +79,9 @@ pub mod empty;
 #[cfg(debug_assertions)]
 pub mod frame_count;
 pub mod header;
+pub mod jellyfin;
 #[cfg(debug_assertions)]
 pub mod logs;
-pub mod jellyfin;
 pub mod lyrics;
 pub mod playlists;
 pub mod progress_bar;
@@ -237,10 +230,9 @@ impl PaneContainer {
                     pane.pane.clone(),
                     Box::new(VolumePane::new(kind.clone())) as Box<dyn BoxedPane>,
                 )),
-                PaneType::Controls => Some((
-                    pane.pane.clone(),
-                    Box::new(ControlsPane::new()) as Box<dyn BoxedPane>,
-                )),
+                PaneType::Controls => {
+                    Some((pane.pane.clone(), Box::new(ControlsPane::new()) as Box<dyn BoxedPane>))
+                }
                 _ => None,
             })
     }
@@ -533,15 +525,15 @@ pub(crate) mod browser {
                 }
                 if let Some(description) = &yt.description {
                     for (idx, line) in description.lines().take(15).enumerate() {
-                        let label =
-                            if idx == 0 { Span::styled("Description", key_style) } else { Span::raw(" ") };
+                        let label = if idx == 0 {
+                            Span::styled("Description", key_style)
+                        } else {
+                            Span::raw(" ")
+                        };
                         // Links inside the description are drawn blue (the
                         // info box's link style), matching the queue box.
-                        let mut row_spans = vec![
-                            start_of_line_spacer.clone(),
-                            label,
-                            separator.clone(),
-                        ];
+                        let mut row_spans =
+                            vec![start_of_line_spacer.clone(), label, separator.clone()];
                         let (spans, _) = crate::ui::panes::lyrics::linkify_line(
                             line,
                             ratatui::style::Style::default(),
@@ -1451,46 +1443,48 @@ impl SizedPaneOrSplit {
                     let constraints: Vec<Constraint> = if album_art_full_width {
                         vec![Constraint::Percentage(100)]
                     } else {
-                        visible.iter().map(|pane| {
-                            if let Some(min) = pane.collapse_below
-                                && split_size < min
-                            {
-                                return Constraint::Length(0);
-                            }
-                            let size = if pane.window_sizes.is_empty() {
-                                pane.size
-                            } else {
-                                Self::window_size_at(root_height, &pane.window_sizes)
-                            };
-                            match (pane.shrink_below, size) {
-                                (Some(min), PercentOrLength::Length(s)) if split_size < min => {
-                                    Constraint::Length(s / 2)
+                        visible
+                            .iter()
+                            .map(|pane| {
+                                if let Some(min) = pane.collapse_below
+                                    && split_size < min
+                                {
+                                    return Constraint::Length(0);
                                 }
-                                _ => {
-                                    let constraint = size.into_constraint(parent_other_size);
-                                    // Responsive sub-panes (`window_sizes`)
-                                    // hide entirely — no box, no borders, the
-                                    // space freed — when they can no longer
-                                    // fit their content minimum (4 rows plus
-                                    // the borders around them). The queue
-                                    // tab's art+lyrics split below ~6 rows
-                                    // would otherwise render as an empty
-                                    // bordered shell (its content already
-                                    // hides below its own 4-row minimum).
-                                    if !pane.window_sizes.is_empty()
-                                        && *direction == ratatui::layout::Direction::Vertical
-                                        && let Some(height) =
-                                            Self::constraint_height(&constraint, split_size)
-                                        && height < Self::content_min_height(&pane.pane)
-                                    {
-                                        Constraint::Length(0)
-                                    } else {
-                                        constraint
+                                let size = if pane.window_sizes.is_empty() {
+                                    pane.size
+                                } else {
+                                    Self::window_size_at(root_height, &pane.window_sizes)
+                                };
+                                match (pane.shrink_below, size) {
+                                    (Some(min), PercentOrLength::Length(s)) if split_size < min => {
+                                        Constraint::Length(s / 2)
+                                    }
+                                    _ => {
+                                        let constraint = size.into_constraint(parent_other_size);
+                                        // Responsive sub-panes (`window_sizes`)
+                                        // hide entirely — no box, no borders, the
+                                        // space freed — when they can no longer
+                                        // fit their content minimum (4 rows plus
+                                        // the borders around them). The queue
+                                        // tab's art+lyrics split below ~6 rows
+                                        // would otherwise render as an empty
+                                        // bordered shell (its content already
+                                        // hides below its own 4-row minimum).
+                                        if !pane.window_sizes.is_empty()
+                                            && *direction == ratatui::layout::Direction::Vertical
+                                            && let Some(height) =
+                                                Self::constraint_height(&constraint, split_size)
+                                            && height < Self::content_min_height(&pane.pane)
+                                        {
+                                            Constraint::Length(0)
+                                        } else {
+                                            constraint
+                                        }
                                     }
                                 }
-                            }
-                        })
-                        .collect()
+                            })
+                            .collect()
                     };
                     let border_style = border_style.unwrap_or_else(|| ctx.config.as_border_style());
                     let mut block = Block::default()
@@ -1542,9 +1536,7 @@ impl SizedPaneOrSplit {
                     let areas = Layout::new(*direction, constraints).split(split_rect);
                     split_callback(block, area, *background_color, &mut custom_data)?;
                     stack.extend(
-                        areas.iter().enumerate().map(|(idx, area)| {
-                            (&visible[idx].pane, *area)
-                        }),
+                        areas.iter().enumerate().map(|(idx, area)| (&visible[idx].pane, *area)),
                     );
                 }
             }
@@ -1572,9 +1564,9 @@ impl SizedPaneOrSplit {
     fn constraint_height(constraint: &Constraint, total: u16) -> Option<u16> {
         match constraint {
             Constraint::Length(l) => Some(*l),
-            Constraint::Percentage(p) => Some(
-                u16::try_from(u32::from(total) * u32::from(*p) / 100).unwrap_or(u16::MAX),
-            ),
+            Constraint::Percentage(p) => {
+                Some(u16::try_from(u32::from(total) * u32::from(*p) / 100).unwrap_or(u16::MAX))
+            }
             Constraint::Ratio(a, b) => {
                 Some(u16::try_from(u32::from(total) * *a / *b).unwrap_or(u16::MAX))
             }
@@ -1594,11 +1586,7 @@ impl SizedPaneOrSplit {
             SizedPaneOrSplit::Pane(p) => MIN_PANE_CONTENT_HEIGHT + border_rows(p.borders),
             SizedPaneOrSplit::Split { borders, panes, .. } => {
                 border_rows(*borders)
-                    + panes
-                        .iter()
-                        .map(|sub| Self::content_min_height(&sub.pane))
-                        .max()
-                        .unwrap_or(0)
+                    + panes.iter().map(|sub| Self::content_min_height(&sub.pane)).max().unwrap_or(0)
             }
         }
     }
@@ -1615,14 +1603,9 @@ mod format_tests {
 
     use crate::{
         config::theme::{
-            StyleFile,
-            TagResolutionStrategy,
+            StyleFile, TagResolutionStrategy,
             properties::{
-                Property,
-                PropertyKind,
-                PropertyKindOrText,
-                SongProperty,
-                StatusProperty,
+                Property, PropertyKind, PropertyKindOrText, SongProperty, StatusProperty,
                 StatusPropertyFile,
             },
         },
@@ -1683,12 +1666,16 @@ mod format_tests {
             let format = Property::<PropertyKind> {
                 kind: PropertyKindOrText::Transform(Transform::Replace {
                     content: Box::new(Property { kind: input_props, style: None, default: None }),
-                    replacements: [(input, Property {
-                        kind: replace_props,
-                        style: None,
-                        default: replace_default
-                            .map(|d| Box::new(Property { kind: d, style: None, default: None })),
-                    })]
+                    replacements: [(
+                        input,
+                        Property {
+                            kind: replace_props,
+                            style: None,
+                            default: replace_default.map(|d| {
+                                Box::new(Property { kind: d, style: None, default: None })
+                            }),
+                        },
+                    )]
                     .into_iter()
                     .collect(),
                 }),
@@ -1758,12 +1745,16 @@ mod format_tests {
             let format = Property::<SongProperty> {
                 kind: PropertyKindOrText::Transform(Transform::Replace {
                     content: Box::new(Property { kind: input_props, style: None, default: None }),
-                    replacements: [(input, Property {
-                        kind: replace_props,
-                        style: None,
-                        default: replace_default
-                            .map(|d| Box::new(Property { kind: d, style: None, default: None })),
-                    })]
+                    replacements: [(
+                        input,
+                        Property {
+                            kind: replace_props,
+                            style: None,
+                            default: replace_default.map(|d| {
+                                Box::new(Property { kind: d, style: None, default: None })
+                            }),
+                        },
+                    )]
                     .into_iter()
                     .collect(),
                 }),
@@ -1826,12 +1817,16 @@ mod format_tests {
             let format = Property::<SongProperty> {
                 kind: PropertyKindOrText::Transform(Transform::Replace {
                     content: Box::new(Property { kind: input_props, style: None, default: None }),
-                    replacements: [(input, Property {
-                        kind: replace_props,
-                        style: None,
-                        default: replace_default
-                            .map(|d| Box::new(Property { kind: d, style: None, default: None })),
-                    })]
+                    replacements: [(
+                        input,
+                        Property {
+                            kind: replace_props,
+                            style: None,
+                            default: replace_default.map(|d| {
+                                Box::new(Property { kind: d, style: None, default: None })
+                            }),
+                        },
+                    )]
                     .into_iter()
                     .collect(),
                 }),
@@ -2275,24 +2270,35 @@ mod format_tests {
             };
             ctx.queue = vec![
                 current_song.clone(),
-                Song { id: 1, file: "song1.mp3".to_owned(), duration: Some(Duration::from_secs(123)), ..Default::default() },
+                Song {
+                    id: 1,
+                    file: "song1.mp3".to_owned(),
+                    duration: Some(Duration::from_secs(123)),
+                    ..Default::default()
+                },
             ];
-            ctx.status = Status {
-                state: State::Play,
-                song: Some(0),
-                songid: Some(0),
-                ..Default::default()
-            };
+            ctx.status =
+                Status { state: State::Play, song: Some(0), songid: Some(0), ..Default::default() };
             ctx.cached_queue_time_total = Duration::from_secs(246);
             ctx.chapters.borrow_mut().insert(
                 "current.mp3".to_owned(),
                 vec![
-                    crate::shared::chapters::Chapter { title: "One".into(), start_secs: 0.0, end_secs: 60.0 },
-                    crate::shared::chapters::Chapter { title: "Two".into(), start_secs: 60.0, end_secs: 120.0 },
+                    crate::shared::chapters::Chapter {
+                        title: "One".into(),
+                        start_secs: 0.0,
+                        end_secs: 60.0,
+                    },
+                    crate::shared::chapters::Chapter {
+                        title: "Two".into(),
+                        start_secs: 60.0,
+                        end_secs: 120.0,
+                    },
                 ],
             );
             let format = Property::<PropertyKind> {
-                kind: PropertyKindOrText::Property(PropertyKind::Status(StatusProperty::QueueBoxTitle())),
+                kind: PropertyKindOrText::Property(PropertyKind::Status(
+                    StatusProperty::QueueBoxTitle(),
+                )),
                 style: None,
                 default: None,
             };
@@ -3030,9 +3036,8 @@ mod layout_visibility_tests {
         for height in [38u16, 36, 34] {
             let panes = collect_panes_at(&layout, height, &ctx);
             assert!(
-                panes.iter().all(
-                    |(t, area)| !matches!(t, PaneType::Lyrics | PaneType::AlbumArt) || area.height == 0
-                ),
+                panes.iter().all(|(t, area)| !matches!(t, PaneType::Lyrics | PaneType::AlbumArt)
+                    || area.height == 0),
                 "art/lyrics must collapse at {height} rows"
             );
             let queue = panes.iter().find(|(t, _)| matches!(t, PaneType::Queue)).unwrap();

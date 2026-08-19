@@ -9,8 +9,7 @@ use anyhow::{Context, Result};
 use crossbeam::channel::Sender;
 
 use crate::{
-    AppEvent,
-    WorkRequest,
+    AppEvent, WorkRequest,
     config::Config,
     shared::{
         ipc::{SocketCommand, SocketCommandExecute, get_socket_path},

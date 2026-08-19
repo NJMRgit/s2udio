@@ -11,7 +11,7 @@ use super::Pane;
 use crate::{
     ctx::Ctx,
     mpd::{
-        commands::{status::OnOffOneshot, State},
+        commands::{State, status::OnOffOneshot},
         mpd_client::{MpdClient, ValueChange},
     },
     shared::{
@@ -71,7 +71,6 @@ const MODE_SLOT: u16 = 9;
 
 /// Width of the " 100%" text right of the volume slider.
 const VOLUME_PCT_W: u16 = 5;
-
 
 /// Mouse scroll step for the volume slider (finer than the keybind step).
 const VOLUME_SCROLL_STEP: u32 = 2;
@@ -153,10 +152,18 @@ impl ControlsPane {
     fn mode_state(mode: Mode, ctx: &Ctx) -> OnOffOneshot {
         match mode {
             Mode::Repeat => {
-                if ctx.status.repeat { OnOffOneshot::On } else { OnOffOneshot::Off }
+                if ctx.status.repeat {
+                    OnOffOneshot::On
+                } else {
+                    OnOffOneshot::Off
+                }
             }
             Mode::Random => {
-                if ctx.status.random { OnOffOneshot::On } else { OnOffOneshot::Off }
+                if ctx.status.random {
+                    OnOffOneshot::On
+                } else {
+                    OnOffOneshot::Off
+                }
             }
             Mode::Single => ctx.status.single,
             Mode::Consume => ctx.status.consume,
@@ -332,14 +339,7 @@ impl ControlsPane {
     /// the chosen preference: update the runtime config, persist it to
     /// state.ron and re-select the matching track on the live mpv instance.
     fn open_language_menu(ctx: &Ctx, title: &str, audio: bool) {
-<<<<<<< HEAD
-        modal!(
-            ctx,
-            crate::ui::modals::language::LanguageModal::new(ctx, title, audio)
-        );
-=======
         modal!(ctx, crate::ui::modals::language::LanguageModal::new(title, audio));
->>>>>>> bd3a7a7 (refactor: extract main() into handler functions + fix medium priority issues)
     }
 
     /// The Download button: open the save-as menu for the ytdlp stream
@@ -466,9 +466,8 @@ impl ControlsPane {
             (f64::from(slider_w - 1) * f64::from(volume.min(100)) / 100.0).round() as u16;
 
         // Hovering the slider lightens its colors (clickable control).
-        let hovered = ctx
-            .mouse_pos()
-            .is_some_and(|p| p.y == y && p.x >= start && p.x < start + slider_w);
+        let hovered =
+            ctx.mouse_pos().is_some_and(|p| p.y == y && p.x >= start && p.x < start + slider_w);
         let (filled, track) = if hovered {
             (
                 crate::config::hover_style(theme.volume_filled),
@@ -669,25 +668,24 @@ impl Pane for ControlsPane {
         // UI source — the mpv buttons (Download / Audio / Subs).
         let mouse = ctx.mouse_pos();
         let show_modes = area.width >= 42;
-        let (mode_start, mpv_buttons) =
-            if crate::core::mpv::mpv_is_ui_source(ctx) {
-                let buttons = Self::mpv_button_layout(area, ctx);
-                // `mpv_button_layout` pushes rightmost-first ([Sub],
-                // [Audio], ⤓), so the cluster's left edge is the minimum x
-                // (⤓ when a ytdlp stream plays, else [Audio]). Taking the
-                // first entry instead — the rightmost [Sub] — would let the
-                // title region run over the buttons.
-                let left = buttons
-                    .iter()
-                    .map(|(_, _, x, _)| *x)
-                    .min()
-                    .unwrap_or_else(|| area.right().saturating_sub(1));
-                (left, Some(buttons))
-            } else if show_modes {
-                (Self::mode_start_x(area), None)
-            } else {
-                (area.right(), None)
-            };
+        let (mode_start, mpv_buttons) = if crate::core::mpv::mpv_is_ui_source(ctx) {
+            let buttons = Self::mpv_button_layout(area, ctx);
+            // `mpv_button_layout` pushes rightmost-first ([Sub],
+            // [Audio], ⤓), so the cluster's left edge is the minimum x
+            // (⤓ when a ytdlp stream plays, else [Audio]). Taking the
+            // first entry instead — the rightmost [Sub] — would let the
+            // title region run over the buttons.
+            let left = buttons
+                .iter()
+                .map(|(_, _, x, _)| *x)
+                .min()
+                .unwrap_or_else(|| area.right().saturating_sub(1));
+            (left, Some(buttons))
+        } else if show_modes {
+            (Self::mode_start_x(area), None)
+        } else {
+            (area.right(), None)
+        };
         if let Some(buttons) = &mpv_buttons {
             for (_, label, x, w) in buttons {
                 let mut style = theme.active;
@@ -1061,11 +1059,7 @@ mod tests {
             added: None,
         };
         ctx.queue = vec![song];
-        ctx.status = Status {
-            state: State::Play,
-            songid: Some(7),
-            ..Default::default()
-        };
+        ctx.status = Status { state: State::Play, songid: Some(7), ..Default::default() };
         let line = ControlsPane::artist_title_line(&ctx);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(text, "The Sound of Grey");
@@ -1083,17 +1077,12 @@ mod tests {
             added: None,
         };
         ctx.queue = vec![song];
-        ctx.status = Status {
-            state: State::Play,
-            songid: Some(8),
-            ..Default::default()
-        };
+        ctx.status = Status { state: State::Play, songid: Some(8), ..Default::default() };
         let line = ControlsPane::artist_title_line(&ctx);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(text, "Neemias Teixeira");
         assert!(!text.contains("No Playback"));
     }
-
 
     #[rstest::rstest]
     fn artist_title_marquees_when_truncated(ctx: Ctx) {
@@ -1103,11 +1092,7 @@ mod tests {
         // screen.
         ctx.status.elapsed = Duration::ZERO;
         let lines = controls_lines(&ctx, 24);
-        assert!(
-            lines[0].contains("Delta Heavy"),
-            "row: {:?}",
-            lines[0]
-        );
+        assert!(lines[0].contains("Delta Heavy"), "row: {:?}", lines[0]);
     }
 
     /// The mpv video is the UI source while it plays: the now-playing lines,
@@ -1210,7 +1195,8 @@ mod tests {
                 url: "https://rr4.example/audio.m4a".to_owned(),
                 original_url: "https://www.youtube.com/watch?v=abc".to_owned(),
                 title: "Video".to_owned(),
-                channel: Some("Channel".to_owned()),            ..Default::default()
+                channel: Some("Channel".to_owned()),
+                ..Default::default()
             },
         );
         // the mpv playlist entry is the original link
@@ -1312,11 +1298,7 @@ mod tests {
         let d = row.find("⤓").expect("the download button must stay visible");
         // Nothing from the title may render at or right of the button: that
         // stretch is exactly the button cluster.
-        assert_eq!(
-            row[d..].trim_end(),
-            "⤓ [Audio] [Sub]",
-            "title overwrote the buttons: {row:?}"
-        );
+        assert_eq!(row[d..].trim_end(), "⤓ [Audio] [Sub]", "title overwrote the buttons: {row:?}");
         // And the channel still leads the row.
         assert!(row.starts_with("GOATED"), "{row:?}");
     }

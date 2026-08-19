@@ -18,26 +18,15 @@ use shared::{
 
 use crate::{
     config::{
-<<<<<<< HEAD
-        Config,
-        ConfigFile,
-        cli::{Args, Command},
-=======
         Config, ConfigFile,
         cli::{Args, Command, RemoteCmd},
->>>>>>> bd3a7a7 (refactor: extract main() into handler functions + fix medium priority issues)
         cli_config::CliConfig,
     },
     mpd::{client::Client, mpd_client::MpdClient, proto_client::SocketClient},
     shared::{
         config_read::{
-            ConfigReadError,
-            ConfigResult,
-            find_first_existing_path,
-            read_cli_config,
-            read_config_and_theme,
-            read_config_file,
-            read_config_for_debuginfo,
+            ConfigReadError, ConfigResult, find_first_existing_path, read_cli_config,
+            read_config_and_theme, read_config_file, read_config_for_debuginfo,
         },
         dependencies::{DEPENDENCIES, FFMPEG, FFPROBE, PYTHON3, PYTHON3MUTAGEN, UEBERZUGPP, YTDLP},
         env::ENV,

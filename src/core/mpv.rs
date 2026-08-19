@@ -95,8 +95,7 @@ pub struct MpvSession {
 pub const MPV_SOCKET: &str = "/tmp/mpvsocket";
 
 /// Whether s2udio launched mpv and it is still running.
-pub static MPV_RUNNING: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+pub static MPV_RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Pick up a live mpv session left behind by a previous s2udio instance
 /// (mpv survives the app's exit; the standalone `s2u-mpv-tracker` daemon
@@ -118,8 +117,7 @@ pub fn detect_mpv_session(ctx: &mut Ctx) -> bool {
 fn detect_mpv_session_at(ctx: &mut Ctx, socket: std::path::PathBuf) -> bool {
     use crate::ui::modals::paste::mpv_mpris_state_path;
 
-    let Some((position, paused, duration, volume, playlist_pos, _)) =
-        read_mpv_state(&socket)
+    let Some((position, paused, duration, volume, playlist_pos, _)) = read_mpv_state(&socket)
     else {
         return false;
     };
@@ -145,8 +143,7 @@ fn detect_mpv_session_at(ctx: &mut Ctx, socket: std::path::PathBuf) -> bool {
             && let Ok(state) = serde_json::from_str::<serde_json::Value>(&content)
         {
             title = state.get("title").and_then(|v| v.as_str()).unwrap_or(&title).to_owned();
-            artist =
-                state.get("artist").and_then(|v| v.as_str()).unwrap_or_default().to_owned();
+            artist = state.get("artist").and_then(|v| v.as_str()).unwrap_or_default().to_owned();
             item_id = state
                 .get("item_id")
                 .and_then(|v| v.as_str())
@@ -174,8 +171,7 @@ fn detect_mpv_session_at(ctx: &mut Ctx, socket: std::path::PathBuf) -> bool {
                     })
                     .collect();
             }
-            restored_pos =
-                state.get("playlist_pos").and_then(|v| v.as_u64()).map(|v| v as usize);
+            restored_pos = state.get("playlist_pos").and_then(|v| v.as_u64()).map(|v| v as usize);
         }
     }
 
@@ -238,8 +234,7 @@ fn mpv_socket_in(fixed: &Path, sockets_dir: &Path) -> Option<PathBuf> {
     if is_live_socket(fixed) {
         return Some(fixed.to_path_buf());
     }
-    newest_mpv_sockets_socket(sockets_dir)
-        .or_else(|| fixed.exists().then(|| fixed.to_path_buf()))
+    newest_mpv_sockets_socket(sockets_dir).or_else(|| fixed.exists().then(|| fixed.to_path_buf()))
 }
 
 /// A Unix socket that accepts connections (mpv's IPC is live when
@@ -280,21 +275,32 @@ fn connect_socket(
 ) -> std::io::Result<std::os::unix::net::UnixStream> {
     use std::{ffi::CString, os::fd::FromRawFd};
 
-    let cpath = CString::new(path.as_os_str().as_encoded_bytes())
-        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "socket path has a NUL byte"))?;
+    let cpath = CString::new(path.as_os_str().as_encoded_bytes()).map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "socket path has a NUL byte")
+    })?;
     let bytes = cpath.as_bytes();
-    if bytes.len() >= std::mem::size_of_val(&unsafe { std::mem::zeroed::<libc::sockaddr_un>() }.sun_path) {
+    if bytes.len()
+        >= std::mem::size_of_val(&unsafe { std::mem::zeroed::<libc::sockaddr_un>() }.sun_path)
+    {
         return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "socket path too long"));
     }
 
     let rc = unsafe {
-        let fd = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC, 0);
+        let fd = libc::socket(
+            libc::AF_UNIX,
+            libc::SOCK_STREAM | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC,
+            0,
+        );
         if fd < 0 {
             return Err(std::io::Error::last_os_error());
         }
         let mut addr: libc::sockaddr_un = std::mem::zeroed();
         addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
-        std::ptr::copy_nonoverlapping(bytes.as_ptr(), addr.sun_path.as_mut_ptr() as *mut u8, bytes.len());
+        std::ptr::copy_nonoverlapping(
+            bytes.as_ptr(),
+            addr.sun_path.as_mut_ptr() as *mut u8,
+            bytes.len(),
+        );
         let connect_rc = libc::connect(
             fd,
             &addr as *const libc::sockaddr_un as *const libc::sockaddr,
@@ -326,7 +332,8 @@ fn connect_socket(
         // EINPROGRESS only: wait for the connection to complete (or fail)
         // up to `timeout`.
         let mut pfd = libc::pollfd { fd, events: libc::POLLOUT, revents: 0 };
-        let polled = libc::poll(&mut pfd, 1, timeout.as_millis().min(i32::MAX as u128) as libc::c_int);
+        let polled =
+            libc::poll(&mut pfd, 1, timeout.as_millis().min(i32::MAX as u128) as libc::c_int);
         if polled <= 0 {
             libc::close(fd);
             return Err(std::io::Error::new(
@@ -398,12 +405,18 @@ pub fn read_mpv_state(
     socket: &Path,
 ) -> Option<(f64, bool, f64, Option<u8>, Option<usize>, Option<usize>)> {
     let command = concat!(
-        r#"{"command":["get_property","time-pos"]}"#, "\n",
-        r#"{"command":["get_property","pause"]}"#, "\n",
-        r#"{"command":["get_property","duration"]}"#, "\n",
-        r#"{"command":["get_property","volume"]}"#, "\n",
-        r#"{"command":["get_property","playlist-pos"]}"#, "\n",
-        r#"{"command":["get_property","playlist-count"]}"#, "\n",
+        r#"{"command":["get_property","time-pos"]}"#,
+        "\n",
+        r#"{"command":["get_property","pause"]}"#,
+        "\n",
+        r#"{"command":["get_property","duration"]}"#,
+        "\n",
+        r#"{"command":["get_property","volume"]}"#,
+        "\n",
+        r#"{"command":["get_property","playlist-pos"]}"#,
+        "\n",
+        r#"{"command":["get_property","playlist-count"]}"#,
+        "\n",
     );
     // mpv unreachable (connection refused / socket gone): None, so callers
     // can tell a dead session apart from a live one with no data yet.
@@ -478,8 +491,10 @@ pub fn read_mpv_state(
 /// for a resolved stream — and mpv's `title` is the media title.
 pub fn read_mpv_playlist(socket: &Path) -> Vec<MpvPlaylistEntry> {
     let command = concat!(
-        r#"{"command":["get_property","playlist"]}"#, "\n",
-        r#"{"command":["get_property","path"]}"#, "\n",
+        r#"{"command":["get_property","playlist"]}"#,
+        "\n",
+        r#"{"command":["get_property","path"]}"#,
+        "\n",
     );
     let lines = mpv_exchange(socket, command, 2).unwrap_or_default();
     let mut entries: Vec<MpvPlaylistEntry> = Vec::new();
@@ -519,8 +534,8 @@ pub fn read_mpv_playlist(socket: &Path) -> Vec<MpvPlaylistEntry> {
 /// the poll adopts it (a `loadfile … replace` splice can leave mpv's real
 /// playlist diverging from the recorded one).
 pub fn read_mpv_path(socket: &Path) -> Option<String> {
-    let lines = mpv_exchange(socket, r#"{"command":["get_property","path"]}"#, 1)
-        .unwrap_or_default();
+    let lines =
+        mpv_exchange(socket, r#"{"command":["get_property","path"]}"#, 1).unwrap_or_default();
     lines.first().and_then(|line| {
         let value: serde_json::Value = serde_json::from_str(line).ok()?;
         (value.get("error").and_then(|e| e.as_str()) == Some("success"))
@@ -552,8 +567,7 @@ pub fn recorded_entry_for_mpv_pos(
     let entry = recorded.get(pos)?.clone();
     let entry_id = crate::jellyfin::item_id_from_url(&entry.url);
     if let Some(entry_id) = entry_id {
-        if let Some(path_id) =
-            mpv_path.and_then(|p| crate::jellyfin::item_id_from_url(p))
+        if let Some(path_id) = mpv_path.and_then(|p| crate::jellyfin::item_id_from_url(p))
             && path_id != entry_id
         {
             return None;
@@ -791,9 +805,10 @@ pub fn update_jellyfin_entry_title(ctx: &Ctx, item_id: &str, title: &str) {
     let mut changed = false;
     {
         let mut playlist = ctx.mpv.playlist.borrow_mut();
-        if let Some(entry) = playlist.iter_mut().find(|e| {
-            crate::jellyfin::item_id_from_url(&e.url).as_deref() == Some(item_id)
-        }) && entry.title != title
+        if let Some(entry) = playlist
+            .iter_mut()
+            .find(|e| crate::jellyfin::item_id_from_url(&e.url).as_deref() == Some(item_id))
+            && entry.title != title
         {
             entry.title = title.to_owned();
             changed = true;
@@ -801,9 +816,10 @@ pub fn update_jellyfin_entry_title(ctx: &Ctx, item_id: &str, title: &str) {
     }
     {
         let mut queue = ctx.video_playlist.borrow_mut();
-        if let Some(entry) = queue.iter_mut().find(|e| {
-            crate::jellyfin::item_id_from_url(&e.url).as_deref() == Some(item_id)
-        }) && entry.title != title
+        if let Some(entry) = queue
+            .iter_mut()
+            .find(|e| crate::jellyfin::item_id_from_url(&e.url).as_deref() == Some(item_id))
+            && entry.title != title
         {
             entry.title = title.to_owned();
             changed = true;
@@ -827,7 +843,8 @@ pub fn add_to_video_playlist(ctx: &Ctx, entries: Vec<MpvPlaylistEntry>, after_cu
         return;
     }
     {
-        let insert_at = after_current.then(|| video_playlist_current_idx(ctx)).flatten().map(|i| i + 1);
+        let insert_at =
+            after_current.then(|| video_playlist_current_idx(ctx)).flatten().map(|i| i + 1);
         let mut playlist = ctx.video_playlist.borrow_mut();
         match insert_at {
             Some(at) => {
@@ -896,10 +913,8 @@ pub(crate) unsafe fn detach_child(cmd: &mut std::process::Command) {
 /// sequence. The playlist is recorded on the session so the Queue tab's
 /// Video view can show it.
 pub fn run_mpv_many(ctx: &Ctx, urls: Vec<String>) {
-    let entries: Vec<MpvPlaylistEntry> = urls
-        .into_iter()
-        .map(|url| MpvPlaylistEntry::new(display_title(&url), url, None))
-        .collect();
+    let entries: Vec<MpvPlaylistEntry> =
+        urls.into_iter().map(|url| MpvPlaylistEntry::new(display_title(&url), url, None)).collect();
     run_mpv_playlist(ctx, entries, None);
 }
 
@@ -919,15 +934,11 @@ fn display_title(url: &str) -> String {
 /// Playing video through mpv pauses MPD playback while it runs (resuming it
 /// when mpv exits), and starting MPD playback pauses mpv (via its IPC
 /// socket) — the two players never run at the same time.
-pub fn run_mpv_playlist(
-    ctx: &Ctx,
-    entries: Vec<MpvPlaylistEntry>,
-    start_index: Option<usize>,
-) {
+pub fn run_mpv_playlist(ctx: &Ctx, entries: Vec<MpvPlaylistEntry>, start_index: Option<usize>) {
     use crate::{
+        MpdCommand,
         mpd::{commands::State, mpd_client::MpdClient},
         shared::events::{AppEvent, ClientRequest},
-        MpdCommand,
     };
 
     // Record the playlist for the Queue tab's Video view (set before the
@@ -1123,7 +1134,8 @@ pub fn mpv_apply_subtitles(socket: &Path, pref: &crate::config::mpv::MpvSubtitle
         }
         MpvSubtitleMode::SystemLanguage => {
             let slang = crate::config::mpv::os_language_code().unwrap_or_default();
-            let cmd = serde_json::json!({ "command": ["set_property", "slang", slang] }).to_string();
+            let cmd =
+                serde_json::json!({ "command": ["set_property", "slang", slang] }).to_string();
             let _ = mpv_exchange(socket, &cmd, 1);
             mpv_set_sub_visibility(socket, true);
             let cmd = serde_json::json!({ "command": ["set_property", "sub", "auto"] }).to_string();
@@ -1241,10 +1253,7 @@ mod tests {
         // bitmask whose bit 0 is SIGHUP.
         let status = std::fs::read_to_string(format!("/proc/{}/status", child.id()))
             .expect("child status readable");
-        let sigign = status
-            .lines()
-            .find_map(|l| l.strip_prefix("SigIgn:"))
-            .expect("SigIgn line");
+        let sigign = status.lines().find_map(|l| l.strip_prefix("SigIgn:")).expect("SigIgn line");
         let sigign = u64::from_str_radix(sigign.trim(), 16).expect("SigIgn hex");
         assert_eq!(sigign & 1, 1, "SIGHUP must be ignored: SigIgn={sigign:#x}");
         let _ = child.kill();
@@ -1400,7 +1409,7 @@ mod tests {
     fn reattach_recovers_the_playlist_from_mpv_when_the_state_file_has_none() {
         use std::io::{BufRead, BufReader};
 
-        use super::{detect_mpv_session_at};
+        use super::detect_mpv_session_at;
         let dir = std::env::temp_dir().join(format!("mpv-reattach-test-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let socket = dir.join("mpv.sock");
@@ -1463,17 +1472,11 @@ mod tests {
             .unwrap();
         }
 
-        assert!(
-            detect_mpv_session_at(&mut ctx, socket),
-            "a live mpv session must be detected"
-        );
+        assert!(detect_mpv_session_at(&mut ctx, socket), "a live mpv session must be detected");
         // The playlist is recovered from mpv itself, so the yt-info /
         // chapters / thumbnail lookups (keyed by the playing URL) work.
         assert_eq!(ctx.mpv.playlist.borrow().len(), 1, "playlist recovered");
-        assert_eq!(
-            ctx.mpv.playlist.borrow()[0].url,
-            "https://www.youtube.com/watch?v=Hc9qrvQ3QPg"
-        );
+        assert_eq!(ctx.mpv.playlist.borrow()[0].url, "https://www.youtube.com/watch?v=Hc9qrvQ3QPg");
         assert_eq!(ctx.mpv.title, "stale title", "fresh state file is trusted for the title");
         assert_eq!(ctx.mpv.playlist_pos.get(), Some(0));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1483,7 +1486,9 @@ mod tests {
     /// entry matched by URL, and the persistence file round-trip.
     #[test]
     fn video_playlist_add_append_current_and_persist() {
-        use crate::core::mpv::{MpvPlaylistEntry, add_to_video_playlist, video_playlist_current_idx};
+        use crate::core::mpv::{
+            MpvPlaylistEntry, add_to_video_playlist, video_playlist_current_idx,
+        };
         use crate::tests::fixtures::ctx;
 
         let (app_tx, _app_rx) = crossbeam::channel::unbounded();
@@ -1499,9 +1504,21 @@ mod tests {
         ctx.config = std::sync::Arc::new(config);
 
         *ctx.video_playlist.borrow_mut() = vec![
-            MpvPlaylistEntry::new("A", "http://jf/Videos/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/stream", None),
-            MpvPlaylistEntry::new("B", "http://jf/Videos/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/stream", None),
-            MpvPlaylistEntry::new("C", "http://jf/Videos/cccccccccccccccccccccccccccccccc/stream", None),
+            MpvPlaylistEntry::new(
+                "A",
+                "http://jf/Videos/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/stream",
+                None,
+            ),
+            MpvPlaylistEntry::new(
+                "B",
+                "http://jf/Videos/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/stream",
+                None,
+            ),
+            MpvPlaylistEntry::new(
+                "C",
+                "http://jf/Videos/cccccccccccccccccccccccccccccccc/stream",
+                None,
+            ),
         ];
         // The session plays B (matched by URL, not by position).
         ctx.mpv.active = true;
@@ -1516,12 +1533,20 @@ mod tests {
         // Add (after the current entry) and append.
         add_to_video_playlist(
             &ctx,
-            vec![MpvPlaylistEntry::new("D", "http://jf/Videos/dddddddddddddddddddddddddddddddd/stream", None)],
+            vec![MpvPlaylistEntry::new(
+                "D",
+                "http://jf/Videos/dddddddddddddddddddddddddddddddd/stream",
+                None,
+            )],
             true,
         );
         add_to_video_playlist(
             &ctx,
-            vec![MpvPlaylistEntry::new("E", "http://jf/Videos/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee/stream", None)],
+            vec![MpvPlaylistEntry::new(
+                "E",
+                "http://jf/Videos/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee/stream",
+                None,
+            )],
             false,
         );
         let titles: Vec<String> =
@@ -1646,20 +1671,13 @@ mod tests {
 
         // Out of range: nothing to adopt.
         let clicked_path = format!("http://jf/Videos/{clicked}/stream?static=true");
-        assert!(
-            recorded_entry_for_mpv_pos(&season, 5, Some(&clicked_path)).is_none()
-        );
+        assert!(recorded_entry_for_mpv_pos(&season, 5, Some(&clicked_path)).is_none());
 
         // A non-Jellyfin entry (YouTube etc.) carries no item id: the
         // positional behavior is preserved regardless of mpv's path.
-        let yt = vec![MpvPlaylistEntry::new(
-            "y",
-            "https://www.youtube.com/watch?v=abc",
-            None,
-        )];
+        let yt = vec![MpvPlaylistEntry::new("y", "https://www.youtube.com/watch?v=abc", None)];
         assert!(
-            recorded_entry_for_mpv_pos(&yt, 0, Some("https://rr4.example/stream.m3u8"))
-                .is_some()
+            recorded_entry_for_mpv_pos(&yt, 0, Some("https://rr4.example/stream.m3u8")).is_some()
         );
         assert!(recorded_entry_for_mpv_pos(&yt, 0, None).is_some());
     }
@@ -1675,7 +1693,9 @@ mod tests {
         let socket = dir.join("mpv.sock");
         fake_mpv(
             &socket,
-            vec![r#"{"error":"success","data":"http://jf/Videos/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/stream"}"#],
+            vec![
+                r#"{"error":"success","data":"http://jf/Videos/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/stream"}"#,
+            ],
         );
         assert_eq!(
             read_mpv_path(&socket).as_deref(),
@@ -1758,8 +1778,7 @@ mod tests {
         use std::io::{BufRead as _, Write as _};
 
         // One temp dir per scenario so listener lifetimes stay obvious.
-        let base =
-            std::env::temp_dir().join(format!("mpv-socket-test-{}", std::process::id()));
+        let base = std::env::temp_dir().join(format!("mpv-socket-test-{}", std::process::id()));
 
         // 1. No sockets at all -> None.
         let dir = base.join("none");
@@ -1808,7 +1827,10 @@ mod tests {
         std::fs::create_dir_all(dir.join("mpvSockets")).unwrap();
         let fixed = dir.join("mpvsocket");
         std::fs::write(&fixed, b"stale").unwrap();
-        assert_eq!(super::mpv_socket_in(&fixed, &dir.join("mpvSockets")).as_deref(), Some(fixed.as_path()));
+        assert_eq!(
+            super::mpv_socket_in(&fixed, &dir.join("mpvSockets")).as_deref(),
+            Some(fixed.as_path())
+        );
 
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -1851,16 +1873,14 @@ mod tests {
             fd
         };
         // Occupy the single backlog slot (keep it open until the end).
-        let _slot = std::os::unix::net::UnixStream::connect(&socket).expect("first connect is allowed");
+        let _slot =
+            std::os::unix::net::UnixStream::connect(&socket).expect("first connect is allowed");
 
         let start = Instant::now();
         let result = super::connect_socket(&socket, Duration::from_millis(200));
         let elapsed = start.elapsed();
         assert!(result.is_err(), "a stuck listener must not connect: {result:?}");
-        assert!(
-            elapsed < Duration::from_secs(5),
-            "connect must give up fast, took {elapsed:?}"
-        );
+        assert!(elapsed < Duration::from_secs(5), "connect must give up fast, took {elapsed:?}");
 
         drop(_slot);
         unsafe {
@@ -1868,5 +1888,4 @@ mod tests {
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
-
 }

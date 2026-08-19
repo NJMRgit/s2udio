@@ -130,10 +130,8 @@ impl Pane for LogsPane {
             && self.scrollbar_area.contains(event.into())
         {
             let content_len = self.scrolling_state.content_len().unwrap_or(0);
-            let viewport_len = self
-                .scrolling_state
-                .viewport_len()
-                .unwrap_or(self.scrollbar_area.height as usize);
+            let viewport_len =
+                self.scrolling_state.viewport_len().unwrap_or(self.scrollbar_area.height as usize);
             // The rendered scrollbar's content_length is max_offset + 1, so
             // the geometry (thumb size / travel) matches the widget.
             let content_len = content_len.saturating_sub(viewport_len).saturating_add(1).max(1);

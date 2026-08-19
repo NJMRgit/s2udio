@@ -102,7 +102,11 @@ impl ListSection {
 
     /// A value-picker row (the old `SelectSection` shape): the section's
     /// `action` callback receives `value` when this row is confirmed.
-    pub fn add_select_item(&mut self, label: impl Into<String>, value: impl Into<String>) -> &mut Self {
+    pub fn add_select_item(
+        &mut self,
+        label: impl Into<String>,
+        value: impl Into<String>,
+    ) -> &mut Self {
         self.items.push(MenuItem {
             label: label.into(),
             value: Some(value.into()),

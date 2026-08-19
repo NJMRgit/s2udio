@@ -11,19 +11,14 @@ use strum::IntoDiscriminant;
 
 use super::exit_code::ExitCode;
 use crate::{
-    AppEvent,
-    WorkRequest,
+    AppEvent, WorkRequest,
     config::{
         Config,
         cli::{RemoteCmd, RemoteCmdDiscriminants},
     },
     shared::ipc::commands::{
-        index_lrc::IndexLrcCommand,
-        keybind::KeybindCommand,
-        set::SetIpcCommand,
-        status_message::StatusMessageCommand,
-        switch_tab::SwitchTabCommand,
-        tmux::TmuxHookCommand,
+        index_lrc::IndexLrcCommand, keybind::KeybindCommand, set::SetIpcCommand,
+        status_message::StatusMessageCommand, switch_tab::SwitchTabCommand, tmux::TmuxHookCommand,
     },
 };
 

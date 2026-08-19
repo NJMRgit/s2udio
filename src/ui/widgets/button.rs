@@ -147,11 +147,8 @@ impl StatefulWidget for &mut ButtonGroup<'_> {
 
         state.button_count = button_count;
         self.buttons.iter_mut().enumerate().for_each(|(idx, button)| {
-            let mut style = if idx == state.selected {
-                self.active_style
-            } else {
-                self.inactive_style
-            };
+            let mut style =
+                if idx == state.selected { self.active_style } else { self.inactive_style };
             // The button under the mouse lightens (clickable).
             if self.hovered == Some(idx) {
                 style = crate::config::hover_style(style);

@@ -46,15 +46,7 @@ pub(crate) fn draw_marquee(
     // The head copy first (its gap-fill blanks the window ahead of the
     // re-entering head); the tail is drawn last so it stays on top
     // while both are visible — the wrap reads tail … gap … head.
-    draw_panel_at(
-        buf,
-        x,
-        y,
-        width,
-        line,
-        o - i64::from(p + CAROUSEL_WRAP_GAP),
-        style,
-    );
+    draw_panel_at(buf, x, y, width, line, o - i64::from(p + CAROUSEL_WRAP_GAP), style);
     draw_panel_at(buf, x, y, width, line, o, style);
 }
 
@@ -92,8 +84,7 @@ pub(crate) fn marquee_offset(progress_ms: u64, panel_len: u16, window_len: u16) 
         // Continue past the tail to p + gap: the head copy at
         // o - (p + gap) lands back at offset 0 there, closing the
         // ticker loop.
-        (p - w)
-            + ((t - 2 * CAROUSEL_PAUSE_MS - scroll_to_tail_ms) / wrap_ms_per_col) as i64
+        (p - w) + ((t - 2 * CAROUSEL_PAUSE_MS - scroll_to_tail_ms) / wrap_ms_per_col) as i64
     }
 }
 
@@ -221,8 +212,7 @@ mod tests {
         let row: String =
             (0..w).map(|x| buf[(x, 0)].symbol().chars().next().unwrap_or(' ')).collect();
         assert_eq!(
-            row,
-            "QRST     A",
+            row, "QRST     A",
             "tail (QRST), a {}-column gap, then the head (A)",
             CAROUSEL_WRAP_GAP
         );
@@ -244,15 +234,9 @@ mod tests {
         assert_eq!(super::marquee_offset(0, p, w), 0);
         assert_eq!(super::marquee_offset(CAROUSEL_PAUSE_MS - 1, p, w), 0);
         // Scroll left to the tail (window at the last columns of the title).
-        assert_eq!(
-            super::marquee_offset(CAROUSEL_PAUSE_MS + scroll_ms, p, w),
-            (p - w) as i64
-        );
+        assert_eq!(super::marquee_offset(CAROUSEL_PAUSE_MS + scroll_ms, p, w), (p - w) as i64);
         // Hold at the end.
-        assert_eq!(
-            super::marquee_offset(CAROUSEL_PAUSE_MS + scroll_ms + 1, p, w),
-            (p - w) as i64
-        );
+        assert_eq!(super::marquee_offset(CAROUSEL_PAUSE_MS + scroll_ms + 1, p, w), (p - w) as i64);
         assert_eq!(
             super::marquee_offset(2 * CAROUSEL_PAUSE_MS + scroll_ms - 1, p, w),
             (p - w) as i64
@@ -262,10 +246,7 @@ mod tests {
         // copy (drawn by the caller at o - (p + CAROUSEL_WRAP_GAP)) follows
         // with a 5-column slack and lands back at 0.
         let t0 = 2 * CAROUSEL_PAUSE_MS + scroll_ms;
-        assert_eq!(
-            super::marquee_offset(t0 + wrap_ms_per_col, p, w),
-            (p - w + 1) as i64
-        );
+        assert_eq!(super::marquee_offset(t0 + wrap_ms_per_col, p, w), (p - w + 1) as i64);
         assert!(
             super::marquee_offset(t0 + w as u64 * wrap_ms_per_col, p, w) >= p as i64,
             "the wrap continues past the tail (no negative offsets)"

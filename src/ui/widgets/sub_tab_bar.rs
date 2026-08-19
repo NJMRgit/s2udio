@@ -43,33 +43,24 @@ impl<'a> SubTabBar<'a> {
     /// Render the segments and return their click areas (one per segment,
     /// in order).
     pub fn render(&self, frame: &mut Frame, ctx: &Ctx) -> Vec<Rect> {
-        let base = ctx
-            .config
-            .theme
-            .text_color
-            .map_or_else(Style::default, |c| Style::default().fg(c));
+        let base =
+            ctx.config.theme.text_color.map_or_else(Style::default, |c| Style::default().fg(c));
         let dim = base.add_modifier(Modifier::DIM);
         let mouse = ctx.mouse_pos();
 
         let mut x = self.x;
         let mut areas = Vec::with_capacity(self.segments.len());
         for segment in self.segments {
-            let label = format!(
-                " {} {} ",
-                if segment.active { "●" } else { "⭘" },
-                segment.label
-            );
+            let label = format!(" {} {} ", if segment.active { "●" } else { "⭘" }, segment.label);
             let width = (label.width() as u16).min(self.right.saturating_sub(x));
             let area = Rect { x, y: self.y, width, height: 1 };
-            let base_style =
-                if segment.active { base.add_modifier(Modifier::BOLD) } else { dim };
+            let base_style = if segment.active { base.add_modifier(Modifier::BOLD) } else { dim };
             // Hovering a toggle lightens it (clickable text).
-            let style =
-                if mouse.is_some_and(|p| area.contains(p)) {
-                    hover_style(base_style)
-                } else {
-                    base_style
-                };
+            let style = if mouse.is_some_and(|p| area.contains(p)) {
+                hover_style(base_style)
+            } else {
+                base_style
+            };
             frame.render_widget(Line::styled(label, style), area);
             areas.push(area);
             x += width;
@@ -77,7 +68,6 @@ impl<'a> SubTabBar<'a> {
         areas
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -95,9 +85,7 @@ mod tests {
         let backend = ratatui::backend::TestBackend::new(60, 3);
         let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
         let mut areas = Vec::new();
-        terminal
-            .draw(|frame| areas = bar.render(frame, ctx))
-            .expect("draw ok");
+        terminal.draw(|frame| areas = bar.render(frame, ctx)).expect("draw ok");
         let width = terminal.backend().buffer().area.width as usize;
         let line: String = terminal
             .backend()
@@ -137,10 +125,8 @@ mod tests {
     #[test]
     fn clips_at_the_right_bound() {
         let mut ctx = test_ctx();
-        let segments = [
-            Segment { label: "Audio", active: true },
-            Segment { label: "Video", active: false },
-        ];
+        let segments =
+            [Segment { label: "Audio", active: true }, Segment { label: "Video", active: false }];
         let bar = SubTabBar::new(&segments, 1, 1, 12);
         let (line, areas) = render(&bar, &mut ctx);
         assert!(areas[1].right() <= 12, "no segment past the right bound");

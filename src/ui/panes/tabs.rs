@@ -11,7 +11,7 @@ use crate::{
         macros::modal,
         mouse_event::{MouseEvent, MouseEventKind},
     },
-    ui::{UiAppEvent, UiEvent, modals::tab_help::TabHelpModal, modals::settings::SettingsModal},
+    ui::{UiAppEvent, UiEvent, modals::settings::SettingsModal, modals::tab_help::TabHelpModal},
 };
 
 /// The tab bar. Tabs sit on the left, grouped with `│` separators and `•`
@@ -95,11 +95,7 @@ impl TabsPane {
                     + if idx == 0 {
                         0
                     } else if BULLET_AFTER.contains(
-                        &self.items[idx - 1]
-                            .tab
-                            .as_ref()
-                            .expect("tab items have a name")
-                            .as_str(),
+                        &self.items[idx - 1].tab.as_ref().expect("tab items have a name").as_str(),
                     ) {
                         SEP_BULLET.chars().count()
                     } else {
@@ -116,11 +112,7 @@ impl TabsPane {
                     + if idx == 0 {
                         0
                     } else if BULLET_AFTER.contains(
-                        &self.items[idx - 1]
-                            .tab
-                            .as_ref()
-                            .expect("tab items have a name")
-                            .as_str(),
+                        &self.items[idx - 1].tab.as_ref().expect("tab items have a name").as_str(),
                     ) {
                         SEP_BULLET_TIGHT.chars().count()
                     } else {
@@ -206,8 +198,7 @@ impl Pane for TabsPane {
                 x = self.draw_at(frame, sep, x, top, tabs_right_bound, inactive);
             }
             let label_width = item.label.chars().count() as u16;
-            let is_active =
-                item.tab.as_ref().is_some_and(|tab| *tab == self.active_tab);
+            let is_active = item.tab.as_ref().is_some_and(|tab| *tab == self.active_tab);
             let item_area = Rect { x, y: top, width: label_width, height: 1 };
             // Only clickable labels hover (the active tab is not).
             let style = if is_active {
@@ -223,12 +214,8 @@ impl Pane for TabsPane {
         }
 
         if right_x >= x {
-            self.help_area = Rect {
-                x: right_x,
-                y: top,
-                width: HELP_LABEL.chars().count() as u16,
-                height: 1,
-            };
+            self.help_area =
+                Rect { x: right_x, y: top, width: HELP_LABEL.chars().count() as u16, height: 1 };
             let help_style = if mouse.is_some_and(|p| self.help_area.contains(p)) {
                 hovered(inactive)
             } else {
@@ -245,9 +232,8 @@ impl Pane for TabsPane {
                 inactive,
             );
             // Settings starts right after Help and the separator.
-            let settings_x = right_x
-                + HELP_LABEL.chars().count() as u16
-                + BUTTON_SEP.chars().count() as u16;
+            let settings_x =
+                right_x + HELP_LABEL.chars().count() as u16 + BUTTON_SEP.chars().count() as u16;
             self.settings_area = Rect {
                 x: settings_x,
                 y: top,
@@ -317,7 +303,8 @@ impl Pane for TabsPane {
         };
 
         if self.active_tab != tab_name {
-            ctx.app_event_sender.send(AppEvent::UiEvent(UiAppEvent::ChangeTab(tab_name.clone())))?;
+            ctx.app_event_sender
+                .send(AppEvent::UiEvent(UiAppEvent::ChangeTab(tab_name.clone())))?;
         }
 
         Ok(())
@@ -331,11 +318,7 @@ impl Pane for TabsPane {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    use ratatui::{
-        Terminal,
-        backend::TestBackend,
-        layout::Rect,
-    };
+    use ratatui::{Terminal, backend::TestBackend, layout::Rect};
 
     use super::*;
     use crate::tests::fixtures::ctx;
@@ -352,9 +335,7 @@ mod tests {
             })
             .unwrap();
         let buf = terminal.backend().buffer();
-        (0..buf.area().width)
-            .map(|x| buf[(x, 1)].symbol().chars().next().unwrap_or(' '))
-            .collect()
+        (0..buf.area().width).map(|x| buf[(x, 1)].symbol().chars().next().unwrap_or(' ')).collect()
     }
 
     /// The user's tab set (Queue, Playlists, MPD, Radio). Round 28: the
@@ -362,12 +343,7 @@ mod tests {
     /// leftover "Search" config entry is hidden by `is_tab_hidden`).
     fn with_four_tabs(mut ctx: Ctx) -> Ctx {
         let mut config = ctx.config.as_ref().clone();
-        config.tabs.names = vec![
-            "Queue".into(),
-            "Playlists".into(),
-            "MPD".into(),
-            "Radio".into(),
-        ];
+        config.tabs.names = vec!["Queue".into(), "Playlists".into(), "MPD".into(), "Radio".into()];
         ctx.config = std::sync::Arc::new(config);
         ctx
     }
@@ -461,9 +437,6 @@ mod tests {
         assert!(settings_col < (pane.settings_area.x + pane.settings_area.width) as usize);
         // Right group is flush with the right edge of the bar (the border
         // occupies the last cell of the full-width buffer).
-        assert_eq!(
-            pane.settings_area.x + pane.settings_area.width,
-            buf.area().width - 1
-        );
+        assert_eq!(pane.settings_area.x + pane.settings_area.width, buf.area().width - 1);
     }
 }

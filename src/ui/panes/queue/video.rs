@@ -15,7 +15,7 @@ use ratatui::{
 
 use unicode_width::UnicodeWidthStr;
 
-use super::{truncate_to_width, Areas, QueuePane, CHAPTER_DURATION_COL};
+use super::{Areas, CHAPTER_DURATION_COL, QueuePane, truncate_to_width};
 use crate::{
     config::keys::{CommonAction, DirectoriesActions, QueueActions},
     ctx::Ctx,
@@ -50,11 +50,8 @@ impl QueuePane {
     pub(super) fn render_video(&mut self, frame: &mut Frame, ctx: &Ctx) -> Result<()> {
         let area = self.areas[Areas::Table];
         let jellyfin = crate::core::mpv::session_playlist_shown(ctx);
-        let playlist: std::cell::Ref<'_, Vec<crate::core::mpv::MpvPlaylistEntry>> = if jellyfin {
-            ctx.mpv.playlist.borrow()
-        } else {
-            ctx.video_playlist.borrow()
-        };
+        let playlist: std::cell::Ref<'_, Vec<crate::core::mpv::MpvPlaylistEntry>> =
+            if jellyfin { ctx.mpv.playlist.borrow() } else { ctx.video_playlist.borrow() };
         self.video_items_len = playlist.len();
         // The playlist can change under the marks (session switches,
         // removals elsewhere); drop any mark that no longer has a row.
@@ -91,13 +88,11 @@ impl QueuePane {
         };
         // Title (flexible) | Duration (right-aligned at the right edge,
         // like the queue's Duration column).
-        let widths = Layout::horizontal([
-            Constraint::Min(0),
-            Constraint::Length(CHAPTER_DURATION_COL),
-        ])
-        .flex(Flex::Start)
-        .spacing(1)
-        .split(area);
+        let widths =
+            Layout::horizontal([Constraint::Min(0), Constraint::Length(CHAPTER_DURATION_COL)])
+                .flex(Flex::Start)
+                .spacing(1)
+                .split(area);
         let title_field = widths[0].width as usize;
         let duration_w = widths[1].width as usize;
 
@@ -118,10 +113,8 @@ impl QueuePane {
                 } else {
                     ctx.config.as_list_text_style()
                 };
-                let duration = entry
-                    .duration
-                    .map(|d| fmt.format(d as u64))
-                    .unwrap_or_else(|| "-".to_owned());
+                let duration =
+                    entry.duration.map(|d| fmt.format(d as u64)).unwrap_or_else(|| "-".to_owned());
                 let prefix = if is_current { "❯ " } else { "  " };
                 let mut title = entry.title.clone();
                 truncate_to_width(&mut title, title_field.saturating_sub(2));
@@ -215,7 +208,11 @@ impl QueuePane {
 
     /// Keyboard handling for Video mode: navigate the mpv playlist with
     /// w/s/↑/↓, load an entry with d/→/Enter. `c` cycles back to Audio.
-    pub(super) fn handle_video_action(&mut self, event: &mut ActionEvent, ctx: &mut Ctx) -> Result<()> {
+    pub(super) fn handle_video_action(
+        &mut self,
+        event: &mut ActionEvent,
+        ctx: &mut Ctx,
+    ) -> Result<()> {
         if let Some(action) = event.claim_directories() {
             return match action {
                 DirectoriesActions::FolderUp => self.video_move(-1, ctx),

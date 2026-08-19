@@ -117,16 +117,15 @@ impl Section for InputSection<'_> {
 
         // Hovering the row lightens the label (clickable: it focuses the
         // input).
-        let mut label_style =
-            if self.is_current && !ctx.input.is_active(self.buffer_id) {
-                ctx.config.theme.current_item_style
-            } else if let Some(f) = filter
-                && self.label.to_lowercase().contains(f)
-            {
-                ctx.config.theme.highlighted_item_style
-            } else {
-                Style::default()
-            };
+        let mut label_style = if self.is_current && !ctx.input.is_active(self.buffer_id) {
+            ctx.config.theme.current_item_style
+        } else if let Some(f) = filter
+            && self.label.to_lowercase().contains(f)
+        {
+            ctx.config.theme.highlighted_item_style
+        } else {
+            Style::default()
+        };
         if ctx.modal_mouse_pos().is_some_and(|p| area.contains(p)) {
             label_style = crate::config::hover_style(label_style);
         }

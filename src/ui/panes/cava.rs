@@ -39,8 +39,7 @@ use crate::{
         keys::ActionEvent,
         terminal::{TERMINAL, TtyWriter},
     },
-    status_warn,
-    try_skip,
+    status_warn, try_skip,
     ui::{UiEvent, image::clear_area},
 };
 
@@ -368,11 +367,8 @@ impl CavaPane {
     /// `.monitor` form; `auto`, mics/virtual sources and existing monitors
     /// are left untouched.
     fn normalize_pipewire_source(source: &str) -> String {
-        let Ok(out) = std::process::Command::new("pactl")
-            .arg("list")
-            .arg("short")
-            .arg("sinks")
-            .output()
+        let Ok(out) =
+            std::process::Command::new("pactl").arg("list").arg("short").arg("sinks").output()
         else {
             return source.to_string();
         };
@@ -393,17 +389,15 @@ impl CavaPane {
         if source.ends_with(".fifo") || source.contains('/') {
             return "auto".to_string();
         }
-        if source.is_empty() || source == "auto" || source == "auto_input"
+        if source.is_empty()
+            || source == "auto"
+            || source == "auto_input"
             || source.ends_with(".monitor")
         {
             return source.to_string();
         }
         let is_sink = sink_names.any(|line| line.split('\t').any(|col| col == source));
-        if is_sink {
-            format!("{source}.monitor")
-        } else {
-            source.to_string()
-        }
+        if is_sink { format!("{source}.monitor") } else { source.to_string() }
     }
 
     /// Whether a Start at the given geometry needs to (re)spawn the cava
@@ -884,9 +878,7 @@ mod tests {
 
         let backend = ratatui::backend::TestBackend::new(60, 12);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
-        terminal
-            .draw(|f| pane.render(f, pane.area, &ctx).unwrap())
-            .unwrap();
+        terminal.draw(|f| pane.render(f, pane.area, &ctx).unwrap()).unwrap();
         assert!(pane.legend_shown, "edit mode shows the legend");
         let buf = terminal.backend().buffer();
         let text: String = buf.content().iter().map(|c| c.symbol()).collect();
@@ -901,9 +893,7 @@ mod tests {
 
         // Leaving edit mode while playing restores the visualizer.
         ctx.lyrics_edit_mode.set(false);
-        terminal
-            .draw(|f| pane.render(f, pane.area, &ctx).unwrap())
-            .unwrap();
+        terminal.draw(|f| pane.render(f, pane.area, &ctx).unwrap()).unwrap();
         assert!(!pane.legend_shown, "legend goes away after edit mode");
         assert_eq!(pane.sent_area, pane.area, "bars restart after leaving edit mode");
     }
@@ -1032,7 +1022,9 @@ mod tests {
         assert_eq!(norm(""), "");
         // A mic source that is not a sink: untouched.
         assert_eq!(
-            norm("alsa_input.usb-BurrBrown_from_Texas_Instruments_USB_AUDIO_CODEC-00.analog-stereo"),
+            norm(
+                "alsa_input.usb-BurrBrown_from_Texas_Instruments_USB_AUDIO_CODEC-00.analog-stereo"
+            ),
             "alsa_input.usb-BurrBrown_from_Texas_Instruments_USB_AUDIO_CODEC-00.analog-stereo"
         );
         // Round 30: a leftover MPD-fifo path falls back to the PipeWire

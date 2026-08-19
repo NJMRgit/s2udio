@@ -3,14 +3,9 @@ use std::{path::PathBuf, time::Duration};
 use anyhow::{Context, Result, bail};
 use crossbeam::channel::Sender;
 use notify_debouncer_full::{
-    DebounceEventResult,
-    Debouncer,
-    RecommendedCache,
-    new_debouncer,
+    DebounceEventResult, Debouncer, RecommendedCache, new_debouncer,
     notify::{
-        EventKind,
-        RecommendedWatcher,
-        RecursiveMode,
+        EventKind, RecommendedWatcher, RecursiveMode,
         event::{AccessKind, AccessMode},
     },
 };
@@ -20,10 +15,7 @@ use crate::{
     config::theme::UiConfig,
     shared::{
         config_read::{
-            ConfigReadError,
-            find_first_existing_path,
-            read_config_file,
-            read_theme_file,
+            ConfigReadError, find_first_existing_path, read_config_file, read_theme_file,
         },
         macros::try_skip,
         paths::theme_paths,

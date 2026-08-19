@@ -230,11 +230,7 @@ impl LrcEditSession {
                 // After the LAST word: its own moment 100 ms on, capped
                 // by the midpoint toward the next line when the next
                 // line starts too soon.
-                let next_line = self
-                    .lines
-                    .get(line + 1)
-                    .map(|l| l.time)
-                    .filter(|t| *t > prev);
+                let next_line = self.lines.get(line + 1).map(|l| l.time).filter(|t| *t > prev);
                 let time = match next_line {
                     Some(next) if next.saturating_sub(prev) <= step => {
                         prev + next.saturating_sub(prev) / 2
@@ -263,12 +259,7 @@ impl LrcEditSession {
         }
         l.words.insert(
             insert_at,
-            EditableWord {
-                text: text.trim().to_owned(),
-                time,
-                marker: None,
-                text_span: None,
-            },
+            EditableWord { text: text.trim().to_owned(), time, marker: None, text_span: None },
         );
         l.content = l.words.iter().map(|w| w.text.clone()).collect::<Vec<_>>().join(" ");
         l.dirty = true;
@@ -399,11 +390,8 @@ impl LrcEditSession {
     /// removed (header, blank and metadata lines pass through verbatim).
     fn gap_without_deleted(&self, from: usize, to: usize) -> String {
         let mut gap = self.raw[from..to].to_owned();
-        let mut spans: Vec<&(usize, usize)> = self
-            .deleted_spans
-            .iter()
-            .filter(|(ds, de)| *ds >= from && *de <= to)
-            .collect();
+        let mut spans: Vec<&(usize, usize)> =
+            self.deleted_spans.iter().filter(|(ds, de)| *ds >= from && *de <= to).collect();
         spans.sort_by_key(|(ds, _)| std::cmp::Reverse(*ds));
         for (ds, de) in spans {
             gap.replace_range(ds - from..de - from, "");
@@ -439,8 +427,11 @@ impl LrcEditSession {
     fn render_line(line: &EditableLine) -> String {
         let tag = Self::format_time(line.time);
         if line.words.is_empty() {
-            format!("[{tag}]{}
-", line.content)
+            format!(
+                "[{tag}]{}
+",
+                line.content
+            )
         } else {
             let body = line
                 .words
@@ -448,8 +439,10 @@ impl LrcEditSession {
                 .map(|w| format!("<{}>{}", Self::format_time(w.time), w.text))
                 .collect::<Vec<_>>()
                 .join(" ");
-            format!("[{tag}]{body}
-")
+            format!(
+                "[{tag}]{body}
+"
+            )
         }
     }
 
@@ -585,7 +578,12 @@ fn parse_words(content_raw: &str, base: usize) -> (String, Vec<EditableWord>) {
         return (content_raw.to_owned(), Vec::new());
     }
     if !rest.trim().is_empty() {
-        segments.push((prev_time, rest.to_owned(), last_marker, (base + pos, base + pos + rest.len())));
+        segments.push((
+            prev_time,
+            rest.to_owned(),
+            last_marker,
+            (base + pos, base + pos + rest.len()),
+        ));
     }
 
     let mut content = String::new();
@@ -758,10 +756,7 @@ mod tests {
         let mut session = LrcEditSession::open(PathBuf::new(), raw.to_owned());
         session.set_word_time(0, 1, Duration::from_millis(1500)).unwrap();
         let new_raw = session.render_pending().unwrap();
-        assert_eq!(
-            new_raw,
-            "[00:01.00]<00:01.20>hello <00:01.50>world <00:02.00>next\n"
-        );
+        assert_eq!(new_raw, "[00:01.00]<00:01.20>hello <00:01.50>world <00:02.00>next\n");
     }
 
     #[test]
@@ -946,7 +941,10 @@ mod tests {
         assert_eq!(idx, 1);
         session.set_line_text(idx, "middle").unwrap();
         let new_raw = session.render_pending().unwrap();
-        assert_eq!(new_raw, "[00:01.00]<00:01.10>a\n[00:02.00]<00:02.00>middle\n[00:03.00]<00:03.10>b\n");
+        assert_eq!(
+            new_raw,
+            "[00:01.00]<00:01.10>a\n[00:02.00]<00:02.00>middle\n[00:03.00]<00:03.10>b\n"
+        );
     }
 
     #[test]
@@ -1007,7 +1005,8 @@ mod tests {
         assert_eq!(idx, 2);
         assert_eq!(session.lines[0].words[2].time, Duration::from_millis(1300));
         // Last word of the LAST line: 100 ms on as well.
-        let mut session = LrcEditSession::open(PathBuf::new(), "[00:01.00]<00:01.20>hello\n".to_owned());
+        let mut session =
+            LrcEditSession::open(PathBuf::new(), "[00:01.00]<00:01.20>hello\n".to_owned());
         session.insert_word_at(0, 0, true, "tail").unwrap();
         assert_eq!(session.lines[0].words[1].time, Duration::from_millis(1300));
     }

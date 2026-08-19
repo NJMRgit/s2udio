@@ -76,9 +76,15 @@ where
             );
             if !items.is_empty() {
                 let (position, autoplay) = if autoplay {
-                    (crate::config::keys::actions::Position::Replace, crate::config::keys::actions::AutoplayKind::Hovered)
+                    (
+                        crate::config::keys::actions::Position::Replace,
+                        crate::config::keys::actions::AutoplayKind::Hovered,
+                    )
                 } else {
-                    (crate::config::keys::actions::Position::EndOfQueue, crate::config::keys::actions::AutoplayKind::None)
+                    (
+                        crate::config::keys::actions::Position::EndOfQueue,
+                        crate::config::keys::actions::AutoplayKind::None,
+                    )
                 };
 
                 Client::resolve_and_enqueue(ctx, items, position, autoplay, None, hovered_song_idx);
@@ -209,10 +215,12 @@ mod scrollbar_tests {
     fn test_mouse_event_in_scrollbar_area() {
         let scrollbar_area = Rect::new(29, 1, 1, 8);
 
-        let inside_event = MouseEvent { kind: MouseEventKind::LeftClick, x: 29, y: 3 , ..Default::default() };
+        let inside_event =
+            MouseEvent { kind: MouseEventKind::LeftClick, x: 29, y: 3, ..Default::default() };
         assert!(scrollbar_area.contains(inside_event.into()));
 
-        let outside_event = MouseEvent { kind: MouseEventKind::LeftClick, x: 28, y: 3 , ..Default::default() };
+        let outside_event =
+            MouseEvent { kind: MouseEventKind::LeftClick, x: 28, y: 3, ..Default::default() };
         assert!(!scrollbar_area.contains(outside_event.into()));
     }
 
@@ -224,7 +232,7 @@ mod scrollbar_tests {
             kind: MouseEventKind::Drag { drag_start_position: drag_start },
             x: 29,
             y: 5,
-        modifiers: crossterm::event::KeyModifiers::NONE,
+            modifiers: crossterm::event::KeyModifiers::NONE,
         };
         assert!(scrollbar_area.contains(drag_event.into()));
         assert!(matches!(drag_event.kind, MouseEventKind::Drag { .. }));

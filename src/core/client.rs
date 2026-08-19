@@ -19,10 +19,7 @@ use drop_guard::ClientDropGuard;
 use crate::{
     config::Config,
     mpd::{
-        client::Client,
-        commands::idle::IdleEvent,
-        errors::MpdError,
-        mpd_client::MpdClient,
+        client::Client, commands::idle::IdleEvent, errors::MpdError, mpd_client::MpdClient,
         proto_client::ProtoClient,
     },
     shared::{

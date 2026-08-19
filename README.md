@@ -165,6 +165,4 @@ s2udio rq check    verify the proxy: /web/ + API answer without credentials
   (`--socks-url`, incoming connections disabled). The web UI itself has
   no VPN settings (it is torrent management only); restart the engine
   after changing the proxy.
-
-- <img width="2560" height="1440" alt="image" src="https://github.com/user-attachments/assets/1f223749-5764-4d20-a84b-2e23e8254763" />
-
+- Shorthand (fish): `alias s2rq 's2udio rq'` → `s2rq start|stop|open|check`.
