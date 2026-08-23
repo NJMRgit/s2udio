@@ -13,7 +13,7 @@ A heavily modified fork of [rmpc](https://github.com/mierak/rmpc) v0.11.0
 a fully featured media center TUI built on rmpc that adds support for video via mpv and a bunch of other goodies!
 
 Built with the help of Deepseek v4 Flash, pi, and prime-agent
-+ ox alpha for refactor
+and ox alpha for refactor
 
 <img width="2065" height="924" alt="image" src="https://github.com/user-attachments/assets/9da9686c-52f3-4b3c-8ef7-cfffe20a7270" />
 <img width="1400" height="163" alt="image" src="https://github.com/user-attachments/assets/e4fc184f-61f7-4f23-8f32-0e15ba493362" />
