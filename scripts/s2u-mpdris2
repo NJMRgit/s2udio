@@ -26,7 +26,15 @@ through dbus-python's _method_lookup()) to no-op on CommandError and on
 stream statuses with no 'time' timeline (KeyError). The seekable-looking
 timeline is kept on purpose — seeks on the MPD path just no-op.
 
-Fourth extension — socket_callback() hardening: mpDris2 sets a 5 s socket
+Fourth extension — call() hardening: MPD answers benign CommandErrors
+for playback commands in the wrong state (next/previous while stopped ->
+"Not playing"); the official call() treats those like a lost connection,
+reconnects and releases the D-Bus name, which makes desktop media
+controls drop the player entirely. The shim wraps call() to no-op on
+CommandError (logged) while keeping real connection errors on the
+official reconnect path.
+
+Fifth extension — socket_callback() hardening: mpDris2 sets a 5 s socket
 timeout at connect(), and the official idle-event fetch has no handler,
 so a TimeoutError while MPD is busy kills the daemon (the MPRIS entry
 vanishes and media keys stop working). The shim wraps it to reconnect on
@@ -329,6 +337,52 @@ def _patch_mpdris2(mod):
                     self.idle_enter()
 
         wrapper.seekid = seekid
+        patched = True
+
+    # Harden call(): MPD answers benign CommandErrors for playback
+    # commands issued in the wrong state (e.g. next/previous while
+    # stopped -> "Not playing"). The official call() lumps CommandError
+    # into the same except clause as connection errors and answers with
+    # a full reconnect(), which releases the D-Bus name — desktop media
+    # controls (plasmusic-toolbar) then lose the player entirely: track
+    # info vanishes, skip does nothing, and the bridge stays dead until
+    # something restarts mpDris2.service.
+    #
+    # The official call() cannot be wrapped from outside: its own broad
+    # except catches CommandError first (it is an MPDError subclass), so
+    # the patch REPLACES call() with a copy whose CommandError branch
+    # no-ops (logged) instead of reconnecting. Real connection errors
+    # keep the official reconnect behavior.
+    if wrapper is not None and hasattr(wrapper, "call"):
+        def call(self, command, *args):
+            fn = getattr(self.client, command)
+            was_idle = False
+            try:
+                was_idle = self.idle_leave()
+                mod.logger.debug(
+                    "Sending command %r (was idle? %r)" % (command, was_idle))
+                r = fn(*args)
+                if was_idle:
+                    self.idle_enter()
+                return r
+            except mod.mpd.CommandError as err:
+                mod.logger.warning(
+                    "Command %r rejected by MPD: %s" % (command, err))
+                # Restore idle mode so event delivery keeps working; the
+                # 15 s status poll covers any missed transition anyway.
+                try:
+                    if was_idle:
+                        self.idle_enter()
+                except Exception:
+                    pass
+                return False
+            except (mod.socket.error, mod.mpd.MPDError,
+                    mod.socket.timeout) as err:
+                mod.logger.debug("Trying to reconnect, got %r" % (err,))
+                self.reconnect()
+                return False
+
+        wrapper.call = call
         patched = True
 
     # Harden socket_callback(): the idle-event fetch reads MPD's "changed"
