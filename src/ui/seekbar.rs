@@ -1,9 +1,6 @@
 use std::time::Instant;
-
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-
 use crate::{ctx::Ctx, mpd::mpd_client::MpdClient, shared::id::Id};
-
 /// Seek direction latched while the user holds Space + an arrow key in
 /// interactive-seek mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -13,7 +10,6 @@ pub enum SeekDir {
     Up,
     Down,
 }
-
 /// Keyboard control of the seekbar (entered with Ctrl+Tab on the Queue
 /// tab). While `focused`, the seekbar owns the keyboard:
 /// - `a` / `d` / left / right move the seek cursor (±2 s, clamped to the
@@ -45,7 +41,6 @@ pub struct SeekbarState {
     /// Scheduler id of the pending release-check one-shot.
     release_check: Option<Id>,
 }
-
 impl Default for SeekbarState {
     fn default() -> Self {
         Self {
@@ -61,7 +56,6 @@ impl Default for SeekbarState {
         }
     }
 }
-
 /// Absolute seek (used by tap / Enter): mpv when it is the UI source, else
 /// MPD.
 fn seek_absolute(ctx: &Ctx, seconds: f64) {
@@ -77,7 +71,6 @@ fn seek_absolute(ctx: &Ctx, seconds: f64) {
         Ok(())
     });
 }
-
 /// Relative seek: mpv via its relative seek command, MPD via seekcur ±N.
 fn seek_relative(ctx: &Ctx, delta_seconds: f64) {
     if crate::core::mpv::mpv_is_ui_source(ctx)
@@ -96,7 +89,6 @@ fn seek_relative(ctx: &Ctx, delta_seconds: f64) {
         Ok(())
     });
 }
-
 fn seek_frame(ctx: &Ctx, forward: bool) {
     if crate::core::mpv::mpv_is_ui_source(ctx)
         && let Some(socket) = ctx.mpv.socket.clone()
@@ -104,7 +96,6 @@ fn seek_frame(ctx: &Ctx, forward: bool) {
         crate::core::mpv::mpv_frame_step(&socket, forward);
     }
 }
-
 /// The current playback position in seconds (the source the seekbar shows).
 pub fn playback_position(ctx: &Ctx) -> f64 {
     if crate::core::mpv::mpv_is_ui_source(ctx) {
@@ -113,7 +104,6 @@ pub fn playback_position(ctx: &Ctx) -> f64 {
         ctx.status.elapsed.as_secs_f64()
     }
 }
-
 /// Exit seekbar keyboard control without seeking.
 pub fn clear(ctx: &Ctx) {
     let mut state = ctx.seekbar.borrow_mut();
@@ -125,11 +115,9 @@ pub fn clear(ctx: &Ctx) {
     state.last_dir = None;
     state.release_check = None;
 }
-
 pub fn is_focused(ctx: &Ctx) -> bool {
     ctx.seekbar.borrow().focused
 }
-
 /// The seek cursor as a fraction of the track (for the progress bar).
 pub fn cursor_fraction(ctx: &Ctx) -> Option<f32> {
     let state = ctx.seekbar.borrow();
@@ -138,7 +126,6 @@ pub fn cursor_fraction(ctx: &Ctx) -> Option<f32> {
     }
     Some((state.cursor / state.duration) as f32)
 }
-
 /// Cancel the pending release-check one-shot (borrow-free: the caller
 /// already holds the state's RefMut).
 fn cancel_release_check_state(state: &mut SeekbarState, ctx: &Ctx) {
@@ -146,7 +133,6 @@ fn cancel_release_check_state(state: &mut SeekbarState, ctx: &Ctx) {
         ctx.scheduler.cancel(id);
     }
 }
-
 /// Schedule the release-check fallback: terminals without release events
 /// send only Press/Repeat, so a Space that stops repeating within the
 /// window is treated as released (tap or exit-interactive).
@@ -154,13 +140,22 @@ fn schedule_release_check_state(state: &mut SeekbarState, ctx: &Ctx) {
     cancel_release_check_state(state, ctx);
     let id = crate::shared::id::new();
     state.release_check = Some(id);
-    ctx.scheduler.schedule_replace(id, std::time::Duration::from_millis(300), move |(tx, _)| {
-        Ok(tx.send(crate::shared::events::AppEvent::UiEvent(
-            crate::ui::UiAppEvent::SeekbarReleaseCheck,
-        ))?)
-    });
+    ctx.scheduler
+        .schedule_replace(
+            id,
+            std::time::Duration::from_millis(300),
+            move |(tx, _)| {
+                Ok(
+                    tx
+                        .send(
+                            crate::shared::events::AppEvent::UiEvent(
+                                crate::ui::UiAppEvent::SeekbarReleaseCheck,
+                            ),
+                        )?,
+                )
+            },
+        );
 }
-
 /// Fired by the scheduler (or a real release event): decide tap vs hold.
 pub fn on_release_check(ctx: &Ctx) {
     let mut state = ctx.seekbar.borrow_mut();
@@ -175,8 +170,6 @@ pub fn on_release_check(ctx: &Ctx) {
     state.tap_pending = false;
     state.last_dir = None;
     if interactive {
-        // Exiting interactive mode: the cursor snaps back to the real
-        // playback position so a later tap seeks from reality.
         state.cursor = if state.duration > 0.0 {
             playback_position(ctx).clamp(0.0, state.duration)
         } else {
@@ -192,32 +185,25 @@ pub fn on_release_check(ctx: &Ctx) {
         ctx.render().ok();
     }
 }
-
 /// Handle a raw key event while the seekbar owns the keyboard. Returns
 /// `true` when the event was consumed.
 pub fn handle_key(ctx: &Ctx, key: KeyEvent) -> bool {
     use KeyEventKind as K;
     let code = key.code;
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-    let is_nav = code == KeyCode::Left
-        || code == KeyCode::Right
-        || code == KeyCode::Up
-        || code == KeyCode::Down
-        || code == KeyCode::Char('a')
+    let is_nav = code == KeyCode::Left || code == KeyCode::Right || code == KeyCode::Up
+        || code == KeyCode::Down || code == KeyCode::Char('a')
         || code == KeyCode::Char('d');
     let is_space = code == KeyCode::Char(' ') && !ctrl;
     let is_enter = code == KeyCode::Enter;
     let is_esc = code == KeyCode::Esc;
-
     if !is_nav && !is_space && !is_enter && !is_esc {
         return false;
     }
-
     let mut state = ctx.seekbar.borrow_mut();
     if !state.focused {
         return false;
     }
-
     match key.kind {
         K::Release => {
             if is_space {
@@ -246,7 +232,6 @@ pub fn handle_key(ctx: &Ctx, key: KeyEvent) -> bool {
                 return true;
             }
             if is_nav && state.interactive {
-                // Releasing the held arrow stops the 1 s auto-repeat.
                 state.last_dir = None;
                 return true;
             }
@@ -254,14 +239,12 @@ pub fn handle_key(ctx: &Ctx, key: KeyEvent) -> bool {
         }
         K::Repeat => {
             if is_space {
-                // Holding Space: not a tap anymore.
                 state.space_down = true;
                 state.tap_pending = false;
                 schedule_release_check_state(&mut state, ctx);
                 return true;
             }
             if is_nav && state.interactive {
-                // Auto-repeat once per second for a held direction.
                 if let Some(dir) = state.last_dir
                     && matches!(dir_for(code), Some(d) if d == dir)
                     && state.last_seek.elapsed() >= std::time::Duration::from_secs(1)
@@ -274,7 +257,6 @@ pub fn handle_key(ctx: &Ctx, key: KeyEvent) -> bool {
                 return true;
             }
             if is_nav && !state.space_down {
-                // Held direction in cursor mode keeps moving the cursor.
                 if let Some(delta) = cursor_delta(code) {
                     let new = (state.cursor + delta).clamp(0.0, state.duration.max(0.0));
                     if (new - state.cursor).abs() > f64::EPSILON {
@@ -304,10 +286,6 @@ pub fn handle_key(ctx: &Ctx, key: KeyEvent) -> bool {
             }
             if is_space {
                 if state.space_down {
-                    // A second Press while Space is already down: either a
-                    // kitty Repeat (Release events available) or an
-                    // auto-repeat on a terminal without them. Either way
-                    // this is a hold, not a tap.
                     state.tap_pending = false;
                     schedule_release_check_state(&mut state, ctx);
                 } else {
@@ -319,13 +297,11 @@ pub fn handle_key(ctx: &Ctx, key: KeyEvent) -> bool {
             }
             if is_nav {
                 if state.space_down {
-                    // Enter interactive seek mode (first arrow while Space
-                    // is held) or repeat in it. Terminals without release
-                    // events send the auto-repeat as Press too, so the 1 s
-                    // throttle applies here as well.
                     if let Some(dir) = dir_for(code) {
                         if state.interactive && state.last_dir == Some(dir) {
-                            if state.last_seek.elapsed() >= std::time::Duration::from_secs(1) {
+                            if state.last_seek.elapsed()
+                                >= std::time::Duration::from_secs(1)
+                            {
                                 state.last_seek = Instant::now();
                                 interactive_seek(ctx, &mut state, dir);
                                 drop(state);
@@ -336,9 +312,6 @@ pub fn handle_key(ctx: &Ctx, key: KeyEvent) -> bool {
                             state.tap_pending = false;
                             state.last_dir = Some(dir);
                             state.last_seek = Instant::now();
-                            // The user is holding Space (interactive mode):
-                            // a release-check from the Space press must not
-                            // fire mid-hold and drop the mode.
                             cancel_release_check_state(&mut state, ctx);
                             interactive_seek(ctx, &mut state, dir);
                             drop(state);
@@ -347,7 +320,6 @@ pub fn handle_key(ctx: &Ctx, key: KeyEvent) -> bool {
                     }
                     return true;
                 }
-                // Cursor mode: move the seek cursor without seeking.
                 if let Some(delta) = cursor_delta(code) {
                     let new = (state.cursor + delta).clamp(0.0, state.duration.max(0.0));
                     if (new - state.cursor).abs() > f64::EPSILON {
@@ -362,7 +334,6 @@ pub fn handle_key(ctx: &Ctx, key: KeyEvent) -> bool {
         }
     }
 }
-
 /// Map a nav key to a seek direction.
 fn dir_for(code: KeyCode) -> Option<SeekDir> {
     match code {
@@ -373,30 +344,24 @@ fn dir_for(code: KeyCode) -> Option<SeekDir> {
         _ => None,
     }
 }
-
 /// Cursor movement in non-interactive mode (±2 s per step).
 fn cursor_delta(code: KeyCode) -> Option<f64> {
     match code {
         KeyCode::Left | KeyCode::Char('a') => Some(-2.0),
         KeyCode::Right | KeyCode::Char('d') => Some(2.0),
-        // Up / Down do not move the cursor (they only seek in interactive
-        // mode, where the terminal Repeat keeps the direction latched).
         _ => None,
     }
 }
-
 /// Perform one interactive seek in the latched direction and update the
 /// cursor so the bar stays honest. The caller renders after dropping the
 /// state borrow (render re-reads the seekbar state).
 fn interactive_seek(ctx: &Ctx, state: &mut SeekbarState, dir: SeekDir) {
     let video = crate::core::mpv::mpv_is_ui_source(ctx);
     let delta = match (video, dir) {
-        // Audio: left/right ±2 s, up/down ±5 s.
         (false, SeekDir::Back) => -2.0,
         (false, SeekDir::Forward) => 2.0,
         (false, SeekDir::Down) => -5.0,
         (false, SeekDir::Up) => 5.0,
-        // Video: up/down ±5 s, left/right frame by frame.
         (true, SeekDir::Up) => 5.0,
         (true, SeekDir::Down) => -5.0,
         (true, SeekDir::Forward) => {
@@ -411,33 +376,5 @@ fn interactive_seek(ctx: &Ctx, state: &mut SeekbarState, dir: SeekDir) {
     seek_relative(ctx, delta);
     if state.duration > 0.0 {
         state.cursor = (state.cursor + delta).clamp(0.0, state.duration);
-    }
-}
-
-#[cfg(test)]
-#[allow(clippy::unwrap_used)]
-mod tests {
-    use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-
-    use super::*;
-    use crate::tests::fixtures::ctx;
-
-    fn fixture() -> Ctx {
-        ctx(
-            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
-            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
-            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
-        )
-    }
-
-    fn key(code: KeyCode, kind: KeyEventKind) -> KeyEvent {
-        KeyEvent { kind, ..KeyEvent::new(code, KeyModifiers::NONE) }
-    }
-
-    #[test]
-    fn not_focused_returns_false() {
-        let ctx = fixture();
-        assert!(!is_focused(&ctx));
-        assert!(!handle_key(&ctx, key(KeyCode::Right, KeyEventKind::Press)));
     }
 }

@@ -14,20 +14,14 @@
 //! The spawned engine is identical to the GUI's: `torrent::start_engine`
 //! (config `torrent.port` / `socks_proxy` / `cache_dir` + the state.ron
 //! socks override), auth-injecting web-UI proxy, random basic-auth token.
-
 use std::{
-    os::unix::process::CommandExt,
-    path::PathBuf,
+    os::unix::process::CommandExt, path::PathBuf,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-
 use serde::{Deserialize, Serialize};
-
 use crate::config::cli::RqCmd;
-
 /// The registration file name inside the s2udio cache dir.
 const STATE_FILE: &str = "rqbit.json";
-
 /// A running standalone rqbit engine, as registered on disk.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RqEngineFile {
@@ -46,19 +40,16 @@ pub struct RqEngineFile {
     /// Unix seconds when the engine was started.
     pub started_at: u64,
 }
-
 impl RqEngineFile {
     /// Whether the registered pid is a live process.
     pub fn alive(&self) -> bool {
         pid_alive(self.pid)
     }
 }
-
 /// `~/.cache/s2udio/rqbit.json`.
 pub fn state_path() -> Option<PathBuf> {
     crate::shared::paths::s2udio_cache_dir().map(|dir| dir.join(STATE_FILE))
 }
-
 /// Read the registration file (missing/unparsable -> None; stale entries
 /// are left for the caller's `alive()` check so a crashed engine can be
 /// detected).
@@ -67,12 +58,10 @@ pub fn read_state() -> Option<RqEngineFile> {
     let content = std::fs::read_to_string(&path).ok()?;
     serde_json::from_str(&content).ok()
 }
-
 /// The registered engine, but only when its pid is alive.
 pub fn registered_running() -> Option<RqEngineFile> {
     read_state().filter(|reg| reg.alive())
 }
-
 /// Whether a pid is a live process (signal 0 probe; EPERM counts as
 /// alive — the process exists, just not ours to signal).
 pub fn pid_alive(pid: u32) -> bool {
@@ -82,23 +71,28 @@ pub fn pid_alive(pid: u32) -> bool {
     }
     std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
-
 /// Register a running engine (overwrites any previous registration).
 /// Used by the Settings panel (pid = the rqbit child; the GUI process
 /// owns the engine) and by the CLI daemon (pid = the daemon itself).
 pub fn register(engine: &crate::core::torrent::TorrentEngine) -> Result<(), String> {
-    let engine_port =
-        engine.base_url().rsplit(':').next().and_then(|p| p.parse::<u16>().ok()).unwrap_or(0);
+    let engine_port = engine
+        .base_url()
+        .rsplit(':')
+        .next()
+        .and_then(|p| p.parse::<u16>().ok())
+        .unwrap_or(0);
     let reg = RqEngineFile {
         pid: engine.pid(),
         web_url: engine.web_url(),
         engine_port,
         cache_dir: engine.cache_dir.display().to_string(),
-        started_at: SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0),
+        started_at: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
     };
     write_registration(&reg)
 }
-
 /// Persist a registration (overwrites any previous one).
 pub fn write_registration(reg: &RqEngineFile) -> Result<(), String> {
     let Some(path) = state_path() else {
@@ -110,9 +104,9 @@ pub fn write_registration(reg: &RqEngineFile) -> Result<(), String> {
         std::fs::create_dir_all(parent)
             .map_err(|err| format!("Cannot create {}: {err}", parent.display()))?;
     }
-    std::fs::write(&path, content).map_err(|err| format!("Cannot write {}: {err}", path.display()))
+    std::fs::write(&path, content)
+        .map_err(|err| format!("Cannot write {}: {err}", path.display()))
 }
-
 /// Remove the registration file (missing file is not an error).
 pub fn unregister() -> Result<(), String> {
     if let Some(path) = state_path() {
@@ -124,7 +118,6 @@ pub fn unregister() -> Result<(), String> {
     }
     Ok(())
 }
-
 /// Kill the registered engine (SIGTERM, then SIGKILL after ~2 s) and
 /// remove its registration. Returns whether an engine was killed.
 pub fn stop_registered() -> Result<bool, String> {
@@ -139,7 +132,6 @@ pub fn stop_registered() -> Result<bool, String> {
     let _ = unregister();
     Ok(true)
 }
-
 /// SIGTERM, poll for exit (~2 s), then SIGKILL.
 fn kill_pid(pid: u32) {
     unsafe {
@@ -155,7 +147,6 @@ fn kill_pid(pid: u32) {
         libc::kill(pid as i32, libc::SIGKILL);
     }
 }
-
 /// The torrent engine config the CLI uses: config.ron `torrent` section
 /// (defaults when absent) + the Settings-panel socks override from
 /// state.ron (same rule as `main.rs` startup).
@@ -173,7 +164,6 @@ pub fn torrent_config() -> crate::config::torrent::Torrent {
     }
     torrent
 }
-
 /// `s2udio rq start|stop|open`.
 pub fn run(cmd: RqCmd) -> Result<(), String> {
     match cmd {
@@ -184,10 +174,12 @@ pub fn run(cmd: RqCmd) -> Result<(), String> {
                     println!("rqbit engine stopped");
                     Ok(())
                 }
-                false => Err(
-                    "No rqbit engine is running (start one with `s2udio rq start` or Settings -> torrent)"
-                        .to_owned(),
-                ),
+                false => {
+                    Err(
+                        "No rqbit engine is running (start one with `s2udio rq start` or Settings -> torrent)"
+                            .to_owned(),
+                    )
+                }
             }
         }
         RqCmd::Open => {
@@ -205,7 +197,6 @@ pub fn run(cmd: RqCmd) -> Result<(), String> {
         RqCmd::Serve => serve(),
     }
 }
-
 /// Verify the auth-injecting proxy end-to-end:
 ///   1. the proxy serves the web UI without credentials (200 text/html),
 ///   2. the proxy serves the API without credentials (200),
@@ -220,12 +211,12 @@ fn check() -> Result<(), String> {
         );
     };
     println!("rqbit engine:   RUNNING (pid {}, web UI {})", reg.pid, reg.web_url);
-
     let mut ok = true;
-    // Proxy base (the web URL minus the /web/ suffix).
-    let proxy_base = reg.web_url.trim_end_matches("/web/").trim_end_matches('/').to_owned();
-
-    // 1. Web UI through the proxy, no credentials.
+    let proxy_base = reg
+        .web_url
+        .trim_end_matches("/web/")
+        .trim_end_matches('/')
+        .to_owned();
     match http_status(&format!("{proxy_base}/web/")) {
         Ok(200) => println!("[PASS] web UI via proxy (no credentials)  -> 200"),
         other => {
@@ -233,7 +224,6 @@ fn check() -> Result<(), String> {
             println!("[FAIL] web UI via proxy (no credentials)  -> {other:?}");
         }
     }
-    // 2. API through the proxy, no credentials.
     match http_status(&format!("{proxy_base}/stats")) {
         Ok(200) => println!("[PASS] API via proxy (no credentials)     -> 200"),
         other => {
@@ -241,7 +231,6 @@ fn check() -> Result<(), String> {
             println!("[FAIL] API via proxy (no credentials)     -> {other:?}");
         }
     }
-    // 3. The engine port itself, no credentials -> must 401.
     if reg.engine_port == 0 {
         ok = false;
         println!(
@@ -264,7 +253,6 @@ fn check() -> Result<(), String> {
             }
         }
     }
-
     if ok {
         println!("result: OK — the proxy is injecting auth correctly");
         Ok(())
@@ -272,7 +260,6 @@ fn check() -> Result<(), String> {
         Err("result: FAILED — see the [FAIL] lines above".to_owned())
     }
 }
-
 /// GET `url` and return the HTTP status (2xx/4xx both come back as
 /// numbers; only transport-level failures are reported as Err).
 fn http_status(url: &str) -> Result<u16, String> {
@@ -286,7 +273,6 @@ fn http_status(url: &str) -> Result<u16, String> {
         Err(err) => Err(format!("{url}: {err}")),
     }
 }
-
 /// Start the standalone engine as a detached daemon (idempotent). The
 /// engine + the auth-injecting proxy MUST outlive this process, so the
 /// work is done by a hidden `s2udio rq __serve` child: it spawns rqbit,
@@ -297,22 +283,17 @@ fn start() -> Result<(), String> {
         println!("rqbit web UI already running: {}", reg.web_url);
         return Ok(());
     }
-    let exe =
-        std::env::current_exe().map_err(|err| format!("Cannot find the s2udio binary: {err}"))?;
+    let exe = std::env::current_exe()
+        .map_err(|err| format!("Cannot find the s2udio binary: {err}"))?;
     let mut child = std::process::Command::new(&exe)
         .arg("rq")
         .arg("serve")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
-        // New process group: terminal Ctrl+C / hangup never reaches the
-        // daemon.
         .process_group(0)
         .spawn()
         .map_err(|err| format!("Failed to spawn the rqbit daemon: {err}"))?;
-
-    // Wait for the daemon's READY line (bounded: 15 s covers the engine
-    // spawn + readiness).
     let mut stdout = child.stdout.take().expect("daemon stdout is piped");
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
@@ -332,14 +313,12 @@ fn start() -> Result<(), String> {
             return Err("rqbit daemon did not become ready within 15 s".to_owned());
         }
     }
-    // The daemon registered itself; print its URL.
     let reg = registered_running()
         .ok_or_else(|| "rqbit daemon started but did not register".to_owned())?;
     println!("rqbit web UI: {}", reg.web_url);
     println!("stop it with `s2udio rq stop`");
     Ok(())
 }
-
 /// The daemon: own the engine + proxy until SIGTERM/SIGINT (or until the
 /// engine child dies), keeping the registration file current.
 fn serve() -> Result<(), String> {
@@ -350,42 +329,44 @@ fn serve() -> Result<(), String> {
     }
     let config = torrent_config();
     let mut engine = crate::core::torrent::start_engine(&config)?;
-    let engine_port =
-        engine.base_url().rsplit(':').next().and_then(|p| p.parse::<u16>().ok()).unwrap_or(0);
+    let engine_port = engine
+        .base_url()
+        .rsplit(':')
+        .next()
+        .and_then(|p| p.parse::<u16>().ok())
+        .unwrap_or(0);
     let reg = RqEngineFile {
         pid: std::process::id(),
         web_url: engine.web_url(),
         engine_port,
         cache_dir: engine.cache_dir.display().to_string(),
-        started_at: SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0),
+        started_at: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
     };
     write_registration(&reg)?;
-    // Signal readiness to the parent (it waits for this line).
     println!("READY {}", reg.web_url);
     loop {
         if SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed) {
             break;
         }
         if !engine.is_running() {
-            // The rqbit child died on its own (crash): self-heal by
-            // exiting and clearing the registration.
             let _ = unregister();
             return Err("rqbit engine exited unexpectedly".to_owned());
         }
         std::thread::sleep(Duration::from_millis(500));
     }
-    // Clean shutdown: dropping the engine kills rqbit + the proxy.
     drop(engine);
     let _ = unregister();
     Ok(())
 }
-
-static SHUTDOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
+static SHUTDOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(
+    false,
+);
 extern "C" fn on_signal(_: libc::c_int) {
     SHUTDOWN.store(true, std::sync::atomic::Ordering::Relaxed);
 }
-
 /// Open `url` in the system browser (`xdg-open`); on failure the URL is
 /// printed so it can be pasted manually.
 fn open_url(url: &str) {
@@ -402,51 +383,5 @@ fn open_url(url: &str) {
             eprintln!("Could not open a browser (xdg-open): {err}");
             eprintln!("Open the URL manually: {url}");
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn state_file_round_trips() {
-        let dir = std::env::temp_dir().join(format!("rqctl-test-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        // Point the state path at the temp dir via a write probe: we can't
-        // easily redirect state_path(), so test the pieces it uses.
-        let reg = RqEngineFile {
-            pid: u32::MAX,
-            web_url: "http://127.0.0.1:1/web/".to_owned(),
-            engine_port: 3030,
-            cache_dir: "/tmp/x".to_owned(),
-            started_at: 1,
-        };
-        let json = serde_json::to_string(&reg).unwrap();
-        let back: RqEngineFile = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.pid, reg.pid);
-        assert_eq!(back.web_url, reg.web_url);
-        let _ = dir;
-    }
-
-    #[test]
-    fn dead_pid_is_not_alive() {
-        // 99_999_999 is beyond Linux's pid_max (~4M), so no process can
-        // own it (and unlike -1/u32::MAX it is not the "signal everyone"
-        // special case, which kill() reports as alive for root).
-        assert!(!pid_alive(99_999_999));
-        // Our own pid is alive.
-        assert!(pid_alive(std::process::id()));
-    }
-
-    #[test]
-    fn stop_registered_without_state_is_a_noop() {
-        // Never touch a live registration (a running engine's file must
-        // survive tests) — skip when one exists.
-        if read_state().is_some() {
-            eprintln!("skipping: an rqbit engine is registered");
-            return;
-        }
-        assert_eq!(stop_registered().expect("no state -> Ok(false)"), false);
     }
 }

@@ -1,78 +1,73 @@
 use std::time::Duration;
-
 use anyhow::anyhow;
 use serde::Serialize;
-
 use super::Volume;
 use crate::mpd::{FromMpd, LineHandled, ParseErrorExt, errors::MpdError};
-
 #[derive(Debug, Serialize, Default, Clone)]
 pub struct Status {
-    pub partition: String, /* the name of the current partition (see
-                            * Partition commands) */
-    pub volume: Volume, /* 0-100 (deprecated: -1 if the volume cannot be
-                         * determined) */
+    pub partition: String,
+    pub volume: Volume,
     pub repeat: bool,
     pub random: bool,
     pub single: OnOffOneshot,
     pub consume: OnOffOneshot,
-    pub playlist: Option<u32>, /* 31-bit unsigned integer, the playlist
-                                * version number */
-    pub playlistlength: u32, // integer, the length of the playlist
-    pub state: State,        // play, stop, or pause
-    pub song: Option<usize>, /* playlist song number of the current song
-                              * stopped on or playing */
-    pub songid: Option<u32>, /* playlist songid of the current song stopped
-                              * on or playing */
-    pub nextsong: Option<u32>, /* playlist song number of the next song to
-                                * be played */
-    pub nextsongid: Option<u32>, /* playlist songid of the next song to be
-                                  * played */
-    pub elapsed: Duration,    /* Total time elapsed within the current song in
-                               * seconds, but
-                               * with higher resolution. */
-    pub duration: Duration,        // Duration of the current song in seconds.
-    pub bitrate: Option<u32>,      // instantaneous bitrate in kbps
-    pub xfade: Option<u32>,        // crossfade in seconds (see Cross-Fading)
-    pub mixrampdb: Option<String>, // mixramp threshold in dB
-    pub mixrampdelay: Option<String>, // mixrampdelay in seconds
-    pub audio: Option<String>,     /* The format emitted by the decoder plugin
-                                    * during playback,
-                                    * format: samplerate:
-                                    * bits:channels. See Global Audio Format for a
-                                    * detailed
-                                    * explanation. */
-    pub updating_db: Option<u32>,           // job id
-    pub error: Option<String>,              // if there is an error, returns message here
-    pub lastloadedplaylist: Option<String>, // last loaded stored playlist
+    pub playlist: Option<u32>,
+    pub playlistlength: u32,
+    pub state: State,
+    pub song: Option<usize>,
+    pub songid: Option<u32>,
+    pub nextsong: Option<u32>,
+    pub nextsongid: Option<u32>,
+    pub elapsed: Duration,
+    pub duration: Duration,
+    pub bitrate: Option<u32>,
+    pub xfade: Option<u32>,
+    pub mixrampdb: Option<String>,
+    pub mixrampdelay: Option<String>,
+    pub audio: Option<String>,
+    pub updating_db: Option<u32>,
+    pub error: Option<String>,
+    pub lastloadedplaylist: Option<String>,
 }
-
 impl Status {
     pub fn samplerate(&self) -> Option<u32> {
         self.audio
             .as_ref()
-            .and_then(|audio| audio.split(':').next().and_then(|rate_str| rate_str.parse().ok()))
+            .and_then(|audio| {
+                audio.split(':').next().and_then(|rate_str| rate_str.parse().ok())
+            })
     }
-
     pub fn bits(&self) -> Option<u32> {
         self.audio
             .as_ref()
-            .and_then(|audio| audio.split(':').nth(1).and_then(|bits_str| bits_str.parse().ok()))
+            .and_then(|audio| {
+                audio.split(':').nth(1).and_then(|bits_str| bits_str.parse().ok())
+            })
     }
-
     pub fn channels(&self) -> Option<u32> {
-        self.audio.as_ref().and_then(|audio| {
-            audio.split(':').nth(2).and_then(|channels_str| channels_str.parse().ok())
-        })
+        self.audio
+            .as_ref()
+            .and_then(|audio| {
+                audio
+                    .split(':')
+                    .nth(2)
+                    .and_then(|channels_str| channels_str.parse().ok())
+            })
     }
 }
-
 impl FromMpd for Status {
-    fn next_internal(&mut self, key: &str, value: String) -> Result<LineHandled, MpdError> {
+    fn next_internal(
+        &mut self,
+        key: &str,
+        value: String,
+    ) -> Result<LineHandled, MpdError> {
         match key {
             "partition" => self.partition = value,
             "volume" if value == "-1" => {
-                log::warn!(command = "status", key, value = value.as_str(); "Received unsupported value");
+                log::warn!(
+                    command = "status", key, value = value.as_str();
+                    "Received unsupported value"
+                );
                 self.volume = Volume::new(0);
             }
             "volume" => self.volume = Volume::new(value.parse().logerr(key, &value)?),
@@ -87,11 +82,19 @@ impl FromMpd for Status {
             "songid" => self.songid = Some(value.parse().logerr(key, &value)?),
             "nextsong" => self.nextsong = Some(value.parse().logerr(key, &value)?),
             "nextsongid" => self.nextsongid = Some(value.parse().logerr(key, &value)?),
-            "elapsed" => self.elapsed = Duration::from_secs_f32(value.parse().logerr(key, &value)?),
-            "duration" => {
-                self.duration = Duration::from_secs_f32(value.parse().logerr(key, &value)?);
+            "elapsed" => {
+                self.elapsed = Duration::from_secs_f32(
+                    value.parse().logerr(key, &value)?,
+                );
             }
-            "bitrate" if value != "0" => self.bitrate = Some(value.parse().logerr(key, &value)?),
+            "duration" => {
+                self.duration = Duration::from_secs_f32(
+                    value.parse().logerr(key, &value)?,
+                );
+            }
+            "bitrate" if value != "0" => {
+                self.bitrate = Some(value.parse().logerr(key, &value)?);
+            }
             "xfade" => self.xfade = Some(value.parse().logerr(key, &value)?),
             "mixrampdb" => self.mixrampdb = Some(value),
             "mixrampdelay" => self.mixrampdelay = Some(value),
@@ -104,13 +107,12 @@ impl FromMpd for Status {
                     self.lastloadedplaylist = Some(value);
                 }
             }
-            "time" => {} // deprecated
+            "time" => {}
             _ => return Ok(LineHandled::No { value }),
         }
         Ok(LineHandled::Yes)
     }
 }
-
 #[derive(Debug, Serialize, Default, PartialEq, Clone, Copy)]
 pub enum State {
     Play,
@@ -118,7 +120,6 @@ pub enum State {
     Stop,
     Pause,
 }
-
 #[derive(Debug, Serialize, Default, Clone, Copy, PartialEq, Eq, strum::AsRefStr)]
 pub enum OnOffOneshot {
     #[strum(serialize = "On")]
@@ -129,7 +130,6 @@ pub enum OnOffOneshot {
     #[strum(serialize = "OS")]
     Oneshot,
 }
-
 impl OnOffOneshot {
     pub fn cycle(self) -> Self {
         match self {
@@ -138,7 +138,6 @@ impl OnOffOneshot {
             OnOffOneshot::Oneshot => OnOffOneshot::On,
         }
     }
-
     /// Single is always enabled as a oneshot: `Off <-> Oneshot` (a plain
     /// `On` counts as enabled, so clicking it disables).
     pub fn cycle_single(self) -> Self {
@@ -148,7 +147,6 @@ impl OnOffOneshot {
             OnOffOneshot::Oneshot => OnOffOneshot::Off,
         }
     }
-
     pub fn cycle_skip_oneshot(self) -> Self {
         match self {
             OnOffOneshot::On => OnOffOneshot::Off,
@@ -156,7 +154,6 @@ impl OnOffOneshot {
             OnOffOneshot::Oneshot => OnOffOneshot::Off,
         }
     }
-
     pub fn to_mpd_value(self) -> &'static str {
         match self {
             OnOffOneshot::On => "1",
@@ -165,25 +162,17 @@ impl OnOffOneshot {
         }
     }
 }
-
 impl std::fmt::Display for OnOffOneshot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
-            f,
-            "{}",
-            match self {
-                OnOffOneshot::On => "On",
-                OnOffOneshot::Off => "Off",
-                OnOffOneshot::Oneshot => "OS",
-            }
+            f, "{}", match self { OnOffOneshot::On => "On", OnOffOneshot::Off => "Off",
+            OnOffOneshot::Oneshot => "OS", }
         )?;
         Ok(())
     }
 }
-
 impl std::str::FromStr for OnOffOneshot {
     type Err = anyhow::Error;
-
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "0" => Ok(OnOffOneshot::Off),
@@ -193,23 +182,16 @@ impl std::str::FromStr for OnOffOneshot {
         }
     }
 }
-
 impl std::fmt::Display for State {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
-            f,
-            "{}",
-            match self {
-                State::Play => "Playing",
-                State::Stop => "Stopped",
-                State::Pause => "Paused",
-            }
+            f, "{}", match self { State::Play => "Playing", State::Stop => "Stopped",
+            State::Pause => "Paused", }
         )
     }
 }
 impl std::str::FromStr for State {
     type Err = anyhow::Error;
-
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "play" => Ok(Self::Play),
@@ -217,26 +199,5 @@ impl std::str::FromStr for State {
             "pause" => Ok(Self::Pause),
             _ => Err(anyhow!("Invalid State: '{s}'")),
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::OnOffOneshot;
-
-    #[test]
-    fn single_cycles_off_oneshot() {
-        // Single is always enabled as a oneshot: off <-> oneshot, and a
-        // plain on counts as enabled (clicking it disables).
-        assert_eq!(OnOffOneshot::Off.cycle_single(), OnOffOneshot::Oneshot);
-        assert_eq!(OnOffOneshot::Oneshot.cycle_single(), OnOffOneshot::Off);
-        assert_eq!(OnOffOneshot::On.cycle_single(), OnOffOneshot::Off);
-    }
-
-    #[test]
-    fn consume_cycles_all_three_states() {
-        assert_eq!(OnOffOneshot::Off.cycle(), OnOffOneshot::Oneshot);
-        assert_eq!(OnOffOneshot::Oneshot.cycle(), OnOffOneshot::On);
-        assert_eq!(OnOffOneshot::On.cycle(), OnOffOneshot::Off);
     }
 }

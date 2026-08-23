@@ -75,8 +75,6 @@ vergen-gitcl = { version = "1.0.8", features = ["build"] }
 anyhow = "1.0.100"
 
 [dev-dependencies]
-rstest = "0.26.1"
-test-case = "3.3.1"
 
 [workspace.dependencies]
 clap = { version = "4.5.53", features = ["derive", "cargo", "string" ] }

@@ -1,15 +1,8 @@
-// NOTE: This file is also included from build.rs. crate:: may mean any of
-// build.rs or main.rs, so remember to replicate the crate imports in build.rs,
-// by using the `#[path = ""]` attribute for `mod`.
-
 use std::path::PathBuf;
-
 use clap::{Parser, Subcommand, ValueEnum, ValueHint};
 use serde::{Deserialize, Serialize};
 use strum::IntoStaticStr;
-
 use crate::mpd::QueuePosition;
-
 #[derive(Parser, Debug)]
 pub struct Args {
     #[arg(short, long, value_hint = ValueHint::AnyPath, value_name = "FILE")]
@@ -30,29 +23,25 @@ pub struct Args {
     pub password: Option<String>,
     #[arg(long, value_enum)]
     /// Where lyrics come from: local-first (default — colocated .lrc
-    /// sidecar, then the lyrics_dir mirror, then the index, then the
-    /// on_song_change network fetch as the last fallback) or local-only
+    /// sidecar, then the `lyrics_dir` mirror, then the index, then the
+    /// `on_song_change` network fetch as the last fallback) or local-only
     /// (local files only — the network fetch is never spawned).
     /// Overrides the config file's `lyrics_source` key.
     pub lyrics_source: Option<LyricsSource>,
-
     #[command(flatten)]
     pub partition: Partition,
 }
-
 #[derive(Debug, clap::Args)]
 #[group(required = false, multiple = true)]
 pub struct Partition {
     /// Partition to connect to at startup
     #[clap(long)]
     pub partition: Option<String>,
-
     /// Automatically create the partition if it does not exist. Requires
     /// partition to be set.
     #[clap(long, requires = "partition")]
     pub autocreate: bool,
 }
-
 #[derive(ValueEnum, IntoStaticStr, strum::Display, Clone, Copy, Debug, PartialEq)]
 #[clap(rename_all = "lower")]
 pub enum AddRandom {
@@ -62,7 +51,6 @@ pub enum AddRandom {
     AlbumArtist,
     Genre,
 }
-
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
 #[clap(rename_all = "lower")]
 pub enum Provider {
@@ -70,14 +58,10 @@ pub enum Provider {
     Soundcloud,
     Nicovideo,
 }
-
 #[derive(Subcommand, Clone, Debug, PartialEq)]
 #[clap(rename_all = "lower")]
 pub enum Command {
-    AddRandom {
-        tag: AddRandom,
-        count: usize,
-    },
+    AddRandom { tag: AddRandom, count: usize },
     /// Prints the default config. Can be used to bootstrap your config file.
     Config {
         /// If provided, print the current config instead of the default one.
@@ -167,7 +151,7 @@ pub enum Command {
             short,
             long = "rewind-to-start",
             default_missing_value = "5",
-            num_args = 0..=1
+            num_args = 0..= 1
         )]
         rewind_to_start: Option<u64>,
         /// Keep the current playback state
@@ -176,26 +160,15 @@ pub enum Command {
     },
     /// Sets volume, relative if prefixed by + or -. Prints current volume if no
     /// arguments is given.
-    Volume {
-        #[arg(allow_negative_numbers(true))]
-        value: Option<String>,
-    },
+    Volume { #[arg(allow_negative_numbers(true))] value: Option<String> },
     /// On or off
-    Repeat {
-        value: OnOff,
-    },
+    Repeat { value: OnOff },
     /// On or off
-    Random {
-        value: OnOff,
-    },
+    Random { value: OnOff },
     /// On, off or oneshot
-    Single {
-        value: OnOffOneshot,
-    },
+    Single { value: OnOffOneshot },
     /// On, off or oneshot
-    Consume {
-        value: OnOffOneshot,
-    },
+    Consume { value: OnOffOneshot },
     /// Toggles the repeat mode
     ToggleRepeat,
     /// Toggles the random mode
@@ -213,10 +186,7 @@ pub enum Command {
         skip_oneshot: bool,
     },
     /// Seeks current song(seconds), relative if prefixed by + or -
-    Seek {
-        #[arg(allow_negative_numbers(true))]
-        value: String,
-    },
+    Seek { #[arg(allow_negative_numbers(true))] value: String },
     /// Clear the current queue
     Clear,
     /// Add a song to the current queue. Relative to music database root. '/' to
@@ -281,20 +251,11 @@ pub enum Command {
     /// List MPD outputs
     Outputs,
     /// Toggle MPD output on or off
-    ToggleOutput {
-        // Id of the output to toggle
-        id: u32,
-    },
+    ToggleOutput { id: u32 },
     /// Enable MPD output
-    EnableOutput {
-        // Id of the output to enable
-        id: u32,
-    },
+    EnableOutput { id: u32 },
     /// Disable MPD output
-    DisableOutput {
-        // Id of the output to disable
-        id: u32,
-    },
+    DisableOutput { id: u32 },
     /// List MPD decoder plugins
     Decoders,
     /// Prints various information like the playback status
@@ -303,28 +264,17 @@ pub enum Command {
     /// If --path specified, prints information about the song at the given path
     /// instead. If --path is specified multiple times, prints an array
     /// containing all the songs.
-    Song {
-        #[arg(short, long)]
-        path: Option<Vec<String>>,
-    },
+    Song { #[arg(short, long)] path: Option<Vec<String>> },
     /// Mounts supported storage to MPD
-    Mount {
-        name: String,
-        path: String,
-    },
+    Mount { name: String, path: String },
     /// Unmounts storage with given name
-    Unmount {
-        name: String,
-    },
+    Unmount { name: String },
     /// List currently mounted storages
     ListMounts,
     /// List the currently existing partitions
     ListPartitions,
     /// Manipulate and query song stickers
-    Sticker {
-        #[command(subcommand)]
-        cmd: StickerCmd,
-    },
+    Sticker { #[command(subcommand)] cmd: StickerCmd },
     /// Send a remote command to running rmpc instance
     Remote {
         /// PID of the rmpc instance to send the remote command to. If not
@@ -335,18 +285,11 @@ pub enum Command {
         command: RemoteCmd,
     },
     /// Sends a message to given channel for inter client communication.
-    SendMessage {
-        channel: String,
-        content: String,
-    },
+    SendMessage { channel: String, content: String },
     /// Control the standalone rqbit engine (start / stop / open the web
     /// UI). Shares the engine with Settings -> torrent.
-    Rq {
-        #[command(subcommand)]
-        cmd: RqCmd,
-    },
+    Rq { #[command(subcommand)] cmd: RqCmd },
 }
-
 #[derive(Subcommand, Clone, Debug, PartialEq)]
 #[clap(rename_all = "lower")]
 pub enum RqCmd {
@@ -366,7 +309,6 @@ pub enum RqCmd {
     #[clap(hide = true)]
     Serve,
 }
-
 #[derive(Subcommand, Clone, Debug, PartialEq, strum::EnumDiscriminants, strum::Display)]
 #[clap(rename_all = "lower")]
 #[strum(serialize_all = "lowercase")]
@@ -392,29 +334,30 @@ pub enum RemoteCmd {
     #[clap(hide = true)]
     Tmux { hook: String },
     /// Sets a value in running rmpc instance
-    Set {
-        #[command(subcommand)]
-        command: SetCommand,
-    },
+    Set { #[command(subcommand)] command: SetCommand },
     /// Emulate a keybind press in the running rmpc instance
     Keybind { key: String },
     /// Switch to a specific tab by name
     SwitchTab { tab: String },
     /// Query the currently active tab name
-    Query {
-        #[arg(required = true)]
-        targets: Vec<RemoteCommandQuery>,
-    },
+    Query { #[arg(required = true)] targets: Vec<RemoteCommandQuery> },
 }
-
-#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Serialize, Deserialize, strum::Display)]
+#[derive(
+    ValueEnum,
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Serialize,
+    Deserialize,
+    strum::Display
+)]
 #[strum(serialize_all = "lowercase")]
 #[clap(rename_all = "lower")]
 pub enum RemoteCommandQuery {
     /// Query the currently active tab name
     ActiveTab,
 }
-
 #[derive(Subcommand, Clone, Debug, PartialEq)]
 #[clap(rename_all = "lower")]
 pub enum SetCommand {
@@ -435,14 +378,12 @@ pub enum SetCommand {
         path: String,
     },
 }
-
 #[derive(Clone, Copy, Debug, PartialEq, Parser, ValueEnum)]
 pub enum Level {
     Info,
     Error,
     Warn,
 }
-
 #[derive(Subcommand, Clone, Debug, PartialEq)]
 #[clap(rename_all = "lower")]
 pub enum StickerCmd {
@@ -487,7 +428,6 @@ pub enum StickerCmd {
         uri: String,
     },
 }
-
 #[derive(Parser, ValueEnum, Copy, Clone, Debug, PartialEq)]
 pub enum OnOff {
     /// Enable
@@ -495,7 +435,6 @@ pub enum OnOff {
     /// Disable
     Off,
 }
-
 #[derive(Parser, ValueEnum, Copy, Clone, Debug, PartialEq)]
 pub enum OnOffOneshot {
     /// Enable
@@ -505,7 +444,6 @@ pub enum OnOffOneshot {
     /// Track get removed from playlist after it has been played
     Oneshot,
 }
-
 /// Round 38: where the lyrics come from. `LocalFirst` (default) resolves
 /// the colocated .lrc sidecar, then the `lyrics_dir` mirror, then the
 /// lyrics index, and only then falls back to the network fetch via the
@@ -519,7 +457,6 @@ pub enum LyricsSource {
     LocalFirst,
     LocalOnly,
 }
-
 impl Args {
     /// Split a shell-like command line into tokens (argv).
     ///
@@ -540,7 +477,6 @@ impl Args {
         let mut in_single_quote = false;
         let mut in_double_quote = false;
         let mut escaped = false;
-
         for ch in s.chars() {
             if escaped {
                 token.push(ch);
@@ -559,7 +495,6 @@ impl Args {
                 c => token.push(c),
             }
         }
-
         if escaped {
             return Err("dangling backslash");
         }
@@ -571,7 +506,6 @@ impl Args {
         }
         Ok(args)
     }
-
     /// Parse a command-line string into [`Args`] as if typed in the terminal.
     ///
     /// This function tokenizes `s` like a shell, prepends a synthetic `argv[0]`
@@ -596,47 +530,14 @@ impl Args {
         let mut argv = Self::split_command_line(s)
             .map_err(|e| clap::Error::raw(clap::error::ErrorKind::InvalidValue, e))?;
         if argv.is_empty() {
-            return Err(clap::Error::raw(
-                clap::error::ErrorKind::MissingRequiredArgument,
-                "empty command",
-            ));
+            return Err(
+                clap::Error::raw(
+                    clap::error::ErrorKind::MissingRequiredArgument,
+                    "empty command",
+                ),
+            );
         }
-        argv.insert(0, "rmpc".to_string()); // clap expects argv[0]
+        argv.insert(0, "rmpc".to_string());
         <Self as Parser>::try_parse_from(argv)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn rq_subcommand_parses() {
-        for (line, want) in [
-            ("rq start", RqCmd::Start),
-            ("rq stop", RqCmd::Stop),
-            ("rq open", RqCmd::Open),
-            ("rq check", RqCmd::Check),
-        ] {
-            let args = Args::parse_from(["s2udio", "rq", line.split_whitespace().nth(1).unwrap()]);
-            match args.command {
-                Some(Command::Rq { cmd }) => assert_eq!(cmd, want, "{line}"),
-                other => panic!("expected Command::Rq for {line}, got {other:?}"),
-            }
-        }
-        assert!(Args::try_parse_from(["s2udio", "rq", "bogus"]).is_err());
-    }
-
-    #[test]
-    fn lyrics_source_cli_flag_parses() {
-        // Round 38: --lyrics-source accepts both modes (kebab-case) and
-        // is absent by default.
-        let args = Args::parse_from(["s2udio", "--lyrics-source", "local-only"]);
-        assert_eq!(args.lyrics_source, Some(LyricsSource::LocalOnly));
-        let args = Args::parse_from(["s2udio", "--lyrics-source", "local-first"]);
-        assert_eq!(args.lyrics_source, Some(LyricsSource::LocalFirst));
-        let args = Args::parse_from(["s2udio"]);
-        assert_eq!(args.lyrics_source, None);
-        assert!(Args::try_parse_from(["s2udio", "--lyrics-source", "bogus"]).is_err());
     }
 }

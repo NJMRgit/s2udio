@@ -1,48 +1,38 @@
 use std::collections::{HashMap, HashSet};
-
 use anyhow::Result;
 use itertools::Itertools;
 use ratatui::{
-    Frame,
-    layout::{Constraint, Layout, Rect},
+    Frame, layout::{Constraint, Layout, Rect},
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, ListState},
 };
-
 use super::{Pane, search::SearchPane};
 use crate::{
     MpdQueryResult,
     config::{
-        keys::GlobalAction,
-        tabs::{PaneType, PaneTypeDiscriminants, TreeBrowserArgs},
+        keys::GlobalAction, tabs::{PaneType, PaneTypeDiscriminants, TreeBrowserArgs},
     },
     ctx::Ctx,
     mpd::{
-        client::Client,
-        commands::Song,
-        mpd_client::{Filter, FilterKind, MpdClient, Tag},
+        client::Client, commands::Song, mpd_client::{Filter, FilterKind, MpdClient, Tag},
     },
     shared::{
-        keys::ActionEvent,
-        macros::modal,
-        mouse_event::{MouseEvent, MouseEventKind},
+        keys::ActionEvent, macros::modal, mouse_event::{MouseEvent, MouseEventKind},
         mpd_client_ext::{Enqueue, MpdClientExt},
     },
     ui::{
-        UiEvent,
-        dir_or_song::DirOrSong,
-        dirstack::{DirStackItem, MarkState, Path},
+        UiEvent, dir_or_song::DirOrSong, dirstack::{DirStackItem, MarkState, Path},
         input::InputResultEvent,
-        modals::{input_modal::InputModal, menu::modal::MenuModal, select_modal::SelectModal},
+        modals::{
+            input_modal::InputModal, menu::modal::MenuModal, select_modal::SelectModal,
+        },
         tree_browser::{TreeBrowserCore, TreeRowView},
         widgets::sub_tab_bar::{Segment, SubTabBar},
     },
 };
-
 const FETCH_DATA: &str = "fetch_data";
 const TREE: &str = "dir_tree";
 const PLAY_FILE: &str = "dir_play_file";
-
 /// Width of the left folder-tree pane for a given total width. The tree
 /// keeps a minimum of 50 columns when there is room; on TUIs 120 columns
 /// wide or less it is hidden entirely (the right pane takes the whole
@@ -58,7 +48,6 @@ const PLAY_FILE: &str = "dir_play_file";
 pub(crate) fn tree_width(total: u16) -> u16 {
     TreeBrowserArgs::default().tree_width(total)
 }
-
 /// Split a full MPD path ("A/B/C") into a dirstack `Path`.
 fn split_path(full: &str) -> Path {
     let mut path = Path::new();
@@ -67,7 +56,6 @@ fn split_path(full: &str) -> Path {
     }
     path
 }
-
 /// A browser entry is shown when it is not a playlist and not a hidden
 /// directory (name starting with `.`, e.g. `.hist`).
 fn is_visible_entry(v: &DirOrSong) -> bool {
@@ -76,13 +64,12 @@ fn is_visible_entry(v: &DirOrSong) -> bool {
         DirOrSong::Song(_) => true,
     }
 }
-
 /// Whether a browser path is the Downloads folder (the marker segment,
 /// `~/Downloads/s2udio-downloads` shown as "Downloads").
 fn is_downloads_path(path: &Path) -> bool {
-    path.as_slice().len() == 1 && path.as_slice()[0] == crate::ui::modals::paste::DOWNLOADS_DIR_NAME
+    path.as_slice().len() == 1
+        && path.as_slice()[0] == crate::ui::modals::paste::DOWNLOADS_DIR_NAME
 }
-
 /// List the downloads folder from disk: it lives outside the MPD library,
 /// so MPD cannot list it. Files carry absolute paths (playable via mpv)
 /// and their file stem as the title (no tags on disk files); subfolders
@@ -93,7 +80,6 @@ fn list_downloads_dir() -> Vec<DirOrSong> {
     };
     list_dir(&dir)
 }
-
 /// The actual disk listing behind [`list_downloads_dir`] (separated for
 /// tests — no `$HOME` dependence).
 fn list_dir(dir: &std::path::Path) -> Vec<DirOrSong> {
@@ -110,10 +96,11 @@ fn list_dir(dir: &std::path::Path) -> Vec<DirOrSong> {
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_else(|| name.clone());
             let mut metadata = std::collections::HashMap::new();
-            metadata.insert(
-                "title".to_owned(),
-                crate::mpd::commands::metadata_tag::MetadataTag::from(stem),
-            );
+            metadata
+                .insert(
+                    "title".to_owned(),
+                    crate::mpd::commands::metadata_tag::MetadataTag::from(stem),
+                );
             DirOrSong::Song(crate::mpd::commands::Song {
                 file: path.to_string_lossy().into_owned(),
                 duration: None,
@@ -133,7 +120,6 @@ fn list_dir(dir: &std::path::Path) -> Vec<DirOrSong> {
     items.sort_by(|a, b| a.as_path().cmp(b.as_path()));
     items
 }
-
 /// A collapsible folder tree for the left pane, built from `listall`.
 #[derive(Debug)]
 struct TreeNode {
@@ -145,12 +131,16 @@ struct TreeNode {
     children: Vec<TreeNode>,
     expanded: bool,
 }
-
 impl TreeNode {
     fn new(name: String, path: Vec<String>) -> Self {
-        Self { name, path, display: None, children: Vec::new(), expanded: false }
+        Self {
+            name,
+            path,
+            display: None,
+            children: Vec::new(),
+            expanded: false,
+        }
     }
-
     fn find_mut(&mut self, path: &[String]) -> Option<&mut TreeNode> {
         let mut node = self;
         for seg in path {
@@ -159,20 +149,17 @@ impl TreeNode {
         }
         Some(node)
     }
-
     /// The name the tree renders for a node (the display override for the
     /// Downloads folder, the path segment otherwise).
     fn display_name(&self) -> &str {
         self.display.as_deref().unwrap_or(&self.name)
     }
 }
-
 #[derive(Debug)]
 pub struct DirTree {
     root: TreeNode,
     selected: usize,
 }
-
 impl Default for DirTree {
     fn default() -> Self {
         Self {
@@ -187,7 +174,6 @@ impl Default for DirTree {
         }
     }
 }
-
 impl DirTree {
     /// Build the tree from `listall` directory paths (e.g. "Artist/Album").
     /// Hidden directories (a segment starting with `.`) are skipped
@@ -213,7 +199,6 @@ impl DirTree {
         }
         tree
     }
-
     /// Flatten the visible nodes (pre-order, skipping collapsed subtrees)
     /// into (node, depth) pairs.
     fn visible<'a>(
@@ -229,7 +214,6 @@ impl DirTree {
             }
         }
     }
-
     /// Expand `path` (and its ancestors) and select its node. Only an
     /// explicit open action expands the target; the root is always expanded
     /// so the tree can never fully collapse.
@@ -247,50 +231,22 @@ impl DirTree {
         }
         let mut flat = Vec::new();
         self.visible(&self.root, 0, &mut flat);
-        self.selected = flat.iter().position(|(n, _)| n.path == path.as_slice()).unwrap_or(0);
+        self.selected = flat
+            .iter()
+            .position(|(n, _)| n.path == path.as_slice())
+            .unwrap_or(0);
     }
-
-    #[cfg(test)]
-    fn toggle(&mut self, path: &[String]) {
-        if let Some(node) = self.root.find_mut(path) {
-            node.expanded = !node.expanded;
-        }
-    }
-
-    #[cfg(test)]
-    fn find(&self, path: &[String]) -> Option<&TreeNode> {
-        let mut node = &self.root;
-        for seg in path {
-            let i = node.children.iter().position(|c| &c.name == seg)?;
-            node = &node.children[i];
-        }
-        Some(node)
-    }
-
     fn expand(&mut self, path: &[String]) {
         if let Some(node) = self.root.find_mut(path) {
             node.expanded = true;
         }
     }
-
     fn collapse(&mut self, path: &[String]) {
         if let Some(node) = self.root.find_mut(path) {
             node.expanded = false;
         }
     }
-
-    #[cfg(test)]
-    fn is_expanded(&self, path: &[String]) -> bool {
-        self.find(path).map(|n| n.expanded).unwrap_or(false)
-    }
-
-    /// A bottom directory: no subdirectories to expand.
-    #[cfg(test)]
-    fn is_leaf(&self, path: &[String]) -> bool {
-        self.find(path).map(|n| n.children.is_empty()).unwrap_or(false)
-    }
 }
-
 /// The mode of the MPD tab (round 28): the tab hosts the library browser
 /// (folders + items) and the search UI (the former top-level Search tab)
 /// under one toggle. The active mode is marked with the app's ●/⭘
@@ -302,7 +258,6 @@ pub enum MpdTabMode {
     /// The search filters + results UI (the folded-in Search tab).
     Search,
 }
-
 /// The MPD tab: a jellyfin-style shared-selection browser. The left tree
 /// mirrors the folder hierarchy (the `Library ↴` root, always expanded),
 /// the right pane lists the **current node's children** — folders and
@@ -358,7 +313,6 @@ pub struct DirectoriesPane {
     /// refreshed on every render.
     toggle_areas: [Rect; 2],
 }
-
 impl DirectoriesPane {
     pub fn new(ctx: &Ctx) -> Self {
         Self {
@@ -380,7 +334,6 @@ impl DirectoriesPane {
             toggle_areas: [Rect::default(); 2],
         }
     }
-
     /// Switch the tab's mode (Library <-> Search), keeping the search
     /// state alive for the session. No-op when already in the mode.
     pub fn set_mode(&mut self, mode: MpdTabMode, ctx: &Ctx) -> Result<()> {
@@ -391,7 +344,6 @@ impl DirectoriesPane {
         ctx.render()?;
         Ok(())
     }
-
     /// Flip the Library/Search mode (bound to `Tab` while the MPD tab is
     /// focused and to clicking the toggle labels).
     pub fn toggle_mode(&mut self, ctx: &Ctx) -> Result<()> {
@@ -401,7 +353,6 @@ impl DirectoriesPane {
         };
         self.set_mode(next, ctx)
     }
-
     /// The `⭘ Library  ● Search` toggle row: left-aligned, one leading
     /// space, the ●/⭘ marker convention with the active mode bold. Click
     /// areas for the two labels are recorded for mouse routing; the row
@@ -412,10 +363,15 @@ impl DirectoriesPane {
             return;
         }
         let segments = [
-            Segment { label: "Library", active: self.mode == MpdTabMode::Library },
-            Segment { label: "Search", active: self.mode == MpdTabMode::Search },
+            Segment {
+                label: "Library",
+                active: self.mode == MpdTabMode::Library,
+            },
+            Segment {
+                label: "Search",
+                active: self.mode == MpdTabMode::Search,
+            },
         ];
-        // One cell in from the left edge (the leading space).
         let x = area.x.saturating_add(1);
         let bar = SubTabBar::new(&segments, x, area.y, area.right().saturating_sub(1));
         let areas = bar.render(frame, ctx);
@@ -423,7 +379,6 @@ impl DirectoriesPane {
             self.toggle_areas[idx] = seg_area;
         }
     }
-
     /// Fetch the children of `path` ("" = root): the folders + songs shown
     /// in the right pane. Playlists are handled by the Playlists tab and
     /// hidden directories are never listed; the MPD browser shows folders
@@ -445,7 +400,9 @@ impl DirectoriesPane {
         ctx.query()
             .id(FETCH_DATA)
             .replace_id("directories_data")
-            .target(PaneType::Directories { tree: TreeBrowserArgs::default() })
+            .target(PaneType::Directories {
+                tree: TreeBrowserArgs::default(),
+            })
             .query(move |client| {
                 let entries = if path.is_empty() {
                     client.lsinfo(None)?
@@ -457,41 +414,42 @@ impl DirectoriesPane {
                     .into_iter()
                     .filter_map(|v| v.into_dir_or_song(playlist_display_mode))
                     .filter(is_visible_entry)
-                    .sorted_by(|a, b| a.with_custom_sort(&sort).cmp(&b.with_custom_sort(&sort)))
+                    .sorted_by(|a, b| {
+                        a.with_custom_sort(&sort).cmp(&b.with_custom_sort(&sort))
+                    })
                     .collect();
-                Ok(MpdQueryResult::DirOrSong { data, path: Some(path) })
+                Ok(MpdQueryResult::DirOrSong {
+                    data,
+                    path: Some(path),
+                })
             });
     }
-
     /// Populate the right pane for the current node: always its children
     /// (folders + songs one level deep). At the root (`selected` = None)
     /// the right pane lists every top-level directory. Playlists and
     /// hidden directories never display here.
     fn populate_items(&mut self) {
         self.item_list.select(None);
-        // A fresh children list has no multi-selection (marks belong to
-        // the list that was on screen).
         self.marked.clear();
         let mut items: Vec<DirOrSong> = match self.selected.as_ref() {
             Some(path) => self.loaded.get(path).cloned().unwrap_or_default(),
             None => self.loaded.get(&Path::new()).cloned().unwrap_or_default(),
         }
-        .into_iter()
-        .filter(is_visible_entry)
-        .collect();
+            .into_iter()
+            .filter(is_visible_entry)
+            .collect();
         if self.selected.is_none() {
-            // The downloads folder (~/Downloads/s2udio-downloads, outside
-            // the MPD library) is listed at the top of the library root,
-            // shown as "Downloads".
-            items.insert(
-                0,
-                DirOrSong::Dir {
-                    name: "Downloads".to_owned(),
-                    full_path: crate::ui::modals::paste::DOWNLOADS_DIR_NAME.to_owned(),
-                    last_modified: chrono::Utc::now(),
-                    playlist: false,
-                },
-            );
+            items
+                .insert(
+                    0,
+                    DirOrSong::Dir {
+                        name: "Downloads".to_owned(),
+                        full_path: crate::ui::modals::paste::DOWNLOADS_DIR_NAME
+                            .to_owned(),
+                        last_modified: chrono::Utc::now(),
+                        playlist: false,
+                    },
+                );
         }
         self.items = items;
         if !self.items.is_empty() {
@@ -499,7 +457,6 @@ impl DirectoriesPane {
             *self.item_list.offset_mut() = 0;
         }
     }
-
     /// Highlight `path` in the right pane (the row we came from when
     /// backing out), falling back to the first row.
     fn select_items_item(&mut self, path: &Path) {
@@ -516,7 +473,6 @@ impl DirectoriesPane {
             self.item_list.select(Some(idx));
         }
     }
-
     /// Open a highlighted folder: expand its path in the tree and show its
     /// children in the right pane (used by `d`/`→` and double-click).
     fn open_item(&mut self, item: DirOrSong, ctx: &Ctx) -> Result<()> {
@@ -530,7 +486,6 @@ impl DirectoriesPane {
         ctx.render()?;
         Ok(())
     }
-
     /// Expand or collapse a tree node. The Library root is never
     /// collapsible. The right pane mirrors the highlighted node: when the
     /// toggled node is the current one, its list is re-shown.
@@ -550,130 +505,134 @@ impl DirectoriesPane {
         ctx.render()?;
         Ok(())
     }
-
     /// Move the tree highlight; the highlighted folder's children fill the
     /// right pane.
-
     /// Move the right-pane cursor; the left tree follows when the item has
     /// a tree row (folders).
-
     /// Context menu for a tree folder: add the whole subtree to the queue
     /// or to a playlist.
     fn open_folder_menu(&mut self, path: &Path, ctx: &Ctx) -> Result<()> {
         let path_str = path.to_string();
-        let folder_name = path.as_slice().last().cloned().unwrap_or_else(|| "Library".to_owned());
-        // Every song under the folder, recursively.
+        let folder_name = path
+            .as_slice()
+            .last()
+            .cloned()
+            .unwrap_or_else(|| "Library".to_owned());
         let find_songs = move |client: &mut Client<'_>| -> Result<Vec<Song>> {
-            Ok(client.find(&[Filter::new_with_kind(
-                Tag::File,
-                &path_str,
-                FilterKind::StartsWith,
-            )])?)
+            Ok(
+                client
+                    .find(
+                        &[
+                            Filter::new_with_kind(
+                                Tag::File,
+                                &path_str,
+                                FilterKind::StartsWith,
+                            ),
+                        ],
+                    )?,
+            )
         };
-
         let modal = MenuModal::new(ctx)
-            .list_section(ctx, |mut section| {
-                let find = find_songs.clone();
-                section.add_item("Add folder to queue", move |ctx| {
-                    ctx.command(move |client| {
-                        let songs = find(client)?;
-                        let items: Vec<Enqueue> =
-                            songs.into_iter().map(|s| Enqueue::File { path: s.file }).collect();
-                        client.enqueue_multiple(items, None, None, false)?;
-                        Ok(())
-                    });
-                    Ok(())
-                });
-                let find = find_songs.clone();
-                section.add_item("Replace queue with folder", move |ctx| {
-                    ctx.command(move |client| {
-                        let songs = find(client)?;
-                        let items: Vec<Enqueue> =
-                            songs.into_iter().map(|s| Enqueue::File { path: s.file }).collect();
-                        client.enqueue_multiple(items, None, None, true)?;
-                        Ok(())
-                    });
-                    Ok(())
-                });
-                Some(section)
-            })
-            .list_section(ctx, |mut section| {
-                let find = find_songs.clone();
-                let initial = folder_name.clone();
-                section.add_item("Create playlist from folder", move |ctx| {
-                    modal!(
-                        ctx,
-                        InputModal::new(ctx)
-                            .title("Create new playlist")
-                            .confirm_label("Save")
-                            .input_label("Playlist name:")
-                            .initial_value(initial)
-                            .on_confirm(move |ctx, value| {
-                                let value = value.to_owned();
-                                let find = find.clone();
+            .list_section(
+                ctx,
+                |mut section| {
+                    let find = find_songs.clone();
+                    section
+                        .add_item(
+                            "Add folder to queue",
+                            move |ctx| {
                                 ctx.command(move |client| {
                                     let songs = find(client)?;
-                                    client.create_playlist(
-                                        &value,
-                                        songs.into_iter().map(|s| s.file).collect(),
-                                    )?;
+                                    let items: Vec<Enqueue> = songs
+                                        .into_iter()
+                                        .map(|s| Enqueue::File { path: s.file })
+                                        .collect();
+                                    client.enqueue_multiple(items, None, None, false)?;
                                     Ok(())
                                 });
                                 Ok(())
-                            })
-                    );
-                    Ok(())
-                });
-                let find = find_songs.clone();
-                section.add_item("Add folder to playlist", move |ctx| {
-                    // The radio favourites playlist is Radio-tab-owned: it
-                    // never appears as an add target.
-                    let radio_playlist = ctx.config.radio.playlist.clone();
-                    let (items, playlists) = ctx.query_sync(move |client| {
-                        let songs = find(client)?;
-                        let playlists = client
-                            .picker_playlists(&radio_playlist)?
-                            .into_iter()
-                            .map(|p| p.name)
-                            .collect_vec();
-                        Ok((songs, playlists))
-                    })?;
-                    modal!(
-                        ctx,
-                        SelectModal::builder()
-                            .ctx(ctx)
-                            .options(playlists)
-                            .confirm_label("Add")
-                            .title("Select a playlist")
-                            .on_confirm(move |ctx, selected, _idx| {
+                            },
+                        );
+                    let find = find_songs.clone();
+                    section
+                        .add_item(
+                            "Replace queue with folder",
+                            move |ctx| {
                                 ctx.command(move |client| {
-                                    client.add_to_playlist_multiple(
-                                        &selected,
-                                        items.into_iter().map(|s| s.file).collect_vec(),
-                                    )?;
+                                    let songs = find(client)?;
+                                    let items: Vec<Enqueue> = songs
+                                        .into_iter()
+                                        .map(|s| Enqueue::File { path: s.file })
+                                        .collect();
+                                    client.enqueue_multiple(items, None, None, true)?;
                                     Ok(())
                                 });
                                 Ok(())
-                            })
-                            .build()
-                    );
-                    Ok(())
-                });
-                Some(section)
-            });
-
+                            },
+                        );
+                    Some(section)
+                },
+            )
+            .list_section(
+                ctx,
+                |mut section| {
+                    let find = find_songs.clone();
+                    let initial = folder_name.clone();
+                    section
+                        .add_item(
+                            "Create playlist from folder",
+                            move |ctx| {
+                                modal!(
+                                    ctx, InputModal::new(ctx).title("Create new playlist")
+                                    .confirm_label("Save").input_label("Playlist name:")
+                                    .initial_value(initial).on_confirm(move | ctx, value | { let
+                                    value = value.to_owned(); let find = find.clone(); ctx
+                                    .command(move | client | { let songs = find(client) ?;
+                                    client.create_playlist(& value, songs.into_iter().map(| s |
+                                    s.file).collect(),) ?; Ok(()) }); Ok(()) })
+                                );
+                                Ok(())
+                            },
+                        );
+                    let find = find_songs.clone();
+                    section
+                        .add_item(
+                            "Add folder to playlist",
+                            move |ctx| {
+                                let radio_playlist = ctx.config.radio.playlist.clone();
+                                let (items, playlists) = ctx
+                                    .query_sync(move |client| {
+                                        let songs = find(client)?;
+                                        let playlists = client
+                                            .picker_playlists(&radio_playlist)?
+                                            .into_iter()
+                                            .map(|p| p.name)
+                                            .collect_vec();
+                                        Ok((songs, playlists))
+                                    })?;
+                                modal!(
+                                    ctx, SelectModal::builder().ctx(ctx).options(playlists)
+                                    .confirm_label("Add").title("Select a playlist")
+                                    .on_confirm(move | ctx, selected, _idx | { ctx.command(move
+                                    | client | { client.add_to_playlist_multiple(& selected,
+                                    items.into_iter().map(| s | s.file).collect_vec(),) ?;
+                                    Ok(()) }); Ok(()) }).build()
+                                );
+                                Ok(())
+                            },
+                        );
+                    Some(section)
+                },
+            );
         crate::shared::macros::modal!(ctx, modal);
         Ok(())
     }
-
     /// Context menu for a highlighted file: add it to the queue or to a
     /// playlist. When songs are marked, the menu acts on every marked
     /// song (like the audio queue list's menu); otherwise the highlighted
     /// file.
     fn open_song_menu(&mut self, ctx: &Ctx) -> Result<()> {
         let Some(item) = self.selected_item() else { return Ok(()) };
-        // The songs the menu acts on: the marked songs when any are
-        // marked, else the highlighted file.
         let songs: Vec<Song> = if self.marked.is_empty() {
             match &item {
                 DirOrSong::Song(song) => vec![song.clone()],
@@ -688,102 +647,103 @@ impl DirectoriesPane {
                 })
                 .collect()
         };
-        let current_items: Vec<Enqueue> =
-            songs.iter().map(|s| Enqueue::File { path: s.file.clone() }).collect();
-        let list_songs = move |_client: &mut Client<'_>| -> Result<Vec<Song>> { Ok(songs.clone()) };
-
+        let current_items: Vec<Enqueue> = songs
+            .iter()
+            .map(|s| Enqueue::File {
+                path: s.file.clone(),
+            })
+            .collect();
+        let list_songs = move |_client: &mut Client<'_>| -> Result<Vec<Song>> {
+            Ok(songs.clone())
+        };
         let modal = MenuModal::new(ctx)
-            .list_section(ctx, |mut section| {
-                if !current_items.is_empty() {
-                    let cloned_items = current_items.clone();
-                    section.add_item("Add to queue", move |ctx| {
-                        ctx.command(move |client| {
-                            client.enqueue_multiple(cloned_items, None, None, false)?;
-                            Ok(())
-                        });
-                        Ok(())
-                    });
-                    let cloned_items = current_items.clone();
-                    section.add_item("Replace queue", move |ctx| {
-                        ctx.command(move |client| {
-                            client.enqueue_multiple(cloned_items, None, None, true)?;
-                            Ok(())
-                        });
-                        Ok(())
-                    });
-                }
-
-                let songs_in_item = list_songs.clone();
-                section.add_item("Create playlist", move |ctx| {
-                    modal!(
-                        ctx,
-                        InputModal::new(ctx)
-                            .title("Create new playlist")
-                            .confirm_label("Save")
-                            .input_label("Playlist name:")
-                            .on_confirm(move |ctx, value| {
-                                let value = value.to_owned();
-                                ctx.command(move |client| {
-                                    let songs = songs_in_item(client)?;
-                                    client.create_playlist(
-                                        &value,
-                                        songs.into_iter().map(|s| s.file).collect(),
-                                    )?;
+            .list_section(
+                ctx,
+                |mut section| {
+                    if !current_items.is_empty() {
+                        let cloned_items = current_items.clone();
+                        section
+                            .add_item(
+                                "Add to queue",
+                                move |ctx| {
+                                    ctx.command(move |client| {
+                                        client.enqueue_multiple(cloned_items, None, None, false)?;
+                                        Ok(())
+                                    });
                                     Ok(())
-                                });
-                                Ok(())
-                            })
-                    );
-                    Ok(())
-                });
-
-                let songs_in_item = list_songs.clone();
-                section.add_item("Add to playlist", move |ctx| {
-                    // The radio favourites playlist is Radio-tab-owned: it
-                    // never appears as an add target.
-                    let radio_playlist = ctx.config.radio.playlist.clone();
-                    let (items, playlists) = ctx.query_sync(move |client| {
-                        let songs = songs_in_item(client)?;
-                        let playlists = client
-                            .picker_playlists(&radio_playlist)?
-                            .into_iter()
-                            .map(|p| p.name)
-                            .collect_vec();
-                        Ok((songs, playlists))
-                    })?;
-                    modal!(
-                        ctx,
-                        SelectModal::builder()
-                            .ctx(ctx)
-                            .options(playlists)
-                            .confirm_label("Add")
-                            .title("Select a playlist")
-                            .on_confirm(move |ctx, selected, _idx| {
-                                ctx.command(move |client| {
-                                    client.add_to_playlist_multiple(
-                                        &selected,
-                                        items.into_iter().map(|s| s.file).collect_vec(),
-                                    )?;
+                                },
+                            );
+                        let cloned_items = current_items.clone();
+                        section
+                            .add_item(
+                                "Replace queue",
+                                move |ctx| {
+                                    ctx.command(move |client| {
+                                        client.enqueue_multiple(cloned_items, None, None, true)?;
+                                        Ok(())
+                                    });
                                     Ok(())
-                                });
+                                },
+                            );
+                    }
+                    let songs_in_item = list_songs.clone();
+                    section
+                        .add_item(
+                            "Create playlist",
+                            move |ctx| {
+                                modal!(
+                                    ctx, InputModal::new(ctx).title("Create new playlist")
+                                    .confirm_label("Save").input_label("Playlist name:")
+                                    .on_confirm(move | ctx, value | { let value = value
+                                    .to_owned(); ctx.command(move | client | { let songs =
+                                    songs_in_item(client) ?; client.create_playlist(& value,
+                                    songs.into_iter().map(| s | s.file).collect(),) ?; Ok(())
+                                    }); Ok(()) })
+                                );
                                 Ok(())
-                            })
-                            .build()
-                    );
-                    Ok(())
-                });
-                Some(section)
-            })
-            .list_section(ctx, |section| {
-                let section = section.item("Cancel", |_ctx| Ok(()));
-                Some(section)
-            })
+                            },
+                        );
+                    let songs_in_item = list_songs.clone();
+                    section
+                        .add_item(
+                            "Add to playlist",
+                            move |ctx| {
+                                let radio_playlist = ctx.config.radio.playlist.clone();
+                                let (items, playlists) = ctx
+                                    .query_sync(move |client| {
+                                        let songs = songs_in_item(client)?;
+                                        let playlists = client
+                                            .picker_playlists(&radio_playlist)?
+                                            .into_iter()
+                                            .map(|p| p.name)
+                                            .collect_vec();
+                                        Ok((songs, playlists))
+                                    })?;
+                                modal!(
+                                    ctx, SelectModal::builder().ctx(ctx).options(playlists)
+                                    .confirm_label("Add").title("Select a playlist")
+                                    .on_confirm(move | ctx, selected, _idx | { ctx.command(move
+                                    | client | { client.add_to_playlist_multiple(& selected,
+                                    items.into_iter().map(| s | s.file).collect_vec(),) ?;
+                                    Ok(()) }); Ok(()) }).build()
+                                );
+                                Ok(())
+                            },
+                        );
+                    Some(section)
+                },
+            )
+            .list_section(
+                ctx,
+                |section| {
+                    let section = section.item("Cancel", |_ctx| Ok(()));
+                    Some(section)
+                },
+            )
             .build();
-
         modal!(ctx, modal);
         Ok(())
     }
-
     /// Right arrow / `d` (or double-click on a file): play the
     /// highlighted file immediately without adding it to the queue (it is
     /// removed again once the song changes).
@@ -791,15 +751,8 @@ impl DirectoriesPane {
         let Some(DirOrSong::Song(song)) = self.selected_item() else {
             return Ok(());
         };
-        // Drop any previous temporary play entry first, so repeatedly
-        // playing files never grows the queue (the SongChanged cleanup below
-        // only fires when the song actually moves on, which can lag or miss
-        // consecutive plays).
         self.drop_temp_play(ctx);
         let file = song.file.clone();
-        // The Downloads folder lives outside the MPD library (MPD cannot
-        // play files from it): play the file through mpv instead — mpv
-        // handles both audio and video, like torrent streams.
         if crate::ui::modals::paste::downloads_dir()
             .is_some_and(|dir| std::path::Path::new(&file).starts_with(&dir))
         {
@@ -809,32 +762,28 @@ impl DirectoriesPane {
                 .unwrap_or_else(|| file.clone());
             crate::core::mpv::play_video_entries(
                 ctx,
-                vec![crate::core::mpv::MpvPlaylistEntry::new(title, file, None)],
+                vec![crate ::core::mpv::MpvPlaylistEntry::new(title, file, None)],
             );
             return Ok(());
         }
         self.play_temp_url(
             ctx,
             PLAY_FILE,
-            PaneType::Directories { tree: TreeBrowserArgs::default() },
+            PaneType::Directories {
+                tree: TreeBrowserArgs::default(),
+            },
             file,
         );
         Ok(())
     }
 }
-
 impl TreeBrowserCore for DirectoriesPane {
     type Item = DirOrSong;
-
-    // ── tree ───────────────────────────────────────────────────────────
-
     fn tree_rows(&self) -> Vec<TreeRowView> {
         let mut flat = Vec::new();
         self.tree.visible(&self.tree.root, 0, &mut flat);
         flat.into_iter()
             .map(|(node, depth)| TreeRowView {
-                // The root renders as the always-open entry point: the
-                // ↴ glyph is part of its label (no collapsible arrow).
                 label: if node.path.is_empty() {
                     "Library ↴".to_owned()
                 } else {
@@ -847,27 +796,21 @@ impl TreeBrowserCore for DirectoriesPane {
             })
             .collect()
     }
-
     fn tree_selected(&self) -> usize {
         self.tree.selected
     }
-
     fn tree_list(&self) -> &ListState {
         &self.tree_state
     }
-
     fn tree_list_mut(&mut self) -> &mut ListState {
         &mut self.tree_state
     }
-
     fn tree_area(&self) -> Rect {
         self.tree_inner
     }
-
     fn set_tree_area(&mut self, area: Rect) {
         self.tree_inner = area;
     }
-
     fn set_expanded_idx(&mut self, idx: usize, expanded: bool, ctx: &Ctx) -> Result<()> {
         let path = {
             let mut flat = Vec::new();
@@ -877,44 +820,37 @@ impl TreeBrowserCore for DirectoriesPane {
         let Some(path) = path else { return Ok(()) };
         self.set_expanded(&path, expanded, ctx)
     }
-
-    // ── items ──────────────────────────────────────────────────────────
-
     fn items_len(&self) -> usize {
         self.items.len()
     }
-
     fn items_list(&self) -> &ListState {
         &self.item_list
     }
-
     fn items_list_mut(&mut self) -> &mut ListState {
         &mut self.item_list
     }
-
     fn items_area(&self) -> Rect {
         self.items_inner
     }
-
     fn set_items_area(&mut self, area: Rect) {
         self.items_inner = area;
     }
-
     fn item_at(&self, idx: usize) -> Option<Self::Item> {
         self.items.get(idx).cloned()
     }
-
     fn item_row(&self, idx: usize, hovered: bool, ctx: &Ctx) -> ListItem<'static> {
-        // The MPD browser rows: directories get a ▶ prefix, songs get none
-        // (no D/S markers); multi-selected rows render with the lighter
-        // marked highlight (like the queue list), the row under the mouse
-        // with the hover highlight.
         let is_marked = self.marked.contains(idx);
         let item = match &self.items[idx] {
-            DirOrSong::Dir { name, .. } => ListItem::from(Line::from(vec![
-                Span::from("▶ "),
-                Span::from(if name.is_empty() { "Untitled".to_owned() } else { name.clone() }),
-            ])),
+            DirOrSong::Dir { name, .. } => {
+                ListItem::from(
+                    Line::from(
+                        vec![
+                            Span::from("▶ "), Span::from(if name.is_empty() {
+                            "Untitled".to_owned() } else { name.clone() }),
+                        ],
+                    ),
+                )
+            }
             DirOrSong::Song(song) => {
                 let spans: Vec<Span> = ctx
                     .config
@@ -924,13 +860,14 @@ impl TreeBrowserCore for DirectoriesPane {
                     .iter()
                     .map(|prop| {
                         Span::from(
-                            prop.as_string(
-                                Some(song),
-                                &ctx.config.theme.format_tag_separator,
-                                ctx.config.theme.multiple_tag_resolution_strategy,
-                                ctx,
-                            )
-                            .unwrap_or_default(),
+                            prop
+                                .as_string(
+                                    Some(song),
+                                    &ctx.config.theme.format_tag_separator,
+                                    ctx.config.theme.multiple_tag_resolution_strategy,
+                                    ctx,
+                                )
+                                .unwrap_or_default(),
                         )
                     })
                     .collect();
@@ -945,9 +882,6 @@ impl TreeBrowserCore for DirectoriesPane {
             item
         }
     }
-
-    // ── behavior hooks ─────────────────────────────────────────────────
-
     fn highlight_tree_node(&mut self, idx: usize, ctx: &Ctx) -> Result<()> {
         let node_path: Option<Vec<String>> = {
             let mut flat = Vec::new();
@@ -968,15 +902,12 @@ impl TreeBrowserCore for DirectoriesPane {
         ctx.render()?;
         Ok(())
     }
-
     fn select_parent(&mut self, ctx: &Ctx) -> Result<()> {
         let Some(current) = self.selected.clone() else { return Ok(()) };
         if current.is_empty() {
             return Ok(());
         }
         let prev = current.clone();
-        // Moving up collapses the branch we leave: the tree shows the path
-        // up to the current node, not the whole history of expansions.
         self.tree.collapse(prev.as_slice());
         let mut parent = current;
         parent.pop();
@@ -990,12 +921,14 @@ impl TreeBrowserCore for DirectoriesPane {
         ctx.render()?;
         Ok(())
     }
-
     fn activate_selected(&mut self, ctx: &Ctx) -> Result<()> {
         let Some(item) = self.selected_item() else { return Ok(()) };
-        if item.is_file() { self.play_selected_file(ctx) } else { self.open_item(item, ctx) }
+        if item.is_file() {
+            self.play_selected_file(ctx)
+        } else {
+            self.open_item(item, ctx)
+        }
     }
-
     fn open_context_menu(&mut self, ctx: &Ctx) -> Result<()> {
         let Some(item) = self.selected_item() else { return Ok(()) };
         if item.is_file() {
@@ -1006,7 +939,6 @@ impl TreeBrowserCore for DirectoriesPane {
             self.open_folder_menu(&path, ctx)
         }
     }
-
     fn render_info(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) {
         let mut items: Vec<ListItem> = Vec::new();
         if let Some(selected) = self.selected_item() {
@@ -1014,10 +946,12 @@ impl TreeBrowserCore for DirectoriesPane {
                 DirOrSong::Song(song) => {
                     for group in song.to_file_preview(ctx) {
                         if let Some(name) = group.name {
-                            items.push(ListItem::new(Line::styled(
-                                name,
-                                group.header_style.unwrap_or_default(),
-                            )));
+                            items
+                                .push(
+                                    ListItem::new(
+                                        Line::styled(name, group.header_style.unwrap_or_default()),
+                                    ),
+                                );
                         }
                         items.extend(group.items);
                         items.push(ListItem::new(""));
@@ -1027,25 +961,42 @@ impl TreeBrowserCore for DirectoriesPane {
                     let key = ctx.config.theme.preview_label_style;
                     let group = ctx.config.theme.preview_metadata_group_style;
                     items.push(ListItem::new(Line::styled(" --- [Folder]", group)));
-                    items.push(ListItem::new(Line::from(vec![
-                        Span::styled("Name", key),
-                        Span::raw(": "),
-                        Span::raw(name.clone()),
-                    ])));
-                    items.push(ListItem::new(Line::from(vec![
-                        Span::styled("Path", key),
-                        Span::raw(": "),
-                        Span::raw(full_path.clone()),
-                    ])));
-                    items.push(ListItem::new(Line::from(vec![
-                        Span::styled("Last Modified", key),
-                        Span::raw(": "),
-                        Span::raw(last_modified.to_string()),
-                    ])));
+                    items
+                        .push(
+                            ListItem::new(
+                                Line::from(
+                                    vec![
+                                        Span::styled("Name", key), Span::raw(": "), Span::raw(name
+                                        .clone()),
+                                    ],
+                                ),
+                            ),
+                        );
+                    items
+                        .push(
+                            ListItem::new(
+                                Line::from(
+                                    vec![
+                                        Span::styled("Path", key), Span::raw(": "),
+                                        Span::raw(full_path.clone()),
+                                    ],
+                                ),
+                            ),
+                        );
+                    items
+                        .push(
+                            ListItem::new(
+                                Line::from(
+                                    vec![
+                                        Span::styled("Last Modified", key), Span::raw(": "),
+                                        Span::raw(last_modified.to_string()),
+                                    ],
+                                ),
+                            ),
+                        );
                 }
             }
         }
-
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(ctx.config.as_border_style())
@@ -1056,84 +1007,73 @@ impl TreeBrowserCore for DirectoriesPane {
             frame.buffer_mut(),
         );
     }
-
     fn temp_play_id(&self) -> Option<u32> {
         self.temp_play_id
     }
-
     fn set_temp_play_id(&mut self, id: Option<u32>) {
         self.temp_play_id = id;
     }
-
-    // ── rendering hooks ────────────────────────────────────────────────
-
     fn tree_title(&self) -> &'static str {
         " Folders "
     }
-
     /// The MPD tree arrows: ▾/▸ for folders with subdirectories, a
     /// two-space spacer for leaves so the names stay aligned (no ▼/▶).
     fn tree_arrow(&self, row: &TreeRowView) -> &'static str {
         if row.expandable { if row.expanded { "▾ " } else { "▸ " } } else { "  " }
     }
-
     fn items_title(&self) -> String {
-        // Pre-padded (as it appears left of the `(n)` count): the shared
-        // format appends "(n)" directly, so the title keeps the
-        // directories spacing `" Library(3) "` (Phase 2.1 parity).
         match self.selected.as_ref() {
-            Some(path) => path.current_dir().map_or_else(
-                || " Library".to_owned(),
-                |name| {
-                    if name == crate::ui::modals::paste::DOWNLOADS_DIR_NAME {
-                        " Downloads".to_owned()
-                    } else {
-                        format!(" {name}")
-                    }
-                },
-            ),
+            Some(path) => {
+                path.current_dir()
+                    .map_or_else(
+                        || " Library".to_owned(),
+                        |name| {
+                            if name == crate::ui::modals::paste::DOWNLOADS_DIR_NAME {
+                                " Downloads".to_owned()
+                            } else {
+                                format!(" {name}")
+                            }
+                        },
+                    )
+            }
             None => " Library".to_owned(),
         }
     }
-
     fn tips_lines(&self, ctx: &Ctx) -> Vec<Line<'static>> {
         let base = ctx.config.as_list_name_style();
         let dim = ctx.config.as_list_text_style();
         vec![
-            Line::from(vec![
-                Span::styled("w/s · ↑/↓", base),
-                Span::styled("  folders · items", dim),
-            ]),
-            Line::from(vec![Span::styled("d / a", base), Span::styled("  open · back out", dim)]),
-            Line::from(vec![Span::styled("Enter", base), Span::styled("  context menu", dim)]),
-            Line::from(vec![Span::styled("d / →", base), Span::styled("  open · play", dim)]),
+            Line::from(vec![Span::styled("w/s · ↑/↓", base),
+            Span::styled("  folders · items", dim),]),
+            Line::from(vec![Span::styled("d / a", base),
+            Span::styled("  open · back out", dim)]),
+            Line::from(vec![Span::styled("Enter", base), Span::styled("  context menu",
+            dim)]), Line::from(vec![Span::styled("d / →", base),
+            Span::styled("  open · play", dim)]),
         ]
     }
-
     /// The info box takes about two thirds of the pane height (the tips
     /// strip stays a fixed 3 rows); the item list gets the rest. Exact
     /// lengths are computed so the rows always fill the area exactly.
     fn layout_vertical(&self, right: Rect) -> (Rect, Rect, Rect) {
         let tips_h = 3;
-        let info_h = self.tree_args.info_box_height(right.height.saturating_sub(tips_h) * 2 / 3);
+        let info_h = self
+            .tree_args
+            .info_box_height(right.height.saturating_sub(tips_h) * 2 / 3);
         let files_h = right.height.saturating_sub(tips_h + info_h);
         let [files_area, tips_area, info_area] = Layout::vertical([
-            Constraint::Length(files_h),
-            Constraint::Length(tips_h),
-            Constraint::Length(info_h),
-        ])
-        .areas(right);
+                Constraint::Length(files_h),
+                Constraint::Length(tips_h),
+                Constraint::Length(info_h),
+            ])
+            .areas(right);
         (files_area, tips_area, info_area)
     }
-
-    // ── defaulted hook overrides ───────────────────────────────────────
-
     /// The configured tree-browser args drive the shared `split_tree`
     /// (tree min width / hide threshold).
     fn tree_args(&self) -> TreeBrowserArgs {
         self.tree_args.clone()
     }
-
     /// Keep the tree highlight on the right-pane cursor: the highlighted
     /// item's row in the tree when it has one (a folder), otherwise the
     /// current node's row (songs have no tree row).
@@ -1153,24 +1093,19 @@ impl TreeBrowserCore for DirectoriesPane {
             let by_node = self
                 .selected
                 .as_ref()
-                .and_then(|selected| flat.iter().position(|(n, _)| n.path == selected.as_slice()));
+                .and_then(|selected| {
+                    flat.iter().position(|(n, _)| n.path == selected.as_slice())
+                });
             by_item.or(by_node)
         };
         if let Some(idx) = idx {
             self.tree.selected = idx;
         }
     }
-
     fn on_confirm(&mut self, ctx: &mut Ctx) -> Result<()> {
-        // Enter opens the context menu (like right-click), same as the
-        // Playlists pane; `d`/`→` keep open/play below.
         self.open_context_menu(ctx)
     }
-
     fn on_select_range(&mut self, dir: i64, ctx: &mut Ctx) -> Result<bool> {
-        // Shift+Up/Down: range-select from the anchor (set by plain clicks /
-        // the first shift-press), moving first so the newly reached row is
-        // included; each press replaces the previous range.
         let start = self.item_list.selected().unwrap_or(0);
         if self.marked.anchor().is_none() || self.marked.is_empty() {
             self.marked.set_anchor(start);
@@ -1181,21 +1116,16 @@ impl TreeBrowserCore for DirectoriesPane {
         ctx.render()?;
         Ok(true)
     }
-
     fn on_close(&mut self, ctx: &Ctx) -> Result<bool> {
         if !self.marked.is_empty() {
             self.marked.clear();
             self.marked.clear_anchor();
-            // Esc is bound to both Close and ShowSettings: clearing a
-            // selection consumes the keypress, so the settings panel only
-            // opens on a second Esc (when nothing is selected).
             ctx.render()?;
             Ok(true)
         } else {
             Ok(false)
         }
     }
-
     fn on_select_all(&mut self, ctx: &mut Ctx) -> Result<bool> {
         let len = self.items_len();
         if len > 0 {
@@ -1206,15 +1136,16 @@ impl TreeBrowserCore for DirectoriesPane {
             Ok(false)
         }
     }
-
-    fn handle_items_left_click(&mut self, row: usize, event: &MouseEvent, ctx: &Ctx) -> Result<()> {
+    fn handle_items_left_click(
+        &mut self,
+        row: usize,
+        event: &MouseEvent,
+        ctx: &Ctx,
+    ) -> Result<()> {
         if row >= self.items_len() {
             return Ok(());
         }
         if event.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) {
-            // Additive selection: the row under the cursor joins the marks
-            // too (a ctrl+click must never drop the initially selected
-            // item), and the clicked row is added without toggling off.
             if self.marked.is_empty() {
                 if let Some(sel) = self.item_list.selected() {
                     self.marked.add(sel);
@@ -1228,15 +1159,11 @@ impl TreeBrowserCore for DirectoriesPane {
             if self.marked.anchor().is_none() {
                 self.marked.set_anchor(row);
             }
-            // Replace the previous alt/shift range, so alt+clicking closer
-            // to the anchor deselects the items beyond it.
             self.marked.select_range(row);
             self.item_list.select(Some(row));
             self.sync_tree_to_items_cursor();
             ctx.render()?;
         } else {
-            // A plain click on a different row drops the multi-selection;
-            // clicking the selected row keeps it.
             if !self.marked.is_empty() && Some(row) != self.item_list.selected() {
                 self.marked.clear();
             }
@@ -1248,9 +1175,7 @@ impl TreeBrowserCore for DirectoriesPane {
         }
         Ok(())
     }
-
     fn tree_context_menu(&mut self, idx: usize, ctx: &Ctx) -> Result<()> {
-        // Context menu for the clicked folder (or the Library root).
         let path = {
             let mut flat = Vec::new();
             self.tree.visible(&self.tree.root, 0, &mut flat);
@@ -1258,7 +1183,6 @@ impl TreeBrowserCore for DirectoriesPane {
         };
         if let Some(path) = path { self.open_folder_menu(&path, ctx) } else { Ok(()) }
     }
-
     fn on_reconnected(&mut self, ctx: &Ctx) -> Result<()> {
         self.initialized = false;
         self.before_show(ctx)?;
@@ -1266,33 +1190,36 @@ impl TreeBrowserCore for DirectoriesPane {
         Ok(())
     }
 }
-
 impl Pane for DirectoriesPane {
     fn render(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) -> Result<()> {
-        // The toggle row sits at the top of the pane (inside the box,
-        // directly below the tab bar); the mode's content renders under it.
-        let [toggle_area, content] =
-            Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
+        let [toggle_area, content] = Layout::vertical([
+                Constraint::Length(1),
+                Constraint::Min(0),
+            ])
+            .areas(area);
         self.render_toggle(frame, toggle_area, ctx);
         match self.mode {
             MpdTabMode::Library => self.render_tree_browser(frame, content, ctx),
             MpdTabMode::Search => self.search.render(frame, content, ctx),
         }
     }
-
     fn before_show(&mut self, ctx: &Ctx) -> Result<()> {
         if !self.initialized {
             self.fetch_children(&Path::new(), ctx);
             ctx.query()
                 .id(TREE)
                 .replace_id(TREE)
-                .target(PaneType::Directories { tree: TreeBrowserArgs::default() })
+                .target(PaneType::Directories {
+                    tree: TreeBrowserArgs::default(),
+                })
                 .query(move |client| {
                     let dirs: Vec<String> = client
                         .list_all(None)?
                         .into_iter()
                         .filter_map(|e| match e {
-                            crate::mpd::commands::list_all::ListAllEntry::Dir(p) => Some(p),
+                            crate::mpd::commands::list_all::ListAllEntry::Dir(p) => {
+                                Some(p)
+                            }
                             _ => None,
                         })
                         .collect();
@@ -1300,14 +1227,14 @@ impl Pane for DirectoriesPane {
                 });
             self.initialized = true;
         }
-
         Ok(())
     }
-
-    fn on_event(&mut self, event: &mut UiEvent, is_visible: bool, ctx: &Ctx) -> Result<()> {
-        // The temp-play lifecycle (SongChanged / stop / reconnected) lives
-        // in the shared tree-browser core; the Database reset is
-        // directories-specific.
+    fn on_event(
+        &mut self,
+        event: &mut UiEvent,
+        is_visible: bool,
+        ctx: &Ctx,
+    ) -> Result<()> {
         let _tree_handled = self.handle_tree_events(event, is_visible, ctx)?;
         match event {
             UiEvent::Database => {
@@ -1322,19 +1249,20 @@ impl Pane for DirectoriesPane {
             }
             _ => {}
         }
-        // The folded-in search keeps its own state (filters, results,
-        // phases) in sync with the same events it got as a top-level tab
-        // (Database / Reconnected / ConfigChanged reset it the same way).
         self.search.on_event(event, is_visible, ctx)?;
         Ok(())
     }
-
     fn handle_mouse_event(&mut self, event: MouseEvent, ctx: &Ctx) -> Result<()> {
-        // Clicking the toggle labels switches the mode (both modes).
-        if matches!(event.kind, MouseEventKind::LeftClick | MouseEventKind::DoubleClick) {
+        if matches!(
+            event.kind, MouseEventKind::LeftClick | MouseEventKind::DoubleClick
+        ) {
             for (idx, area) in self.toggle_areas.iter().enumerate() {
                 if area.contains(event.into()) {
-                    let mode = if idx == 0 { MpdTabMode::Library } else { MpdTabMode::Search };
+                    let mode = if idx == 0 {
+                        MpdTabMode::Library
+                    } else {
+                        MpdTabMode::Search
+                    };
                     return self.set_mode(mode, ctx);
                 }
             }
@@ -1344,20 +1272,17 @@ impl Pane for DirectoriesPane {
             MpdTabMode::Search => self.search.handle_mouse_event(event, ctx),
         }
     }
-
-    fn handle_insert_mode(&mut self, kind: InputResultEvent, ctx: &mut Ctx) -> Result<()> {
+    fn handle_insert_mode(
+        &mut self,
+        kind: InputResultEvent,
+        ctx: &mut Ctx,
+    ) -> Result<()> {
         match self.mode {
             MpdTabMode::Library => Ok(()),
             MpdTabMode::Search => self.search.handle_insert_mode(kind, ctx),
         }
     }
-
     fn handle_action(&mut self, event: &mut ActionEvent, ctx: &mut Ctx) -> Result<()> {
-        // Round 28b: ONLY Shift+Tab toggles the Library/Search mode while
-        // the MPD tab is focused (the `ToggleMpdMode` global). Tab / E / Q
-        // still cycle tabs (NextTab / PreviousTab), so the tab is always
-        // reachable from the keyboard. Any other global action falls
-        // through to the mode's handler (or the global handler below).
         if let Some(action) = event.claim_global() {
             if matches!(action, GlobalAction::ToggleMpdMode) {
                 return self.toggle_mode(ctx);
@@ -1365,10 +1290,6 @@ impl Pane for DirectoriesPane {
             event.abandon();
         }
         match self.mode {
-            // Shared tree-browser action arms: w/s/arrows move the
-            // right-pane list, `a`/`←` back out, `d`/`→` open/play,
-            // Enter/right-click the context menu, Shift+Up/Down
-            // range-select, Esc clears the marks.
             MpdTabMode::Library => {
                 self.handle_tree_action(event, ctx)?;
             }
@@ -1376,7 +1297,6 @@ impl Pane for DirectoriesPane {
         }
         Ok(())
     }
-
     fn on_query_finished(
         &mut self,
         id: &'static str,
@@ -1391,19 +1311,13 @@ impl Pane for DirectoriesPane {
                     return Ok(());
                 };
                 let Some(path) = path else {
-                    log::error!(path:?; "Cannot insert data because path is not provided");
+                    log::error!(
+                        path:?; "Cannot insert data because path is not provided"
+                    );
                     return Ok(());
                 };
-                // Only the last fetch of the (replace_id) identity ever
-                // runs: the client task skips superseded queries without
-                // firing their callbacks, so no other pending path can
-                // still deliver a result. Drop them all to keep `pending`
-                // honest — a superseded dir must fetch again on re-entry
-                // instead of silently showing an empty pane.
                 self.pending.clear();
                 self.loaded.insert(path.clone(), data);
-                // Only the current node's list (or the root list while at
-                // the root) is shown; stale fetches are dropped.
                 let is_current = self.selected.as_ref() == Some(&path)
                     || (self.selected.is_none() && path.is_empty());
                 if is_current {
@@ -1417,21 +1331,22 @@ impl Pane for DirectoriesPane {
                 let MpdQueryResult::Any(any) = data else { return Ok(()) };
                 if let Ok(dirs) = any.downcast::<Vec<String>>() {
                     self.tree = DirTree::build(dirs.into_iter());
-                    // The downloads folder (~/Downloads/s2udio-downloads,
-                    // outside the MPD library) sits at the top of the
-                    // library, right under "Library ↴", displayed as
-                    // "Downloads" (hidden dirs are otherwise skipped by
-                    // the build).
-                    self.tree.root.children.insert(
-                        0,
-                        TreeNode {
-                            name: crate::ui::modals::paste::DOWNLOADS_DIR_NAME.to_owned(),
-                            path: vec![crate::ui::modals::paste::DOWNLOADS_DIR_NAME.to_owned()],
-                            display: Some("Downloads".to_owned()),
-                            children: Vec::new(),
-                            expanded: false,
-                        },
-                    );
+                    self.tree
+                        .root
+                        .children
+                        .insert(
+                            0,
+                            TreeNode {
+                                name: crate::ui::modals::paste::DOWNLOADS_DIR_NAME
+                                    .to_owned(),
+                                path: vec![
+                                    crate ::ui::modals::paste::DOWNLOADS_DIR_NAME.to_owned()
+                                ],
+                                display: Some("Downloads".to_owned()),
+                                children: Vec::new(),
+                                expanded: false,
+                            },
+                        );
                     ctx.render()?;
                 }
             }
@@ -1439,1154 +1354,12 @@ impl Pane for DirectoriesPane {
                 let MpdQueryResult::Any(any) = data else { return Ok(()) };
                 if let Ok(id) = any.downcast::<u32>() {
                     self.temp_play_id = Some(*id);
-                    // Expose the id so the Queue pane can hide the
-                    // temporary entry from its list.
                     ctx.temp_play_id.set(Some(*id));
                 }
             }
-            // Everything else (the folded-in search's `SEARCH` results and
-            // any modal-targeted queries) goes to the search UI.
             _ => self.search.on_query_finished(id, data, _is_visible, ctx)?,
         }
         Ok(())
     }
 }
-
 impl DirectoriesPane {}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{
-        config::keys::{CommonAction, DirectoriesActions, GlobalAction},
-        shared::keys::Actions,
-    };
-
-    fn dir(name: &str, full_path: &str) -> DirOrSong {
-        DirOrSong::Dir {
-            name: name.to_owned(),
-            full_path: full_path.to_owned(),
-            last_modified: chrono::Utc::now(),
-            playlist: false,
-        }
-    }
-
-    fn song(file: &str) -> DirOrSong {
-        DirOrSong::Song(crate::mpd::commands::Song { file: file.to_owned(), ..Default::default() })
-    }
-
-    /// The Downloads folder listing reads the real folder from disk:
-    /// regular files only (no subfolders/dotfiles), absolute paths, the
-    /// file stem as the title, sorted by name.
-    #[test]
-    fn downloads_listing_reads_the_folder_from_disk() {
-        let dir = std::env::temp_dir().join(format!("s2u-dl-list-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("b.mp4"), b"b").unwrap();
-        std::fs::write(dir.join("a.mp4"), b"a").unwrap();
-        std::fs::write(dir.join(".hidden"), b"h").unwrap();
-        std::fs::create_dir_all(dir.join("sub")).unwrap();
-
-        let items = list_dir(&dir);
-        let shown: Vec<&str> = items.iter().map(|i| i.as_path()).collect();
-        assert_eq!(
-            shown,
-            [&dir.join("a.mp4").to_string_lossy(), &dir.join("b.mp4").to_string_lossy()]
-        );
-        let DirOrSong::Song(song) = &items[0] else { panic!("files list as songs") };
-        assert_eq!(song.metadata.get("title").map(|t| t.first()), Some("a"));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    fn test_ctx() -> Ctx {
-        let (app_tx, app_rx) = crossbeam::channel::unbounded();
-        let (work_tx, work_rx) = crossbeam::channel::unbounded();
-        let (client_tx, client_rx) = crossbeam::channel::unbounded();
-        // Keep the receivers alive for the whole test: pane actions send
-        // render requests and MPD queries that must never fail.
-        std::mem::forget(app_rx);
-        std::mem::forget(work_rx);
-        std::mem::forget(client_rx);
-        crate::tests::fixtures::ctx(
-            (app_tx, crossbeam::channel::unbounded().1),
-            (work_tx, crossbeam::channel::unbounded().1),
-            (client_tx, crossbeam::channel::unbounded().1),
-        )
-    }
-
-    fn action(actions: Vec<Actions>) -> ActionEvent {
-        ActionEvent::from(std::sync::Arc::new(actions))
-    }
-
-    #[test]
-    fn tree_build_flatten_sync() {
-        let mut tree = DirTree::build(
-            ["A/B".to_owned(), "A/C".to_owned(), "A/B/D".to_owned(), "Z".to_owned()].into_iter(),
-        );
-        assert_eq!(tree.root.children.len(), 2);
-        assert_eq!(tree.root.children[0].name, "A");
-        assert_eq!(tree.root.children[0].children.len(), 2);
-        assert_eq!(tree.root.children[0].children[0].name, "B");
-        assert_eq!(tree.root.children[0].children[0].children.len(), 1);
-
-        // expand A: root, A, B, C, Z (B and Z need expansion for their children)
-        tree.toggle(&["A".to_owned()]);
-        let mut flat = Vec::new();
-        tree.visible(&tree.root, 0, &mut flat);
-        let names: Vec<&str> = flat.iter().map(|(n, _)| n.name.as_str()).collect();
-        assert_eq!(names, ["Library", "A", "B", "C", "Z"]);
-
-        // sync to A/B/D: path + ancestors expanded, node selected
-        let mut p = Path::new();
-        for s in ["A", "B", "D"] {
-            p.push(s.to_owned());
-        }
-        tree.sync(&p);
-        let mut flat1 = Vec::new();
-        tree.visible(&tree.root, 0, &mut flat1);
-        let names1: Vec<&str> = flat1.iter().map(|(n, _)| n.name.as_str()).collect();
-        assert_eq!(names1, ["Library", "A", "B", "D", "C", "Z"]);
-        assert_eq!(tree.selected, 3);
-
-        // collapse A: its subtree hides, but A and Z stay visible
-        tree.toggle(&["A".to_owned()]);
-        let mut flat2 = Vec::new();
-        tree.visible(&tree.root, 0, &mut flat2);
-        assert_eq!(flat2.len(), 3);
-
-        // is_leaf: "D" is a bottom directory, "A" and "B" are not.
-        assert!(tree.is_leaf(&["A".to_owned(), "B".to_owned(), "D".to_owned()]));
-        assert!(!tree.is_leaf(&["A".to_owned()]));
-        assert!(!tree.is_leaf(&["A".to_owned(), "B".to_owned()]));
-    }
-
-    /// At the root the right pane lists every top-level directory; `d`/`→`
-    /// opens the highlighted folder (tree path expanded, children shown) —
-    /// highlighting alone never lists files recursively.
-    #[test]
-    fn root_lists_top_directories_and_open_shows_children() {
-        let mut ctx = test_ctx();
-        let mut pane = DirectoriesPane::new(&ctx);
-        pane.tree = DirTree::build(["A/B".to_owned(), "Z".to_owned()].into_iter());
-        pane.loaded.insert(Path::new(), vec![dir("A", "A"), dir("Z", "Z")]);
-        pane.loaded.insert(Path::from(["A"]), vec![dir("B", "A/B"), song("A/song.flac")]);
-
-        // Root: the right pane lists the top-level directories, with the
-        // downloads folder shown as "Downloads" at the top.
-        pane.selected = None;
-        pane.populate_items();
-        assert_eq!(pane.items.len(), 3, "root lists the top-level directories + Downloads");
-        let DirOrSong::Dir { name, .. } = &pane.items[0] else {
-            panic!("Downloads must be a folder entry");
-        };
-        assert_eq!(name, "Downloads");
-        assert_eq!(pane.items[0].as_path(), "Downloads");
-        assert_eq!(pane.items[1].as_path(), "A");
-        assert_eq!(pane.items[2].as_path(), "Z");
-
-        // Moving the cursor through the root list only moves the highlight
-        // (no fetch, no recursive file list, no tree expansion).
-        pane.move_items(1, &ctx).unwrap();
-        assert_eq!(pane.item_list.selected(), Some(1), "cursor moved down");
-        assert!(pane.selected.is_none(), "highlighting never opens a folder");
-        assert_eq!(pane.items.len(), 3);
-        assert!(!pane.tree.is_expanded(&["A".to_owned()]), "highlighting never expands");
-        pane.move_items(-1, &ctx).unwrap();
-        assert_eq!(pane.item_list.selected(), Some(0));
-
-        // `d` on the highlighted folder opens it: children shown, path
-        // expanded in the tree.
-        pane.item_list.select(Some(1));
-        let mut ev = action(vec![Actions::Directories(DirectoriesActions::FolderExpand)]);
-        pane.handle_action(&mut ev, &mut ctx).unwrap();
-        assert_eq!(pane.selected.as_ref().map(|p| p.to_string()), Some("A".to_owned()));
-        assert_eq!(pane.items.len(), 2, "a folder shows its children one level deep");
-        assert_eq!(pane.items[0].as_path(), "B");
-        assert_eq!(pane.items[1].as_path(), "A/song.flac");
-        assert!(pane.tree.is_expanded(&["A".to_owned()]), "opening expands the tree path");
-    }
-
-    /// Regression: since round 34 bound `→` to Common(Right) and rounds
-    /// 35-41 bound `d`/`a` to lyrics-edit-mode common actions, the key trie
-    /// resolves those keys to BOTH a Common and a Directories action. The
-    /// tree browser must still run the directories half (`d` → FolderExpand,
-    /// `a` → FolderCollapse, `→` → PlayFile) instead of swallowing the
-    /// keypress on the unhandled common half.
-    #[test]
-    fn shared_lyrics_keys_still_drive_the_directory_browser() {
-        let mut ctx = test_ctx();
-        let mut pane = DirectoriesPane::new(&ctx);
-        pane.tree = DirTree::build(["A/B".to_owned(), "Z".to_owned()].into_iter());
-        pane.loaded.insert(Path::new(), vec![dir("A", "A"), dir("Z", "Z")]);
-        pane.loaded.insert(Path::from(["A"]), vec![dir("B", "A/B"), song("A/song.flac")]);
-        pane.selected = None;
-        pane.populate_items();
-        assert_eq!(pane.items.len(), 3, "root lists the top-level directories + Downloads");
-        pane.item_list.select(Some(1));
-
-        // `d` = [Common(LyricsDeleteWord), Directories(FolderExpand)].
-        let mut ev = action(vec![
-            Actions::Common(CommonAction::LyricsDeleteWord),
-            Actions::Directories(DirectoriesActions::FolderExpand),
-        ]);
-        pane.handle_action(&mut ev, &mut ctx).unwrap();
-        assert_eq!(pane.selected.as_ref().map(|p| p.to_string()), Some("A".to_owned()));
-        assert_eq!(pane.items.len(), 2, "`d` still opens the highlighted folder");
-        assert_eq!(pane.items[0].as_path(), "B");
-        assert_eq!(pane.items[1].as_path(), "A/song.flac");
-
-        // `a` = [Common(LyricsInsertAfter), Directories(FolderCollapse)]:
-        // backs out to the root with the branch we left collapsed.
-        let mut ev = action(vec![
-            Actions::Common(CommonAction::LyricsInsertAfter),
-            Actions::Directories(DirectoriesActions::FolderCollapse),
-        ]);
-        pane.handle_action(&mut ev, &mut ctx).unwrap();
-        assert!(pane.selected.is_none(), "`a` backs out of the folder");
-        assert_eq!(pane.items.len(), 3, "root lists the top-level directories again");
-        assert!(!pane.tree.is_expanded(&["A".to_owned()]), "the branch we left collapses");
-
-        // `→` = [Common(Right), Directories(PlayFile)] opens the folder too.
-        pane.item_list.select(Some(1));
-        let mut ev = action(vec![
-            Actions::Common(CommonAction::Right),
-            Actions::Directories(DirectoriesActions::PlayFile),
-        ]);
-        pane.handle_action(&mut ev, &mut ctx).unwrap();
-        assert_eq!(pane.selected.as_ref().map(|p| p.to_string()), Some("A".to_owned()));
-        assert_eq!(pane.items.len(), 2, "`→` still opens the highlighted folder");
-
-        // A lyric-only action with no directories half is a no-op.
-        let mut ev = action(vec![Actions::Common(CommonAction::LyricsDeleteWord)]);
-        pane.handle_action(&mut ev, &mut ctx).unwrap();
-        assert_eq!(pane.selected.as_ref().map(|p| p.to_string()), Some("A".to_owned()));
-    }
-
-    /// Backing out one level shows the parent's children with the row we
-    /// came from highlighted and collapses the branch we left; at the root
-    /// it is a no-op.
-    #[test]
-    fn back_out_returns_to_the_parent_and_collapses_the_branch() {
-        let mut ctx = test_ctx();
-        let mut pane = DirectoriesPane::new(&ctx);
-        pane.tree = DirTree::build(["A/B".to_owned(), "Z".to_owned()].into_iter());
-        pane.loaded.insert(Path::new(), vec![dir("A", "A"), dir("Z", "Z")]);
-        pane.loaded.insert(Path::from(["A"]), vec![dir("B", "A/B")]);
-        pane.loaded.insert(Path::from(["A", "B"]), vec![song("A/B/track.flac")]);
-
-        // Inside A/B.
-        let path = Path::from(["A", "B"]);
-        pane.selected = Some(path.clone());
-        pane.tree.sync(&path);
-        pane.populate_items();
-        assert_eq!(pane.items.len(), 1);
-        assert_eq!(pane.items[0].as_path(), "A/B/track.flac");
-
-        // `a` backs out to A: A's children, cursor on B, B's branch
-        // collapses, the tree follows the cursor onto B.
-        let mut ev = action(vec![Actions::Directories(DirectoriesActions::FolderCollapse)]);
-        pane.handle_action(&mut ev, &mut ctx).unwrap();
-        assert_eq!(pane.selected.as_ref().map(|p| p.to_string()), Some("A".to_owned()));
-        assert_eq!(pane.items.len(), 1);
-        assert_eq!(pane.items[0].as_path(), "B", "the row we came from is highlighted");
-        assert!(!pane.tree.is_expanded(&["A".to_owned(), "B".to_owned()]), "branch left collapses");
-        assert!(pane.tree.is_expanded(&["A".to_owned()]), "the parent stays expanded");
-
-        // Back out to the root: the top-level list again (Downloads + A + Z),
-        // cursor on A.
-        let mut ev = action(vec![Actions::Directories(DirectoriesActions::FolderCollapse)]);
-        pane.handle_action(&mut ev, &mut ctx).unwrap();
-        assert!(pane.selected.is_none(), "backed out to the root");
-        assert_eq!(pane.items.len(), 3, "root lists the top-level directories + Downloads again");
-        assert_eq!(pane.items[0].as_path(), "Downloads");
-        assert_eq!(pane.items[1].as_path(), "A");
-        assert!(!pane.tree.is_expanded(&["A".to_owned()]), "the folder we left collapses");
-
-        // Backing out at the root is a no-op.
-        let mut ev = action(vec![Actions::Directories(DirectoriesActions::FolderCollapse)]);
-        pane.handle_action(&mut ev, &mut ctx).unwrap();
-        assert!(pane.selected.is_none());
-        assert_eq!(pane.items.len(), 3);
-    }
-
-    /// The Library root is always expanded and never collapsible.
-    #[test]
-    fn library_root_is_not_collapsible() {
-        let mut ctx = test_ctx();
-        let mut pane = DirectoriesPane::new(&ctx);
-        pane.tree = DirTree::build(["A".to_owned(), "B".to_owned()].into_iter());
-
-        let root = Path::new();
-        pane.set_expanded(&root, false, &ctx).unwrap();
-        assert!(pane.tree.root.expanded, "the root stays expanded");
-
-        // Expanding a real folder works.
-        pane.set_expanded(&Path::from(["A"]), true, &ctx).unwrap();
-        assert!(pane.tree.is_expanded(&["A".to_owned()]));
-    }
-
-    /// The tree renders the root as `Library ↴` (no collapsible arrow) and
-    /// highlights the row the cursor sits on.
-    #[test]
-    fn tree_renders_the_root_as_library() {
-        let mut ctx = test_ctx();
-        let mut pane = DirectoriesPane::new(&ctx);
-        pane.tree = DirTree::build(["A/B".to_owned(), "B".to_owned()].into_iter());
-        pane.tree.selected = 1; // "A"
-
-        let backend = ratatui::backend::TestBackend::new(160, 10);
-        let mut terminal = ratatui::Terminal::new(backend).unwrap();
-        terminal
-            .draw(|frame| {
-                pane.render(frame, Rect::new(0, 0, 160, 10), &ctx).unwrap();
-            })
-            .unwrap();
-        let text = terminal.backend().buffer();
-        let mut lines = Vec::new();
-        for y in 0..10u16 {
-            let line: String = (0..160).map(|x| text[(x, y)].symbol().to_string()).collect();
-            lines.push(line);
-        }
-        let joined = lines.join("\n");
-        assert!(joined.contains("Library ↴"), "{joined}");
-        assert!(!joined.contains("▾ Library"), "no collapsible arrow on the root: {joined}");
-        assert!(joined.contains("▸ A"), "a collapsed folder keeps its arrow: {joined}");
-    }
-
-    /// Playlists are excluded from the children list: the MPD browser
-    /// lists folders and songs only.
-    #[test]
-    fn children_exclude_playlists() {
-        let mut ctx = test_ctx();
-        let mut pane = DirectoriesPane::new(&ctx);
-        pane.selected = None;
-        pane.loaded.insert(
-            Path::new(),
-            vec![
-                dir("A", "A"),
-                DirOrSong::Dir {
-                    name: "mix.m3u".to_owned(),
-                    full_path: "mix.m3u".to_owned(),
-                    last_modified: chrono::Utc::now(),
-                    playlist: true,
-                },
-            ],
-        );
-        pane.populate_items();
-        assert_eq!(pane.items.len(), 2, "playlists never show in the MPD browser");
-        assert_eq!(pane.items[0].as_path(), "Downloads", "the downloads folder sits at the top");
-        assert_eq!(pane.items[1].as_path(), "A");
-    }
-
-    /// Hidden directories (name starting with `.`, e.g. `.hist`) never
-    /// appear in the MPD browser: the tree skips them (with their whole
-    /// subtree) and the children list filters them out.
-    #[test]
-    fn hidden_directories_are_excluded() {
-        let mut ctx = test_ctx();
-        // The tree skips `.hist` and everything under it.
-        let tree = DirTree::build(
-            ["A".to_owned(), "A/B".to_owned(), ".hist".to_owned(), ".hist/old".to_owned()]
-                .into_iter(),
-        );
-        let names: Vec<&str> = tree.root.children.iter().map(|n| n.name.as_str()).collect();
-        assert_eq!(names, ["A"], "hidden dirs never become tree rows");
-        assert_eq!(tree.root.children[0].children.len(), 1, "visible subtrees keep their children");
-
-        // The children list hides hidden dirs too (files are kept).
-        let mut pane = DirectoriesPane::new(&ctx);
-        pane.selected = None;
-        pane.loaded
-            .insert(Path::new(), vec![dir("A", "A"), dir(".hist", ".hist"), song("track.flac")]);
-        pane.populate_items();
-        let shown: Vec<&str> = pane.items.iter().map(|i| i.as_path()).collect();
-        assert_eq!(
-            shown,
-            ["Downloads", "A", "track.flac"],
-            "hidden dirs never list, files stay (Downloads is injected)"
-        );
-    }
-
-    /// Rapidly opening two folders supersedes the first `lsinfo` fetch
-    /// (the client task skips it without firing its callback). The
-    /// superseded path must not stay in `pending` forever — reopening it
-    /// must issue a fresh fetch instead of showing an empty pane.
-    #[test]
-    fn superseded_fetch_never_sticks_in_pending() {
-        let (app_tx, app_rx) = crossbeam::channel::unbounded();
-        let (work_tx, work_rx) = crossbeam::channel::unbounded();
-        let (client_tx, client_rx) = crossbeam::channel::unbounded();
-        // Keep the app/work receivers alive; hold the client receiver so
-        // the fetch requests are observable (and never fail to send).
-        std::mem::forget(app_rx);
-        std::mem::forget(work_rx);
-        let _client_rx = client_rx;
-        let mut ctx = crate::tests::fixtures::ctx(
-            (app_tx, crossbeam::channel::unbounded().1),
-            (work_tx, crossbeam::channel::unbounded().1),
-            (client_tx, crossbeam::channel::unbounded().1),
-        );
-        let mut pane = DirectoriesPane::new(&ctx);
-        pane.tree = DirTree::build(["A".to_owned(), "B".to_owned()].into_iter());
-        pane.loaded.insert(Path::new(), vec![dir("A", "A"), dir("B", "B")]);
-        pane.selected = None;
-        pane.populate_items();
-
-        // Open A, back out, then open B before A's fetch resolves — B's
-        // fetch supersedes A's in the client task, so A's callback never
-        // fires. (Index 1 = A; index 0 is the injected Downloads row.)
-        pane.item_list.select(Some(1));
-        let mut ev = action(vec![Actions::Directories(DirectoriesActions::FolderExpand)]);
-        pane.handle_action(&mut ev, &mut ctx).unwrap();
-        assert!(pane.pending.contains(&Path::from(["A"])), "A is being fetched");
-
-        let mut ev = action(vec![Actions::Directories(DirectoriesActions::FolderCollapse)]);
-        pane.handle_action(&mut ev, &mut ctx).unwrap();
-        assert!(pane.selected.is_none(), "back at the root");
-
-        pane.item_list.select(Some(2));
-        let mut ev = action(vec![Actions::Directories(DirectoriesActions::FolderExpand)]);
-        pane.handle_action(&mut ev, &mut ctx).unwrap();
-        assert!(pane.pending.contains(&Path::from(["B"])), "B is being fetched");
-        assert!(
-            pane.pending.contains(&Path::from(["A"])),
-            "A's superseded fetch is still unresolved"
-        );
-
-        // B's fetch resolves — the only one the client task would run.
-        pane.on_query_finished(
-            FETCH_DATA,
-            MpdQueryResult::DirOrSong {
-                data: vec![song("B/track.flac")],
-                path: Some(Path::from(["B"])),
-            },
-            true,
-            &ctx,
-        )
-        .unwrap();
-        assert!(pane.pending.is_empty(), "superseded fetches never stick in pending");
-        assert_eq!(pane.items.len(), 1, "B's children are shown");
-
-        // Back out and reopen A — a fresh fetch is issued instead of
-        // silently showing nothing.
-        let mut ev = action(vec![Actions::Directories(DirectoriesActions::FolderCollapse)]);
-        pane.handle_action(&mut ev, &mut ctx).unwrap();
-        assert!(pane.selected.is_none());
-        assert!(pane.pending.is_empty());
-
-        pane.item_list.select(Some(1));
-        let mut ev = action(vec![Actions::Directories(DirectoriesActions::FolderExpand)]);
-        pane.handle_action(&mut ev, &mut ctx).unwrap();
-        assert!(pane.pending.contains(&Path::from(["A"])), "a fresh fetch is issued for A");
-    }
-    /// The MPD pane's right pane supports the queue tab's multi-selection:
-    /// ctrl+click toggles a mark, alt+click ranges from the anchor, plain
-    /// clicks clear the marks, Shift+Up/Down range-selects — and the rows
-    /// render directories with a ▶ prefix and songs with no D/S marker.
-    use super::*;
-    use crate::{
-        shared::{
-            keys::ActionEvent,
-            mouse_event::{MouseEvent, MouseEventKind},
-        },
-        ui::panes::Pane,
-    };
-    use crossterm::event::KeyModifiers;
-    use ratatui::prelude::Rect;
-
-    fn pane_with_items(ctx: &Ctx) -> DirectoriesPane {
-        let mut pane = DirectoriesPane::new(ctx);
-        pane.items = vec![
-            dir("Folder", "Folder"),
-            song("a.flac"),
-            song("b.flac"),
-            song("c.flac"),
-            song("d.flac"),
-        ];
-        pane.item_list.select(Some(0));
-        pane
-    }
-
-    #[test]
-    fn shift_up_down_ranges_and_contracts() {
-        let mut ctx = test_ctx();
-        let mut pane = pane_with_items(&ctx);
-
-        // Shift+Down from row 0 marks 0..=1, then extends to 2.
-        let mut ev = action(vec![Actions::Common(CommonAction::SelectDown)]);
-        pane.handle_action(&mut ev, &mut ctx).unwrap();
-        assert_eq!(pane.marked.iter().collect::<Vec<_>>(), vec![0, 1]);
-        let mut ev = action(vec![Actions::Common(CommonAction::SelectDown)]);
-        pane.handle_action(&mut ev, &mut ctx).unwrap();
-        assert_eq!(pane.marked.iter().collect::<Vec<_>>(), vec![0, 1, 2]);
-
-        // Shift+Up contracts, unmarking the row left behind.
-        let mut ev = action(vec![Actions::Common(CommonAction::SelectUp)]);
-        pane.handle_action(&mut ev, &mut ctx).unwrap();
-        assert_eq!(pane.marked.iter().collect::<Vec<_>>(), vec![0, 1]);
-        assert_eq!(pane.item_list.selected(), Some(1));
-    }
-
-    #[test]
-    fn shift_selection_reanchors_after_the_marks_are_cleared() {
-        let mut ctx = test_ctx();
-        let mut pane = pane_with_items(&ctx);
-
-        // Shift+Down from row 0 marks 0..=1 (anchor 0).
-        let mut ev = action(vec![Actions::Common(CommonAction::SelectDown)]);
-        pane.handle_action(&mut ev, &mut ctx).unwrap();
-        assert_eq!(pane.marked.iter().collect::<Vec<_>>(), vec![0, 1]);
-
-        // The selection is cleared (Esc) and the cursor moves away: the
-        // stale anchor must not survive, so the next Shift+Down starts a
-        // fresh range from the new cursor position.
-        pane.marked.clear();
-        pane.item_list.select(Some(3));
-        let mut ev = action(vec![Actions::Common(CommonAction::SelectDown)]);
-        pane.handle_action(&mut ev, &mut ctx).unwrap();
-        assert_eq!(pane.item_list.selected(), Some(4));
-        assert_eq!(pane.marked.iter().collect::<Vec<_>>(), vec![3, 4]);
-    }
-
-    #[test]
-    fn ctrl_alt_and_plain_clicks_mark_and_clear() {
-        let ctx = test_ctx();
-        let mut pane = pane_with_items(&ctx);
-        let backend = ratatui::backend::TestBackend::new(80, 30);
-        let mut terminal = ratatui::Terminal::new(backend).unwrap();
-        terminal.draw(|frame| pane.render(frame, Rect::new(0, 0, 80, 30), &ctx).unwrap()).unwrap();
-        let inner = pane.items_inner;
-
-        // Plain click on row 2 sets the anchor; ctrl+click row 4 ADDS to
-        // it (the initially selected row stays marked).
-        pane.handle_mouse_event(
-            MouseEvent {
-                x: inner.x + 1,
-                y: inner.y + 2,
-                kind: MouseEventKind::LeftClick,
-                modifiers: KeyModifiers::NONE,
-            },
-            &ctx,
-        )
-        .unwrap();
-        pane.handle_mouse_event(
-            MouseEvent {
-                x: inner.x + 1,
-                y: inner.y + 4,
-                kind: MouseEventKind::LeftClick,
-                modifiers: KeyModifiers::CONTROL,
-            },
-            &ctx,
-        )
-        .unwrap();
-        assert_eq!(
-            pane.marked.iter().collect::<Vec<_>>(),
-            vec![2, 4],
-            "ctrl+click keeps the initially selected row and adds the clicked row"
-        );
-
-        // ctrl+click an unmarked row keeps growing the selection.
-        pane.handle_mouse_event(
-            MouseEvent {
-                x: inner.x + 1,
-                y: inner.y + 3,
-                kind: MouseEventKind::LeftClick,
-                modifiers: KeyModifiers::CONTROL,
-            },
-            &ctx,
-        )
-        .unwrap();
-        assert_eq!(pane.marked.iter().collect::<Vec<_>>(), vec![2, 3, 4]);
-
-        // alt+click row 3 ranges from the anchor (2) to 3.
-        pane.handle_mouse_event(
-            MouseEvent {
-                x: inner.x + 1,
-                y: inner.y + 3,
-                kind: MouseEventKind::LeftClick,
-                modifiers: KeyModifiers::ALT,
-            },
-            &ctx,
-        )
-        .unwrap();
-        assert_eq!(pane.marked.iter().collect::<Vec<_>>(), vec![2, 3, 4]);
-
-        // A plain click on a different row clears the marks.
-        pane.handle_mouse_event(
-            MouseEvent {
-                x: inner.x + 1,
-                y: inner.y + 1,
-                kind: MouseEventKind::LeftClick,
-                modifiers: KeyModifiers::NONE,
-            },
-            &ctx,
-        )
-        .unwrap();
-        assert!(pane.marked.is_empty());
-        assert_eq!(pane.item_list.selected(), Some(1));
-    }
-
-    /// Round 32: the wheel over the MPD items pane scrolls the viewport
-    /// only — the highlight stays put (it may leave the visible area) and
-    /// the offset clamps at the list's ends.
-    #[test]
-    fn wheel_scrolls_the_items_viewport() {
-        let ctx = test_ctx();
-        let mut pane = pane_with_items(&ctx);
-        let backend = ratatui::backend::TestBackend::new(80, 30);
-        let mut terminal = ratatui::Terminal::new(backend).unwrap();
-        terminal.draw(|frame| pane.render(frame, Rect::new(0, 0, 80, 30), &ctx).unwrap()).unwrap();
-        // A short viewport so the 5-entry list overflows it.
-        let area = pane.items_area();
-        pane.set_items_area(Rect::new(area.x, area.y, area.width, 2));
-
-        let selected = pane.item_list.selected();
-        assert_eq!(selected, Some(0), "the list opens on the first row");
-        let wheel = |pane: &mut DirectoriesPane, kind: MouseEventKind| {
-            pane.handle_mouse_event(
-                MouseEvent { x: area.x + 1, y: area.y + 1, kind, modifiers: KeyModifiers::NONE },
-                &ctx,
-            )
-            .unwrap();
-        };
-
-        wheel(&mut pane, MouseEventKind::ScrollDown);
-        assert_eq!(pane.item_list.offset(), 1, "wheel down scrolls the viewport");
-        assert_eq!(pane.item_list.selected(), selected, "the highlight does not move");
-        wheel(&mut pane, MouseEventKind::ScrollUp);
-        assert_eq!(pane.item_list.offset(), 0, "wheel up scrolls back");
-        wheel(&mut pane, MouseEventKind::ScrollUp);
-        assert_eq!(pane.item_list.offset(), 0, "wheel up clamps at the top");
-        for _ in 0..20 {
-            wheel(&mut pane, MouseEventKind::ScrollDown);
-        }
-        assert_eq!(
-            pane.item_list.offset(),
-            pane.items.len().saturating_sub(2),
-            "wheel down clamps at the last page"
-        );
-        assert_eq!(pane.item_list.selected(), selected, "the highlight never moved");
-    }
-
-    #[test]
-    fn ctrl_a_marks_every_item_of_the_right_pane() {
-        let mut ctx = test_ctx();
-        let mut pane = pane_with_items(&ctx);
-        assert!(pane.marked.is_empty());
-
-        let mut ev = action(vec![Actions::Common(CommonAction::SelectAll)]);
-        pane.handle_action(&mut ev, &mut ctx).unwrap();
-        assert_eq!(pane.marked.iter().collect::<Vec<_>>(), vec![0, 1, 2, 3, 4]);
-
-        // Ctrl+A again keeps everything marked.
-        let mut ev = action(vec![Actions::Common(CommonAction::SelectAll)]);
-        pane.handle_action(&mut ev, &mut ctx).unwrap();
-        assert_eq!(pane.marked.iter().count(), 5);
-    }
-
-    #[test]
-    fn items_render_play_for_dirs_and_no_markers_for_songs() {
-        let ctx = test_ctx();
-        let mut pane = DirectoriesPane::new(&ctx);
-        pane.items = vec![dir("Folder", "Folder"), song("alpha_song.flac")];
-
-        let backend = ratatui::backend::TestBackend::new(60, 16);
-        let mut terminal = ratatui::Terminal::new(backend).unwrap();
-        terminal.draw(|frame| pane.render(frame, Rect::new(0, 0, 60, 16), &ctx).unwrap()).unwrap();
-        let buffer = terminal.backend().buffer();
-        let text: String = (0..16u16)
-            .map(|y| (0..60u16).map(|x| buffer[(x, y)].symbol().to_string()).collect::<String>())
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(text.contains("▶ Folder"), "directories get the ▶ prefix: {text}");
-        assert!(!text.contains('D'), "no D marker on the folder row: {text}");
-        assert!(!text.contains("S alpha"), "no S marker on the song row: {text}");
-        assert!(text.contains("alpha_song"), "the song row still shows the file: {text}");
-    }
-
-    /// The items-box title keeps the pre-Phase-2 directories spacing: a
-    /// single leading space before the name, then the `(n)` count with no
-    /// extra space — `" Library(3) "` (Phase 2.1 parity close-out).
-    #[test]
-    fn items_box_title_keeps_the_directories_spacing() {
-        let ctx = test_ctx();
-        let mut pane = DirectoriesPane::new(&ctx);
-        pane.items = vec![song("a.flac"), song("b.flac"), song("c.flac")];
-
-        let backend = ratatui::backend::TestBackend::new(80, 30);
-        let mut terminal = ratatui::Terminal::new(backend).unwrap();
-        terminal.draw(|frame| pane.render(frame, Rect::new(0, 0, 80, 30), &ctx).unwrap()).unwrap();
-        let buffer = terminal.backend().buffer();
-        let text: String = (0..30u16)
-            .map(|y| (0..80u16).map(|x| buffer[(x, y)].symbol().to_string()).collect::<String>())
-            .collect::<Vec<_>>()
-            .join(
-                "
-",
-            );
-        assert!(
-            text.contains(" Library(3) "),
-            "the items-box title is ` Library(3) `, not ` Library (3) ` or `Library(3) `: {text}"
-        );
-    }
-
-    /// The MPD browser's temp-play entry is dropped on the stop transition
-    /// (the shared tree-browser core; pins the Phase-2 fix that gave
-    /// directories the Stop cleanup radio/jellyfin already had — before it
-    /// the entry leaked into the queue after Stop).
-    #[test]
-    fn stop_drops_the_temp_play_entry() {
-        let mut ctx = test_ctx();
-        let mut pane = DirectoriesPane::new(&ctx);
-        pane.temp_play_id = Some(7);
-        ctx.temp_play_id.set(Some(7));
-        ctx.status.state = crate::mpd::commands::State::Stop;
-
-        let mut event = crate::ui::UiEvent::PlaybackStateChanged;
-        pane.on_event(&mut event, true, &ctx).unwrap();
-        assert_eq!(pane.temp_play_id, None);
-        assert_eq!(ctx.temp_play_id.get(), None, "the queue pane reads it via Ctx");
-    }
-
-    #[test]
-    fn marked_rows_render_with_the_marked_style() {
-        let mut ctx = test_ctx();
-        let mut pane = DirectoriesPane::new(&ctx);
-        pane.items = vec![song("a.flac"), song("b.flac"), song("c.flac")];
-        pane.item_list.select(Some(0));
-        let mut ev = action(vec![Actions::Common(CommonAction::SelectDown)]);
-        pane.handle_action(&mut ev, &mut ctx).unwrap();
-        assert_eq!(pane.marked.iter().collect::<Vec<_>>(), vec![0, 1]);
-
-        let backend = ratatui::backend::TestBackend::new(80, 30);
-        let mut terminal = ratatui::Terminal::new(backend).unwrap();
-        terminal.draw(|frame| pane.render(frame, Rect::new(0, 0, 80, 30), &ctx).unwrap()).unwrap();
-        let buffer = terminal.backend().buffer();
-        let marked_style = ctx.config.theme.marked_item_style;
-        let plain_style = ctx.config.as_list_name_style();
-        // Sample inside the items list (right pane, past its border). The
-        // marked rows render with the lighter marked highlight; the row the
-        // cursor sits on (row 0) keeps the List's accent highlight, and a
-        // plain row keeps the list style.
-        // x=27 sits inside the items list (right pane, past its border).
-        // The toggle row (round 28) occupies pane row 0, so the items list
-        // starts one row lower than before the fold.
-        let row_bg = |y: u16| buffer[(27, y)].style().bg;
-        // The marked rows render with the marked highlight; the row the
-        // cursor sits on (row 1, the shift+down target) keeps the List's
-        // accent highlight; the plain row keeps the list background.
-        assert_eq!(row_bg(2), marked_style.bg, "row 0 is marked");
-        assert_eq!(
-            row_bg(3),
-            ctx.config.theme.current_item_style.bg,
-            "cursor row keeps the accent"
-        );
-        assert!(
-            !matches!(
-                row_bg(4),
-                Some(ratatui::style::Color::Rgb(92, 92, 92))
-                    | Some(ratatui::style::Color::Rgb(71, 71, 71))
-            ),
-            "row 2 keeps the plain list background"
-        );
-    }
-
-    /// The tree pane is hidden entirely on TUIs ≤ 120 columns wide: the
-    /// right pane gets the whole area (its inner rect starts at x=0), and
-    /// the tree inner stays unset so mouse events over the right pane can
-    /// never hit the tree.
-    #[test]
-    fn tree_pane_hidden_on_narrow_tui() {
-        assert_eq!(tree_width(120), 0);
-        assert_eq!(tree_width(80), 0);
-
-        let mut ctx = test_ctx();
-        let mut pane = DirectoriesPane::new(&ctx);
-        let backend = ratatui::backend::TestBackend::new(80, 30);
-        let mut terminal = ratatui::Terminal::new(backend).unwrap();
-        terminal.draw(|frame| pane.render(frame, Rect::new(0, 0, 80, 30), &ctx).unwrap()).unwrap();
-        assert_eq!(pane.tree_inner, Rect::default(), "tree not rendered on a narrow TUI");
-        // The right pane spans the whole width (x=1 is its border offset;
-        // 78 = 80 minus the 2 border columns).
-        assert_eq!(pane.items_inner.x, 1, "right pane starts at the left edge");
-        assert_eq!(pane.items_inner.width, 78, "right pane takes the whole width");
-    }
-
-    /// On TUIs wider than 120 columns the left folder tree keeps a
-    /// 50-column minimum (the 30% share is applied but never below 50),
-    /// and the right pane still gets the remainder.
-    #[test]
-    fn tree_pane_keeps_min_width_on_wide_tui() {
-        // 30% of 200 is 60 ≥ 50, so the proportional share wins.
-        assert_eq!(tree_width(200), 60);
-        // 30% of 160 is 48 < 50, so the minimum floor kicks in.
-        assert_eq!(tree_width(160), 50);
-        // The tree never eats the whole area: the right pane keeps ≥ 1 col.
-        assert!(tree_width(u16::MAX) <= u16::MAX - 1);
-
-        let mut ctx = test_ctx();
-        let mut pane = DirectoriesPane::new(&ctx);
-        let backend = ratatui::backend::TestBackend::new(160, 30);
-        let mut terminal = ratatui::Terminal::new(backend).unwrap();
-        terminal.draw(|frame| pane.render(frame, Rect::new(0, 0, 160, 30), &ctx).unwrap()).unwrap();
-        assert_eq!(
-            pane.tree_inner.width, 48,
-            "50-col tree pane minus its 2 border columns: {:?}",
-            pane.tree_inner
-        );
-        assert!(pane.items_inner.x >= pane.tree_inner.width, "right pane starts after the tree");
-    }
-
-    /// The tree-browser args drive the shared layout hooks: a non-default
-    /// `tree_min_width` widens the tree (60 cols at 160 vs the 50
-    /// default) and `info_box_cap: None` removes the 15-row info cap.
-    #[test]
-    fn tree_args_change_the_tree_width_and_info_cap() {
-        let mut ctx = test_ctx();
-        let mut pane = DirectoriesPane::new(&ctx);
-        pane.tree_args = TreeBrowserArgs {
-            tree_min_width: 60,
-            info_box_cap: None,
-            ..TreeBrowserArgs::default()
-        };
-
-        let (tree, _right) = pane.split_tree(Rect::new(0, 0, 160, 30));
-        assert_eq!(tree.width, 60, "tree_min_width: 60 widens the tree at 160 cols");
-        let (tree, _right) = pane.split_tree(Rect::new(0, 0, 100, 30));
-        assert_eq!(tree.width, 0, "the default hide threshold still hides at 100 cols");
-
-        let (_items, _tips, info) = pane.layout_vertical(Rect::new(0, 0, 60, 40));
-        assert_eq!(info.height, 24, "info_box_cap: None keeps the raw 2/3 share (40-3)*2/3");
-    }
-
-    /// Enter opens the right-click context menu on a folder AND on a song
-    /// (parity with the Playlists pane), while `d`/`→` still open/play:
-    /// `d` on a song issues the play query and never opens a modal.
-    #[test]
-    fn enter_opens_context_menu_d_still_plays() {
-        let (app_tx, app_rx) = crossbeam::channel::unbounded();
-        let (work_tx, work_rx) = crossbeam::channel::unbounded();
-        let (client_tx, client_rx) = crossbeam::channel::unbounded();
-        // `app_rx` is read below via try_recv — do not forget it; the other
-        // receivers are unused, so forget them (leaking keeps the channels
-        // open so sends from the fixture never error).
-        std::mem::forget(work_rx);
-        let _client_rx = client_rx;
-        let mut ctx = crate::tests::fixtures::ctx(
-            (app_tx.clone(), crossbeam::channel::unbounded().1),
-            (work_tx, crossbeam::channel::unbounded().1),
-            (client_tx, crossbeam::channel::unbounded().1),
-        );
-        let mut pane = DirectoriesPane::new(&ctx);
-        pane.items = vec![dir("Folder", "Folder"), song("a.flac")];
-
-        // Enter on the folder opens its whole-subtree context menu.
-        pane.item_list.select(Some(0));
-        let mut ev = action(vec![Actions::Common(CommonAction::Confirm)]);
-        pane.handle_action(&mut ev, &mut ctx).unwrap();
-        assert!(
-            matches!(
-                app_rx.try_recv(),
-                Ok(crate::AppEvent::UiEvent(crate::ui::UiAppEvent::Modal(_)))
-            ),
-            "Enter on a folder opens the context menu"
-        );
-
-        // Enter on the song opens the song's context menu.
-        pane.item_list.select(Some(1));
-        let mut ev = action(vec![Actions::Common(CommonAction::Confirm)]);
-        pane.handle_action(&mut ev, &mut ctx).unwrap();
-        assert!(
-            matches!(
-                app_rx.try_recv(),
-                Ok(crate::AppEvent::UiEvent(crate::ui::UiAppEvent::Modal(_)))
-            ),
-            "Enter on a song opens the context menu"
-        );
-
-        // `d` on the song still plays it (a play query, no modal).
-        let mut ev = action(vec![Actions::Directories(DirectoriesActions::PlayFile)]);
-        pane.handle_action(&mut ev, &mut ctx).unwrap();
-        assert!(
-            matches!(app_rx.try_recv(), Err(crossbeam::channel::TryRecvError::Empty)),
-            "d on a song must not open a modal"
-        );
-    }
-
-    #[test]
-    fn esc_with_a_selection_consumes_the_keypress() {
-        let mut ctx = test_ctx();
-        let mut pane = DirectoriesPane::new(&ctx);
-        pane.items = vec![song("a.flac"), song("b.flac"), song("c.flac")];
-        pane.item_list.select(Some(0));
-        let mut ev = action(vec![Actions::Common(CommonAction::SelectDown)]);
-        pane.handle_action(&mut ev, &mut ctx).unwrap();
-        assert_eq!(pane.marked.iter().collect::<Vec<_>>(), vec![0, 1]);
-
-        // Esc carries both Close (menu) and ShowSettings; clearing the
-        // selection must consume the keypress so settings does not open on
-        // the same press.
-        let mut ev = action(vec![
-            Actions::Common(CommonAction::Close),
-            Actions::Global(GlobalAction::ShowSettings),
-        ]);
-        pane.handle_action(&mut ev, &mut ctx).unwrap();
-        assert!(pane.marked.is_empty(), "Esc clears the selection");
-        assert!(ev.is_consumed(), "clearing the selection consumes the keypress");
-    }
-
-    #[test]
-    fn esc_without_a_selection_leaves_settings_enabled() {
-        let mut ctx = test_ctx();
-        let mut pane = DirectoriesPane::new(&ctx);
-        pane.items = vec![song("a.flac"), song("b.flac")];
-        pane.item_list.select(Some(0));
-        let mut ev = action(vec![
-            Actions::Common(CommonAction::Close),
-            Actions::Global(GlobalAction::ShowSettings),
-        ]);
-        pane.handle_action(&mut ev, &mut ctx).unwrap();
-        assert!(pane.marked.is_empty());
-        assert!(!ev.is_consumed(), "no selection: Esc still opens settings");
-    }
-
-    #[test]
-    fn shift_range_reanchors_after_esc_clears_the_selection() {
-        let mut ctx = test_ctx();
-        let mut pane = DirectoriesPane::new(&ctx);
-        pane.items =
-            vec![song("a.flac"), song("b.flac"), song("c.flac"), song("d.flac"), song("e.flac")];
-        pane.item_list.select(Some(0));
-
-        // Shift+Down twice marks [0..=2] (anchor 0).
-        for _ in 0..2 {
-            let mut ev = action(vec![Actions::Common(CommonAction::SelectDown)]);
-            pane.handle_action(&mut ev, &mut ctx).unwrap();
-        }
-        assert_eq!(pane.item_list.selected(), Some(2));
-        assert_eq!(pane.marked.iter().collect::<Vec<_>>(), vec![0, 1, 2]);
-
-        // Esc clears the marks - and (with the fix) the anchor too.
-        let mut ev = action(vec![Actions::Common(CommonAction::Close)]);
-        pane.handle_action(&mut ev, &mut ctx).unwrap();
-        assert!(pane.marked.is_empty());
-
-        // Move the cursor back up to row 1, then Shift+Down: the range
-        // must start from the new cursor (1), not reach back to the old
-        // anchor (0).
-        let mut ev = action(vec![Actions::Common(CommonAction::Up)]);
-        pane.handle_action(&mut ev, &mut ctx).unwrap();
-        assert_eq!(pane.item_list.selected(), Some(1));
-        let mut ev = action(vec![Actions::Common(CommonAction::SelectDown)]);
-        pane.handle_action(&mut ev, &mut ctx).unwrap();
-        assert_eq!(pane.item_list.selected(), Some(2));
-        assert_eq!(pane.marked.iter().collect::<Vec<_>>(), vec![1, 2]);
-    }
-
-    // ── Round 28: the Search tab folded into the MPD tab ──────────────
-
-    /// The toggle row marks the active mode with the app's ●/⭘ convention
-    /// and the tab starts in Library mode.
-    #[test]
-    fn toggle_row_marks_the_active_mode() {
-        let mut ctx = test_ctx();
-        let mut pane = DirectoriesPane::new(&ctx);
-        assert_eq!(pane.mode, MpdTabMode::Library, "the MPD tab starts in Library mode");
-
-        let render_toggle_line = |pane: &mut DirectoriesPane| -> String {
-            let backend = ratatui::backend::TestBackend::new(80, 20);
-            let mut terminal = ratatui::Terminal::new(backend).unwrap();
-            terminal
-                .draw(|frame| pane.render(frame, Rect::new(0, 0, 80, 20), &ctx).unwrap())
-                .unwrap();
-            let buf = terminal.backend().buffer();
-            (0..80u16).map(|x| buf[(x, 0)].symbol().to_string()).collect()
-        };
-
-        let line = render_toggle_line(&mut pane);
-        assert!(line.contains("● Library"), "Library mode: {line}");
-        assert!(line.contains("⭘ Search"), "Library mode: {line}");
-        assert!(!line.contains("⭘ Library"), "Library is active: {line}");
-        assert!(!line.contains("● Search"), "Search is inactive: {line}");
-
-        pane.set_mode(MpdTabMode::Search, &ctx).unwrap();
-        let line = render_toggle_line(&mut pane);
-        assert!(line.contains("⭘ Library"), "Search mode: {line}");
-        assert!(line.contains("● Search"), "Search mode: {line}");
-    }
-
-    /// Clicking the toggle labels switches the MPD tab's mode.
-    #[test]
-    fn clicking_the_toggle_labels_switches_the_mode() {
-        let mut ctx = test_ctx();
-        let mut pane = DirectoriesPane::new(&ctx);
-        let backend = ratatui::backend::TestBackend::new(80, 20);
-        let mut terminal = ratatui::Terminal::new(backend).unwrap();
-        terminal.draw(|frame| pane.render(frame, Rect::new(0, 0, 80, 20), &ctx).unwrap()).unwrap();
-        let [library_area, search_area] = pane.toggle_areas;
-        assert!(search_area.width > 0, "the toggle labels are clickable");
-
-        pane.handle_mouse_event(
-            MouseEvent {
-                x: search_area.x + 1,
-                y: search_area.y,
-                kind: MouseEventKind::LeftClick,
-                modifiers: crossterm::event::KeyModifiers::NONE,
-            },
-            &ctx,
-        )
-        .unwrap();
-        assert_eq!(pane.mode, MpdTabMode::Search, "clicking Search switches to it");
-
-        pane.handle_mouse_event(
-            MouseEvent {
-                x: library_area.x + 1,
-                y: library_area.y,
-                kind: MouseEventKind::LeftClick,
-                modifiers: crossterm::event::KeyModifiers::NONE,
-            },
-            &ctx,
-        )
-        .unwrap();
-        assert_eq!(pane.mode, MpdTabMode::Library, "clicking Library switches back");
-    }
-
-    /// `Shift+Tab` (the ToggleMpdMode global) toggles the Library/Search
-    /// mode — the ONLY key that does: Tab / E / Q (NextTab / PreviousTab)
-    /// fall through and still cycle tabs, so the MPD tab stays reachable.
-    #[test]
-    fn shift_tab_toggles_the_library_search_mode() {
-        let mut ctx = test_ctx();
-        let mut pane = DirectoriesPane::new(&ctx);
-
-        let mut ev = action(vec![Actions::Global(GlobalAction::ToggleMpdMode)]);
-        pane.handle_action(&mut ev, &mut ctx).unwrap();
-        assert_eq!(pane.mode, MpdTabMode::Search, "Shift+Tab enters Search mode");
-
-        let mut ev = action(vec![Actions::Global(GlobalAction::ToggleMpdMode)]);
-        pane.handle_action(&mut ev, &mut ctx).unwrap();
-        assert_eq!(pane.mode, MpdTabMode::Library, "a second Shift+Tab returns to Library");
-    }
-
-    /// Tab (NextTab) and Q (PreviousTab) must NOT toggle the mode — they
-    /// are abandoned so the global handler cycles tabs as before.
-    #[test]
-    fn tab_and_q_do_not_toggle_the_mode() {
-        let mut ctx = test_ctx();
-        let mut pane = DirectoriesPane::new(&ctx);
-
-        let mut ev = action(vec![Actions::Global(GlobalAction::NextTab)]);
-        pane.handle_action(&mut ev, &mut ctx).unwrap();
-        assert_eq!(pane.mode, MpdTabMode::Library, "Tab still cycles tabs, never toggles");
-
-        let mut ev = action(vec![Actions::Global(GlobalAction::PreviousTab)]);
-        pane.handle_action(&mut ev, &mut ctx).unwrap();
-        assert_eq!(pane.mode, MpdTabMode::Library, "Q still cycles tabs, never toggles");
-    }
-
-    /// In Search mode the tab renders the folded-in search UI (filters
-    /// pane, results list, info box) and search results delivered to the
-    /// Directories pane reach the embedded search.
-    #[test]
-    fn search_mode_renders_the_folded_in_search_ui() {
-        let mut ctx = test_ctx();
-        let mut pane = DirectoriesPane::new(&ctx);
-        pane.set_mode(MpdTabMode::Search, &ctx).unwrap();
-
-        pane.on_query_finished(
-            crate::ui::panes::search::SEARCH,
-            MpdQueryResult::SearchResult {
-                data: vec![crate::mpd::commands::Song {
-                    file: "/mnt/music/ambient.flac".to_owned(),
-                    ..Default::default()
-                }],
-            },
-            true,
-            &ctx,
-        )
-        .unwrap();
-
-        let backend = ratatui::backend::TestBackend::new(100, 30);
-        let mut terminal = ratatui::Terminal::new(backend).unwrap();
-        terminal.draw(|frame| pane.render(frame, Rect::new(0, 0, 100, 30), &ctx).unwrap()).unwrap();
-        let buf = terminal.backend().buffer();
-        let text: String = (0..30u16)
-            .map(|y| (0..100u16).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>())
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(text.contains(" Search "), "the filter pane title shows: {text}");
-        assert!(text.contains(" Results "), "the results title shows: {text}");
-        assert!(text.contains(" Info "), "the info box shows: {text}");
-        assert!(text.contains("ambient.flac"), "the delivered result renders: {text}");
-    }
-
-    /// The search filters live for the session: a Library↔Search toggle
-    /// keeps the typed filter values.
-    #[test]
-    fn search_filters_survive_a_library_search_toggle() {
-        let mut ctx = test_ctx();
-        let mut pane = DirectoriesPane::new(&ctx);
-        pane.set_mode(MpdTabMode::Search, &ctx).unwrap();
-
-        // Type into the first filter textbox (its buffer lives on Ctx).
-        let buffer_id = pane
-            .search
-            .first_filter_buffer_id()
-            .expect("the search filters create textbox buffers");
-        ctx.input.set_buffer("Aphex Twin".to_owned(), buffer_id);
-        assert_eq!(ctx.input.value(buffer_id), "Aphex Twin");
-
-        // Toggle to Library and back: the search state is untouched.
-        pane.set_mode(MpdTabMode::Library, &ctx).unwrap();
-        pane.set_mode(MpdTabMode::Search, &ctx).unwrap();
-        assert_eq!(
-            ctx.input.value(buffer_id),
-            "Aphex Twin",
-            "the filters survive the Library↔Search toggle"
-        );
-    }
-
-    /// Esc with an active search selection clears the marks and consumes
-    /// the keypress through the embedded search (round-24 parity); with
-    /// nothing selected it leaves the keypress for the settings panel.
-    #[test]
-    fn esc_in_search_mode_clears_the_selection_and_consumes_the_keypress() {
-        let mut ctx = test_ctx();
-        let mut pane = DirectoriesPane::new(&ctx);
-        pane.set_mode(MpdTabMode::Search, &ctx).unwrap();
-        pane.on_query_finished(
-            crate::ui::panes::search::SEARCH,
-            MpdQueryResult::SearchResult {
-                data: (0..3)
-                    .map(|i| crate::mpd::commands::Song {
-                        id: i,
-                        file: format!("/mnt/music/{i}.flac"),
-                        ..Default::default()
-                    })
-                    .collect(),
-            },
-            true,
-            &ctx,
-        )
-        .unwrap();
-
-        // `d` moves into the results list (BrowseResults phase).
-        let mut ev = action(vec![Actions::Directories(DirectoriesActions::FolderExpand)]);
-        pane.handle_action(&mut ev, &mut ctx).unwrap();
-
-        // Shift+Down marks rows 0..=1.
-        let mut ev = action(vec![Actions::Common(CommonAction::SelectDown)]);
-        pane.handle_action(&mut ev, &mut ctx).unwrap();
-
-        let mut ev = action(vec![Actions::Common(CommonAction::Close)]);
-        pane.handle_action(&mut ev, &mut ctx).unwrap();
-        assert!(ev.is_consumed(), "the first Esc clears the search marks");
-
-        // Nothing is selected now: the keypress is not consumed, so the
-        // settings panel opens (the ui-level ShowSettings half).
-        let mut ev = action(vec![Actions::Common(CommonAction::Close)]);
-        pane.handle_action(&mut ev, &mut ctx).unwrap();
-        assert!(!ev.is_consumed(), "a second Esc with nothing selected opens settings");
-    }
-}

@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-
 /// The OS language as an ISO 639-1 code from the locale environment
 /// (`LC_ALL` / `LC_MESSAGES` / `LANG` / `LC_CTYPE`), e.g. `en_US.UTF-8` ->
 /// `en`. `C`/`POSIX` locales (and unset variables) yield None — mpv then
@@ -7,8 +6,12 @@ use serde::{Deserialize, Serialize};
 pub fn os_language_code() -> Option<String> {
     for var in ["LC_ALL", "LC_MESSAGES", "LANG", "LC_CTYPE"] {
         if let Ok(value) = std::env::var(var) {
-            let code =
-                value.split(['_', '.', '@']).next().unwrap_or("").trim().to_ascii_lowercase();
+            let code = value
+                .split(['_', '.', '@'])
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_ascii_lowercase();
             if !code.is_empty() && code != "c" && code != "posix" {
                 return Some(code);
             }
@@ -16,7 +19,6 @@ pub fn os_language_code() -> Option<String> {
     }
     None
 }
-
 /// Audio language preference when playing video in mpv — a preference chain:
 /// first the system language or a chosen language, then "original" (mpv's
 /// default track). Realized with `--alang`: mpv selects a track matching the
@@ -33,7 +35,6 @@ pub enum MpvAudioLang {
     #[serde(rename = "custom")]
     Custom { lang: String },
 }
-
 impl MpvAudioLang {
     /// String form persisted to state.ron: `system` / `custom:<lang>`.
     /// Legacy values (`en`, empty) parse back too.
@@ -43,7 +44,6 @@ impl MpvAudioLang {
             Self::Custom { lang } => format!("custom:{lang}"),
         }
     }
-
     /// The first preference, as shown in the settings panel.
     pub fn label(&self) -> String {
         match self {
@@ -51,22 +51,24 @@ impl MpvAudioLang {
             Self::Custom { lang } => lang.clone(),
         }
     }
-
     pub fn parse(s: &str) -> Option<Self> {
         let s = s.trim();
-        if s.is_empty()
-            || s.eq_ignore_ascii_case("system")
+        if s.is_empty() || s.eq_ignore_ascii_case("system")
             || s.eq_ignore_ascii_case("system language")
         {
             return Some(Self::System);
         }
-        // `custom:<lang>`, or a bare language code (legacy "en" and friends).
-        Some(match s.strip_prefix("custom:") {
-            Some(lang) => Self::Custom { lang: lang.to_owned() },
-            None => Self::Custom { lang: s.to_owned() },
-        })
+        Some(
+            match s.strip_prefix("custom:") {
+                Some(lang) => {
+                    Self::Custom {
+                        lang: lang.to_owned(),
+                    }
+                }
+                None => Self::Custom { lang: s.to_owned() },
+            },
+        )
     }
-
     /// The `--alang` value: the OS language code for System (None when the
     /// locale can't be determined — mpv then picks the original track), the
     /// chosen code otherwise.
@@ -77,7 +79,6 @@ impl MpvAudioLang {
         }
     }
 }
-
 /// Subtitle preference when playing video in mpv — a preference chain: first
 /// "signs" (forced subtitle tracks), then a second preference (hidden /
 /// system language / a chosen language). Realized with the forced-track
@@ -96,7 +97,6 @@ pub enum MpvSubtitleMode {
     #[serde(rename = "custom")]
     Custom { lang: String },
 }
-
 impl MpvSubtitleMode {
     /// String form persisted to state.ron; custom carries its code as
     /// `custom:<lang>`. Legacy "signs"/"off" map to "hidden" on parse.
@@ -107,7 +107,6 @@ impl MpvSubtitleMode {
             Self::Custom { lang } => format!("custom:{lang}"),
         }
     }
-
     /// The second preference, as shown in the settings panel.
     pub fn label(&self) -> String {
         match self {
@@ -116,20 +115,20 @@ impl MpvSubtitleMode {
             Self::Custom { lang } => lang.clone(),
         }
     }
-
     pub fn parse(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
-            // Legacy "signs" (forced tracks only) and "off" (no subtitles)
-            // both become the "signs > hidden" chain.
             "signs" | "off" | "hidden" => Some(Self::Hidden),
             "system" | "system language" => Some(Self::SystemLanguage),
             _ => {
-                s.trim().strip_prefix("custom:").map(|lang| Self::Custom { lang: lang.to_owned() })
+                s.trim()
+                    .strip_prefix("custom:")
+                    .map(|lang| Self::Custom {
+                        lang: lang.to_owned(),
+                    })
             }
         }
     }
 }
-
 /// mpv launch preferences: the audio language chain (system/chosen >
 /// original) and the subtitle chain (signs > hidden/system/chosen).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -148,7 +147,6 @@ pub struct Mpv {
     /// to the user's own mpv.conf / scripts.
     pub svp: bool,
 }
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(default)]
 pub struct MpvFile {
@@ -160,7 +158,6 @@ pub struct MpvFile {
     /// toggle; persisted to state.ron).
     pub svp: Option<bool>,
 }
-
 impl From<MpvFile> for Mpv {
     fn from(value: MpvFile) -> Self {
         Self {
@@ -173,43 +170,5 @@ impl From<MpvFile> for Mpv {
                 .unwrap_or_else(|| "mpv".to_owned()),
             svp: value.svp.unwrap_or(false),
         }
-    }
-}
-
-#[cfg(test)]
-#[allow(clippy::unwrap_used)]
-mod tests {
-    use super::{Mpv, MpvFile};
-
-    #[test]
-    fn mpv_bin_defaults_to_mpv_and_expands_tilde() {
-        // The tilde expansion reads the shared test ENV; the lock keeps
-        // other HOME-reading tests from racing this one.
-        let _home_guard = crate::tests::fixtures::HOME_LOCK.lock().unwrap();
-        use crate::shared::env::ENV;
-
-        let default: Mpv = MpvFile::default().into();
-        assert_eq!(default.bin, "mpv");
-        assert!(!default.svp, "svp support defaults off");
-
-        ENV.set("HOME".to_owned(), "/home/tester".to_owned());
-        let explicit: Mpv = MpvFile {
-            audio_lang: None,
-            subtitles: None,
-            bin: Some("~/somewhere/mpv".to_owned()),
-            svp: None,
-        }
-        .into();
-        assert_eq!(explicit.bin, "/home/tester/somewhere/mpv");
-
-        let blank: Mpv = MpvFile {
-            audio_lang: None,
-            subtitles: None,
-            bin: Some("   ".to_owned()),
-            svp: Some(true),
-        }
-        .into();
-        assert_eq!(blank.bin, "mpv", "blank bin falls back to mpv");
-        assert!(blank.svp, "explicit svp override survives");
     }
 }

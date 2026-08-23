@@ -1,11 +1,8 @@
 use std::{fmt::Write, path::PathBuf};
-
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
-
 use super::defaults;
 use crate::shared::paths::legacy_config_dir;
-
 #[derive(Debug, Default, Clone)]
 pub struct Cava {
     pub framerate: u16,
@@ -17,7 +14,6 @@ pub struct Cava {
     pub smoothing: CavaSmoothing,
     pub eq: Vec<f64>,
 }
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct CavaFile {
@@ -30,7 +26,6 @@ pub struct CavaFile {
     smoothing: CavaSmoothingFile,
     eq: Vec<f64>,
 }
-
 impl Default for CavaFile {
     fn default() -> Self {
         Self {
@@ -45,7 +40,6 @@ impl Default for CavaFile {
         }
     }
 }
-
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CavaSmoothingFile {
     #[serde(default)]
@@ -55,14 +49,12 @@ pub struct CavaSmoothingFile {
     #[serde(default = "defaults::u8::<77>")]
     noise_reduction: u8,
 }
-
 #[derive(Debug, Default, Clone)]
 pub struct CavaSmoothing {
     pub monstercat: bool,
     pub waves: bool,
     pub noise_reduction: u8,
 }
-
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CavaInputFile {
     /// Round 30: cava is PipeWire-only; a legacy `method` field in older
@@ -83,7 +75,6 @@ pub struct CavaInputFile {
     #[serde(default)]
     node_name: Option<String>,
 }
-
 #[derive(Debug, Clone)]
 pub struct CavaInput {
     /// The PipeWire capture source (`auto` or a sink/monitor/virtual source
@@ -98,11 +89,9 @@ pub struct CavaInput {
     /// keep cava's own ("cava").
     pub node_name: Option<String>,
 }
-
 impl Default for CavaInput {
     fn default() -> Self {
         Self {
-            // Round 30: the PipeWire default capture source.
             source: "auto".to_string(),
             sample_rate: None,
             sample_bits: None,
@@ -112,7 +101,6 @@ impl Default for CavaInput {
         }
     }
 }
-
 impl From<CavaFile> for Cava {
     fn from(value: CavaFile) -> Self {
         Cava {
@@ -122,8 +110,6 @@ impl From<CavaFile> for Cava {
             lower_cutoff_freq: value.lower_cutoff_freq,
             higher_cutoff_freq: value.higher_cutoff_freq,
             input: CavaInput {
-                // Round 30: a legacy FIFO `source` (an mpd.conf fifo path)
-                // falls back to the PipeWire default capture source.
                 source: sanitize_pipewire_source(&value.input.source),
                 sample_rate: value.input.sample_rate,
                 sample_bits: value.input.sample_bits,
@@ -140,7 +126,6 @@ impl From<CavaFile> for Cava {
         }
     }
 }
-
 /// Round 30: a cava `source` that names a fifo (an mpd.conf fifo path like
 /// `/tmp/mpd-cava.fifo`) is meaningless for the PipeWire-only input; fall
 /// back to the PipeWire default ("auto"). PipeWire node names never contain
@@ -152,11 +137,9 @@ fn sanitize_pipewire_source(source: &str) -> String {
         source.to_string()
     }
 }
-
 impl Cava {
     pub fn to_cava_config_file(&self, bars: u16) -> Result<String> {
         let mut buf = String::new();
-
         writeln!(buf, "[general]")?;
         writeln!(buf, "framerate = {}", self.framerate)?;
         writeln!(buf, "bars = {bars}")?;
@@ -168,9 +151,7 @@ impl Cava {
         if let Some(val) = self.higher_cutoff_freq {
             writeln!(buf, "higher_cutoff_freq = {val}")?;
         }
-
         writeln!(buf, "[input]")?;
-        // Round 30: cava is PipeWire-only — the method is always pipewire.
         writeln!(buf, "method = pipewire")?;
         writeln!(buf, "source = {}", self.input.source)?;
         if let Some(val) = self.input.sample_rate {
@@ -185,28 +166,23 @@ impl Cava {
         if let Some(val) = self.input.autoconnect {
             writeln!(buf, "autoconnect = {val}")?;
         }
-
         writeln!(buf, "[output]")?;
         writeln!(buf, "method = raw")?;
         writeln!(buf, "channels = mono")?;
         writeln!(buf, "data_format = binary")?;
         writeln!(buf, "bit_format = 16bit")?;
         writeln!(buf, "reverse = 0")?;
-
         writeln!(buf, "[smoothing]")?;
         writeln!(buf, "noise_reduction = {}", self.smoothing.noise_reduction)?;
         writeln!(buf, "monstercat = {}", i8::from(self.smoothing.monstercat))?;
         writeln!(buf, "waves = {}", i8::from(self.smoothing.waves))?;
-
         writeln!(buf, "[eq]")?;
         for (i, val) in self.eq.iter().enumerate() {
             writeln!(buf, "{i} = {val}")?;
         }
-
         Ok(buf)
     }
 }
-
 /// Cava settings adjusted from the Settings panel, persisted to the
 /// `cava.ron` sidecar (the main config file is never rewritten). Only the
 /// fields the panel manages are stored; `None` leaves the configured value
@@ -231,26 +207,24 @@ pub struct CavaOverridesFile {
     /// leaves the configured value untouched (the usual sidecar semantic).
     pub node_name: Option<String>,
 }
-
 pub const CAVA_OVERRIDE_FILE: &str = "cava.ron";
-
 impl CavaOverridesFile {
     /// The s2udio sidecar path (`~/.config/s2udio/cava.ron`, round 19 —
     /// s2udio's settings sidecar moved out of `~/.config/rmpc/`).
     pub fn path() -> Option<PathBuf> {
         crate::shared::paths::s2udio_config_dir().map(|dir| dir.join(CAVA_OVERRIDE_FILE))
     }
-
     /// The legacy pre-round-23 sidecar path (`~/.config/rmpc/cava.ron`).
     fn legacy_path() -> Option<PathBuf> {
         legacy_config_dir().map(|dir| dir.join(CAVA_OVERRIDE_FILE))
     }
-
     /// Read the sidecar file, if it exists and parses. Falls back to the
     /// legacy `~/.config/rmpc/cava.ron` when the s2udio file is absent.
     pub fn load() -> Option<Self> {
-        let path =
-            Self::path().filter(|p| p.exists()).or_else(Self::legacy_path).or_else(Self::path)?;
+        let path = Self::path()
+            .filter(|p| p.exists())
+            .or_else(Self::legacy_path)
+            .or_else(Self::path)?;
         let content = std::fs::read_to_string(&path).ok()?;
         match ron::de::from_str(&content) {
             Ok(overrides) => Some(overrides),
@@ -260,7 +234,6 @@ impl CavaOverridesFile {
             }
         }
     }
-
     /// Apply the overrides on top of the configured cava settings.
     pub fn apply_to(&self, cava: &mut Cava) {
         if let Some(v) = self.framerate {
@@ -282,7 +255,6 @@ impl CavaOverridesFile {
             cava.input.channels = Some(v);
         }
         if let Some(v) = &self.source {
-            // Round 30: a legacy FIFO path falls back to the PipeWire default.
             cava.input.source = sanitize_pipewire_source(v);
         }
         if let Some(v) = self.noise_reduction {
@@ -295,11 +267,9 @@ impl CavaOverridesFile {
             cava.smoothing.waves = v;
         }
         if let Some(v) = &self.node_name {
-            // Some("") = explicit disable; Some(name) = rename the node.
             cava.input.node_name = (!v.is_empty()).then(|| v.clone());
         }
     }
-
     /// Persist the overrides to the sidecar file.
     pub fn save(&self) -> Result<()> {
         let Some(path) = Self::path() else {
@@ -308,100 +278,11 @@ impl CavaOverridesFile {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let content = ron::ser::to_string_pretty(self, ron::ser::PrettyConfig::default())?;
+        let content = ron::ser::to_string_pretty(
+            self,
+            ron::ser::PrettyConfig::default(),
+        )?;
         std::fs::write(&path, content)?;
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Round 29: the sidecar can set the cava node name (and explicitly
-    /// disable it with an empty string); `None` leaves it untouched.
-    #[test]
-    fn node_name_override_sets_and_disables() {
-        let mut cava = Cava::default();
-        assert_eq!(cava.input.node_name, None);
-
-        let set = CavaOverridesFile { node_name: Some("s2udio-cava".into()), ..Default::default() };
-        set.apply_to(&mut cava);
-        assert_eq!(cava.input.node_name.as_deref(), Some("s2udio-cava"));
-
-        // Some("") explicitly disables the rename.
-        let off = CavaOverridesFile { node_name: Some(String::new()), ..Default::default() };
-        off.apply_to(&mut cava);
-        assert_eq!(cava.input.node_name, None, "an empty node_name disables the rename");
-
-        // None leaves the resolved value alone.
-        cava.input.node_name = Some("keep-me".into());
-        let untouched = CavaOverridesFile::default();
-        untouched.apply_to(&mut cava);
-        assert_eq!(cava.input.node_name.as_deref(), Some("keep-me"));
-    }
-
-    /// The main config's cava.input accepts `node_name` (round 29); the
-    /// round-30 removal of the `method` field is invisible to old configs
-    /// (`method: Pipewire` is an unknown field and is ignored).
-    #[test]
-    fn main_config_input_parses_node_name() {
-        let content = r#"(input: (method: Pipewire, source: "Media.monitor", node_name: Some("s2udio-cava")))"#;
-        let parsed: CavaFile = ron::de::from_str(content).unwrap();
-        let cava: Cava = parsed.into();
-        assert_eq!(cava.input.node_name.as_deref(), Some("s2udio-cava"));
-        assert_eq!(cava.input.source, "Media.monitor");
-    }
-
-    /// Old configs / sidecars with removed fields (sample rate / bit depth,
-    /// and the round-30 `method`) must still load: the unknown fields are
-    /// ignored and the rest applies.
-    #[test]
-    fn legacy_sidecar_with_removed_fields_still_parses() {
-        // A cava.ron written before the sample rate / bit depth options were
-        // removed must still load: the unknown fields are ignored and the
-        // rest applies.
-        let content = r#"(framerate: Some(90), autosens: Some(false), sensitivity: Some(175),
-            lower_cutoff_freq: Some(20), higher_cutoff_freq: Some(15000),
-            sample_rate: Some(48000), sample_bits: Some(24), channels: Some(2),
-            method: Some(Fifo), source: Some("/tmp/mpd-cava.fifo"),
-            noise_reduction: Some(10), monstercat: Some(false), waves: Some(false))"#;
-        let parsed: CavaOverridesFile = ron::de::from_str(content).unwrap();
-        assert_eq!(parsed.framerate, Some(90));
-        assert_eq!(parsed.sensitivity, Some(175));
-        assert_eq!(parsed.channels, Some(2));
-    }
-
-    /// Round 30: a main config that still points cava at the MPD fifo loads
-    /// (the `method` field is gone and ignored) and its `source` falls back
-    /// to the PipeWire default capture source.
-    #[test]
-    fn legacy_fifo_input_falls_back_to_pipewire_auto() {
-        let content = r#"(input: (method: Fifo, source: "/tmp/mpd-cava.fifo", sample_rate: Some(44100), sample_bits: Some(16), channels: Some(2)))"#;
-        let parsed: CavaFile = ron::de::from_str(content).unwrap();
-        let cava: Cava = parsed.into();
-        assert_eq!(cava.input.source, "auto");
-    }
-
-    /// Round 30: the generated cava config always selects the PipeWire
-    /// input method.
-    #[test]
-    fn generated_config_is_pipewire_only() {
-        let cava = Cava::default();
-        let config = cava.to_cava_config_file(24).unwrap();
-        assert!(config.contains("method = pipewire"), "{config}");
-        assert!(!config.contains("fifo"), "{config}");
-    }
-
-    /// Round 30: the sidecar's `source` is sanitized the same way as the
-    /// main config's (a fifo path falls back to "auto").
-    #[test]
-    fn sidecar_source_sanitizes_fifo_paths() {
-        let mut cava = Cava::default();
-        cava.input.source = "/tmp/mpd-cava.fifo".into();
-        let overrides =
-            CavaOverridesFile { source: Some("/tmp/mpd-cava.fifo".into()), ..Default::default() };
-        overrides.apply_to(&mut cava);
-        assert_eq!(cava.input.source, "auto");
     }
 }

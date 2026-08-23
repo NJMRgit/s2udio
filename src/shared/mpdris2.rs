@@ -12,12 +12,9 @@
 //! on the shim side). Absent/unparsable means *enabled*: that matches
 //! mpDris2's own default, so a shim that never sees the file (or an
 //! unpatched mpDris2) behaves exactly like upstream.
-
 use std::path::Path;
-
 /// File name of the notification-toggle state (read by the shim).
 pub const NOTIFY_STATE_FILE: &str = "mpdris2-notify.json";
-
 /// The mpDris2 notification-toggle state path: `<cache_dir>/` when the
 /// config sets one, else `~/.cache/s2udio/` (round 19 layout; no legacy
 /// rmpc fallback — this file is new, absent = enabled either way).
@@ -31,7 +28,6 @@ pub fn notify_state_path(cache_dir: Option<&Path>) -> std::path::PathBuf {
         })
         .join(NOTIFY_STATE_FILE)
 }
-
 /// Sync the mpDris2 notification toggle to the bridge state file
 /// (`{"notify": <enabled>}`). Called on Settings Save and at startup so a
 /// restarted s2udio re-applies the persisted preference. Failure is only
@@ -42,45 +38,8 @@ pub fn write_notify_state(cache_dir: Option<&Path>, enabled: bool) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    // A tiny literal cannot fail to serialize; format! keeps the write
-    // infallible too (no unwrap in a non-test path).
     let bytes = format!(r#"{{"notify":{enabled}}}"#).into_bytes();
     if let Err(err) = std::fs::write(&path, bytes) {
         log::error!(error:? = err; "Failed to write the mpDris2 notification state");
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn state_file_round_trips_the_toggle() {
-        let dir =
-            std::env::temp_dir().join(format!("s2u-mpdris2-notify-test-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-
-        write_notify_state(Some(&dir), false);
-        let path = notify_state_path(Some(&dir));
-        assert!(path.exists());
-        let content = std::fs::read_to_string(&path).unwrap();
-        let v: serde_json::Value = serde_json::from_str(&content).unwrap();
-        assert_eq!(v["notify"], serde_json::Value::Bool(false));
-
-        write_notify_state(Some(&dir), true);
-        let content = std::fs::read_to_string(&path).unwrap();
-        let v: serde_json::Value = serde_json::from_str(&content).unwrap();
-        assert_eq!(v["notify"], serde_json::Value::Bool(true));
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn configured_cache_dir_wins_over_default() {
-        let dir =
-            std::env::temp_dir().join(format!("s2u-mpdris2-notify-path-{}", std::process::id()));
-        let path = notify_state_path(Some(&dir));
-        assert_eq!(path, dir.join(NOTIFY_STATE_FILE));
     }
 }

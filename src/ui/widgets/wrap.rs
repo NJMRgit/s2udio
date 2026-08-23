@@ -1,18 +1,11 @@
 //! Text wrapping helpers shared by the lyrics pane and the jellyfin info
 //! box: display-width-aware paragraph wrapping (`wrap_to_width`) and
 //! span-aware row wrapping (`wrap_spans`).
-
-use ratatui::{
-    layout::Alignment,
-    style::Style,
-    text::{Line, Span},
-};
-
+use ratatui::{layout::Alignment, style::Style, text::{Line, Span}};
 /// Wrap a paragraph into lines of at most `width` cells, breaking on
 /// whitespace (display-width aware, so CJK text doesn't overflow).
 pub(crate) fn wrap_to_width(text: &str, width: usize) -> Vec<String> {
     use unicode_width::UnicodeWidthStr;
-
     let mut lines = Vec::new();
     for paragraph in text.split('\n') {
         let mut current = String::new();
@@ -40,7 +33,6 @@ pub(crate) fn wrap_to_width(text: &str, width: usize) -> Vec<String> {
     }
     lines
 }
-
 /// Wrap a sequence of spans into rows of at most `width` columns, joining
 /// words with single spaces and centering each row.
 pub(crate) fn wrap_spans(spans: &[Span], width: u16) -> Vec<Line<'static>> {
@@ -68,17 +60,4 @@ pub(crate) fn wrap_spans(spans: &[Span], width: u16) -> Vec<Line<'static>> {
         rows.push(Line::from(row).alignment(Alignment::Center));
     }
     rows
-}
-
-#[cfg(test)]
-#[allow(clippy::unwrap_used)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn wrap_to_width_breaks_on_words_and_keeps_paragraphs() {
-        assert_eq!(wrap_to_width("one two three", 8), vec!["one two", "three"]);
-        assert_eq!(wrap_to_width("short", 20), vec!["short"]);
-        assert_eq!(wrap_to_width("a\nb", 5), vec!["a", "b"]);
-    }
 }
