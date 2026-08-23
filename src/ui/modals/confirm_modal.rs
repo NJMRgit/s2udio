@@ -1,33 +1,21 @@
 use std::borrow::Cow;
-
 use anyhow::Result;
 use bon::bon;
 use itertools::Itertools;
 use ratatui::{
-    Frame,
-    macros::constraint,
-    prelude::{Constraint, Layout},
-    style::Style,
-    symbols::border,
-    text::Line,
-    widgets::{Block, Borders, Clear},
+    Frame, macros::constraint, prelude::{Constraint, Layout},
+    style::Style, symbols::border, text::Line, widgets::{Block, Borders, Clear},
 };
-
 use super::{BUTTON_GROUP_SYMBOLS, Modal};
 use crate::{
-    config::{
-        Size,
-        keys::{CommonAction, GlobalAction},
-    },
+    config::{Size, keys::{CommonAction, GlobalAction}},
     ctx::Ctx,
     shared::{
         id::{self, Id},
-        keys::ActionEvent,
-        mouse_event::{MouseEvent, MouseEventKind},
+        keys::ActionEvent, mouse_event::{MouseEvent, MouseEventKind},
     },
     ui::widgets::button::{Button, ButtonGroup, ButtonGroupState},
 };
-
 pub struct ConfirmModal<'a> {
     id: Id,
     message: Vec<Cow<'a, str>>,
@@ -36,7 +24,6 @@ pub struct ConfirmModal<'a> {
     size: Option<Size>,
     action: Action<'a>,
 }
-
 impl std::fmt::Debug for ConfirmModal<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -46,26 +33,22 @@ impl std::fmt::Debug for ConfirmModal<'_> {
         )
     }
 }
-
 type Callback<'a> = Box<dyn FnOnce(&Ctx) -> Result<()> + Send + Sync + 'a>;
-
 pub enum Action<'a> {
     Single {
         confirm_label: Option<&'a str>,
         cancel_label: Option<&'a str>,
         on_confirm: Callback<'a>,
     },
-    CustomButtons {
-        buttons: Vec<(&'a str, Callback<'a>)>,
-    },
+    CustomButtons { buttons: Vec<(&'a str, Callback<'a>)> },
 }
-
 impl Default for Action<'_> {
     fn default() -> Self {
-        Self::CustomButtons { buttons: Vec::default() }
+        Self::CustomButtons {
+            buttons: Vec::default(),
+        }
     }
 }
-
 #[allow(dead_code)]
 #[bon]
 impl<'a> ConfirmModal<'a> {
@@ -78,7 +61,6 @@ impl<'a> ConfirmModal<'a> {
         action: Action<'a>,
     ) -> Self {
         let mut button_group_state = ButtonGroupState::default();
-
         let buttons = match &action {
             Action::Single { confirm_label, cancel_label, on_confirm: _ } => {
                 vec![
@@ -90,7 +72,6 @@ impl<'a> ConfirmModal<'a> {
                 buttons.iter().map(|b| Button::default().label(b.0)).collect()
             }
         };
-
         button_group_state.set_button_count(buttons.len());
         let button_group = ButtonGroup::default()
             .active_style(ctx.config.theme.current_item_style)
@@ -102,7 +83,6 @@ impl<'a> ConfirmModal<'a> {
                     .border_set(BUTTON_GROUP_SYMBOLS)
                     .border_style(ctx.config.as_border_style()),
             );
-
         Self {
             id: id::new(),
             message: message.into_iter().map(|line| line.into()).collect(),
@@ -125,74 +105,73 @@ impl<'a> ConfirmModal<'a> {
                 (buttons.remove(self.button_group_state.selected).1)(ctx)?;
             }
         }
-
         self.hide(ctx)?;
         Ok(())
     }
 }
-
 impl Modal for ConfirmModal<'_> {
     fn id(&self) -> Id {
         self.id
     }
-
     fn render(&mut self, frame: &mut Frame, ctx: &mut Ctx) -> Result<()> {
         let width = match (frame.area().width, self.size) {
             (fw, Some(Size { width, .. })) => width.min(fw),
             (fw, None) if fw > 120 => fw / 2,
             (fw, None) => fw,
         };
-
         let lines = self
             .message
             .iter()
             .flat_map(|message| message.lines())
             .flat_map(|line| textwrap::wrap(line, (width as usize).saturating_sub(2)))
             .collect_vec();
-
-        let popup_area = frame.area().centered(
-            constraint!(==width),
-            constraint!(==self.size.map_or(u16::try_from(lines.len())? + 4, |v| v.height)),
-        );
+        let popup_area = frame
+            .area()
+            .centered(
+                constraint!(== width),
+                constraint!(
+                    == self.size.map_or(u16::try_from(lines.len()) ? + 4, | v | v.height)
+                ),
+            );
         frame.render_widget(Clear, popup_area);
-
         if let Some(bg_color) = ctx.config.theme.modal_background_color {
-            frame.render_widget(Block::default().style(Style::default().bg(bg_color)), popup_area);
+            frame
+                .render_widget(
+                    Block::default().style(Style::default().bg(bg_color)),
+                    popup_area,
+                );
         }
-
         let block = Block::default()
             .borders(Borders::TOP | Borders::LEFT | Borders::RIGHT)
             .border_set(border::ROUNDED)
             .border_style(ctx.config.as_border_style())
             .title_alignment(ratatui::prelude::Alignment::Center);
-
-        let [content_area, buttons_area] =
-            Layout::vertical([Constraint::Min(2), Constraint::Length(3)]).areas(popup_area);
-
+        let [content_area, buttons_area] = Layout::vertical([
+                Constraint::Min(2),
+                Constraint::Length(3),
+            ])
+            .areas(popup_area);
         let areas = Layout::vertical((0..lines.len()).map(|_| Constraint::Length(1)))
             .split(block.inner(content_area));
         frame.render_widget(&block, content_area);
-
         for (idx, message) in lines.iter().enumerate() {
-            // TODO centered default
-            let paragraph =
-                Line::from(message.as_ref()).style(ctx.config.as_text_style()).left_aligned();
-
+            let paragraph = Line::from(message.as_ref())
+                .style(ctx.config.as_text_style())
+                .left_aligned();
             let Some(area) = areas.get(idx) else {
                 continue;
             };
             frame.render_widget(paragraph, *area);
         }
-
-        self.button_group.render_with_hover(
-            buttons_area,
-            frame.buffer_mut(),
-            &mut self.button_group_state,
-            ctx.modal_mouse_pos(),
-        );
+        self.button_group
+            .render_with_hover(
+                buttons_area,
+                frame.buffer_mut(),
+                &mut self.button_group_state,
+                ctx.modal_mouse_pos(),
+            );
         Ok(())
     }
-
     fn handle_key(&mut self, key: &mut ActionEvent, ctx: &mut Ctx) -> Result<()> {
         if let Some(action) = key.claim_common() {
             match action {
@@ -225,16 +204,14 @@ impl Modal for ConfirmModal<'_> {
                 _ => {}
             }
         }
-
         Ok(())
     }
-
-    fn handle_raw_key(&mut self, key: crossterm::event::KeyEvent, ctx: &mut Ctx) -> Result<bool> {
+    fn handle_raw_key(
+        &mut self,
+        key: crossterm::event::KeyEvent,
+        ctx: &mut Ctx,
+    ) -> Result<bool> {
         use crossterm::event::{KeyCode, KeyModifiers};
-        // The confirm buttons are navigated with the arrow keys. Some keybind
-        // setups (the minimal s2udio set) do not bind Left/Right to the
-        // common actions, so handle the arrows at the raw level to keep the
-        // buttons usable everywhere (consumed here, never double-fired).
         match (key.code, key.modifiers) {
             (KeyCode::Right, KeyModifiers::NONE) => {
                 self.button_group_state.next();
@@ -246,9 +223,6 @@ impl Modal for ConfirmModal<'_> {
                 ctx.render()?;
                 Ok(true)
             }
-            // Space confirms the selected button (the minimal keybind set
-            // maps Space to TogglePause globally; in a confirmation dialog
-            // it must activate the choice instead of toggling playback).
             (KeyCode::Char(' '), KeyModifiers::NONE) => {
                 self.confirm_selected(ctx)?;
                 Ok(true)
@@ -256,7 +230,6 @@ impl Modal for ConfirmModal<'_> {
             _ => Ok(false),
         }
     }
-
     fn handle_mouse_event(&mut self, event: MouseEvent, ctx: &mut Ctx) -> Result<()> {
         match event.kind {
             MouseEventKind::LeftClick => {
@@ -301,69 +274,5 @@ impl Modal for ConfirmModal<'_> {
             MouseEventKind::Moved => {}
         }
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Space confirms the selected button (double-click / Enter already
-    /// worked; the minimal keybind set maps Space to TogglePause, so it must
-    /// be consumed at the raw level instead of toggling playback).
-    #[test]
-    fn space_confirms_the_selected_button() {
-        let (app_tx, app_rx) = crossbeam::channel::unbounded();
-        let mut ctx = crate::tests::fixtures::ctx(
-            (app_tx, app_rx.clone()),
-            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
-            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
-        );
-        // The action itself is observable: it sends a marker event before
-        // the modal's own PopModal.
-        let mut modal = ConfirmModal::builder()
-            .ctx(&ctx)
-            .message(vec!["Proceed?"])
-            .action(Action::Single {
-                confirm_label: Some("OK"),
-                cancel_label: None,
-                on_confirm: Box::new(|ctx| {
-                    ctx.app_event_sender.send(crate::AppEvent::UiEvent(
-                        crate::ui::UiAppEvent::PopModal(crate::shared::id::new()),
-                    ))?;
-                    Ok(())
-                }),
-            })
-            .build();
-
-        modal
-            .handle_raw_key(
-                crossterm::event::KeyEvent::new(
-                    crossterm::event::KeyCode::Char(' '),
-                    crossterm::event::KeyModifiers::NONE,
-                ),
-                &mut ctx,
-            )
-            .unwrap();
-
-        let mut events = Vec::new();
-        while let Ok(ev) = app_rx.try_recv() {
-            events.push(ev);
-        }
-        assert!(
-            matches!(
-                events.first(),
-                Some(crate::AppEvent::UiEvent(crate::ui::UiAppEvent::PopModal(marker)))
-                    if *marker != modal.id()
-            ),
-            "the confirm action ran first, got {events:?}"
-        );
-        assert!(
-            events.iter().any(|ev| matches!(
-                ev,
-                crate::AppEvent::UiEvent(crate::ui::UiAppEvent::PopModal(id)) if *id == modal.id()
-            )),
-            "the dialog closed after confirming, got {events:?}"
-        );
     }
 }

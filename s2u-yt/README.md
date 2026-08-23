@@ -23,7 +23,7 @@ s2u-yt/
 ├── install.sh      # idempotent installer: fetch → configure → service → verify
 ├── uninstall.sh    # full reverse (or --keep-data for a quick re-install)
 ├── status.sh       # health check incl. a live HTTP-200 stream test
-├── conf/config     # the only yt-dlp config delta (android_vr first, web_safari fallback)
+├── conf/config     # the only yt-dlp config delta (NO pinned player_client — see 2026-08-22 note)
 └── README.md
 ```
 
@@ -59,28 +59,28 @@ What it does:
 4. Verifies end-to-end: provider registered, resolved stream URL returns
    **HTTP 200** (it returned 403 before).
 
-### Client strategy: `android_vr` first, `web_safari` fallback
+### Client strategy: anonymous default-order first (updated 2026-08-22)
 
-The wrapper makes two attempts per yt-dlp call:
+> **2026-08-22:** YouTube's SABR/range enforcement retired the original
+> `android_vr`-first pin — android_vr URLs began answering **403 to plain
+> GETs and open-ended `Range: bytes=0-`** (the request shapes mpv/ffmpeg
+> and MPD send), while `yt-dlp -J` still exited 0 so the fallback never
+> fired. The managed conf no longer pins `player_client`: unpinned
+> defaults reach the new anonymous **VISIONOS** client, whose URLs answer
+> plain GETs/open ranges everywhere (mpv, MPD, ffprobe — live-verified).
+> **Do not re-pin without end-to-end verification.**
 
-1. **Anonymous `android_vr`** — the wrapper strips the cookie options from
-   your `~/.config/yt-dlp/config` for this attempt, because yt-dlp skips
-   `android_vr` (and the other `SUPPORTS_COOKIES=false` clients) when the
-   session is authenticated. On this bot-checked IP it is the only client
-   whose googlevideo URLs are accepted (verified live: HTTP 200/206), and it
-   serves **DASH video up to 2160p** (vs web_safari's 1080p HLS ceiling)
-   plus **single-file audio** (opus/m4a) that MPD can range-seek — so stream
-   seeking in s2udio works again, at the same time.
-2. **Authenticated `web_safari`** — if the anonymous pass fails (or a video
-   needs the session), the wrapper retries with your cookies; yt-dlp then
-   auto-skips `android_vr` and uses web_safari (HLS up to 1080p), the
-   previously verified-good path.
+The wrapper still makes two attempts per yt-dlp call:
 
-The `android_vr` pass depends on the bgutil server (its GVS policy requires a
-PO token) — `status.sh` checks both the server and which client won, and
-warns when a test URL fell back to HLS. If YouTube ever extends the SABR
-experiment to `android_vr` (it currently hits the plain `android` client,
-yt-dlp #12482), the web_safari fallback keeps playback working at 1080p.
+1. **Anonymous** — the wrapper strips the cookie options from your
+   `~/.config/yt-dlp/config` for this attempt and runs with NO client
+   pin; yt-dlp's default order reaches VISIONOS for stream URLs.
+2. **Authenticated retry** — if the anonymous pass fails (or a video
+   needs the session), the wrapper retries with your cookies.
+
+The bgutil server still mints PO tokens (`status.sh` checks both the
+server and which client won). Requires yt-dlp >= 2026.08.19 — older
+versions don't know the VISIONOS client; upgrade via `pipx upgrade yt-dlp`.
 
 ### Fallback provider: `wpc` (browser-minted tokens)
 

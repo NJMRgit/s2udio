@@ -1,22 +1,14 @@
 use bon::bon;
 use ratatui::{
-    buffer::Buffer,
-    layout::{Alignment, Position, Rect},
-    style::Style,
-    widgets::{Block, Borders, Widget},
+    buffer::Buffer, layout::{Alignment, Position, Rect},
+    style::Style, widgets::{Block, Borders, Widget},
 };
 use strum::{FromRepr, IntoStaticStr, VariantNames};
-
 use crate::{
     config::{FilterKindFile, Search},
-    ctx::Ctx,
-    mpd::mpd_client::{FilterKind, StickerFilter},
-    ui::{
-        input::BufferId,
-        widgets::{button::Button, input::Input},
-    },
+    ctx::Ctx, mpd::mpd_client::{FilterKind, StickerFilter},
+    ui::{input::BufferId, widgets::{button::Button, input::Input}},
 };
-
 pub const SEARCH_MODE_KEY: &str = "search_mode";
 pub const FOLD_CASE_KEY: &str = "fold_case";
 pub const STRIP_DIACRITICS_KEY: &str = "strip_diacritics";
@@ -26,7 +18,6 @@ pub const RESET_BUTTON_KEY: &str = "reset";
 pub const SEARCH_BUTTON_KEY: &str = "search_button";
 pub const CUSTOM_QUERY_KEY: &str = "custom_query";
 pub const LIKE_KEY: &str = "like";
-
 /// Build a filter row's label for the available row width. When the pane
 /// has room the label pads to the longest filter category so every colon
 /// aligns **one character past the longest label**, and a space separates
@@ -36,18 +27,15 @@ pub const LIKE_KEY: &str = "like";
 /// never cut off, only labels).
 fn filter_label(raw: &str, row_width: u16, longest: usize) -> String {
     const MIN_VALUE: usize = 10;
-
-    // The value takes the remainder of the row after the label.
     let max_label = (row_width as usize).saturating_sub(MIN_VALUE);
     if max_label == 0 {
         return raw.to_string();
     }
-    // " " + label padded to `longest` + " : " (margin, colon, margin).
     let full_len = 1 + longest + 3;
     if full_len <= max_label {
         format!(" {:<longest$} : ", raw)
     } else {
-        let keep = max_label.saturating_sub(5); // " : " + the ellipsis
+        let keep = max_label.saturating_sub(5);
         if keep == 0 {
             return raw.to_string();
         }
@@ -55,7 +43,6 @@ fn filter_label(raw: &str, row_width: u16, longest: usize) -> String {
         format!(" {s}… : ")
     }
 }
-
 /// Buttons have no value column: the label only shrinks (with an ellipsis)
 /// when the pane is too narrow for it - no padding, no colon.
 fn filter_button_label(raw: &str, row_width: u16) -> String {
@@ -69,19 +56,15 @@ fn filter_button_label(raw: &str, row_width: u16) -> String {
         raw.to_string()
     }
 }
-
 #[derive(derive_more::Debug)]
 #[allow(clippy::struct_excessive_bools)]
 pub(super) struct InputGroups {
     pub inputs: Vec<InputType>,
-
     search_button: bool,
     initial_fold_case: bool,
     initial_strip_diacritics: bool,
-
     focused_idx: usize,
     pub area: Rect,
-
     text_style: Style,
     separator_style: Style,
     current_item_style: Style,
@@ -90,14 +73,12 @@ pub(super) struct InputGroups {
     /// cursor (the Search phase): the hover highlight, so the active pane
     /// is visible while navigating (Radio/Playlists focus convention).
     focused_style: Style,
-
     fold_case: bool,
     strip_diacritics: bool,
     search_mode: SearchMode,
     rating_mode: RatingMode,
     liked_mode: LikedMode,
 }
-
 #[bon]
 impl InputGroups {
     #[builder]
@@ -118,99 +99,115 @@ impl InputGroups {
     ) -> Self {
         let mut inputs = Vec::new();
         for tag in &search_config.tags {
-            inputs.push(InputType::Textbox(TextboxInput {
-                key: "",
-                filter_key: Some(tag.value.clone()),
-                label: format!(" {}", tag.label),
-                initial_value: None,
-                buffer_id: BufferId::new(),
-            }));
+            inputs
+                .push(
+                    InputType::Textbox(TextboxInput {
+                        key: "",
+                        filter_key: Some(tag.value.clone()),
+                        label: format!(" {}", tag.label),
+                        initial_value: None,
+                        buffer_id: BufferId::new(),
+                    }),
+                );
         }
-
         if custom_query {
             inputs.push(InputType::Separator);
             let buffer_id = BufferId::new();
             ctx.input.create_buffer(buffer_id, None);
-            inputs.push(InputType::Textbox(TextboxInput {
-                key: CUSTOM_QUERY_KEY,
-                filter_key: None,
-                label: format!(" {}", "Query"),
-                initial_value: None,
-                buffer_id,
-            }));
+            inputs
+                .push(
+                    InputType::Textbox(TextboxInput {
+                        key: CUSTOM_QUERY_KEY,
+                        filter_key: None,
+                        label: format!(" {}", "Query"),
+                        initial_value: None,
+                        buffer_id,
+                    }),
+                );
         }
-
         if stickers_supported {
             inputs.push(InputType::Separator);
-            inputs.push(InputType::Spinner(SpinnerInput {
-                key: RATING_MODE_KEY,
-                label: format!(" {}", "Rating"),
-            }));
-
+            inputs
+                .push(
+                    InputType::Spinner(SpinnerInput {
+                        key: RATING_MODE_KEY,
+                        label: format!(" {}", "Rating"),
+                    }),
+                );
             let buffer_id = BufferId::new();
             ctx.input.create_buffer(buffer_id, Some("0"));
-            inputs.push(InputType::Numberbox(TextboxInput {
-                key: RATING_VALUE_KEY,
-                filter_key: None,
-                label: format!(" {}", "Value"),
-                initial_value: Some("0".to_owned()),
-                buffer_id,
-            }));
-
+            inputs
+                .push(
+                    InputType::Numberbox(TextboxInput {
+                        key: RATING_VALUE_KEY,
+                        filter_key: None,
+                        label: format!(" {}", "Value"),
+                        initial_value: Some("0".to_owned()),
+                        buffer_id,
+                    }),
+                );
             inputs.push(InputType::Separator);
-            inputs.push(InputType::Spinner(SpinnerInput {
-                key: LIKE_KEY,
-                label: format!(" {}", "Liked"),
-            }));
+            inputs
+                .push(
+                    InputType::Spinner(SpinnerInput {
+                        key: LIKE_KEY,
+                        label: format!(" {}", "Liked"),
+                    }),
+                );
         }
-
         inputs.push(InputType::Separator);
-
-        inputs.push(InputType::Spinner(SpinnerInput {
-            key: SEARCH_MODE_KEY,
-            label: format!(" {}", "Search mode"),
-        }));
-        inputs.push(InputType::Spinner(SpinnerInput {
-            key: FOLD_CASE_KEY,
-            label: format!(" {}", "Case sensitive"),
-        }));
+        inputs
+            .push(
+                InputType::Spinner(SpinnerInput {
+                    key: SEARCH_MODE_KEY,
+                    label: format!(" {}", "Search mode"),
+                }),
+            );
+        inputs
+            .push(
+                InputType::Spinner(SpinnerInput {
+                    key: FOLD_CASE_KEY,
+                    label: format!(" {}", "Case sensitive"),
+                }),
+            );
         if strip_diacritics_supported {
-            inputs.push(InputType::Spinner(SpinnerInput {
-                key: STRIP_DIACRITICS_KEY,
-                label: format!(" {}", "Ignore diacritics"),
-            }));
+            inputs
+                .push(
+                    InputType::Spinner(SpinnerInput {
+                        key: STRIP_DIACRITICS_KEY,
+                        label: format!(" {}", "Ignore diacritics"),
+                    }),
+                );
         }
-
         inputs.push(InputType::Separator);
-
-        inputs.push(InputType::Button(ButtonInput {
-            key: RESET_BUTTON_KEY,
-            label: " Reset".to_owned(),
-        }));
-
+        inputs
+            .push(
+                InputType::Button(ButtonInput {
+                    key: RESET_BUTTON_KEY,
+                    label: " Reset".to_owned(),
+                }),
+            );
         if search_button {
-            inputs.push(InputType::Button(ButtonInput {
-                key: SEARCH_BUTTON_KEY,
-                label: " Search".to_owned(),
-            }));
+            inputs
+                .push(
+                    InputType::Button(ButtonInput {
+                        key: SEARCH_BUTTON_KEY,
+                        label: " Search".to_owned(),
+                    }),
+                );
         }
-
         Self {
             inputs,
-
             focused_idx: 0,
             area: Rect::default(),
-
             search_button,
             initial_fold_case,
             initial_strip_diacritics,
-
             text_style,
             separator_style,
             current_item_style,
             highlight_item_style,
             focused_style,
-
             fold_case: initial_fold_case,
             strip_diacritics: initial_strip_diacritics,
             search_mode: search_config.mode.into(),
@@ -218,37 +215,33 @@ impl InputGroups {
             liked_mode: LikedMode::default(),
         }
     }
-
     pub fn search_mode(&self) -> SearchMode {
         self.search_mode
     }
-
     pub fn rating_value(&self, ctx: &Ctx) -> String {
         self.textbox_value(RATING_VALUE_KEY, ctx).unwrap_or_default()
     }
-
     pub fn custom_query(&self, ctx: &Ctx) -> Option<String> {
         self.textbox_value(CUSTOM_QUERY_KEY, ctx)
     }
-
     pub fn is_rating_filter_active(&self) -> bool {
         !matches!(self.rating_mode, RatingMode::Any)
     }
-
     pub fn rating_filter(
         &self,
         ctx: &Ctx,
     ) -> Result<Option<StickerFilter>, std::num::ParseIntError> {
         let value = self.rating_value(ctx);
         let value = if value.is_empty() { 0 } else { value.trim().parse()? };
-        Ok(match self.rating_mode {
-            RatingMode::Equals => Some(StickerFilter::EqualsInt(value)),
-            RatingMode::GreaterThan => Some(StickerFilter::GreaterThanInt(value)),
-            RatingMode::LessThan => Some(StickerFilter::LessThanInt(value)),
-            RatingMode::Any => None,
-        })
+        Ok(
+            match self.rating_mode {
+                RatingMode::Equals => Some(StickerFilter::EqualsInt(value)),
+                RatingMode::GreaterThan => Some(StickerFilter::GreaterThanInt(value)),
+                RatingMode::LessThan => Some(StickerFilter::LessThanInt(value)),
+                RatingMode::Any => None,
+            },
+        )
     }
-
     pub fn liked_filter(&self) -> Option<StickerFilter> {
         match self.liked_mode {
             LikedMode::Any => None,
@@ -257,32 +250,21 @@ impl InputGroups {
             LikedMode::Disliked => Some(StickerFilter::EqualsInt(0)),
         }
     }
-
     pub fn fold_case(&self) -> bool {
         self.fold_case
     }
-
     pub fn strip_diacritics(&self) -> bool {
         self.strip_diacritics
     }
-
     pub fn first(&mut self) {
         self.focused_idx = 0;
     }
-
     pub fn last(&mut self) {
         self.focused_idx = self.inputs.len() - 1;
     }
-
     pub fn focused(&self) -> &InputType {
         &self.inputs[self.focused_idx]
     }
-
-    #[cfg(test)]
-    pub(crate) fn focused_idx(&self) -> usize {
-        self.focused_idx
-    }
-
     pub fn activate_focused(&mut self, ctx: &Ctx) -> ActionResult {
         match &mut self.inputs[self.focused_idx] {
             InputType::Textbox(input) | InputType::Numberbox(input) => {
@@ -291,8 +273,11 @@ impl InputGroups {
                 } else if ctx.input.is_normal_mode() {
                     ctx.input.insert_mode(input.buffer_id);
                 }
-
-                if self.search_button { ActionResult::None } else { ActionResult::Search }
+                if self.search_button {
+                    ActionResult::None
+                } else {
+                    ActionResult::Search
+                }
             }
             InputType::Spinner(input) => {
                 match input.key {
@@ -319,20 +304,23 @@ impl InputGroups {
                     }
                     _ => {}
                 }
-
-                if self.search_button { ActionResult::None } else { ActionResult::Search }
+                if self.search_button {
+                    ActionResult::None
+                } else {
+                    ActionResult::Search
+                }
             }
             InputType::Button(ButtonInput { key: RESET_BUTTON_KEY, .. }) => {
                 self.reset_all(ctx);
-
                 ActionResult::Reset
             }
-            InputType::Button(ButtonInput { key: SEARCH_BUTTON_KEY, .. }) => ActionResult::Search,
+            InputType::Button(ButtonInput { key: SEARCH_BUTTON_KEY, .. }) => {
+                ActionResult::Search
+            }
             InputType::Button(_) => ActionResult::None,
             InputType::Separator => ActionResult::None,
         }
     }
-
     fn reset_item(&mut self, idx: usize, ctx: &Ctx) {
         if let Some(input) = self.inputs.get_mut(idx) {
             match input {
@@ -343,96 +331,83 @@ impl InputGroups {
                         ctx.input.clear_buffer(input.buffer_id);
                     }
                 }
-                InputType::Spinner(spinner) => match spinner.key {
-                    FOLD_CASE_KEY => {
-                        self.fold_case = self.initial_fold_case;
+                InputType::Spinner(spinner) => {
+                    match spinner.key {
+                        FOLD_CASE_KEY => {
+                            self.fold_case = self.initial_fold_case;
+                        }
+                        STRIP_DIACRITICS_KEY => {
+                            self.strip_diacritics = self.initial_strip_diacritics;
+                        }
+                        SEARCH_MODE_KEY => {
+                            self.search_mode = SearchMode::default();
+                        }
+                        RATING_MODE_KEY => {
+                            self.rating_mode = RatingMode::default();
+                        }
+                        LIKE_KEY => {
+                            self.liked_mode = LikedMode::default();
+                        }
+                        _ => {}
                     }
-                    STRIP_DIACRITICS_KEY => {
-                        self.strip_diacritics = self.initial_strip_diacritics;
-                    }
-                    SEARCH_MODE_KEY => {
-                        self.search_mode = SearchMode::default();
-                    }
-                    RATING_MODE_KEY => {
-                        self.rating_mode = RatingMode::default();
-                    }
-                    LIKE_KEY => {
-                        self.liked_mode = LikedMode::default();
-                    }
-                    _ => {}
-                },
+                }
                 InputType::Button(_) | InputType::Separator => {}
             }
         }
     }
-
     pub fn reset_all(&mut self, ctx: &Ctx) {
         for idx in 0..self.inputs.len() {
             self.reset_item(idx, ctx);
         }
     }
-
     pub fn reset_focused(&mut self, ctx: &Ctx) {
         self.reset_item(self.focused_idx, ctx);
     }
-
     pub fn enter_insert_mode(&mut self, ctx: &Ctx) {
         if let InputType::Textbox(input) | InputType::Numberbox(input) = self.focused() {
             ctx.input.insert_mode(input.buffer_id);
         }
     }
-
     pub fn next_non_wrapping(&mut self) {
         self.focused_idx = (self.focused_idx + 1).min(self.inputs.len() - 1);
-
         if matches!(self.focused(), InputType::Separator) {
             self.next_non_wrapping();
         }
     }
-
     pub fn next(&mut self) {
         self.focused_idx = (self.focused_idx + 1) % self.inputs.len();
-
         if matches!(self.focused(), InputType::Separator) {
             self.next();
         }
     }
-
     pub fn prev_non_wrapping(&mut self) {
         if self.focused_idx > 0 {
             self.focused_idx -= 1;
         }
-
         if matches!(self.focused(), InputType::Separator) {
             self.prev_non_wrapping();
         }
     }
-
     pub fn prev(&mut self) {
         if self.focused_idx == 0 {
             self.focused_idx = self.inputs.len() - 1;
         } else {
             self.focused_idx -= 1;
         }
-
         if matches!(self.focused(), InputType::Separator) {
             self.prev();
         }
     }
-
     pub fn focus_input_at(&mut self, position: Position) {
         if !self.area.contains(position) {
             return;
         }
         let y = (position.y - self.area.y) as usize;
-
-        if let Some(input) = self.inputs.get(y)
-            && !matches!(input, InputType::Separator)
+        if let Some(input) = self.inputs.get(y) && !matches!(input, InputType::Separator)
         {
             self.focused_idx = y;
         }
     }
-
     fn textbox_value(&self, key: &str, ctx: &Ctx) -> Option<String> {
         for input in &self.inputs {
             if let InputType::Textbox(input) | InputType::Numberbox(input) = input
@@ -444,7 +419,6 @@ impl InputGroups {
         None
     }
 }
-
 #[derive(Debug)]
 pub(super) enum InputType {
     Textbox(TextboxInput),
@@ -453,7 +427,6 @@ pub(super) enum InputType {
     Button(ButtonInput),
     Separator,
 }
-
 impl InputType {
     fn label(&self) -> &str {
         match self {
@@ -464,7 +437,6 @@ impl InputType {
         }
     }
 }
-
 #[derive(Debug)]
 pub(super) struct TextboxInput {
     pub label: String,
@@ -473,13 +445,11 @@ pub(super) struct TextboxInput {
     pub initial_value: Option<String>,
     pub buffer_id: BufferId,
 }
-
 #[derive(Debug)]
 pub(super) struct SpinnerInput {
     pub key: &'static str,
     pub label: String,
 }
-
 #[derive(Debug, Default, PartialEq, VariantNames, Clone, Copy, FromRepr, IntoStaticStr)]
 pub(super) enum SearchMode {
     #[strum(serialize = "Contains")]
@@ -496,7 +466,6 @@ pub(super) enum SearchMode {
     #[strum(serialize = "Not regex")]
     NotRegex,
 }
-
 #[derive(Debug, Default, Clone, Copy, IntoStaticStr, VariantNames, FromRepr)]
 pub(super) enum LikedMode {
     #[default]
@@ -509,7 +478,6 @@ pub(super) enum LikedMode {
     #[strum(serialize = "Disliked")]
     Disliked,
 }
-
 #[derive(Debug, Default, Clone, Copy, IntoStaticStr, VariantNames, FromRepr)]
 pub(super) enum RatingMode {
     #[default]
@@ -522,7 +490,6 @@ pub(super) enum RatingMode {
     #[strum(serialize = "Less than")]
     LessThan,
 }
-
 impl From<SearchMode> for FilterKind {
     fn from(value: SearchMode) -> Self {
         match value {
@@ -535,7 +502,6 @@ impl From<SearchMode> for FilterKind {
         }
     }
 }
-
 impl From<FilterKindFile> for SearchMode {
     fn from(value: FilterKindFile) -> Self {
         match value {
@@ -548,7 +514,6 @@ impl From<FilterKindFile> for SearchMode {
         }
     }
 }
-
 impl SearchMode {
     fn cycle(&mut self) {
         let i = *self as usize;
@@ -557,7 +522,6 @@ impl SearchMode {
         }
     }
 }
-
 impl RatingMode {
     fn cycle(&mut self) {
         let i = *self as usize;
@@ -566,7 +530,6 @@ impl RatingMode {
         }
     }
 }
-
 impl LikedMode {
     fn cycle(&mut self) {
         let i = *self as usize;
@@ -575,25 +538,25 @@ impl LikedMode {
         }
     }
 }
-
 pub(super) enum ActionResult {
     None,
     Search,
     Reset,
 }
-
 #[derive(derive_more::Debug)]
 pub(super) struct ButtonInput {
     pub key: &'static str,
     pub label: String,
 }
-
 impl InputGroups {
-    pub fn render(&mut self, mut area: Rect, buf: &mut Buffer, ctx: &Ctx, pane_focused: bool) {
+    pub fn render(
+        &mut self,
+        mut area: Rect,
+        buf: &mut Buffer,
+        ctx: &Ctx,
+        pane_focused: bool,
+    ) {
         self.area = area;
-        // The colon column aligns to the longest filter category among the
-        // rows that are actually rendered (buttons and separators have no
-        // value column and do not count).
         let longest = self
             .inputs
             .iter()
@@ -608,28 +571,20 @@ impl InputGroups {
             if remaining_height == 0 {
                 break;
             }
-
             let is_focused = idx == self.focused_idx;
-            // The pane holding the keyboard cursor shows its focused input
-            // with the hover highlight (Radio/Playlists focus convention);
-            // once the results pane takes the cursor it keeps the plain
-            // selection style.
-            let focus_style =
-                if pane_focused { self.focused_style } else { self.current_item_style };
-            // The row under the mouse is a clickable field, so it gets the
-            // hover highlight too (the buttons/list-row treatment; it wins
-            // over the keyboard selection like the other hoverable rows,
-            // and any keyboard input clears it).
-            let mouse_hovered = ctx.mouse_pos().is_some_and(|pos| {
-                pos.y == area.y && pos.x >= area.x && pos.x < area.x.saturating_add(area.width)
-            });
+            let focus_style = if pane_focused {
+                self.focused_style
+            } else {
+                self.current_item_style
+            };
+            let mouse_hovered = ctx
+                .mouse_pos()
+                .is_some_and(|pos| {
+                    pos.y == area.y && pos.x >= area.x
+                        && pos.x < area.x.saturating_add(area.width)
+                });
             let hover_style = self.focused_style;
-            // The row's label adapts to the available width so the value
-            // column is never cut off: when there is room the colons align
-            // one character past the longest filter category with a space
-            // on each side; when the pane is narrow the label ellipsizes.
             let label = filter_label(&input.label(), area.width, longest);
-
             match input {
                 InputType::Textbox(input) => {
                     let widget = Input::builder()
@@ -639,7 +594,6 @@ impl InputGroups {
                         .label(&label)
                         .placeholder("<None>")
                         .focused(is_focused && ctx.input.is_active(input.buffer_id));
-
                     let widget = if ctx.input.is_active(input.buffer_id) && is_focused {
                         widget
                             .label_style(self.highlight_item_style)
@@ -650,9 +604,11 @@ impl InputGroups {
                     } else if is_focused {
                         widget.label_style(focus_style).input_style(focus_style).build()
                     } else {
-                        widget.label_style(self.text_style).input_style(self.text_style).build()
+                        widget
+                            .label_style(self.text_style)
+                            .input_style(self.text_style)
+                            .build()
                     };
-
                     widget.render(area, buf);
                 }
                 InputType::Numberbox(input) => {
@@ -663,7 +619,6 @@ impl InputGroups {
                         .label(&label)
                         .placeholder("<None>")
                         .focused(is_focused && ctx.input.is_active(input.buffer_id));
-
                     let widget = if ctx.input.is_active(input.buffer_id) && is_focused {
                         widget
                             .label_style(self.highlight_item_style)
@@ -674,43 +629,38 @@ impl InputGroups {
                     } else if is_focused {
                         widget.label_style(focus_style).input_style(focus_style).build()
                     } else {
-                        widget.label_style(self.text_style).input_style(self.text_style).build()
+                        widget
+                            .label_style(self.text_style)
+                            .input_style(self.text_style)
+                            .build()
                     };
-
                     widget.render(area, buf);
                 }
                 InputType::Spinner(input) => {
                     let text = match input.key {
-                        FOLD_CASE_KEY => {
-                            if self.fold_case {
-                                "No"
-                            } else {
-                                "Yes"
-                            }
-                        }
+                        FOLD_CASE_KEY => if self.fold_case { "No" } else { "Yes" }
                         STRIP_DIACRITICS_KEY => {
-                            if self.strip_diacritics {
-                                "Yes"
-                            } else {
-                                "No"
-                            }
+                            if self.strip_diacritics { "Yes" } else { "No" }
                         }
                         SEARCH_MODE_KEY => self.search_mode.into(),
                         RATING_MODE_KEY => self.rating_mode.into(),
                         LIKE_KEY => self.liked_mode.into(),
                         _ => "",
                     };
-                    let inp =
-                        Input::new_static().ctx(ctx).text(text).borderless(true).label(&label);
-
+                    let inp = Input::new_static()
+                        .ctx(ctx)
+                        .text(text)
+                        .borderless(true)
+                        .label(&label);
                     let inp = if mouse_hovered {
                         inp.label_style(hover_style).input_style(hover_style).call()
                     } else if is_focused {
                         inp.label_style(focus_style).input_style(focus_style).call()
                     } else {
-                        inp.label_style(self.text_style).input_style(self.text_style).call()
+                        inp.label_style(self.text_style)
+                            .input_style(self.text_style)
+                            .call()
                     };
-
                     inp.render(area, buf);
                 }
                 InputType::Button(input) => {
@@ -718,13 +668,15 @@ impl InputGroups {
                     Button::default()
                         .label(&label)
                         .label_alignment(Alignment::Left)
-                        .style(if mouse_hovered {
-                            hover_style
-                        } else if is_focused {
-                            focus_style
-                        } else {
-                            self.text_style
-                        })
+                        .style(
+                            if mouse_hovered {
+                                hover_style
+                            } else if is_focused {
+                                focus_style
+                            } else {
+                                self.text_style
+                            },
+                        )
                         .render(area, buf);
                 }
                 InputType::Separator => {

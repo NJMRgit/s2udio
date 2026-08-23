@@ -1,5 +1,4 @@
 use std::{collections::HashMap, path::PathBuf, str::FromStr, sync::Arc, time::Duration};
-
 use crate::config::mpv::{Mpv, MpvFile};
 use address::MpdPassword;
 use album_art::{AlbumArtConfig, AlbumArtConfigFile, ImageMethodFile};
@@ -14,12 +13,13 @@ use radio::{Radio, RadioFile};
 use search::SearchFile;
 use serde::{Deserialize, Serialize};
 use sort_mode::{SortMode, SortModeFile, SortOptions};
-use tabs::{PaneType, PaneTypeDiscriminants, Tabs, TabsFile, TreeBrowserArgs, validate_tabs};
+use tabs::{
+    PaneType, PaneTypeDiscriminants, Tabs, TabsFile, TreeBrowserArgs, validate_tabs,
+};
 use theme::properties::{SongProperty, SongPropertyFile};
 use torrent::{Torrent, TorrentFile};
 use utils::tilde_expand;
 use video::{Video, VideoFile};
-
 pub mod address;
 pub mod album_art;
 pub mod artists;
@@ -38,11 +38,9 @@ pub mod tabs;
 pub mod theme;
 pub mod torrent;
 pub mod video;
-
 pub use address::MpdAddress;
 pub use cli::LyricsSource;
 pub use search::{FilterKindFile, Search};
-
 /// Runtime UI visibility settings, toggled from the Settings panel. These
 /// are runtime-only in the sense that they are not part of the config file
 /// schema; the app re-applies them on config reloads so they survive within
@@ -74,7 +72,6 @@ pub struct UiSettings {
     #[serde(default = "crate::config::defaults::bool::<true>")]
     pub mpdris2_notifications: bool,
 }
-
 impl Default for UiSettings {
     fn default() -> Self {
         Self {
@@ -89,7 +86,6 @@ impl Default for UiSettings {
         }
     }
 }
-
 use self::{
     keys::{KeyConfig, KeyConfigFile},
     theme::{ConfigColor, UiConfig},
@@ -102,12 +98,7 @@ use crate::{
     shared::{duration_format::DurationFormat, lrc::LrcOffset, terminal::TERMINAL},
     tmux,
 };
-
-use ratatui::{
-    prelude::IntoCrossterm,
-    style::{Color, Style},
-};
-
+use ratatui::{prelude::IntoCrossterm, style::{Color, Style}};
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -168,7 +159,6 @@ pub struct Config {
     /// Runtime show/hide toggles from the Settings panel.
     pub ui: UiSettings,
 }
-
 impl Default for Config {
     fn default() -> Self {
         ConfigFile::default()
@@ -176,7 +166,6 @@ impl Default for Config {
             .expect("Default config should be valid")
     }
 }
-
 #[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub enum ShowPlaylistsMode {
     All,
@@ -184,7 +173,6 @@ pub enum ShowPlaylistsMode {
     #[default]
     NonRoot,
 }
-
 #[allow(clippy::struct_excessive_bools)]
 /// Round 19 heritage: the s2udio-only config overlay. Since round 23 the
 /// full config lives at `~/.config/s2udio/config.ron` and this overlay
@@ -203,7 +191,6 @@ pub struct S2udioConfigFile {
     pub mpv: Option<MpvFile>,
     pub torrent: Option<TorrentFile>,
 }
-
 impl S2udioConfigFile {
     /// Overlay the s2udio sections onto a base rmpc `ConfigFile`: each
     /// present section replaces the base file's (which may carry the
@@ -226,7 +213,6 @@ impl S2udioConfigFile {
         }
     }
 }
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct ConfigFile {
@@ -258,7 +244,6 @@ pub struct ConfigFile {
     keybinds: KeyConfigFile,
     pub normal_timeout_ms: u64,
     pub insert_timeout_ms: u64,
-    // Deprecated
     image_method: Option<ImageMethodFile>,
     album_art_max_size_px: Size,
     pub album_art: AlbumArtConfigFile,
@@ -281,25 +266,24 @@ pub struct ConfigFile {
     pub auto_open_downloads: bool,
     pub duration_format: String,
 }
-
 #[derive(Debug, Serialize, Deserialize, Copy, Clone, PartialEq, Eq)]
 pub struct Size {
     pub width: u16,
     pub height: u16,
 }
-
 impl Default for Size {
     fn default() -> Self {
         Self { width: 1200, height: 1200 }
     }
 }
-
 impl From<(u16, u16)> for Size {
     fn from(value: (u16, u16)) -> Self {
-        Self { width: value.0, height: value.1 }
+        Self {
+            width: value.0,
+            height: value.1,
+        }
     }
 }
-
 impl ConfigFile {
     fn stock_default() -> Self {
         Self {
@@ -342,7 +326,10 @@ impl ConfigFile {
             artists: ArtistsFile::default(),
             ignore_leading_the: false,
             browser_song_sort: defaults::default_song_sort(),
-            directories_sort: SortModeFile::SortFormat { group_by_type: true, reverse: false },
+            directories_sort: SortModeFile::SortFormat {
+                group_by_type: true,
+                reverse: false,
+            },
             rewind_to_start_sec: None,
             keep_state_on_song_change: true,
             reflect_changes_to_playlist: false,
@@ -358,39 +345,35 @@ impl ConfigFile {
         }
     }
 }
-
 impl Default for ConfigFile {
     fn default() -> Self {
         thread_local! {
-            static PARSING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+            static PARSING : std::cell::Cell < bool > = const {
+            std::cell::Cell::new(false) };
         }
-        PARSING.with(|parsing| {
-            if parsing.get() {
-                // Re-entrant call from serde's container-level default while we
-                // are deserializing our own embedded default config.
-                return Self::stock_default();
-            }
-            parsing.set(true);
-            let mut result =
-                ron::from_str::<ConfigFile>(include_str!("../../assets/example_config.ron"))
+        PARSING
+            .with(|parsing| {
+                if parsing.get() {
+                    return Self::stock_default();
+                }
+                parsing.set(true);
+                let mut result = ron::from_str::<
+                    ConfigFile,
+                >(include_str!("../../assets/example_config.ron"))
                     .expect("Failed to parse default config");
-            // The example config's keybinds section omits the debug-only logs
-            // map; restore it so the debug build's default keybinds match.
-            #[cfg(debug_assertions)]
-            {
-                result.keybinds.logs = KeyConfigFile::default().logs;
-            }
-            parsing.set(false);
-            result
-        })
+                #[cfg(debug_assertions)]
+                {
+                    result.keybinds.logs = KeyConfigFile::default().logs;
+                }
+                parsing.set(false);
+                result
+            })
     }
 }
-
 impl Config {
     pub fn validate(&self) -> Result<()> {
         validate_tabs(&self.theme.layout, &self.tabs)
     }
-
     /// Whether a pane should be skipped entirely because the Settings panel
     /// has its show/hide toggle off.
     pub fn is_pane_hidden(&self, pane: &PaneType) -> bool {
@@ -401,7 +384,6 @@ impl Config {
             _ => false,
         }
     }
-
     /// The tree-browser args of the first `Directories` / `Playlists` /
     /// `Jellyfin` / `Radio` pane in the tab + theme layouts. The pane
     /// container keeps one pane instance per type, so the first
@@ -427,7 +409,6 @@ impl Config {
             .map(|(_, args)| args)
             .unwrap_or_default()
     }
-
     /// Whether a tab should be hidden from the tab bar and tab cycling. The
     /// Radio/Jellyfin tabs can be disabled from the Settings panel; they stay
     /// in the config so they can be re-enabled without losing their
@@ -438,10 +419,10 @@ impl Config {
     /// hidden too — the tab bar never shows it again.
     pub fn is_tab_hidden(&self, tab: &TabName) -> bool {
         (!self.ui.show_radio_tab && tab.as_str().eq_ignore_ascii_case("Radio"))
-            || (!self.ui.show_jellyfin_tab && tab.as_str().eq_ignore_ascii_case("Jellyfin"))
+            || (!self.ui.show_jellyfin_tab
+                && tab.as_str().eq_ignore_ascii_case("Jellyfin"))
             || tab.as_str().eq_ignore_ascii_case("Search")
     }
-
     /// Merge key remaps persisted by the Settings panel (`keybinds.ron`
     /// sidecar) on top of the configured keybinds. Called at startup and on
     /// config reloads.
@@ -450,7 +431,6 @@ impl Config {
             overrides.apply_to(&mut self.keybinds);
         }
     }
-
     /// Merge cava settings persisted by the Settings panel (`cava.ron`
     /// sidecar) on top of the configured cava settings.
     pub fn apply_cava_override(&mut self) {
@@ -458,7 +438,6 @@ impl Config {
             overrides.apply_to(&mut self.cava);
         }
     }
-
     pub fn calc_active_panes(
         tabs: &HashMap<TabName, Tab>,
         layout: &SizedPaneOrSplit,
@@ -469,27 +448,23 @@ impl Config {
             .unique()
             .collect_vec()
     }
-
     pub fn default_cli(args: &mut Args) -> Config {
         let mut file = ConfigFile::default();
-        // Round 38: the --lyrics-source CLI flag overrides the default.
         if let Some(source) = args.lyrics_source {
             file.lyrics_source = source;
         }
         file.into_config(
-            UiConfig::default(),
-            std::mem::take(&mut args.address),
-            std::mem::take(&mut args.password),
-            false,
-        )
-        .expect("Default config should always convert")
+                UiConfig::default(),
+                std::mem::take(&mut args.address),
+                std::mem::take(&mut args.password),
+                false,
+            )
+            .expect("Default config should always convert")
     }
-
     pub fn default_with_album_art_check() -> Result<Config> {
         ConfigFile::default().into_config(UiConfig::default(), None, None, false)
     }
 }
-
 impl ConfigFile {
     pub fn into_config(
         self,
@@ -499,19 +474,26 @@ impl ConfigFile {
         skip_album_art_check: bool,
     ) -> Result<Config> {
         let original_tabs_definition = self.tabs.clone();
-        let tabs: Tabs = self.tabs.convert(&theme.components, &theme.border_symbol_sets)?;
+        let tabs: Tabs = self
+            .tabs
+            .convert(&theme.components, &theme.border_symbol_sets)?;
         let active_panes = Config::calc_active_panes(&tabs.tabs, &theme.layout);
-
-        let (address, password) =
-            MpdAddress::resolve(address_cli, password_cli, self.address, self.password);
+        let (address, password) = MpdAddress::resolve(
+            address_cli,
+            password_cli,
+            self.address,
+            self.password,
+        );
         let album_art_method = self.album_art.method;
         let mut config = Config {
             theme_name: self.theme,
             cache_dir: self.cache_dir.map(|v| tilde_expand_path(&v)),
-            lyrics_dir: self.lyrics_dir.map(|v| {
-                let v = tilde_expand(&v);
-                if v.ends_with('/') { v.into_owned() } else { format!("{v}/") }
-            }),
+            lyrics_dir: self
+                .lyrics_dir
+                .map(|v| {
+                    let v = tilde_expand(&v);
+                    if v.ends_with('/') { v.into_owned() } else { format!("{v}/") }
+                }),
             lyrics_offset: LrcOffset::from_millis(self.lyrics_offset_ms),
             enable_lyrics_index: self.enable_lyrics_index,
             enable_lyrics_hot_reload: self.enable_lyrics_hot_reload,
@@ -528,7 +510,9 @@ impl ConfigFile {
             status_update_interval_ms: self.status_update_interval_ms.map(|v| v.max(16)),
             mpd_read_timeout: Duration::from_millis(self.mpd_read_timeout_ms),
             mpd_write_timeout: Duration::from_millis(self.mpd_write_timeout_ms),
-            mpd_idle_read_timeout_ms: self.mpd_idle_read_timeout_ms.map(Duration::from_millis),
+            mpd_idle_read_timeout_ms: self
+                .mpd_idle_read_timeout_ms
+                .map(Duration::from_millis),
             enable_mouse: self.enable_mouse,
             scroll_amount: self.scroll_amount,
             enable_config_hot_reload: self.enable_config_hot_reload,
@@ -540,55 +524,86 @@ impl ConfigFile {
             search: self.search.try_into()?,
             artists: self.artists.into(),
             album_art: self.album_art.into(),
-            on_song_change: self.on_song_change.map(|arr| {
-                Arc::new(arr.into_iter().map(|v| tilde_expand(&v).into_owned()).collect_vec())
-            }),
+            on_song_change: self
+                .on_song_change
+                .map(|arr| {
+                    Arc::new(
+                        arr
+                            .into_iter()
+                            .map(|v| tilde_expand(&v).into_owned())
+                            .collect_vec(),
+                    )
+                }),
             exec_on_song_change_at_start: self.exec_on_song_change_at_start,
-            on_resize: self.on_resize.map(|arr| {
-                Arc::new(arr.into_iter().map(|v| tilde_expand(&v).into_owned()).collect_vec())
-            }),
+            on_resize: self
+                .on_resize
+                .map(|arr| {
+                    Arc::new(
+                        arr
+                            .into_iter()
+                            .map(|v| tilde_expand(&v).into_owned())
+                            .collect_vec(),
+                    )
+                }),
             show_playlists_in_browser: self.show_playlists_in_browser,
             browser_song_sort: Arc::new(SortOptions {
                 mode: SortMode::Format(
-                    self.browser_song_sort.iter().cloned().map(SongProperty::from).collect_vec(),
+                    self
+                        .browser_song_sort
+                        .iter()
+                        .cloned()
+                        .map(SongProperty::from)
+                        .collect_vec(),
                 ),
                 group_by_type: true,
                 reverse: false,
                 ignore_leading_the: self.ignore_leading_the,
                 fold_case: true,
             }),
-            directories_sort: Arc::new(match self.directories_sort {
-                SortModeFile::Format { group_by_type, reverse } => SortOptions {
-                    mode: SortMode::Format(
-                        theme
-                            .browser_song_format
-                            .0
-                            .iter()
-                            .flat_map(|prop| prop.kind.collect_properties())
-                            .collect_vec(),
-                    ),
-                    group_by_type,
-                    reverse,
-                    ignore_leading_the: self.ignore_leading_the,
-                    fold_case: true,
+            directories_sort: Arc::new(
+                match self.directories_sort {
+                    SortModeFile::Format { group_by_type, reverse } => {
+                        SortOptions {
+                            mode: SortMode::Format(
+                                theme
+                                    .browser_song_format
+                                    .0
+                                    .iter()
+                                    .flat_map(|prop| prop.kind.collect_properties())
+                                    .collect_vec(),
+                            ),
+                            group_by_type,
+                            reverse,
+                            ignore_leading_the: self.ignore_leading_the,
+                            fold_case: true,
+                        }
+                    }
+                    SortModeFile::SortFormat { group_by_type, reverse } => {
+                        SortOptions {
+                            mode: SortMode::Format(
+                                self
+                                    .browser_song_sort
+                                    .into_iter()
+                                    .map(SongProperty::from)
+                                    .collect_vec(),
+                            ),
+                            group_by_type,
+                            reverse,
+                            ignore_leading_the: self.ignore_leading_the,
+                            fold_case: true,
+                        }
+                    }
+                    SortModeFile::ModifiedTime { group_by_type, reverse } => {
+                        SortOptions {
+                            mode: SortMode::ModifiedTime,
+                            group_by_type,
+                            reverse,
+                            ignore_leading_the: self.ignore_leading_the,
+                            fold_case: true,
+                        }
+                    }
                 },
-                SortModeFile::SortFormat { group_by_type, reverse } => SortOptions {
-                    mode: SortMode::Format(
-                        self.browser_song_sort.into_iter().map(SongProperty::from).collect_vec(),
-                    ),
-                    group_by_type,
-                    reverse,
-                    ignore_leading_the: self.ignore_leading_the,
-                    fold_case: true,
-                },
-                SortModeFile::ModifiedTime { group_by_type, reverse } => SortOptions {
-                    mode: SortMode::ModifiedTime,
-                    group_by_type,
-                    reverse,
-                    ignore_leading_the: self.ignore_leading_the,
-                    fold_case: true,
-                },
-            }),
+            ),
             theme,
             rewind_to_start_sec: self.rewind_to_start_sec,
             keep_state_on_song_change: self.keep_state_on_song_change,
@@ -603,36 +618,25 @@ impl ConfigFile {
             duration_format: DurationFormat::parse(&self.duration_format)?,
             ui: UiSettings::default(),
         };
-
-        // Derive the border / focused-border / selection colors from the text
-        // color so external theme edits (sttm/blsw) keep the accents in sync
-        // automatically.
         derive_theme_accents(&mut config.theme);
-
         if skip_album_art_check {
             return Ok(config);
         }
-
         let is_tmux = tmux::is_inside_tmux();
         if is_tmux && !tmux::is_passthrough_enabled()? {
             tmux::enable_passthrough()?;
         }
-
-        config.album_art.method =
-            TERMINAL.resolve_image_backend(self.image_method.unwrap_or(album_art_method));
-
+        config.album_art.method = TERMINAL
+            .resolve_image_backend(self.image_method.unwrap_or(album_art_method));
         Ok(config)
     }
 }
-
 impl FromStr for Args {
     type Err = anyhow::Error;
-
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Ok(Args::try_parse_from(std::iter::once("").chain(s.split_whitespace()))?)
     }
 }
-
 impl From<OnOff> for bool {
     fn from(value: OnOff) -> Self {
         match value {
@@ -641,7 +645,6 @@ impl From<OnOff> for bool {
         }
     }
 }
-
 impl From<OnOffOneshot> for crate::mpd::commands::status::OnOffOneshot {
     fn from(value: OnOffOneshot) -> Self {
         match value {
@@ -651,17 +654,19 @@ impl From<OnOffOneshot> for crate::mpd::commands::status::OnOffOneshot {
         }
     }
 }
-
 /// Scale an RGB color by `f` (0..1) for derived accents.
 pub(crate) fn scale_color(color: Color, f: f64) -> Color {
     match color {
         Color::Rgb(r, g, b) => {
-            Color::Rgb((f64::from(r) * f) as u8, (f64::from(g) * f) as u8, (f64::from(b) * f) as u8)
+            Color::Rgb(
+                (f64::from(r) * f) as u8,
+                (f64::from(g) * f) as u8,
+                (f64::from(b) * f) as u8,
+            )
         }
         other => other,
     }
 }
-
 /// Hover color for clickable text/buttons: the base color blended 35%
 /// toward white — lighter **and** less saturated at the same time. Named
 /// colors (white/black/yellow…) can't be lightened reliably, so they pass
@@ -678,7 +683,6 @@ pub(crate) fn hover_color(color: Color) -> Color {
         other => other,
     }
 }
-
 /// The hover style of a clickable element: its foreground lightened and
 /// desaturated (named colors pass through). Text without an explicit color
 /// (rendered in the terminal's default foreground) becomes white on hover,
@@ -689,7 +693,6 @@ pub(crate) fn hover_style(style: Style) -> Style {
     style.bg = style.bg.map(hover_color);
     style
 }
-
 /// Apply the hover style to every span of a line (lightening each span's
 /// own color so the row keeps its per-span color relationships).
 pub(crate) fn hover_line(line: &mut ratatui::text::Line) {
@@ -697,438 +700,60 @@ pub(crate) fn hover_line(line: &mut ratatui::text::Line) {
         span.style = hover_style(span.style);
     }
 }
-
 /// Derive the dependent colors from the theme's text color so they track
 /// external theme changes (blur modes) automatically: the pane outlines
 /// (borders) match the cava bars' accent color, the selection highlight and
 /// the active tab highlight share the same accent, and the seekbar follows.
 pub(crate) fn derive_theme_accents(theme: &mut UiConfig) {
     let Some(base) = theme.text_color else {
-        // No accent color: the hover highlight just mirrors the selection.
         theme.hovered_item_style = theme.current_item_style;
         return;
     };
-    // The cava bars are the accent; the pane outlines use the very same
-    // color so the whole frame matches the visualizer.
     theme.borders_style.fg = Some(base);
     theme.highlight_border_style.fg = Some(base);
     theme.current_item_style.bg = Some(scale_color(base, 0.50));
-    // Multi-selected (marked) rows: the same highlight effect with a
-    // lighter background (0.65 vs the selection's 0.50).
     theme.marked_item_style = theme.current_item_style;
     theme.marked_item_style.bg = Some(scale_color(base, 0.65));
-    // Mouse-over rows: the same highlight effect, slightly brighter than
-    // the selection (0.58) but not as bright as marked rows (0.65).
     theme.hovered_item_style = theme.current_item_style;
     theme.hovered_item_style.bg = Some(scale_color(base, 0.58));
-    theme.cava.bar_color = crate::config::theme::cava::CavaColor::Single(base.into_crossterm());
-    // The active tab highlight reuses the selection highlight used
-    // everywhere else (current_item_style), with the text color on top.
+    theme.cava.bar_color = crate::config::theme::cava::CavaColor::Single(
+        base.into_crossterm(),
+    );
     theme.tab_bar.active_style.fg = Some(base);
     theme.tab_bar.active_style.bg = theme.current_item_style.bg;
     theme.progress_bar.elapsed_style.fg = Some(base);
     theme.progress_bar.thumb_style.fg = Some(base);
     theme.progress_bar.track_style.fg = Some(scale_color(base, 0.4));
 }
-
 pub mod utils {
-    use std::{
-        borrow::Cow,
-        path::{MAIN_SEPARATOR, Path, PathBuf},
-    };
-
+    use std::{borrow::Cow, path::{MAIN_SEPARATOR, Path, PathBuf}};
     use crate::shared::env::ENV;
-
     pub fn tilde_expand_path(inp: &Path) -> PathBuf {
         let Ok(home) = ENV.var("HOME") else {
             return inp.to_owned();
         };
         let home = home.strip_suffix(MAIN_SEPARATOR).unwrap_or(home.as_ref());
-
         if let Ok(inp) = inp.strip_prefix("~") {
             if inp.as_os_str().is_empty() {
                 return home.into();
             }
-
             return PathBuf::from(home.to_owned()).join(inp);
         }
-
         inp.to_path_buf()
     }
-
     pub fn tilde_expand(inp: &str) -> Cow<'_, str> {
         let Ok(home) = ENV.var("HOME") else {
             return Cow::Borrowed(inp);
         };
         let home = home.strip_suffix("/").unwrap_or(home.as_ref());
-
         if let Some(inp) = inp.strip_prefix('~') {
             if inp.is_empty() {
                 return Cow::Owned(home.to_owned());
             }
-
             if inp.starts_with(MAIN_SEPARATOR) {
                 return Cow::Owned(format!("{home}{inp}"));
             }
         }
-
         Cow::Borrowed(inp)
-    }
-
-    #[cfg(test)]
-    #[allow(clippy::unwrap_used)]
-    mod tests {
-        use std::{
-            path::PathBuf,
-            sync::{LazyLock, Mutex},
-        };
-
-        use test_case::test_case;
-
-        use super::tilde_expand;
-        use crate::{config::utils::tilde_expand_path, shared::env::ENV};
-
-        static TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
-
-        #[test_case("~", "/home/some_user")]
-        #[test_case("~enene", "~enene")]
-        #[test_case("~nope/", "~nope/")]
-        #[test_case("~/yes", "/home/some_user/yes")]
-        #[test_case("no/~/no", "no/~/no")]
-        #[test_case("basic/path", "basic/path")]
-        fn home_dir_present(input: &str, expected: &str) {
-            let _guard = TEST_LOCK.lock().unwrap();
-
-            ENV.clear();
-            ENV.set("HOME".to_string(), "/home/some_user/".to_string());
-            assert_eq!(tilde_expand(input), expected);
-        }
-
-        #[test_case("~", "~")]
-        #[test_case("~enene", "~enene")]
-        #[test_case("~nope/", "~nope/")]
-        #[test_case("~/yes", "~/yes")]
-        #[test_case("no/~/no", "no/~/no")]
-        #[test_case("basic/path", "basic/path")]
-        fn home_dir_not_present(input: &str, expected: &str) {
-            let _guard = TEST_LOCK.lock().unwrap();
-
-            ENV.clear();
-            ENV.remove("HOME");
-            assert_eq!(tilde_expand(input), expected);
-        }
-
-        #[test_case("~", "/home/some_user")]
-        #[test_case("~enene", "~enene")]
-        #[test_case("~nope/", "~nope/")]
-        #[test_case("~/yes", "/home/some_user/yes")]
-        #[test_case("no/~/no", "no/~/no")]
-        #[test_case("basic/path", "basic/path")]
-        fn home_dir_present_path(input: &str, expected: &str) {
-            let _guard = TEST_LOCK.lock().unwrap();
-
-            ENV.clear();
-            ENV.set("HOME".to_string(), "/home/some_user/".to_string());
-
-            let got = tilde_expand_path(&PathBuf::from(input));
-            assert_eq!(got, PathBuf::from(expected));
-        }
-
-        #[test_case("~", "~")]
-        #[test_case("~enene", "~enene")]
-        #[test_case("~nope/", "~nope/")]
-        #[test_case("~/yes", "~/yes")]
-        #[test_case("no/~/no", "no/~/no")]
-        #[test_case("basic/path", "basic/path")]
-        fn home_dir_not_present_path(input: &str, expected: &str) {
-            let _guard = TEST_LOCK.lock().unwrap();
-
-            ENV.clear();
-            ENV.remove("HOME");
-
-            let got = tilde_expand_path(&PathBuf::from(input));
-            assert_eq!(got, PathBuf::from(expected));
-        }
-
-        #[test]
-        fn torrent_cache_dir_default_is_expanded() {
-            let _home_guard = crate::tests::fixtures::HOME_LOCK.lock().unwrap();
-            use crate::config::{ConfigFile, UiConfig};
-
-            let _guard = TEST_LOCK.lock().unwrap();
-            // The runtime torrent config expands the `~` in the default
-            // cache dir (a config-file value is expanded too): without a
-            // `torrent:` section the engine and the "Play and Download"
-            // move must not address a literal `~/…` path.
-            ENV.clear();
-            ENV.set("HOME".to_string(), "/home/some_user".to_string());
-            let config = ConfigFile::default()
-                .into_config(UiConfig::default(), None, None, true)
-                .expect("Default config should be valid");
-            assert_eq!(
-                config.torrent.cache_dir.to_string_lossy(),
-                "/home/some_user/.cache/s2udio/torrents"
-            );
-            // A config-file value is expanded the same way.
-            let mut file = ConfigFile::default();
-            file.torrent.cache_dir = Some("~/custom/torrents".into());
-            let config = file
-                .into_config(UiConfig::default(), None, None, true)
-                .expect("config should be valid");
-            assert_eq!(
-                config.torrent.cache_dir.to_string_lossy(),
-                "/home/some_user/custom/torrents"
-            );
-        }
-    }
-}
-
-#[cfg(test)]
-#[allow(clippy::unwrap_used)]
-mod tests {
-    use super::{UiConfig, derive_theme_accents, scale_color};
-    #[cfg(debug_assertions)]
-    use crate::config::keys::KeyConfigFile;
-    use crate::config::tabs::{PaneType, TabName};
-    use crate::config::{
-        Config, ConfigFile, LyricsSource, S2udioConfigFile, UiSettings, theme::UiConfigFile,
-    };
-
-    #[test]
-    fn lyrics_source_defaults_to_local_first() {
-        // Round 38: default must reproduce today's behavior — local
-        // files first, network fetch as the last fallback.
-        assert_eq!(ConfigFile::default().lyrics_source, LyricsSource::LocalFirst);
-        assert_eq!(Config::default().lyrics_source, LyricsSource::LocalFirst);
-    }
-
-    #[test]
-    fn lyrics_source_parses_from_ron() {
-        // The RON key accepts both modes (serde default = PascalCase
-        // variants, matching ShowPlaylistsMode-style config enums).
-        let file: ConfigFile = ron::de::from_str("(lyrics_source: LocalOnly)").unwrap();
-        assert_eq!(file.lyrics_source, LyricsSource::LocalOnly);
-        let file: ConfigFile = ron::de::from_str("(lyrics_source: LocalFirst)").unwrap();
-        assert_eq!(file.lyrics_source, LyricsSource::LocalFirst);
-        // A config without the key (older files) falls back to the default.
-        let file: ConfigFile = ron::de::from_str("()").unwrap();
-        assert_eq!(file.lyrics_source, LyricsSource::LocalFirst);
-    }
-
-    #[test]
-    fn lyrics_source_flows_through_into_config() {
-        let mut file = ConfigFile::default();
-        file.lyrics_source = LyricsSource::LocalOnly;
-        let config = file.into_config(UiConfig::default(), None, None, true).unwrap();
-        assert_eq!(config.lyrics_source, LyricsSource::LocalOnly);
-        // And the other way round: the example default config is LocalFirst.
-        assert_eq!(Config::default().lyrics_source, LyricsSource::LocalFirst);
-    }
-
-    #[test]
-    fn s2udio_overlay_overrides_the_base_sections_and_leaves_the_rest() {
-        // Round 19: the ~/.config/s2udio/config.ron overlay only carries
-        // the s2udio sections; merging it onto a base rmpc config must
-        // replace exactly those sections and leave the base fields alone.
-        let mut base = ConfigFile::default();
-        base.address = "192.0.2.1:6600".to_owned();
-        base.torrent.enabled = Some(false); // base file: disabled
-
-        let overlay = S2udioConfigFile {
-            torrent: Some(crate::config::torrent::TorrentFile {
-                enabled: Some(true),
-                ..Default::default()
-            }),
-            radio: None,
-            jellyfin: None,
-            video: None,
-            mpv: None,
-        };
-        overlay.merge_into(&mut base);
-
-        // The s2udio section came from the overlay…
-        assert_eq!(base.torrent.enabled, Some(true), "overlay torrent.enabled wins");
-        // …and the base fields are untouched.
-        assert_eq!(base.address, "192.0.2.1:6600");
-    }
-
-    #[test]
-    fn example_s2udio_overlay_parses() {
-        // The shipped ~/.config/s2udio/config.ron template must deserialize
-        // as the overlay (all sections commented out = empty overlay) and
-        // merge as a no-op over a base config.
-        let overlay: S2udioConfigFile =
-            ron::de::from_str(include_str!("../../assets/example_s2udio_config.ron"))
-                .expect("example overlay parses");
-        let mut base = ConfigFile::default();
-        overlay.merge_into(&mut base);
-        // Torrent stays enabled-by-default (no overlay section).
-        assert_eq!(base.torrent.enabled, Some(true));
-    }
-
-    #[test]
-    fn s2udio_overlay_defaults_are_all_optional() {
-        // An empty (or absent) overlay must deserialize and merge to a
-        // no-op — the base file's sections (or defaults) apply.
-        let overlay: S2udioConfigFile = ron::de::from_str("()").expect("empty overlay parses");
-        let mut base = ConfigFile::default();
-        base.torrent.enabled = Some(false);
-        overlay.merge_into(&mut base);
-        assert_eq!(base.torrent.enabled, Some(false), "absent overlay leaves the base section");
-    }
-
-    #[test]
-    fn ui_settings_hide_panes_and_tabs() {
-        let mut config = Config::default();
-        assert!(!config.is_pane_hidden(&PaneType::AlbumArt));
-        assert!(!config.is_pane_hidden(&PaneType::Lyrics));
-        assert!(!config.is_pane_hidden(&PaneType::Cava));
-        assert!(!config.is_tab_hidden(&TabName::from("Radio")));
-        assert!(!config.is_tab_hidden(&TabName::from("Jellyfin")));
-
-        config.ui = UiSettings {
-            show_album_art: false,
-            show_lyrics: false,
-            show_cava: false,
-            show_radio_tab: false,
-            show_jellyfin_tab: false,
-            auto_show_chapters: true,
-            show_virtual_devices: false,
-            mpdris2_notifications: true,
-        };
-        assert!(config.is_pane_hidden(&PaneType::AlbumArt));
-        assert!(config.is_pane_hidden(&PaneType::Lyrics));
-        assert!(config.is_pane_hidden(&PaneType::Cava));
-        assert!(!config.is_pane_hidden(&PaneType::Queue));
-        assert!(config.is_tab_hidden(&TabName::from("Radio")));
-        assert!(config.is_tab_hidden(&TabName::from("Jellyfin")));
-        assert!(config.is_tab_hidden(&TabName::from("radio"))); // case-insensitive
-        assert!(!config.is_tab_hidden(&TabName::from("Local")));
-    }
-
-    #[test]
-    fn derive_theme_accents_follows_text_color() {
-        use ratatui::prelude::IntoCrossterm as _;
-
-        let mut theme = UiConfig::default();
-        let base = ratatui::style::Color::Rgb(0xff, 0xb4, 0x54);
-        theme.text_color = Some(base);
-        derive_theme_accents(&mut theme);
-        // Pane outlines match the cava bars (the text color itself).
-        assert_eq!(theme.borders_style.fg, Some(base));
-        assert_eq!(theme.highlight_border_style.fg, Some(base));
-        match theme.cava.bar_color {
-            super::theme::cava::CavaColor::Single(c) => {
-                assert_eq!(c, base.into_crossterm())
-            }
-            _ => panic!("expected a single cava bar color"),
-        }
-        // Selection + active tab share the same highlight accent.
-        assert_eq!(theme.current_item_style.bg, Some(scale_color(base, 0.50)));
-        assert_eq!(theme.tab_bar.active_style.bg, theme.current_item_style.bg);
-        assert_eq!(theme.tab_bar.active_style.fg, Some(base));
-        // Multi-selected rows: the same highlight effect with a lighter bg.
-        assert_eq!(theme.marked_item_style.bg, Some(scale_color(base, 0.65)));
-        let (mut current, mut marked) = (theme.current_item_style, theme.marked_item_style);
-        current.bg = None;
-        marked.bg = None;
-        assert_eq!(marked, current, "marked copies the selection effect, only the bg lightens");
-        // Mouse-over rows: the same highlight effect, brighter than the
-        // selection but dimmer than marked rows.
-        assert_eq!(theme.hovered_item_style.bg, Some(scale_color(base, 0.58)));
-        let (mut current, mut hovered) = (theme.current_item_style, theme.hovered_item_style);
-        current.bg = None;
-        hovered.bg = None;
-        assert_eq!(hovered, current, "hover copies the selection effect, only the bg lightens");
-    }
-
-    #[test]
-    fn hover_color_lightens_and_desaturates() {
-        use ratatui::style::Color;
-
-        // The grey text color lightens toward white.
-        let c = super::hover_color(Color::Rgb(0x8f, 0x8f, 0x8f));
-        assert_eq!(c, Color::Rgb(0xb6, 0xb6, 0xb6));
-        // A saturated accent moves toward white: lighter *and* less
-        // saturated (channels converge toward each other).
-        let c = super::hover_color(Color::Rgb(0xff, 0x00, 0x00));
-        assert_eq!(c, Color::Rgb(0xff, 0x59, 0x59));
-        assert!(f64::from(0xff) > f64::from(0x59));
-        // Named colors pass through unchanged.
-        assert_eq!(super::hover_color(Color::Yellow), Color::Yellow);
-    }
-
-    #[test]
-    fn hover_style_unstyled_text_becomes_white() {
-        use ratatui::style::{Color, Style};
-
-        let s = super::hover_style(Style::default());
-        assert_eq!(s.fg, Some(Color::White));
-        assert_eq!(s.bg, None);
-        let s = super::hover_style(Style::default().fg(Color::Rgb(0x40, 0x40, 0x40)));
-        assert_eq!(s.fg, Some(Color::Rgb(0x83, 0x83, 0x83)));
-        let s = super::hover_style(Style::default().bg(Color::Rgb(0x40, 0x40, 0x40)));
-        assert_eq!(s.bg, Some(Color::Rgb(0x83, 0x83, 0x83)));
-    }
-
-    #[test]
-    fn derive_theme_accents_does_not_recolor_lists() {
-        let mut theme = UiConfig::default();
-        let static_color = ratatui::style::Color::Rgb(0x8f, 0x8f, 0x8f);
-        theme.list_text_color = Some(static_color);
-        theme.text_color = Some(ratatui::style::Color::Rgb(0xff, 0xb4, 0x54));
-        derive_theme_accents(&mut theme);
-        assert_eq!(
-            theme.list_text_color,
-            Some(static_color),
-            "the list text color is untouched by the accent derivation"
-        );
-    }
-
-    #[test]
-    fn derive_theme_accents_is_noop_without_text_color() {
-        let mut theme = UiConfig::default();
-        theme.text_color = None;
-        let before = theme.borders_style.fg;
-        derive_theme_accents(&mut theme);
-        assert_eq!(theme.borders_style.fg, before);
-        // Without an accent the hover highlight mirrors the selection.
-        assert_eq!(theme.hovered_item_style, theme.current_item_style);
-    }
-
-    #[test]
-    #[cfg(debug_assertions)]
-    fn example_config_equals_default() {
-        let config = ConfigFile::default();
-        let path =
-            format!("{}/assets/example_config.ron", std::env::var("CARGO_MANIFEST_DIR").unwrap());
-
-        let mut f: ConfigFile = ron::de::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
-        f.keybinds.logs = KeyConfigFile::default().logs;
-
-        assert_eq!(config, f);
-    }
-
-    #[test]
-    #[cfg(not(debug_assertions))]
-    fn example_config_equals_default() {
-        let config = ConfigFile::default();
-        let path =
-            format!("{}/assets/example_config.ron", std::env::var("CARGO_MANIFEST_DIR").unwrap());
-
-        let f: ConfigFile = ron::de::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
-
-        assert_eq!(config, f);
-    }
-
-    #[test]
-    fn example_theme_equals_default() {
-        let theme = UiConfigFile::default();
-        let path =
-            format!("{}/assets/example_theme.ron", std::env::var("CARGO_MANIFEST_DIR").unwrap());
-
-        let file = ron::de::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
-
-        assert_eq!(theme, file);
     }
 }

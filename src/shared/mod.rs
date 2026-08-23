@@ -7,7 +7,6 @@ pub mod env;
 pub mod events;
 pub mod exit_code;
 pub mod ext;
-pub mod geometry;
 pub mod id;
 pub mod image;
 pub mod ipc;

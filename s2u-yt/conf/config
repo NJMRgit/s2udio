@@ -4,24 +4,24 @@
 # so anything you already have (cookies, js runtimes, ...) keeps working and this
 # file wins on any conflict.
 #
-# Client strategy — android_vr first, web_safari fallback:
+# Client strategy — NO pinned player_client (2026-08-22):
 #
-# * android_vr (anonymous): the only client on this bot-checked IP whose
-#   googlevideo URLs are not rejected (verified live: HTTP 200/206). It serves
-#   DASH video up to 2160p (vs web_safari's 1080p HLS ceiling) and single-file
-#   audio (opus/m4a) that MPD can range-seek — fixing stream seekability too.
-#   yt-dlp only runs it when the session has NO cookies (SUPPORTS_COOKIES is
-#   false), so the wrapper strips the user config's cookie options for the
-#   first attempt and retries with them if it fails.
+# YouTube's SABR/range enforcement (2026-08) broke the previous pin
+# (`android_vr,web_safari`): android_vr URLs came back answering **403 to
+# plain GETs and open-ended `Range: bytes=0-`** — exactly what mpv/ffmpeg
+# and MPD send — while `yt-dlp -J` still exited 0, so the wrapper's
+# authenticated fallback never fired. Verified live 2026-08-22 with
+# yt-dlp 2026.08.19: with NO client pin, the default client order reaches
+# the new anonymous **VISIONOS** client, whose URLs answer **200 to plain
+# GETs** (and 206 to open ranges, after a 302 redirect) — mpv, ffprobe
+# and MPD all play them.
 #
-# * web_safari (authenticated fallback): the previously verified-good path
-#   (HLS up to 1080p). When the anonymous pass fails (or a video needs the
-#   session), the wrapper retries with your cookies — yt-dlp then auto-skips
-#   android_vr (cookies present) and uses web_safari.
+# Do NOT re-pin `player_client` here without re-verifying end-to-end:
+# every pinned combination tested (web/mweb/web_safari variants) steered
+# selection onto range-restricted audio formats (403s), and an
+# authenticated session alone lands on WEB_EMBEDDED_PLAYER (fully 403).
 #
-# PO tokens: android_vr's GVS policy requires them; the bgutil provider mints
-# them (systemd --user unit s2u-yt-bgutil.service). If bgutil is down the
-# anonymous pass degrades to low-quality formats — keep it running (status.sh
-# checks it). If YouTube ever extends the SABR experiment to android_vr, the
-# web_safari fallback keeps playback working at 1080p.
---extractor-args "youtube:player_client=android_vr,web_safari"
+# PO tokens: still minted by the bgutil provider (systemd --user unit
+# s2u-yt-bgutil.service); keep it running (status.sh checks it). If the
+# anonymous pass ever fails, the wrapper's phase-2 authenticated retry
+# (user cookies) still applies.

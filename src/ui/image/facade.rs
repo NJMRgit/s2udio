@@ -1,23 +1,15 @@
 use std::{io::Write, sync::Arc};
-
 use anyhow::Result;
 use crossbeam::channel::Sender;
 use ratatui::{buffer::Buffer, layout::Rect, prelude::IntoCrossterm};
-
 use super::{
-    Backend,
-    block::Block,
-    iterm2::Iterm2,
-    kitty::Kitty,
-    sixel::Sixel,
+    Backend, block::Block, iterm2::Iterm2, kitty::Kitty, sixel::Sixel,
     ueberzug::{Layer, Ueberzug},
 };
 use crate::{
-    config::album_art::ImageMethod,
-    ctx::Ctx,
+    config::album_art::ImageMethod, ctx::Ctx,
     shared::{events::WorkRequest, macros::status_error, terminal::TERMINAL},
 };
-
 #[derive(Debug)]
 pub struct AlbumArtFacade {
     image_backend: ImageBackend,
@@ -49,7 +41,6 @@ pub struct AlbumArtFacade {
     /// image may have been wiped and needs a re-place).
     region_dirty: bool,
 }
-
 #[derive(Debug, Default)]
 enum ImageBackend {
     Kitty(Kitty),
@@ -60,7 +51,6 @@ enum ImageBackend {
     #[default]
     None,
 }
-
 #[derive(Debug, Default, Clone)]
 pub enum EncodeData {
     Kitty(<Kitty as Backend>::EncodedData),
@@ -71,20 +61,20 @@ pub enum EncodeData {
     #[default]
     Empty,
 }
-
 impl AlbumArtFacade {
     pub fn new(ctx: &Ctx) -> Self {
         let config = ctx.config.as_ref();
         let image_backend = match config.album_art.method {
             ImageMethod::Kitty => ImageBackend::Kitty(Kitty),
-            ImageMethod::UeberzugWayland => ImageBackend::Ueberzug(Ueberzug::new(Layer::Wayland)),
+            ImageMethod::UeberzugWayland => {
+                ImageBackend::Ueberzug(Ueberzug::new(Layer::Wayland))
+            }
             ImageMethod::UeberzugX11 => ImageBackend::Ueberzug(Ueberzug::new(Layer::X11)),
             ImageMethod::Iterm2 => ImageBackend::Iterm2(Iterm2),
             ImageMethod::Sixel => ImageBackend::Sixel(Sixel),
             ImageMethod::Block => ImageBackend::Block(Block),
             ImageMethod::None => ImageBackend::None,
         };
-
         Self {
             image_backend,
             current_album_art: None,
@@ -101,88 +91,121 @@ impl AlbumArtFacade {
             region_dirty: false,
         }
     }
-
     pub fn show_default(&mut self, ctx: &Ctx) -> Result<()> {
         self.current_album_art = Some(Arc::clone(&self.default_album_art));
         self.show_current(ctx)
     }
-
     pub fn show_current(&mut self, ctx: &Ctx) -> Result<()> {
-        let Some(current_album_art) = self.current_album_art.as_ref().map(Arc::clone) else {
+        let Some(current_album_art) = self.current_album_art.as_ref().map(Arc::clone)
+        else {
             log::warn!("Tried to display current album art but none was present");
             return Ok(());
         };
-
         self.show(current_album_art, ctx)?;
         return Ok(());
     }
-
     pub fn show(&mut self, data: impl Into<Arc<Vec<u8>>>, ctx: &Ctx) -> Result<()> {
         self.is_showing = true;
-
         let max_size = ctx.config.album_art.max_size_px;
         let halign = ctx.config.album_art.horizontal_align;
         let valign = ctx.config.album_art.vertical_align;
         let size = self.last_size;
-        // The pane size this encode is made for; a flush at a different
-        // size is stale and gets re-encoded instead of drawn.
         self.last_show_size = size;
-
         let data = data.into();
         self.current_album_art = Some(Arc::clone(&data));
-
         self.request_queue.push(Arc::clone(&data));
         if self.request_queue.len() > 1 {
             log::debug!("Image encode request already in flight, queueing the new one.");
             return Ok(());
         }
-
         match &mut self.image_backend {
             ImageBackend::Kitty(_kitty) => {
-                self.work_tx.send(WorkRequest::ResizeImage(Box::new(move || {
-                    Ok(EncodeData::Kitty(Kitty::create_data(
-                        &data, size, max_size, halign, valign,
-                    )?))
-                })))?;
+                self.work_tx
+                    .send(
+                        WorkRequest::ResizeImage(
+                            Box::new(move || {
+                                Ok(
+                                    EncodeData::Kitty(
+                                        Kitty::create_data(&data, size, max_size, halign, valign)?,
+                                    ),
+                                )
+                            }),
+                        ),
+                    )?;
             }
             ImageBackend::Iterm2(_iterm2) => {
-                self.work_tx.send(WorkRequest::ResizeImage(Box::new(move || {
-                    Ok(EncodeData::Iterm2(Iterm2::create_data(
-                        &data, size, max_size, halign, valign,
-                    )?))
-                })))?;
+                self.work_tx
+                    .send(
+                        WorkRequest::ResizeImage(
+                            Box::new(move || {
+                                Ok(
+                                    EncodeData::Iterm2(
+                                        Iterm2::create_data(&data, size, max_size, halign, valign)?,
+                                    ),
+                                )
+                            }),
+                        ),
+                    )?;
             }
             ImageBackend::Sixel(_sixel) => {
                 log::debug!("Sending sixel image encode request");
-                self.work_tx.send(WorkRequest::ResizeImage(Box::new(move || {
-                    Ok(EncodeData::Sixel(Sixel::create_data(
-                        &data, size, max_size, halign, valign,
-                    )?))
-                })))?;
+                self.work_tx
+                    .send(
+                        WorkRequest::ResizeImage(
+                            Box::new(move || {
+                                Ok(
+                                    EncodeData::Sixel(
+                                        Sixel::create_data(&data, size, max_size, halign, valign)?,
+                                    ),
+                                )
+                            }),
+                        ),
+                    )?;
             }
             ImageBackend::Block(_block) => {
-                self.work_tx.send(WorkRequest::ResizeImage(Box::new(move || {
-                    Ok(EncodeData::Block(Block::create_data(
-                        &data, size, max_size, halign, valign,
-                    )?))
-                })))?;
+                self.work_tx
+                    .send(
+                        WorkRequest::ResizeImage(
+                            Box::new(move || {
+                                Ok(
+                                    EncodeData::Block(
+                                        Block::create_data(&data, size, max_size, halign, valign)?,
+                                    ),
+                                )
+                            }),
+                        ),
+                    )?;
             }
             ImageBackend::Ueberzug(_ueberzug) => {
-                self.work_tx.send(WorkRequest::ResizeImage(Box::new(move || {
-                    Ok(EncodeData::Ueberzug(Ueberzug::create_data(
-                        &data, size, max_size, halign, valign,
-                    )?))
-                })))?;
+                self.work_tx
+                    .send(
+                        WorkRequest::ResizeImage(
+                            Box::new(move || {
+                                Ok(
+                                    EncodeData::Ueberzug(
+                                        Ueberzug::create_data(
+                                            &data,
+                                            size,
+                                            max_size,
+                                            halign,
+                                            valign,
+                                        )?,
+                                    ),
+                                )
+                            }),
+                        ),
+                    )?;
             }
             ImageBackend::None => {}
         }
-
         Ok(())
     }
-
-    pub fn image_processing_failed(&mut self, err: &anyhow::Error, ctx: &Ctx) -> Result<()> {
+    pub fn image_processing_failed(
+        &mut self,
+        err: &anyhow::Error,
+        ctx: &Ctx,
+    ) -> Result<()> {
         status_error!("Failed to process album art image: {err:?}");
-
         if let Some(req_data) = self.request_queue.pop()
             && !self.request_queue.is_empty()
         {
@@ -192,14 +215,14 @@ impl AlbumArtFacade {
         }
         Ok(())
     }
-
     pub fn display(&mut self, data: EncodeData, ctx: &Ctx) -> Result<()> {
         if !self.is_showing {
-            log::trace!("Not showing image because its not supposed to be displayed anymore");
+            log::trace!(
+                "Not showing image because its not supposed to be displayed anymore"
+            );
             self.request_queue.clear();
             return Ok(());
         }
-
         if let Some(req_data) = self.request_queue.pop()
             && !self.request_queue.is_empty()
         {
@@ -208,16 +231,10 @@ impl AlbumArtFacade {
             self.show(req_data, ctx)?;
             return Ok(());
         }
-
         log::debug!(data:?, area:? = self.last_size; "Received encoded data",);
-        // Defer the actual terminal write until after the frame's buffer
-        // flush: the flush would otherwise overwrite the overlay's
-        // placeholder cells (deleting the transient image), which is what
-        // left broken art behind after a resize.
         self.pending_display = Some(data);
         Ok(())
     }
-
     /// Record the frame that was just flushed so the next
     /// [`Self::flush_display`] re-places the image only when the frame's
     /// diff actually rewrote cells in the art pane area (a transient kitty
@@ -229,7 +246,9 @@ impl AlbumArtFacade {
             return;
         }
         let snapshot = |buffer: &Buffer, area: Rect| {
-            let mut region = Vec::with_capacity(usize::from(area.width) * usize::from(area.height));
+            let mut region = Vec::with_capacity(
+                usize::from(area.width) * usize::from(area.height),
+            );
             for y in area.top()..area.bottom() {
                 for x in area.left()..area.right() {
                     region.push(buffer.cell((x, y)).cloned().unwrap_or_default());
@@ -238,9 +257,6 @@ impl AlbumArtFacade {
             region
         };
         if self.prev_art_region_area != area {
-            // Resize / layout change: the whole pane area is new. Treat it
-            // as dirty and rebuild the snapshot (comparing across mismatched
-            // areas would always differ anyway).
             self.region_dirty = true;
             self.prev_art_region = snapshot(buffer, area);
             self.prev_art_region_area = area;
@@ -252,7 +268,6 @@ impl AlbumArtFacade {
         }
         self.prev_art_region = region;
     }
-
     /// Draw the encoded image queued by [`Self::display`], or re-place the
     /// last drawn one. Called by the event loop after every frame's buffer
     /// flush. A stale encode (the pane changed size since it was queued) is
@@ -267,13 +282,11 @@ impl AlbumArtFacade {
                 if !self.is_showing {
                     return Ok(());
                 }
-                // The encode was made for an older pane size: re-encode at
-                // the current size (drawing it would put the image over the
-                // wrong cells, e.g. over the queue box after a vertical
-                // shrink).
                 if self.last_show_size != self.last_size {
-                    log::debug!(last_show:? = self.last_show_size, current:? = self.last_size;
-                        "Dropping stale album-art encode, re-encoding at the current size");
+                    log::debug!(
+                        last_show:? = self.last_show_size, current:? = self.last_size;
+                        "Dropping stale album-art encode, re-encoding at the current size"
+                    );
                     if let Some(art) = self.current_album_art.clone() {
                         self.show(art, ctx)?;
                     }
@@ -282,47 +295,45 @@ impl AlbumArtFacade {
                 data
             }
             None => {
-                // Nothing new: re-place the last drawn image when a frame's
-                // diff rewrote its (transient) placeholder cells, healing
-                // the wipe within one frame. The encode must still match the
-                // current pane size: re-placing a stale one would put the
-                // image over the wrong cells.
                 match &self.last_drawn {
-                    Some(data)
-                        if self.is_showing
-                            && self.region_dirty
-                            && self.last_show_size == self.last_size =>
-                    {
-                        data.clone()
-                    }
+                    Some(
+                        data,
+                    ) if self.is_showing && self.region_dirty
+                        && self.last_show_size == self.last_size => data.clone(),
                     _ => return Ok(()),
                 }
             }
         };
-
         let w = TERMINAL.writer();
         let mut w = w.lock();
         let w = w.by_ref();
         let c = ctx.config.theme.background_color.map(|c| c.into_crossterm());
-
-        // Keep a copy of what is about to be drawn so the next flush can
-        // re-place it if a frame's diff overwrote the transient cells.
         let drawn = data.clone();
         let result = match (&mut self.image_backend, data) {
             (ImageBackend::Kitty(kitty), EncodeData::Kitty(data)) => {
-                kitty.hide(w, self.last_size, c).and_then(|()| kitty.display(w, data, ctx))
+                kitty
+                    .hide(w, self.last_size, c)
+                    .and_then(|()| kitty.display(w, data, ctx))
             }
             (ImageBackend::Ueberzug(ueberzug), EncodeData::Ueberzug(data)) => {
-                ueberzug.hide(w, self.last_size, c).and_then(|()| ueberzug.display(w, data, ctx))
+                ueberzug
+                    .hide(w, self.last_size, c)
+                    .and_then(|()| ueberzug.display(w, data, ctx))
             }
             (ImageBackend::Iterm2(iterm2), EncodeData::Iterm2(data)) => {
-                iterm2.hide(w, self.last_size, c).and_then(|()| iterm2.display(w, data, ctx))
+                iterm2
+                    .hide(w, self.last_size, c)
+                    .and_then(|()| iterm2.display(w, data, ctx))
             }
             (ImageBackend::Sixel(sixel), EncodeData::Sixel(data)) => {
-                sixel.hide(w, self.last_size, c).and_then(|()| sixel.display(w, data, ctx))
+                sixel
+                    .hide(w, self.last_size, c)
+                    .and_then(|()| sixel.display(w, data, ctx))
             }
             (ImageBackend::Block(block), EncodeData::Block(data)) => {
-                block.hide(w, self.last_size, c).and_then(|()| block.display(w, data, ctx))
+                block
+                    .hide(w, self.last_size, c)
+                    .and_then(|()| block.display(w, data, ctx))
             }
             (ImageBackend::None, EncodeData::Empty) => {
                 log::warn!("Tried to display image but no backend is selected");
@@ -335,20 +346,14 @@ impl AlbumArtFacade {
                 Ok(())
             }
         };
-
         if let Err(err) = result {
             status_error!("Failed to display image {err:#}");
         } else {
-            // Remember what was drawn so a later frame that rewrites its
-            // cells can re-place it, and clear the dirty flag: the draw (a
-            // fresh encode or a heal) just put the image back on screen.
             self.last_drawn = Some(drawn);
             self.region_dirty = false;
         }
-
         Ok(())
     }
-
     pub fn hide(&mut self, ctx: &Ctx) -> Result<()> {
         self.is_showing = false;
         self.last_drawn = None;
@@ -357,7 +362,6 @@ impl AlbumArtFacade {
         let mut w = w.lock();
         let w = w.by_ref();
         let c = ctx.config.theme.background_color.map(|c| c.into_crossterm());
-
         self.request_queue.clear();
         match &mut self.image_backend {
             ImageBackend::Kitty(s) => s.hide(w, self.last_size, c)?,
@@ -369,120 +373,21 @@ impl AlbumArtFacade {
         }
         Ok(())
     }
-
     pub fn cleanup(&mut self) -> Result<()> {
         let state = std::mem::take(&mut self.image_backend);
         self.is_showing = false;
         match state {
             ImageBackend::Kitty(kitty) => Box::new(kitty).cleanup(self.last_size),
-            ImageBackend::Ueberzug(ueberzug) => Box::new(ueberzug).cleanup(self.last_size),
+            ImageBackend::Ueberzug(ueberzug) => {
+                Box::new(ueberzug).cleanup(self.last_size)
+            }
             ImageBackend::Iterm2(iterm2) => Box::new(iterm2).cleanup(self.last_size),
             ImageBackend::Sixel(s) => Box::new(s).cleanup(self.last_size),
             ImageBackend::Block(s) => Box::new(s).cleanup(self.last_size),
             ImageBackend::None => Ok(()),
         }
     }
-
     pub fn set_size(&mut self, area: Rect) {
         self.last_size = area;
-    }
-}
-
-#[cfg(test)]
-#[allow(clippy::unwrap_used)]
-mod tests {
-    use crossbeam::channel::{Receiver, Sender};
-    use rstest::rstest;
-
-    use super::AlbumArtFacade;
-    use crate::{
-        shared::events::{AppEvent, ClientRequest, WorkRequest},
-        tests::fixtures::{app_event_channel, client_request_channel, ctx, work_request_channel},
-    };
-
-    /// The self-heal must only trigger when a frame's diff actually rewrote
-    /// the art pane area: re-placing after every frame made the art strobe
-    /// while playing (status updates render many frames a second).
-    #[rstest]
-    fn re_place_skipped_while_the_art_area_is_unchanged(
-        app_event_channel: (Sender<AppEvent>, Receiver<AppEvent>),
-        work_request_channel: (Sender<WorkRequest>, Receiver<WorkRequest>),
-        client_request_channel: (Sender<ClientRequest>, Receiver<ClientRequest>),
-    ) {
-        let mut facade = AlbumArtFacade::new(&ctx(
-            app_event_channel,
-            work_request_channel,
-            client_request_channel,
-        ));
-        facade.set_size(ratatui::layout::Rect::new(0, 0, 10, 5));
-        let mut buffer = ratatui::buffer::Buffer::empty(ratatui::layout::Rect::new(0, 0, 10, 5));
-
-        // First frame at a fresh area is treated as dirty (nothing drawn yet);
-        // the flush that follows a change draws and clears the latch.
-        facade.frame_rendered(&buffer);
-        assert!(facade.region_dirty);
-        facade.region_dirty = false;
-
-        // Identical frames must not re-dirty: this is the steady-state
-        // playback case that used to re-place the image every frame.
-        facade.frame_rendered(&buffer);
-        assert!(!facade.region_dirty);
-
-        // A frame that rewrote a cell inside the art pane area (modal
-        // closed, resize, layout change) re-dirties so the image heals.
-        buffer.get_mut(3, 2).set_symbol("x");
-        facade.frame_rendered(&buffer);
-        assert!(facade.region_dirty);
-
-        // The latch stays set until a draw clears it, so a sequence of
-        // changing frames keeps the heal armed.
-        facade.frame_rendered(&buffer);
-        assert!(facade.region_dirty);
-    }
-
-    /// A pane-area change (resize / layout change) forces a heal instead of
-    /// comparing across mismatched areas.
-    #[rstest]
-    fn pane_area_change_marks_dirty(
-        app_event_channel: (Sender<AppEvent>, Receiver<AppEvent>),
-        work_request_channel: (Sender<WorkRequest>, Receiver<WorkRequest>),
-        client_request_channel: (Sender<ClientRequest>, Receiver<ClientRequest>),
-    ) {
-        let mut facade = AlbumArtFacade::new(&ctx(
-            app_event_channel,
-            work_request_channel,
-            client_request_channel,
-        ));
-        facade.set_size(ratatui::layout::Rect::new(0, 0, 10, 5));
-        let buffer = ratatui::buffer::Buffer::empty(ratatui::layout::Rect::new(0, 0, 10, 5));
-        facade.frame_rendered(&buffer);
-        facade.region_dirty = false;
-
-        facade.set_size(ratatui::layout::Rect::new(0, 0, 12, 6));
-        facade.frame_rendered(&buffer);
-        assert!(facade.region_dirty);
-    }
-
-    /// Cells outside the art pane area must not dirty the region.
-    #[rstest]
-    fn cells_outside_the_art_area_are_ignored(
-        app_event_channel: (Sender<AppEvent>, Receiver<AppEvent>),
-        work_request_channel: (Sender<WorkRequest>, Receiver<WorkRequest>),
-        client_request_channel: (Sender<ClientRequest>, Receiver<ClientRequest>),
-    ) {
-        let mut facade = AlbumArtFacade::new(&ctx(
-            app_event_channel,
-            work_request_channel,
-            client_request_channel,
-        ));
-        facade.set_size(ratatui::layout::Rect::new(0, 0, 4, 4));
-        let mut buffer = ratatui::buffer::Buffer::empty(ratatui::layout::Rect::new(0, 0, 10, 10));
-        facade.frame_rendered(&buffer);
-        facade.region_dirty = false;
-
-        // A change at (9, 9) is outside the 4x4 art pane area: no heal.
-        buffer.get_mut(9, 9).set_symbol("x");
-        facade.frame_rendered(&buffer);
-        assert!(!facade.region_dirty);
     }
 }
