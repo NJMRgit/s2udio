@@ -13,7 +13,6 @@ A heavily modified fork of [rmpc](https://github.com/mierak/rmpc) v0.11.0
 a fully featured media center TUI built on rmpc that adds support for video via mpv and a bunch of other goodies!
 
 Built with the help of Deepseek v4 Flash, pi, and prime-agent
-and ox alpha for refactor
 
 <img width="2065" height="924" alt="image" src="https://github.com/user-attachments/assets/9da9686c-52f3-4b3c-8ef7-cfffe20a7270" />
 <img width="1400" height="163" alt="image" src="https://github.com/user-attachments/assets/e4fc184f-61f7-4f23-8f32-0e15ba493362" />
@@ -166,4 +165,6 @@ s2udio rq check    verify the proxy: /web/ + API answer without credentials
   (`--socks-url`, incoming connections disabled). The web UI itself has
   no VPN settings (it is torrent management only); restart the engine
   after changing the proxy.
+
+  refactored with Ox Alpha (during free period)
 - Shorthand (fish): `alias s2rq 's2udio rq'` → `s2rq start|stop|open|check`.
