@@ -164,7 +164,8 @@ s2udio rq check    verify the proxy: /web/ + API answer without credentials
   `socks5://127.0.0.1:1080`) — all rqbit traffic then goes through it
   (`--socks-url`, incoming connections disabled). The web UI itself has
   no VPN settings (it is torrent management only); restart the engine
-  after changing the proxy.
-
-  refactored with Ox Alpha (during free period)
+  after changing the proxy. 
 - Shorthand (fish): `alias s2rq 's2udio rq'` → `s2rq start|stop|open|check`.
+
+
+ refactored with Ox Alpha (during free period)
