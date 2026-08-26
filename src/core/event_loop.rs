@@ -962,6 +962,11 @@ fn main_task<B: Backend + std::io::Write>(
                     match ui.handle_action(&mut action, &mut ctx) {
                         Ok(KeyHandleResult::None) => continue,
                         Ok(KeyHandleResult::Quit) => {
+                            // Round 45: quitting must not orphan a
+                            // completed torrent download that is still
+                            // marked deferred (its mpv-session-end move
+                            // will never run after the process exits).
+                            finalize_complete_torrent_download(&mut ctx);
                             if let Err(err) = ui.on_event(UiEvent::Exit, &mut ctx) {
                                 log::error!(error:? = err; "UI failed to handle quit event");
                             }
@@ -2082,6 +2087,49 @@ fn start_torrent_playback(
     }
 }
 
+/// Finalize a torrent download job whose files are fully downloaded
+/// (`job.complete`): move the kept files to `s2udio-downloads` and drop
+/// the job. Used where a complete-but-deferred job would otherwise never
+/// be finished — a new download job is about to replace it, or the app
+/// is quitting (round 45: restarting the app / starting the next
+/// episode's download orphaned the previous episode's complete file in
+/// the torrent cache, since the deferred move waits on an mpv session
+/// end that never comes). Move-only: the live paths
+/// (`finish_torrent_download`) also delete the torrent from the engine.
+fn finalize_complete_torrent_download(ctx: &mut Ctx) {
+    let complete = ctx
+        .torrent_download
+        .borrow()
+        .as_ref()
+        .is_some_and(|job| job.complete);
+    if !complete {
+        return;
+    }
+    let Some(dest_dir) = crate::ui::modals::paste::downloads_dir() else {
+        status_warn!(
+            "Cannot determine the downloads folder (~/Downloads) — the downloaded file stays in the torrent cache"
+        );
+        return;
+    };
+    let files = ctx
+        .torrent_download
+        .borrow()
+        .as_ref()
+        .map(|job| job.files.clone());
+    let Some(files) = files else { return };
+    for file in &files {
+        match crate::core::torrent::move_completed_file(&file.source_path, &dest_dir) {
+            Ok(_) => {
+                status_info!("Downloaded '{}' to s2udio-downloads", file.file_name);
+            }
+            Err(err) => {
+                status_warn!("Failed to keep downloaded file '{}': {err}", file.file_name);
+            }
+        }
+    }
+    *ctx.torrent_download.borrow_mut() = None;
+}
+
 /// Start a download-only torrent job (round 21): keep the engine running
 /// (the popup's "Download" / "Download all", and the fresh
 /// `TorrentDownloadPrepared` path), poll its stats once per second and
@@ -2101,6 +2149,11 @@ fn start_torrent_download(
         status_warn!("No files to download");
         return;
     }
+    // Round 45: a previous job whose download finished but whose move is
+    // still deferred would be orphaned by the job replacement below (its
+    // file would sit complete in the torrent cache forever). Finalize it
+    // first.
+    finalize_complete_torrent_download(ctx);
     // Keep the engine alive for the whole job (the last Arc clone's Drop
     // kills the rqbit child on app exit).
     *ctx.torrent_engine.borrow_mut() = Some(engine.clone());
