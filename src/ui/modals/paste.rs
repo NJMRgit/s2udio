@@ -846,6 +846,21 @@ fn paste_menu(ctx: &Ctx, items: Vec<PastedItem>) -> MenuModal<'static> {
                                                     )
                                                 },
                                             );
+                                        let both_item = item.clone();
+                                        let both_key = key.clone();
+                                        section = section
+                                            .item(
+                                                "Stream and download",
+                                                move |ctx| {
+                                                    play_scanned_or_fresh(
+                                                        ctx,
+                                                        &both_item,
+                                                        &both_key,
+                                                        Vec::new(),
+                                                        true,
+                                                    )
+                                                },
+                                            );
                                         let dl_item = item.clone();
                                         let dl_key = key.clone();
                                         section = section
