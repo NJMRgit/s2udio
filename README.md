@@ -46,6 +46,12 @@ Right: RMPC ootb
 ## Showcase
 ### Jellyfin
 https://github.com/user-attachments/assets/ecb84436-4ce9-45d0-9dbf-a34cc159e31d
+
+Jellyfin is configured in-app: Settings → Jellyfin → Server URL /
+Username / Password → Sign in (credentials are stored in
+`~/.config/s2udio/jellyfin.ron`; a pre-existing jellytui config is
+reused when the sidecar is absent). A fresh install ships the full
+canonical tab set — `Queue │ Playlists │ MPD • Jellyfin • Radio`.
 ### Automatic theming (STTM only for now)
 [Screencast_20260809_202700.webm](https://github.com/user-attachments/assets/9ed0e9b8-ecac-4f69-90aa-e39b247a3aa6)
 ### ctrl+click / alt+click / shift + up|down

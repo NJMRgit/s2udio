@@ -803,6 +803,23 @@ fn jellyfin_current_url(ctx: &Ctx) -> String {
 }
 impl SettingsModal {
     pub fn new(ctx: &Ctx) -> Self {
+        Self::new_on_section(ctx, Section::General)
+    }
+
+    /// Round 51: open the panel straight to the Jellyfin sign-in section
+    /// (the Jellyfin tab's unconfigured state routes Enter / click here).
+    pub fn open_jellyfin(ctx: &Ctx) {
+        if let Err(err) = ctx.app_event_sender.send(crate::AppEvent::UiEvent(
+            crate::ui::UiAppEvent::Modal(Box::new(SettingsModal::new_on_section(
+                ctx, Section::Jellyfin,
+            ))),
+        )) {
+            log::error!("Failed to open a modal: {err}");
+        }
+    }
+
+    /// Build the panel with a preselected section (default: General).
+    fn new_on_section(ctx: &Ctx, section: Section) -> Self {
         let ui_initial = ctx.config.ui;
         let video_initial = ctx.config.video.playback;
         let mpv_audio_initial = ctx.config.mpv.audio_lang.clone();
@@ -824,10 +841,13 @@ impl SettingsModal {
             .unwrap_or_default();
         let mut modal = Self {
             id: id::new(),
-            section: Section::General,
+            section,
             rows: Vec::new(),
             selected: 0,
-            sidebar_selected: 0,
+            sidebar_selected: Section::all()
+                .iter()
+                .position(|s| *s == section)
+                .unwrap_or(0),
             focus: SettingsFocus::Sidebar,
             nodes: Vec::new(),
             library_path: AppStateFile::load().mpd_library_path.unwrap_or_default(),
