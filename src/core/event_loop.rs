@@ -66,6 +66,10 @@ fn main_task<B: Backend + std::io::Write>(
     let mut last_render = std::time::Instant::now().sub(Duration::from_secs(10));
     let mut additional_evs = HashSet::new();
     let mut connected = true;
+    // Last MPD Status.error surfaced to the status bar (round 52): a
+    // per-poll repeat of the same error stays quiet; a distinct error or a
+    // recovery prints once. Kept per session; re-shown on reconnect.
+    let mut last_reported_mpd_error: Option<String> = None;
     ui.before_show(area, &mut ctx).expect("Initial render init to succeed");
     let mut _update_loop_guard = None;
     let mut _update_db_loop_guard = None;
@@ -1584,6 +1588,22 @@ fn main_task<B: Backend + std::io::Write>(
                             let current_updating_db = ctx.status.updating_db;
                             let current_playlist = ctx.status.lastloadedplaylist.take();
                             let previous_status = std::mem::replace(&mut ctx.status, status);
+                            // Round 52 (GitHub issue #1 symptom 3): surface
+                            // MPD's `error:` field — a broken db / state dir
+                            // appears verbatim there — in the status bar. One
+                            // message per distinct error string (a per-poll
+                            // repeat stays quiet); a recovery line when the
+                            // error clears.
+                            if let Some(err) = &ctx.status.error {
+                                if last_reported_mpd_error.as_deref() != Some(err.as_str()) {
+                                    status_warn!(
+                                        "MPD: {err} — re-run setup.sh or check the MPD state dir permissions"
+                                    );
+                                    last_reported_mpd_error = Some(err.clone());
+                                }
+                            } else if last_reported_mpd_error.take().is_some() {
+                                status_info!("MPD: error cleared — MPD is ready");
+                            }
                             let new_playlist = ctx.status.lastloadedplaylist.as_ref();
                             let mut song_changed = false;
 
@@ -1938,6 +1958,15 @@ fn main_task<B: Backend + std::io::Write>(
                         log::error!(error:? = err, event:?; "UI failed to handle resize event");
                     }
                     status_warn!("rmpc reconnected to MPD and will reinitialize");
+                    // Round 52: re-surface MPD's error state on reconnect (it
+                    // may have changed while disconnected; a fresh status
+                    // poll replaces it right after).
+                    if let Some(err) = &ctx.status.error {
+                        status_warn!(
+                            "MPD: {err} — re-run setup.sh or check the MPD state dir permissions"
+                        );
+                        last_reported_mpd_error = Some(err.clone());
+                    }
                     connected = true;
                 }
                 AppEvent::LostConnection => {

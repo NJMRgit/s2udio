@@ -10,11 +10,15 @@ against them and asserts, per backend:
   - NO installs on non-interactive runs without -y
   - Arch path output byte-identical to the pre-dispatcher setup.sh
     (regression guarantee; the dispatcher must not change Arch behavior)
+  - round 52 fix: the MPD wire probe is exercised against a REAL fake MPD
+    listener on a hermetic port (healthy / erroring / dead), plus the
+    run_arch user-unit keep policy (exact / different user-writable /
+    system-state confs)
 
 Usage: scripts/dev/test-setup-mock.py        (run from the repo root)
 Exit 0 = all checks pass. No root, no containers, no network needed.
 """
-import os, pathlib, shutil, signal, stat, subprocess, sys, tempfile
+import os, pathlib, shutil, signal, socket, stat, subprocess, sys, tempfile, threading, time
 
 HERE = pathlib.Path(__file__).resolve().parent
 REPO = HERE.parent.parent
@@ -23,6 +27,73 @@ CU = pathlib.Path(tempfile.mkdtemp(prefix='s2u-mock-cu-', dir='/tmp'))
 OSREL = pathlib.Path(tempfile.mkdtemp(prefix='s2u-mock-osrel-', dir='/tmp'))
 HOMES = pathlib.Path(tempfile.mkdtemp(prefix='s2u-mock-homes-', dir='/tmp'))
 LOG_ROOT = pathlib.Path(tempfile.mkdtemp(prefix='s2u-mock-logs-', dir='/tmp'))
+
+# Round 52 fix (FEEDBACK-2026-08-27-4): the wire probe must run against a
+# REAL (fake) listener this time — and never against a host MPD. The mock
+# picked a dedicated free port; fresh_home writes it into the mock mpd.conf,
+# so EVERY probe in the matrix targets the hermetic port. It stays closed
+# (instant connection-refused) unless a case arms FakeMpd on it. Supporting
+# a 6600 fallback is deliberately avoided: the old read-to-EOF probe timed
+# out against a live healthy MPD while the fixed one PASSES, so an ambient
+# 6600 listener would corrupt the whole matrix's expectations.
+def _pick_free_port():
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(('127.0.0.1', 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+MPD_PORT = _pick_free_port()
+
+class FakeMpd:
+    """Minimal MPD wire server for the probe: sends the `OK MPD …`
+    greeting, consumes `status`, replies per mode ('ok' = pairs + bare OK,
+    'error' = the reporter's error: line + bare OK), then HOLDS the
+    connection open like a real MPD — a read-to-EOF probe blocks on it
+    until the 3s socket timeout; the fixed line-loop probe returns on the
+    bare OK."""
+    def __init__(self, port, mode):
+        self.srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.srv.bind(('127.0.0.1', port))
+        self.srv.listen(5)
+        self.mode = mode
+        threading.Thread(target=self._serve, daemon=True).start()
+    def _serve(self):
+        while True:
+            try:
+                conn, _ = self.srv.accept()
+            except OSError:
+                return
+            threading.Thread(target=self._handle, args=(conn,), daemon=True).start()
+    def _handle(self, conn):
+        try:
+            f = conn.makefile('rwb')
+            f.write(b'OK MPD 0.24.14 (mock)\n')
+            f.flush()
+            f.readline()  # the probe's `status\n`
+            if self.mode == 'error':
+                f.write(b'error: Failed to open "/var/lib/mpd/mpd.db": Permission denied\nOK\n')
+            else:
+                f.write(b'volume: -1\nstate: stop\nplaylistlength: 0\nOK\n')
+            f.flush()
+            try:
+                while conn.recv(4096):
+                    pass
+            except OSError:
+                pass
+        except OSError:
+            pass
+        finally:
+            try:
+                conn.close()
+            except OSError:
+                pass
+    def stop(self):
+        try:
+            self.srv.close()
+        except OSError:
+            pass
 
 def shim(name, body):
     p = BIN / name
@@ -74,8 +145,16 @@ esac''')
 case "$1" in
     build)
         mkdir -p target/release
-        printf '#!/usr/bin/env bash\\necho "s2udio 0.11.0 (mock)"\\n' > target/release/s2u
-        chmod +x target/release/s2u
+        # The repo's target/ is root:root-owned since the 2026-08-23
+        # ownership change: the dispatcher's in-repo build cannot overwrite
+        # target/release/s2u (the fixture builds in a writable tmp dir).
+        # Write the mock binary only when the dir is writable (skip silently
+        # otherwise — byte-identity normalizes the version line below; no
+        # shell redirect diagnostics may leak into the compared output).
+        if [[ -w target/release ]]; then
+            printf '#!/usr/bin/env bash\\necho "s2udio 0.11.0 (mock)"\\n' > target/release/s2u
+            chmod +x target/release/s2u
+        fi
         exit 0 ;;
     --version) echo "cargo 1.97.1 (mock)"; exit 0 ;;
     *) exit 0 ;;
@@ -148,8 +227,18 @@ for t in "$@"; do
     [[ "$t" != -* ]] && {{ mkdir -p "$(dirname "$t")" 2>/dev/null; touch "$t" 2>/dev/null; }}
 done
 exit 0''')
+    # Round 52: python3 is also the MPD wire-probe interpreter
+    # (mpd_readiness_check -> mpd_wire_probe runs `python3 - addr port` with
+    # the probe script on stdin). Route that invocation to the REAL
+    # interpreter so the probe body really executes — against FakeMpd on the
+    # hermetic port (round 52 fix §4: the probe must NOT be shimmed).
     shim('python3', f'''{LOG}
-case "$1" in -m) exit 0 ;; --version) echo "Python 3.12 (mock)"; exit 0 ;; *) exit 0 ;; esac''')
+case "$1" in
+    -m) exit 0 ;;
+    --version) echo "Python 3.12 (mock)"; exit 0 ;;
+    -) exec {sys.executable} - "${{@:2}}" ;;
+    *) exit 0 ;;
+esac''')
 
     # coreutils-only dir (no host package-manager/toolchain leakage)
     for t in ['bash', 'sh', 'env', 'sed', 'grep', 'cat', 'cp', 'mkdir', 'mv', 'rm', 'chmod',
@@ -175,19 +264,49 @@ case "$1" in -m) exit 0 ;; --version) echo "Python 3.12 (mock)"; exit 0 ;; *) ex
     for k, v in os_release.items():
         (OSREL / k).write_text(v)
 
-def fresh_home(key, mode):
+def fresh_home(key, mode, unit_conf=None, port=MPD_PORT):
     home = HOMES / f'{key}-{mode}'
     shutil.rmtree(home, ignore_errors=True)
     (home / '.config' / 'mpd').mkdir(parents=True)
-    (home / '.config' / 'mpd' / 'mpd.conf').write_text('music_directory "~/Music"\nport "6600"\n')
+    (home / '.config' / 'mpd' / 'mpd.conf').write_text(
+        f'music_directory "~/Music"\nport "{port}"\n')
+    if unit_conf:
+        # round 52 fix §3a: pre-existing USER mpd.service scenarios for the
+        # run_arch keep policy (exact-template / different user-writable
+        # conf / different conf with SYSTEM-level state dirs)
+        (home / '.config' / 'systemd' / 'user').mkdir(parents=True)
+        if unit_conf == 'exact':
+            conf = home / '.config' / 'mpd' / 'mpd.conf'
+        elif unit_conf == 'other':
+            conf = home / '.config' / 'mpd' / 'other.conf'
+            conf.write_text(f'music_directory "~/Music"\nport "{port}"\n')
+        else:  # 'system': same config but state dirs under /var/lib/mpd
+            conf = home / '.config' / 'mpd' / 'sys.conf'
+            conf.write_text(
+                'music_directory "~/Music"\n'
+                'db_file "/var/lib/mpd/database"\n'
+                'state_file "/var/lib/mpd/state"\n'
+                'sticker_file "/var/lib/mpd/sticker.sql"\n'
+                'playlist_directory "/var/lib/mpd/playlists"\n'
+                f'port "{port}"\n')
+        (home / '.config' / 'systemd' / 'user' / 'mpd.service').write_text(
+            '[Unit]\nDescription=Music Player Daemon (mock pre-existing user unit)\n'
+            '[Service]\n'
+            f'ExecStart=/usr/bin/mpd --no-daemon {conf}\n'
+            '[Install]\nWantedBy=default.target\n')
     return home
 
-def run_case(key, args=(), extra_env=None, drop=(), old=False, mode=None, extra_shims=None):
+def run_case(key, args=(), extra_env=None, drop=(), old=False, mode=None, extra_shims=None,
+             mpd_mode=None, unit_conf=None):
     # -y vs non-interactive runs MUST use separate homes, or fresh_home()
     # deletes the pidfile of a still-running launcher mpd (orphan leak)
     if mode is None:
         mode = 'y' if '-y' in args else 'noy'
-    home = fresh_home(key, mode)
+    # fake modes bind their OWN fresh port (MPD_PORT stays the never-bound
+    # dead-port for all other cases; rebinding one shared port in quick
+    # succession races the OS listen-socket teardown)
+    port = _pick_free_port() if mpd_mode else MPD_PORT
+    home = fresh_home(key, mode, unit_conf, port)
     calls = LOG_ROOT / f'calls-{key}-{mode}.log'
     calls.unlink(missing_ok=True)
     bindir = LOG_ROOT / f'bin-{key}-{mode}'
@@ -202,7 +321,10 @@ def run_case(key, args=(), extra_env=None, drop=(), old=False, mode=None, extra_
         sp.chmod(sp.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     env = dict(os.environ)
     env.update({'HOME': str(home), 'PATH': str(bindir) + ':' + str(CU),
-                'MOCK_CALLS': str(calls), 'S2UDIO_OS_RELEASE': str(OSREL / key)})
+                'MOCK_CALLS': str(calls), 'S2UDIO_OS_RELEASE': str(OSREL / key),
+                # round 52: readiness wire probe retries only once in the mock
+                # (nothing listens; a 1s sleep per failed try would slow ~30 cases)
+                'MPD_READY_TRIES': '1'})
     if extra_env:
         env.update(extra_env)
     script = REPO / 'setup.sh'
@@ -217,11 +339,25 @@ def run_case(key, args=(), extra_env=None, drop=(), old=False, mode=None, extra_
         (olddir / 'assets').symlink_to(REPO / 'assets')
         script = olddir / 'setup.sh'
         env.pop('S2UDIO_OS_RELEASE', None)
+    fake = FakeMpd(port, mpd_mode) if mpd_mode else None
+    t0 = time.time()
     r = subprocess.run(['bash', str(script), *args], cwd=str(REPO),
                        capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL)
+    elapsed = time.time() - t0
+    if fake:
+        fake.stop()
     out = r.stdout + r.stderr
     calls_txt = calls.read_text() if calls.exists() else ''
-    return {'rc': r.returncode, 'out': out, 'calls': calls_txt}
+    return {'rc': r.returncode, 'out': out, 'calls': calls_txt, 'elapsed': elapsed}
+
+# root:root ownership of ~/Projects/target (2026-08-23) means the
+# dispatcher's in-repo `cargo build` CANNOT overwrite target/release/s2u
+# while the fixture's tmp-dir build can — the installed binary's version
+# line differs ((mock) vs the real git hash). Byte-identity normalizes
+# exactly that one environmental line; everything else must match.
+import re
+def norm(out):
+    return re.sub(r's2udio 0\.11\.0 git [0-9a-f]+', 's2udio 0.11.0 (mock)', out)
 
 results = []
 def check(name, cond, detail=''):
@@ -238,18 +374,25 @@ def main():
     print('== arch -y (byte-identity old vs new) ==')
     r_old = run_case('arch', ['-y'], extra_env={'MOCK_USER_MPD': '1'}, old=True, mode='y')
     r_new = run_case('arch', ['-y'], extra_env={'MOCK_USER_MPD': '1'}, mode='y')
-    check('arch -y: output byte-identical', r_old['out'] == r_new['out'],
+    check('arch -y: output byte-identical', norm(r_old['out']) == norm(r_new['out']),
           f"old {len(r_old['out'])}B new {len(r_new['out'])}B")
     check('arch -y: pacman backend + installs (mpd ffmpeg cava yt-dlp)',
           'pacman -S --needed mpd ffmpeg cava yt-dlp' in r_new['calls'])
     check('arch -y: AUR mpdris2-git + mpv-full via yay',
           'yay -S --needed mpdris2-git' in r_new['calls'] and 'yay -S --needed mpv-full' in r_new['calls'])
     check('arch -y: exit 0', r_new['rc'] == 0, f"rc={r_new['rc']}")
+    check('arch -y: user mpd unit written (round 52 ensure-user-instance)',
+          'mpd.service (user) written (user-level instance' in r_new['out'])
+    check('arch -y: readiness step 8/9 runs before the summary',
+          '8/9  MPD readiness check' in r_new['out'])
+    check('arch -y: wire probe warns (hermetic dead port) + BROKEN marker',
+          f'MPD not reachable at 127.0.0.1:{MPD_PORT}' in r_new['out']
+          and 'BROKEN - see above' in r_new['out'])
 
     print('== arch non-interactive no -y (byte-identity) ==')
     r_old = run_case('arch', extra_env={'MOCK_USER_MPD': '1'}, old=True, mode='noy')
     r_new = run_case('arch', extra_env={'MOCK_USER_MPD': '1'}, mode='noy')
-    check('arch no-y: output byte-identical', r_old['out'] == r_new['out'])
+    check('arch no-y: output byte-identical', norm(r_old['out']) == norm(r_new['out']))
     check('arch no-y: no installs', 'pacman -S ' not in r_new['calls'] and 'yay -S ' not in r_new['calls'])
 
     print('== artix (ID_LIKE=arch -> pacman) ==')
@@ -266,6 +409,53 @@ def main():
     r = run_case('artix', extra_env={'MOCK_USER_MPD': '1'})
     check('artix no-y: no installs', 'pacman -S ' not in r['calls'] and 'yay -S ' not in r['calls'])
 
+    print('== arch with a packaged SYSTEM mpd.service (round 52 fix) ==')
+    r = run_case('arch', ['-y'], extra_env={'MOCK_USER_MPD': '1', 'MOCK_SYSTEM_MPD': '1'}, mode='arch-sys')
+    check('arch -y system-mpd: system unit stopped+disabled',
+          'systemctl stop mpd.service' in r['calls'] and 'systemctl disable mpd.service' in r['calls'])
+    check('arch -y system-mpd: user unit takes over',
+          'system mpd.service stopped+disabled (user unit takes over)' in r['out']
+          and 'mpd.service (user) written (user-level instance' in r['out'])
+    check('arch -y system-mpd: readiness still runs', '8/9  MPD readiness check' in r['out'])
+
+    print('== round 52 fix: wire probe vs REAL/fake MPD listeners (FEEDBACK-2026-08-27-4 §2/§4) ==')
+    r = run_case('arch', ['-y'], extra_env={'MOCK_USER_MPD': '1'}, mpd_mode='ok', mode='wire-ok')
+    check('fake healthy MPD: wire PASS, no stall, summary "+ ready" (old probe: 3s timeout -> BROKEN)',
+          'MPD ready (db OK, wire check passed)' in r['out']
+          and '  mpd    : active + ready' in r['out']
+          and 'BROKEN - see above' not in r['out']
+          and 'timed out' not in r['out'])
+    check('fake healthy MPD: case completed fast (< 2.5s; read-to-EOF stalled 3s+)',
+          r['elapsed'] < 2.5, f"elapsed={r['elapsed']:.2f}s")
+    r = run_case('arch', ['-y'], extra_env={'MOCK_USER_MPD': '1'}, mpd_mode='error', mode='wire-err')
+    check('fake erroring MPD: reporter string printed verbatim + BROKEN (exit-1 path)',
+          'error: Failed to open "/var/lib/mpd/mpd.db": Permission denied' in r['out']
+          and 'MPD reports an error over the wire' in r['out']
+          and 'BROKEN - see above' in r['out'])
+    check('fake erroring MPD: case completed fast (< 2.5s)',
+          r['elapsed'] < 2.5, f"elapsed={r['elapsed']:.2f}s")
+    check('dead port (no listener): not reachable + BROKEN, fast (no 3s timeout hang)',
+          f'MPD not reachable at 127.0.0.1:{MPD_PORT}' in r_new['out']
+          and r_new['elapsed'] < 2.5, f"elapsed={r_new['elapsed']:.2f}s")
+
+    print('== run_arch user-mpd unit keep policy (FEEDBACK-2026-08-27-4 §3a) ==')
+    r = run_case('arch', ['-y'], extra_env={'MOCK_USER_MPD': '1'}, unit_conf='exact', mode='unit-exact')
+    unit = (HOMES / 'arch-unit-exact' / '.config' / 'systemd' / 'user' / 'mpd.service').read_text()
+    check('unit targets $MPD_CONF exactly: kept, not rewritten',
+          'already targets' in r['out'] and 'mpd.service (user) written' not in r['out']
+          and 'mpd.conf' in unit and 'overwriting' not in r['out'])
+    r = run_case('arch', ['-y'], extra_env={'MOCK_USER_MPD': '1'}, unit_conf='other', mode='unit-other')
+    unit = (HOMES / 'arch-unit-other' / '.config' / 'systemd' / 'user' / 'mpd.service').read_text()
+    check('unit with DIFFERENT user-writable conf: kept (message + file untouched)',
+          'already targets' in r['out'] and 'other.conf' in unit
+          and 'mpd.service (user) written' not in r['out'] and 'overwriting' not in r['out'])
+    r = run_case('arch', ['-y'], extra_env={'MOCK_USER_MPD': '1'}, unit_conf='system', mode='unit-sys')
+    unit = (HOMES / 'arch-unit-sys' / '.config' / 'systemd' / 'user' / 'mpd.service').read_text()
+    check('unit with SYSTEM-state conf: warn + overwritten with the template',
+          'overwriting with the s2udio template' in r['out']
+          and 'mpd.service (user) written (user-level instance' in r['out']
+          and 'sys.conf' not in unit)
+
     print('== fedora (dnf5) ==')
     r = run_case('fedora', ['-y'], extra_env={'MOCK_RUSTC_VERSION': '1.80.0', 'MOCK_SYSTEM_MPD': '0'})
     check('fedora: detected dnf5 backend', '-> dnf5 backend' in r['out'])
@@ -274,6 +464,9 @@ def main():
     check('fedora -y: rustup (rustc too old)', 'rustup toolchain install stable' in r['calls'])
     check('fedora -y: services via s2u-svc systemd-user', 'systemctl --user enable mpd.service' in r['calls'])
     check('fedora -y: no stale-yt-dlp pip hint', 'pip install -U --break-system-packages' not in r['out'])
+    check('fedora -y: MPD readiness step runs', 'MPD readiness check' in r['out'])
+    check('fedora -y: readiness FAIL when no MPD listener (mock)',
+          'MPD readiness FAIL' in r['out'] and 'BROKEN - see above' in r['out'])
     r = run_case('fedora', extra_env={'MOCK_RUSTC_VERSION': '1.80.0'})
     check('fedora no-y: no installs', 'dnf5 install' not in r['calls'] and 'rustup' not in r['calls'])
     r = run_case('fedora', drop=('cargo', 'rustc'))
@@ -288,6 +481,7 @@ def main():
         check(f'{label} -y: system mpd stopped+disabled', 'systemctl stop mpd.service' in r['calls'] and 'systemctl disable mpd.service' in r['calls'])
         check(f'{label} -y: services via s2u-svc', 'systemctl --user enable mpd.service' in r['calls'])
         check(f'{label} -y: stale yt-dlp pip hint (§12.7)', 'pip install -U --break-system-packages yt-dlp' in r['out'])
+        check(f'{label} -y: MPD readiness step runs', 'MPD readiness check' in r['out'])
         r = run_case(key, extra_env={'MOCK_SYSTEM_MPD': '1'})
         check(f'{label} no-y: no installs', 'apt-get install' not in r['calls'] and 'apt-get update' not in r['calls'])
 
@@ -301,6 +495,7 @@ def main():
           'systemctl stop mpd.service' in r['calls'] and 'systemctl disable mpd.service' in r['calls'])
     check('devuan -y: services via s2u-svc', 'systemctl --user enable mpd.service' in r['calls'])
     check('devuan -y: stale yt-dlp pip hint (§12.7)', 'pip install -U --break-system-packages yt-dlp' in r['out'])
+    check('devuan -y: MPD readiness step runs', 'MPD readiness check' in r['out'])
     r = run_case('devuan', extra_env={'MOCK_SYSTEM_MPD': '1'})
     check('devuan no-y: no installs', 'apt-get install' not in r['calls'] and 'apt-get update' not in r['calls'])
 
@@ -310,6 +505,7 @@ def main():
     check('alpine -y: correct package names', APK in r['calls'])
     check('alpine -y: cava built from source', 'git clone' in r['calls'] and 'cava built from source' in r['out'])
     check('alpine -y: services via s2u-svc launcher', 'mpd active (launcher)' in r['out'])
+    check('alpine -y: MPD readiness step runs', 'MPD readiness check' in r['out'])
     r = run_case('alpine', extra_env={'MOCK_NO_SYSTEMD': '1'}, drop=('cava',))
     check('alpine no-y: no installs', 'apk add' not in r['calls'] and 'git clone' not in r['calls'] and 'curl ' not in r['calls'])
 
@@ -344,6 +540,7 @@ def main():
     check('void -y: no rustup (rustc 1.97.1)', 'rustup' not in r['calls'])
     check('void -y: services via s2u-svc runit', 'sv start' in r['calls'] and 'mpd active (runit-user)' in r['out'])
     check('void -y: runit pkg (runit-user backend sv+runsvdir prerequisites)', 'runit' in r['calls'])
+    check('void -y: MPD readiness step runs', 'MPD readiness check' in r['out'])
     r = run_case('void', extra_env={'MOCK_RUSTC_VERSION': '1.97.1', 'MOCK_NO_SYSTEMD': '1'})
     check('void no-y: no installs/setcap', 'xbps-install' not in r['calls'] and 'setcap' not in r['calls'])
 
@@ -353,6 +550,7 @@ def main():
     check('nixos -y: flake profile install (app+bridge)', 'nix profile install .#s2udio .#bridgePython' in r['calls'])
     check('nixos -y: runtime deps via nixpkgs', all(x in r['calls'] for x in ('nixpkgs#mpd', 'nixpkgs#mpv', 'nixpkgs#cava', 'nixpkgs#mpdris2')))
     check('nixos -y: services via s2u-svc launcher', 'mpd active (launcher)' in r['out'])
+    check('nixos -y: MPD readiness step runs', 'MPD readiness check' in r['out'])
     r = run_case('nixos', extra_env={'MOCK_NO_SYSTEMD': '1'})
     check('nixos no-y: no profile install', 'nix profile install' not in r['calls'])
 
