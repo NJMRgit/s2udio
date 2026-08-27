@@ -123,33 +123,25 @@ fn fetch_stations(playlist: &str) -> Result<Vec<RadioStation>> {
 /// Parse an EXTINF m3u (the format the app writes; MPD's own stored
 /// playlists are plain URL-per-line and parse the same). `#EXTINF:-1,name`
 /// lines name the following URL; bare URLs keep the URL as their name.
+/// Delegates to the shared library-playlist m3u parser
+/// (`shared/playlist_file.rs`); only stream URLs become stations, exactly
+/// like before. The EXTINF *write* path below stays untouched.
 fn parse_m3u(content: &str) -> Vec<RadioStation> {
-    let mut stations = Vec::new();
-    let mut pending_name: Option<String> = None;
-    for raw in content.lines() {
-        let line = raw.trim();
-        if line.is_empty() || line.starts_with("#EXTM3U") {
-            continue;
-        }
-        if let Some(rest) = line.strip_prefix("#EXTINF:") {
-            pending_name = Some(
-                rest.splitn(2, ',').nth(1).unwrap_or_default().trim().to_string(),
-            );
-        } else if is_stream_url(line) {
-            let name = pending_name
-                .take()
+    crate::shared::playlist_file::parse_m3u(content)
+        .into_iter()
+        .filter(|entry| is_stream_url(&entry.uri))
+        .map(|entry| {
+            let name = entry
+                .title
+                .clone()
                 .filter(|name| !name.is_empty())
-                .unwrap_or_else(|| line.to_string());
-            stations
-                .push(RadioStation {
-                    name,
-                    url: line.to_string(),
-                });
-        } else {
-            pending_name = None;
-        }
-    }
-    stations
+                .unwrap_or_else(|| entry.uri.clone());
+            RadioStation {
+                name,
+                url: entry.uri,
+            }
+        })
+        .collect()
 }
 /// EXTINF m3u serialization: every station keeps its name, which MPD's own
 /// playlist commands would drop on rewrite.

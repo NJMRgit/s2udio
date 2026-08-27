@@ -37,8 +37,8 @@ pub struct AppStateFile {
     /// when present.
     pub mpv_svp: Option<bool>,
     /// The settings panel's UI toggles (album art / lyrics / cava / radio /
-    /// jellyfin tabs + auto-chapters): runtime-only in the config schema,
-    /// persisted here so a restart keeps them.
+    /// jellyfin tabs + auto-chapters + library playlist files): not part of
+    /// the `config.ron` schema; persisted here so a restart keeps them.
     pub ui: Option<UiSettings>,
     /// Appearance colors from the settings panel, in
     /// `AppearanceTarget::all()` order: a hex string, "" for transparent,

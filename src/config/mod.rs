@@ -41,10 +41,10 @@ pub mod video;
 pub use address::MpdAddress;
 pub use cli::LyricsSource;
 pub use search::{FilterKindFile, Search};
-/// Runtime UI visibility settings, toggled from the Settings panel. These
-/// are runtime-only in the sense that they are not part of the config file
-/// schema; the app re-applies them on config reloads so they survive within
-/// a session (restarting resets them).
+/// Runtime UI visibility settings, toggled from the Settings panel. They
+/// are not part of the `config.ron` schema; the panel stages them and
+/// Settings Save persists them to `state.ron` (`AppStateFile::ui`), which
+/// startup re-applies — so they survive restarts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UiSettings {
     pub show_album_art: bool,
@@ -71,6 +71,13 @@ pub struct UiSettings {
     /// at all) behaves like upstream.
     #[serde(default = "crate::config::defaults::bool::<true>")]
     pub mpdris2_notifications: bool,
+    /// Settings > MPD "show library playlist files": the Playlists tab
+    /// also lists the `.m3u` / `.pls` / `.xspf` playlist files found in
+    /// the music library (read-only — list / open / add / replace-queue
+    /// only, never edited or deleted). Defaults to off (current behavior
+    /// unchanged); the radio favourites name is excluded.
+    #[serde(default)]
+    pub library_playlist_files: bool,
 }
 impl Default for UiSettings {
     fn default() -> Self {
@@ -83,6 +90,7 @@ impl Default for UiSettings {
             auto_show_chapters: true,
             show_virtual_devices: false,
             mpdris2_notifications: true,
+            library_playlist_files: false,
         }
     }
 }
@@ -357,6 +365,9 @@ impl Default for ConfigFile {
                     return Self::stock_default();
                 }
                 parsing.set(true);
+                // The mutation below only exists in debug builds, so the
+                // binding is unused in release (zero-warning build gate).
+                #[cfg_attr(not(debug_assertions), allow(unused_mut))]
                 let mut result = ron::from_str::<
                     ConfigFile,
                 >(include_str!("../../assets/example_config.ron"))

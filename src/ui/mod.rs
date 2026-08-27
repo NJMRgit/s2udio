@@ -1152,9 +1152,10 @@ impl Ui {
                 state.mpv_audio_lang = Some(staged.mpv_audio_lang.as_str().to_owned());
                 state.mpv_subtitles = Some(staged.mpv_subtitles.as_str());
                 state.mpv_svp = Some(staged.mpv_svp);
-                // The UI toggles (incl. auto chapters) and the appearance
-                // colors are runtime-only in the config schema; persist them
-                // here so a restart keeps them.
+                // The UI toggles (incl. auto chapters + library playlist
+                // files) and the appearance colors are not part of the
+                // config.ron schema; persist them here so a restart keeps
+                // them (startup re-applies state.ui onto the config).
                 state.ui = Some(staged.ui);
                 // The mpDris2 track-change notification toggle: sync it to
                 // the bridge state file so the s2u-mpdris2 shim applies it
