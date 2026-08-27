@@ -253,7 +253,8 @@ impl QueuePane {
                 CommonAction::Bottom => self.video_jump(usize::MAX, ctx)?,
                 // Enter opens the context menu (like right-click);
                 // `d`/`→` still load the highlighted entry.
-                CommonAction::Confirm => self.open_context_menu(ctx),
+                // Keyboard-opened menus stay centered (Round 46).
+                CommonAction::Confirm => self.open_context_menu(ctx, None),
                 CommonAction::SelectUp | CommonAction::SelectDown => {
                     // Shift+Up/Down: range-select from the anchor (set by
                     // plain clicks / the first shift-press), moving first

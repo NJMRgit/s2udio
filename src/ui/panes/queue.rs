@@ -73,6 +73,10 @@ pub struct QueuePane {
     /// Drag state of the Chapters-list scrollbar (thumb follows the
     /// pointer).
     chapters_scrollbar_drag: crate::shared::mouse_event::ScrollbarDrag,
+    /// Rubber-band (drag-rect) selection state of the Video list (Round
+    /// 46): armed by a left press, updated by `Drag` events, finalized by
+    /// `LeftRelease`.
+    video_band: crate::ui::band::BandState,
     /// Click areas of the Audio / Video / Chapters toggle.
     pub(crate) toggle_areas: [Rect; 3],
 }
@@ -263,6 +267,7 @@ impl QueuePane {
             video_marked: MarkState::default(),
             video_scrollbar_drag: crate::shared::mouse_event::ScrollbarDrag::default(),
             chapters_scrollbar_drag: crate::shared::mouse_event::ScrollbarDrag::default(),
+            video_band: crate::ui::band::BandState::default(),
             toggle_areas: [Rect::default(); 3],
         }
     }
@@ -714,6 +719,8 @@ impl Pane for QueuePane {
             } else {
                 crate::ctx::QueueTabMode::Audio
             };
+            self.queue.state.band.cancel();
+            self.video_band.cancel();
             Self::set_tab(self, ctx, mode);
             ctx.render()?;
             return Ok(());
@@ -769,6 +776,7 @@ impl Pane for QueuePane {
             if table.contains(position) {
                 match event.kind {
                     MouseEventKind::DoubleClick => {
+                        self.video_band.cancel();
                         let row = usize::from(position.y.saturating_sub(table.y));
                         let idx = self.video_state.offset() + row;
                         if idx < self.video_items_len {
@@ -790,6 +798,9 @@ impl Pane for QueuePane {
                                 }
                             }
                             self.video_marked.add(idx);
+                            // Arm the band so a ctrl+drag from here adds a
+                            // range (ctrl semantics keep existing marks).
+                            self.video_band.arm(idx, false);
                             self.video_state.select(Some(idx));
                             ctx.render()?;
                             return Ok(());
@@ -814,11 +825,12 @@ impl Pane for QueuePane {
                         let row = usize::from(position.y.saturating_sub(table.y));
                         let idx = self.video_state.offset() + row;
                         if idx < self.video_items_len {
-                            if !self.video_marked.is_empty()
-                                && Some(idx) != self.video_state.selected()
-                            {
-                                self.video_marked.clear();
-                            }
+                            // A plain press arms the band and defers the
+                            // multi-selection drop (click ≠ drag); the
+                            // release resolves it (Round 46).
+                            let click_on_different_row = !self.video_marked.is_empty()
+                                && Some(idx) != self.video_state.selected();
+                            self.video_band.arm(idx, click_on_different_row);
                             self.video_state.select(Some(idx));
                             self.video_marked.set_anchor(idx);
                             self.video_marked.clear_range();
@@ -827,6 +839,7 @@ impl Pane for QueuePane {
                         }
                     }
                     MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                        self.video_band.cancel();
                         let dir = if matches!(event.kind, MouseEventKind::ScrollUp) {
                             -1
                         } else {
@@ -919,6 +932,25 @@ impl Pane for QueuePane {
                 return Ok(());
             }
         }
+        // Band capture (Round 46): once a band is armed inside the list,
+        // drags and releases are accepted even when the pointer left the
+        // list area (the row clamps to the visible list). Handled before
+        // the area gate below.
+        match event.kind {
+            MouseEventKind::Drag { .. } if self.band_active_for_mode(ctx) => {
+                return match ctx.queue_tab.get() {
+                    crate::ctx::QueueTabMode::Video => self.video_band_drag(event, ctx),
+                    _ => self.queue_band_drag(event, ctx),
+                };
+            }
+            MouseEventKind::LeftRelease if self.band_active_for_mode(ctx) => {
+                return match ctx.queue_tab.get() {
+                    crate::ctx::QueueTabMode::Video => self.video_band_release(ctx),
+                    _ => self.queue_band_release(ctx),
+                };
+            }
+            _ => {}
+        }
         if !self.areas[Areas::Table].contains(position) {
             return Ok(());
         }
@@ -936,6 +968,8 @@ impl Pane for QueuePane {
                         }
                     }
                     self.queue.state.mark(idx);
+                    // Arm the band so a ctrl+drag from here adds a range.
+                    self.queue.state.band.arm(idx, false);
                     self.queue.select_idx(idx, ctx.config.scrolloff);
                     ctx.render()?;
                 }
@@ -947,6 +981,7 @@ impl Pane for QueuePane {
                     .saturating_sub(self.areas[Areas::Table].y)
                     .into();
                 if let Some(idx) = self.queue.state.get_at_rendered_row(clicked_row) {
+                    self.queue.state.band.cancel();
                     if self.queue.state.mark_anchor().is_none() {
                         self.queue.state.set_mark_anchor(idx);
                     }
@@ -973,11 +1008,12 @@ impl Pane for QueuePane {
                     .saturating_sub(self.areas[Areas::Table].y)
                     .into();
                 if let Some(idx) = self.queue.state.get_at_rendered_row(clicked_row) {
-                    if !self.queue.state.marked.is_empty()
-                        && Some(idx) != self.queue.state.get_selected()
-                    {
-                        self.queue.state.unmark_all();
-                    }
+                    // A plain press arms the band and defers the
+                    // multi-selection drop (click ≠ drag); the release
+                    // resolves it (Round 46).
+                    let click_on_different_row = !self.queue.state.marked.is_empty()
+                        && Some(idx) != self.queue.state.get_selected();
+                    self.queue.state.band.arm(idx, click_on_different_row);
                     self.queue.select_idx(idx, ctx.config.scrolloff);
                     self.queue.state.set_mark_anchor(idx);
                     self.queue.state.clear_range_mark();
@@ -988,6 +1024,7 @@ impl Pane for QueuePane {
             MouseEventKind::DoubleClick if self
                 .areas[Areas::Table]
                 .contains(event.into()) => {
+                self.queue.state.band.cancel();
                 let clicked_row: usize = event
                     .y
                     .saturating_sub(self.areas[Areas::Table].y)
@@ -1005,6 +1042,7 @@ impl Pane for QueuePane {
             MouseEventKind::MiddleClick if self
                 .areas[Areas::Table]
                 .contains(event.into()) => {
+                self.queue.state.band.cancel();
                 let clicked_row: usize = event
                     .y
                     .saturating_sub(self.areas[Areas::Table].y)
@@ -1027,6 +1065,7 @@ impl Pane for QueuePane {
             | MouseEventKind::ScrollUp if self
                 .areas[Areas::Table]
                 .contains(event.into()) => {
+                self.queue.state.band.cancel();
                 let dir = if matches!(event.kind, MouseEventKind::ScrollUp) {
                     -1
                 } else {
@@ -1041,6 +1080,8 @@ impl Pane for QueuePane {
             MouseEventKind::RightClick if self
                 .areas[Areas::Table]
                 .contains(event.into()) => {
+                self.queue.state.band.cancel();
+                self.video_band.cancel();
                 let clicked_row: usize = event
                     .y
                     .saturating_sub(self.areas[Areas::Table].y)
@@ -1049,9 +1090,12 @@ impl Pane for QueuePane {
                     self.queue.select_idx(idx, ctx.config.scrolloff);
                     ctx.render()?;
                 }
-                self.open_context_menu(ctx);
+                self.open_context_menu(ctx, Some(position));
             }
-            MouseEventKind::RightClick => {}
+            MouseEventKind::RightClick => {
+                self.queue.state.band.cancel();
+                self.video_band.cancel();
+            }
             MouseEventKind::Drag { .. } => {}
             MouseEventKind::LeftRelease => {}
             MouseEventKind::Moved => {}
@@ -1460,10 +1504,10 @@ impl Pane for QueuePane {
                     }
                 }
                 CommonAction::Confirm => {
-                    self.open_context_menu(ctx);
+                    self.open_context_menu(ctx, None);
                 }
                 CommonAction::ContextMenu => {
-                    self.open_context_menu(ctx);
+                    self.open_context_menu(ctx, None);
                 }
                 CommonAction::Right | CommonAction::Left => {}
                 other => self.handle_claimed_common_action(other, event, ctx)?,
@@ -1528,6 +1572,119 @@ impl QueuePane {
     fn scrollbar_area(&self) -> Option<Rect> {
         let area = self.areas[Areas::Scrollbar];
         if area.width > 0 { Some(area) } else { None }
+    }
+
+
+    /// Whether a rubber-band is armed/active in the list the current
+    /// queue tab shows (Round 46).
+    fn band_active_for_mode(&self, ctx: &Ctx) -> bool {
+        match ctx.queue_tab.get() {
+            crate::ctx::QueueTabMode::Video => self.video_band.is_active(),
+            _ => self.queue.state.band.is_active(),
+        }
+    }
+    /// Rubber-band drag of the audio queue table: plain drag replaces
+    /// every mark with the anchor→current range, ctrl+drag adds/contracts
+    /// the range keeping the other marks. The row clamps to the visible
+    /// list (band capture).
+    fn queue_band_drag(&mut self, event: MouseEvent, ctx: &Ctx) -> Result<()> {
+        if !self.queue.state.band.is_active() {
+            return Ok(());
+        }
+        let control = event.modifiers.contains(crossterm::event::KeyModifiers::CONTROL);
+        let table = self.areas[Areas::Table];
+        let (offset, len) = (self.queue.state.offset(), self.queue.len());
+        let Some(current) =
+            crate::ui::band::band_current_row(event.y, table, offset, len, 1)
+        else {
+            return Ok(());
+        };
+        let state = &mut self.queue.state;
+        let anchor = state.band.anchor.unwrap_or(current);
+        state.band.update(current);
+        if control {
+            if let Some((lo, hi)) = state.take_range_mark() {
+                for i in lo..=hi {
+                    state.marked.remove(&i);
+                }
+            }
+        } else {
+            state.unmark_all();
+        }
+        let (lo, hi) = (anchor.min(current), anchor.max(current));
+        if lo <= hi {
+            state.mark_range(lo, hi);
+        }
+        if lo < hi {
+            state.set_range_mark(lo, hi);
+        } else {
+            state.clear_range_mark();
+        }
+        ctx.render()?;
+        Ok(())
+    }
+    /// Resolve the audio queue's armed band on release: a press that never
+    /// moved is a plain click (deferred unmark applies when it landed on
+    /// a different row); a moved press finalizes with the band's marks in
+    /// place.
+    fn queue_band_release(&mut self, ctx: &Ctx) -> Result<()> {
+        let clear_marks = {
+            let state = &mut self.queue.state;
+            match state.band.release() {
+                crate::ui::band::BandEnd::Click { clear_marks } => clear_marks,
+                _ => false,
+            }
+        };
+        if clear_marks {
+            self.queue.state.unmark_all();
+        }
+        ctx.render()?;
+        Ok(())
+    }
+    /// Rubber-band drag of the Video (mpv playlist) list. The marks live
+    /// in `MarkState`; plain drag clears then range-selects from the band
+    /// anchor, ctrl+drag keeps the other marks and replaces only the
+    /// previous band range.
+    fn video_band_drag(&mut self, event: MouseEvent, ctx: &Ctx) -> Result<()> {
+        if !self.video_band.is_active() {
+            return Ok(());
+        }
+        let control = event.modifiers.contains(crossterm::event::KeyModifiers::CONTROL);
+        let table = self.areas[Areas::Table];
+        let (offset, len) = (self.video_state.offset(), self.video_items_len);
+        let Some(current) =
+            crate::ui::band::band_current_row(event.y, table, offset, len, 1)
+        else {
+            return Ok(());
+        };
+        let anchor = self.video_band.anchor.unwrap_or(current);
+        self.video_band.update(current);
+        // The band anchor drives the range even after prior keyboard
+        // selection set the mark anchor elsewhere.
+        self.video_marked.set_anchor(anchor);
+        if control {
+            self.video_marked.select_range(current);
+        } else {
+            self.video_marked.clear();
+            self.video_marked.set_anchor(anchor);
+            self.video_marked.select_range(current);
+        }
+        ctx.render()?;
+        Ok(())
+    }
+    /// Resolve the Video list's armed band on release.
+    fn video_band_release(&mut self, ctx: &Ctx) -> Result<()> {
+        let clear_marks = {
+            match self.video_band.release() {
+                crate::ui::band::BandEnd::Click { clear_marks } => clear_marks,
+                _ => false,
+            }
+        };
+        if clear_marks {
+            self.video_marked.clear();
+        }
+        ctx.render()?;
+        Ok(())
     }
 }
 /// Truncate `s` so its display width fits `max_cols`, keeping whole

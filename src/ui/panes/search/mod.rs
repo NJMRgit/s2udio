@@ -589,7 +589,7 @@ impl SearchPane {
                     run_external(command.clone(), create_env(ctx, selected));
                 }
                 GlobalAction::TogglePause if self.songs_dir.marked().len() > 1 => {
-                    self.open_result_phase_context_menu(ctx);
+                    self.open_result_phase_context_menu(ctx, None);
                 }
                 _ => {
                     event.abandon();
@@ -645,18 +645,23 @@ impl SearchPane {
                 }
                 CommonAction::Delete => {}
                 CommonAction::Confirm => {
-                    self.open_result_phase_context_menu(ctx);
+                    self.open_result_phase_context_menu(ctx, None);
                 }
                 CommonAction::ContextMenu => {
-                    self.open_result_phase_context_menu(ctx);
+                    self.open_result_phase_context_menu(ctx, None);
                 }
                 other => self.handle_claimed_common_action(other, event, ctx)?,
             }
         }
         Ok(())
     }
-    fn open_result_phase_context_menu(&self, ctx: &Ctx) {
+    fn open_result_phase_context_menu(
+        &self,
+        ctx: &Ctx,
+        anchor: Option<ratatui::layout::Position>,
+    ) {
         let modal = MenuModal::new(ctx)
+            .anchor(anchor)
             .list_section(
                 ctx,
                 move |mut section| {
@@ -917,6 +922,10 @@ impl SongListCore<Song, ListState> for SearchPane {
     fn list_mut(&mut self) -> &mut Dir<Song, ListState> {
         &mut self.songs_dir
     }
+    /// The song column is the band's list area (Round 46).
+    fn list_area(&self) -> Option<Rect> {
+        Some(self.column_areas[BrowserArea::Current])
+    }
     fn list_songs_in_item(
         &self,
         item: Song,
@@ -1103,6 +1112,8 @@ impl Pane for SearchPane {
                             }
                         }
                         self.songs_dir.state.mark(idx);
+                        // Arm the band so a ctrl+drag from here adds a range.
+                        self.songs_dir.state.band.arm(idx, false);
                         self.songs_dir.select_idx(idx, ctx.config.scrolloff);
                     } else if event
                         .modifiers
@@ -1124,11 +1135,12 @@ impl Pane for SearchPane {
                         }
                         self.songs_dir.select_idx(idx, ctx.config.scrolloff);
                     } else {
-                        if !self.songs_dir.marked().is_empty()
-                            && Some(idx) != self.songs_dir.state.get_selected()
-                        {
-                            self.songs_dir.marked_mut().clear();
-                        }
+                        // A plain press arms the band and defers the
+                        // multi-selection drop (click ≠ drag); the release
+                        // resolves it (Round 46).
+                        let click_on_different_row = !self.songs_dir.marked().is_empty()
+                            && Some(idx) != self.songs_dir.state.get_selected();
+                        self.songs_dir.state.band.arm(idx, click_on_different_row);
                         self.songs_dir.select_idx(idx, ctx.config.scrolloff);
                         self.songs_dir.state.set_mark_anchor(idx);
                         self.songs_dir.state.clear_range_mark();
@@ -1137,6 +1149,7 @@ impl Pane for SearchPane {
                 ctx.render()?;
             }
             MouseEventKind::DoubleClick => {
+                self.songs_dir.state.band.cancel();
                 match self.phase {
                     Phase::Search => {
                         if self
@@ -1170,6 +1183,7 @@ impl Pane for SearchPane {
             MouseEventKind::MiddleClick if self
                 .column_areas[BrowserArea::Current]
                 .contains(event.into()) => {
+                self.songs_dir.state.band.cancel();
                 match self.phase {
                     Phase::Search => {}
                     Phase::BrowseResults => {
@@ -1198,6 +1212,7 @@ impl Pane for SearchPane {
                 }
             }
             MouseEventKind::ScrollDown => {
+                self.songs_dir.state.band.cancel();
                 match self.phase {
                     Phase::Search => {
                         if ctx.input.is_insert_mode() {
@@ -1216,6 +1231,7 @@ impl Pane for SearchPane {
                 }
             }
             MouseEventKind::ScrollUp => {
+                self.songs_dir.state.band.cancel();
                 match self.phase {
                     Phase::Search => {
                         if ctx.input.is_insert_mode() {
@@ -1238,6 +1254,7 @@ impl Pane for SearchPane {
                     Phase::BrowseResults if !ctx
                         .input
                         .is_active(self.songs_dir.filter_buffer_id) => {
+                        self.songs_dir.state.band.cancel();
                         let clicked_row = event
                             .y
                             .saturating_sub(self.column_areas[BrowserArea::Current].y)
@@ -1250,10 +1267,16 @@ impl Pane for SearchPane {
                             self.songs_dir.select_idx(idx, ctx.config.scrolloff);
                             ctx.render()?;
                         }
-                        self.open_result_phase_context_menu(ctx);
+                        self.open_result_phase_context_menu(ctx, Some(event.into()));
                     }
                     _ => {}
                 }
+            }
+            MouseEventKind::Drag { .. } if self.songs_dir.state.band.is_active() => {
+                return SongListCore::update_band_drag(self, event, ctx);
+            }
+            MouseEventKind::LeftRelease if self.songs_dir.state.band.is_active() => {
+                return SongListCore::finish_band_drag(self, ctx);
             }
             MouseEventKind::Drag { .. } => {}
             _ => {}

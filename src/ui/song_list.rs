@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use anyhow::Result;
 use itertools::Itertools;
-use ratatui::{prelude::Rect, widgets::ListState};
+use ratatui::{layout::Position, prelude::Rect, widgets::ListState};
 
 use crate::{
     MpdQueryResult,
@@ -317,6 +317,9 @@ where
                     let current = self.list_mut();
                     current.select_idx(idx_to_select, ctx.config.scrolloff);
                     current.state.toggle_mark(idx_to_select);
+                    // Arm the band so a ctrl+drag from here adds a range
+                    // (ctrl semantics keep the existing marks).
+                    current.state.band.arm(idx_to_select, false);
                     self.fetch_data_internal(ctx);
                 }
             }
@@ -328,6 +331,7 @@ where
 
                 if let Some(idx_to_select) = self.list().state.get_at_rendered_row(clicked_row) {
                     let current = self.list_mut();
+                    current.state.band.cancel();
                     if current.state.mark_anchor().is_none() {
                         current.state.set_mark_anchor(idx_to_select);
                     }
@@ -357,14 +361,16 @@ where
 
                 if let Some(idx_to_select) = self.list().state.get_at_rendered_row(clicked_row) {
                     let current = self.list_mut();
-                    // A plain click on a different row drops the
-                    // multi-selection (ctrl/alt clicks above keep their
-                    // marking behavior). Clicking the selected row keeps it.
-                    if !current.state.marked.is_empty()
-                        && Some(idx_to_select) != current.state.get_selected()
-                    {
-                        current.state.unmark_all();
-                    }
+                    // A plain press arms the band and defers the
+                    // multi-selection drop: a drag must not wipe the marks
+                    // before the band replaces them (click ≠ drag). The
+                    // release resolves the press: no drag → the plain-click
+                    // semantics (a click on a different row drops the
+                    // multi-selection, clicking the selected row keeps it);
+                    // drag → the band replaces the marks.
+                    let click_on_different_row = !current.state.marked.is_empty()
+                        && Some(idx_to_select) != current.state.get_selected();
+                    current.state.band.arm(idx_to_select, click_on_different_row);
                     current.select_idx(idx_to_select, ctx.config.scrolloff);
                     current.state.set_mark_anchor(idx_to_select);
                     current.state.clear_range_mark();
@@ -372,6 +378,7 @@ where
                 }
             }
             MouseEventKind::DoubleClick if area.contains(position) => {
+                self.list_mut().state.band.cancel();
                 let clicked_row: usize = event.y.saturating_sub(area.y).into();
 
                 if let Some(_) = self.list().state.get_at_rendered_row(clicked_row) {
@@ -380,6 +387,7 @@ where
                 }
             }
             MouseEventKind::MiddleClick if area.contains(position) => {
+                self.list_mut().state.band.cancel();
                 let clicked_row: usize = event.y.saturating_sub(area.y).into();
 
                 if let Some(idx_to_select) = self.list().state.get_at_rendered_row(clicked_row) {
@@ -398,16 +406,19 @@ where
                 }
             }
             MouseEventKind::ScrollUp if area.contains(position) => {
+                self.list_mut().state.band.cancel();
                 self.list_mut().scroll_up(ctx.config.scroll_amount, ctx.config.scrolloff);
                 self.fetch_data_internal(ctx);
                 ctx.render()?;
             }
             MouseEventKind::ScrollDown if area.contains(position) => {
+                self.list_mut().state.band.cancel();
                 self.list_mut().scroll_down(ctx.config.scroll_amount, ctx.config.scrolloff);
                 self.fetch_data_internal(ctx);
                 ctx.render()?;
             }
             MouseEventKind::RightClick => {
+                self.list_mut().state.band.cancel();
                 let clicked_row: usize = event.y.saturating_sub(area.y).into();
 
                 if let Some(idx_to_select) = self.list().state.get_at_rendered_row(clicked_row) {
@@ -415,9 +426,14 @@ where
                     self.fetch_data_internal(ctx);
                 }
 
-                self.open_context_menu(ctx)?;
+                self.open_context_menu(ctx, Some(position))?;
             }
-            MouseEventKind::Drag { .. } => {}
+            MouseEventKind::Drag { .. } => {
+                self.update_band_drag(event, ctx)?;
+            }
+            MouseEventKind::LeftRelease => {
+                self.finish_band_drag(ctx)?;
+            }
             _ => {}
         }
 
@@ -669,7 +685,7 @@ where
                 modal!(ctx, create_add_modal(opts, ctx));
             }
             CommonAction::ContextMenu => {
-                self.open_context_menu(ctx)?;
+                self.open_context_menu(ctx, None)?;
             }
             CommonAction::Rate {
                 kind: RateKind::Value(value),
@@ -829,7 +845,7 @@ where
         self.enqueue(self.items(all).map(|(_, item)| item))
     }
 
-    fn open_context_menu(&mut self, ctx: &Ctx) -> Result<()> {
+    fn open_context_menu(&mut self, ctx: &Ctx, anchor: Option<Position>) -> Result<()> {
         let list_songs_in_items = self
             .items(false)
             .map(|(_, item)| self.list_songs_in_item(item.to_owned()))
@@ -959,9 +975,76 @@ where
                 let section = section.item("Cancel", |_ctx| Ok(()));
                 Some(section)
             })
+            .anchor(anchor)
             .build();
 
         modal!(ctx, modal);
+        Ok(())
+    }
+
+    /// The band motion handler shared by every `Dir`-based list: plain
+    /// drag replaces all marks with the anchor→current range, ctrl+drag
+    /// adds/contracts the range keeping the other marks. The row comes
+    /// from the pointer clamped into the visible list (band capture
+    /// semantics). Used by `handle_list_mouse_action` and the panes with
+    /// their own mouse handlers (queue audio, playlists songs).
+    fn update_band_drag(&mut self, event: MouseEvent, ctx: &Ctx) -> Result<()> {
+        let Some(area) = self.list_area() else {
+            return Ok(());
+        };
+        if !self.list().state.band.is_active() {
+            return Ok(());
+        }
+        let control = event.modifiers.contains(crossterm::event::KeyModifiers::CONTROL);
+        let (offset, len) = (self.list().state.offset(), self.list().len());
+        let Some(current) =
+            crate::ui::band::band_current_row(event.y, area, offset, len, 1)
+        else {
+            return Ok(());
+        };
+        let state = &mut self.list_mut().state;
+        let anchor = state.band.anchor.unwrap_or(current);
+        state.band.update(current);
+        if control {
+            // ctrl+drag = add: replace only the previous band range.
+            if let Some((lo, hi)) = state.take_range_mark() {
+                for i in lo..=hi {
+                    state.marked.remove(&i);
+                }
+            }
+        } else {
+            // plain drag = replace: only the band's rows stay marked.
+            state.unmark_all();
+        }
+        let (lo, hi) = (anchor.min(current), anchor.max(current));
+        if lo <= hi {
+            state.mark_range(lo, hi);
+        }
+        if lo < hi {
+            state.set_range_mark(lo, hi);
+        } else {
+            state.clear_range_mark();
+        }
+        ctx.render()?;
+        Ok(())
+    }
+
+    /// Resolve an armed band on `LeftRelease`: a press that never moved
+    /// is a plain click (deferred unmark applies when it landed on a
+    /// different row); a moved press finalizes with the band's marks in
+    /// place.
+    fn finish_band_drag(&mut self, ctx: &Ctx) -> Result<()> {
+        let clear_marks = {
+            let state = &mut self.list_mut().state;
+            match state.band.release() {
+                crate::ui::band::BandEnd::Click { clear_marks } => clear_marks,
+                _ => false,
+            }
+        };
+        if clear_marks {
+            self.list_mut().state.unmark_all();
+        }
+        ctx.render()?;
         Ok(())
     }
 }
