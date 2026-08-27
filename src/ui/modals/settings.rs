@@ -290,6 +290,9 @@ enum MpvLanguageTarget {
 enum MpdRow {
     LibraryHeader,
     LibraryPath,
+    /// Settings > MPD: show the `.m3u` / `.pls` / `.xspf` playlist files
+    /// found in the music library in the Playlists tab (read-only).
+    LibraryPlaylists,
     Update,
     Rescan,
     PlaybackHeader,
@@ -938,6 +941,7 @@ impl SettingsModal {
                 vec![
                     ContentRow::Mpd(MpdRow::LibraryHeader),
                     ContentRow::Mpd(MpdRow::LibraryPath),
+                    ContentRow::Mpd(MpdRow::LibraryPlaylists),
                     ContentRow::Mpd(MpdRow::Update), ContentRow::Mpd(MpdRow::Rescan),
                     ContentRow::Mpd(MpdRow::PlaybackHeader),
                     ContentRow::Mpd(MpdRow::Crossfade), ContentRow::Mpd(MpdRow::Repeat),
@@ -1653,6 +1657,13 @@ impl SettingsModal {
                         }
                         Ok(())
                     }
+                    MpdRow::LibraryPlaylists => {
+                        self.ui_pending.library_playlist_files = !self
+                            .ui_pending
+                            .library_playlist_files;
+                        ctx.render()?;
+                        Ok(())
+                    }
                     MpdRow::Update | MpdRow::Rescan => {
                         let rescan = matches!(m, MpdRow::Rescan);
                         let scope = if self.library_path.is_empty() {
@@ -2044,6 +2055,13 @@ impl SettingsModal {
                                 Click::Edit }
                             ],
                             Some(Click::Edit),
+                        )
+                    }
+                    MpdRow::LibraryPlaylists => {
+                        Self::toggle_row(
+                            "show .m3u/.pls/.xspf playlists from the music library",
+                            self.ui_pending.library_playlist_files,
+                            style,
                         )
                     }
                     MpdRow::Update => {

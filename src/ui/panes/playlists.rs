@@ -2,7 +2,7 @@ use std::{
     collections::{BTreeSet, HashMap, HashSet},
     sync::Arc,
 };
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use enum_map::EnumMap;
 use itertools::Itertools;
 use ratatui::{
@@ -18,7 +18,13 @@ use crate::{
         tabs::{PaneType, PaneTypeDiscriminants, TreeBrowserArgs},
     },
     ctx::Ctx,
-    mpd::{client::Client, commands::Song, mpd_client::{MpdClient, SingleOrRange}},
+    mpd::{
+        client::Client,
+        commands::{
+            Song, lsinfo::LsInfoEntry, metadata_tag::MetadataTag,
+        },
+        mpd_client::{MpdClient, SingleOrRange},
+    },
     shared::{
         cmp::StringCompare, ext::btreeset_ranges::BTreeSetRanges, keys::ActionEvent,
         macros::{modal, status_info},
@@ -40,7 +46,8 @@ use crate::{
     },
 };
 /// The list items of the Playlists tab: playlist rows carry the ♪ / ▶
-/// prefix (from the background classification), stream songs inside a
+/// prefix (from the background classification) — or the ♫ prefix for
+/// library playlist files (read-only) —, stream songs inside a
 /// playlist show their cached title in the stream color, and everything
 /// else renders like the other tabs (local files stay white). The rows
 /// are fully owned (`'static`) so the caller can snapshot the stack
@@ -58,15 +65,21 @@ fn playlist_items(
         .map(|(idx, item)| {
             let config = &ctx.config;
             let list_item = match item {
-                DirOrSong::Dir { name, playlist: true, .. } => {
-                    let kind = kinds
-                        .get(name.as_str())
-                        .copied()
-                        .unwrap_or(PlaylistKind::Audio);
+                DirOrSong::Dir { name, full_path, playlist: true, .. } => {
+                    let library = !full_path.is_empty();
+                    let prefix = if library {
+                        "♫ "
+                    } else {
+                        kinds
+                            .get(name.as_str())
+                            .copied()
+                            .unwrap_or(PlaylistKind::Audio)
+                            .prefix()
+                    };
                     ListItem::from(
                         Line::from(
                             vec![
-                                Span::from(kind.prefix()), Span::from(if name.is_empty() {
+                                Span::from(prefix), Span::from(if name.is_empty() {
                                 "Untitled".to_owned() } else { name.clone() }),
                             ],
                         ),
@@ -150,6 +163,12 @@ pub struct PlaylistsPane {
     /// Playlist name -> whether it holds audio or video content (from the
     /// background classification query), driving the ♪ / ▶ prefixes.
     playlist_kinds: HashMap<String, PlaylistKind>,
+    /// Library-relative path of the currently opened playlist when it is a
+    /// library playlist file (`.m3u`/`.pls`/`.xspf`, read-only); `None`
+    /// for stored playlists and at the root. Guards the stored-playlist-
+    /// only operations (rename / delete / clear / move) and the song
+    /// menu's remove-from-playlist.
+    open_library_playlist: Option<String>,
     /// Scroll state of the info box (mouse wheel / scrollbar).
     info_state: ListState,
     /// Area of the info box (for mouse scrolling).
@@ -239,6 +258,7 @@ impl PlaylistsPane {
             playlists_scrollbar_area: Rect::default(),
             initialized: false,
             playlist_kinds: HashMap::new(),
+            open_library_playlist: None,
             info_state: ListState::default(),
             info_area: Rect::default(),
             info_items_len: 0,
@@ -436,7 +456,7 @@ impl PlaylistsPane {
         let mut items: Vec<ListItem> = Vec::new();
         if self.stack.path().is_empty() {
             if let Some(playlist) = self.stack.root().selected() {
-                if let DirOrSong::Dir { name, .. } = playlist {
+                if let DirOrSong::Dir { name, full_path, .. } = playlist {
                     let key_style = ctx.config.theme.preview_label_style;
                     let group = ctx.config.theme.preview_metadata_group_style;
                     items.push(ListItem::new(Line::styled(" --- [Playlist]", group)));
@@ -451,6 +471,20 @@ impl PlaylistsPane {
                                 ),
                             ),
                         );
+                    // Library playlist file: show its library-relative path.
+                    if !full_path.is_empty() {
+                        items
+                            .push(
+                                ListItem::new(
+                                    Line::from(
+                                        vec![
+                                            Span::styled("Path", key_style), Span::raw(": "),
+                                            Span::raw(full_path.clone()),
+                                        ],
+                                    ),
+                                ),
+                            );
+                    }
                 }
             }
         } else if let Some(DirOrSong::Song(song)) = self.stack.current().selected() {
@@ -653,6 +687,7 @@ impl PlaylistsPane {
     /// Back out one level to the playlist list (no-op at the root).
     fn back_out(&mut self, ctx: &Ctx) -> Result<()> {
         self.stack_mut().leave();
+        self.open_library_playlist = None;
         SongListCore::fetch_data_internal(self, ctx)?;
         ctx.render()?;
         Ok(())
@@ -667,48 +702,51 @@ impl PlaylistsPane {
         anchor: Option<ratatui::layout::Position>,
     ) -> Result<()> {
         if self.stack.path().is_empty() {
-            let name = self
-                .stack
-                .root()
-                .selected()
-                .and_then(|d| match d {
-                    DirOrSong::Dir { name, .. } => Some(name.clone()),
-                    _ => None,
-                });
-            if let Some(name) = name {
-                return self.open_playlist_menu(&name, ctx, anchor);
+            let selected = self.stack.root().selected().cloned();
+            if let Some(DirOrSong::Dir { name, full_path, .. }) = selected {
+                let library_path = (!full_path.is_empty()).then_some(full_path);
+                return self.open_playlist_menu(&name, library_path.as_deref(), ctx, anchor);
             }
             return Ok(());
         }
         self.open_song_menu(ctx, anchor)
     }
     /// Right-click / Enter menu for a playlist (anchored at the cursor
-    /// when opened with the mouse).
+    /// when opened with the mouse). Library playlist files get only the
+    /// queue actions — they are user-owned files on disk and read-only
+    /// from the app (no rename / delete).
     fn open_playlist_menu(
         &mut self,
         name: &str,
+        library_path: Option<&str>,
         ctx: &Ctx,
         anchor: Option<ratatui::layout::Position>,
     ) -> Result<()> {
         let playlist = name.to_owned();
+        let library_path = library_path.map(str::to_owned);
         let menu = MenuModal::new(ctx)
             .anchor(anchor)
             .list_section(
                 ctx,
                 |mut section| {
+                    let playlist = playlist.clone();
+                    let library_path = library_path.clone();
                     section
                         .add_item(
                             "Add to Queue",
                             {
                                 let playlist = playlist.clone();
+                                let library_path = library_path.clone();
                                 move |ctx| {
                                     ctx.command(move |client| {
-                                        let songs = client.list_playlist_info(&playlist, None)?;
-                                        let items: Vec<Enqueue> = songs
-                                            .into_iter()
-                                            .map(|s| Enqueue::File { path: s.file })
-                                            .collect();
-                                        client.enqueue_multiple(items, None, None, false)?;
+                                        match playlist_menu_items(
+                                            client, &playlist, library_path.as_deref(),
+                                        ) {
+                                            Ok(items) => {
+                                                client.enqueue_multiple(items, None, None, false)?;
+                                            }
+                                            Err(err) => status_warn!("{err:#}"),
+                                        }
                                         Ok(())
                                     });
                                     Ok(())
@@ -720,14 +758,17 @@ impl PlaylistsPane {
                             "Replace Queue",
                             {
                                 let playlist = playlist.clone();
+                                let library_path = library_path.clone();
                                 move |ctx| {
                                     ctx.command(move |client| {
-                                        let songs = client.list_playlist_info(&playlist, None)?;
-                                        let items: Vec<Enqueue> = songs
-                                            .into_iter()
-                                            .map(|s| Enqueue::File { path: s.file })
-                                            .collect();
-                                        client.enqueue_multiple(items, None, None, true)?;
+                                        match playlist_menu_items(
+                                            client, &playlist, library_path.as_deref(),
+                                        ) {
+                                            Ok(items) => {
+                                                client.enqueue_multiple(items, None, None, true)?;
+                                            }
+                                            Err(err) => status_warn!("{err:#}"),
+                                        }
                                         Ok(())
                                     });
                                     Ok(())
@@ -736,10 +777,12 @@ impl PlaylistsPane {
                         );
                     Some(section)
                 },
-            )
-            .list_section(
+            );
+        let menu = if library_path.is_none() {
+            menu.list_section(
                 ctx,
                 |mut section| {
+                    let playlist = playlist.clone();
                     section
                         .add_item(
                             "Rename Playlist",
@@ -785,7 +828,10 @@ impl PlaylistsPane {
                         );
                     Some(section)
                 },
-            );
+            )
+        } else {
+            menu
+        };
         crate::shared::macros::modal!(ctx, menu);
         Ok(())
     }
@@ -822,6 +868,10 @@ impl PlaylistsPane {
             .first()
             .cloned()
             .unwrap_or_default();
+        // Library playlist files are read-only: no remove/clear/move via
+        // MPD (they are user-owned files on disk, and a same-named stored
+        // playlist must not be edited by mistake).
+        let library = self.open_library_playlist.is_some();
         let download_ctx = {
             let info = ctx.yt_info.borrow();
             info.get(&highlighted_file)
@@ -968,23 +1018,26 @@ impl PlaylistsPane {
             .list_section(
                 ctx,
                 |mut section| {
-                    section
-                        .add_item(
-                            "Remove from playlist",
-                            {
-                                let playlist_name = playlist_name.clone();
-                                let remove_paths = remove_paths.clone();
-                                move |ctx| {
-                                    delete_from_playlist_or_show_confirmation(
-                                        playlist_name,
-                                        &remove_paths,
-                                        true,
-                                        ctx,
-                                    )?;
-                                    Ok(())
-                                }
-                            },
-                        );
+                    let library = library;
+                    if !library {
+                        section
+                            .add_item(
+                                "Remove from playlist",
+                                {
+                                    let playlist_name = playlist_name.clone();
+                                    let remove_paths = remove_paths.clone();
+                                    move |ctx| {
+                                        delete_from_playlist_or_show_confirmation(
+                                            playlist_name,
+                                            &remove_paths,
+                                            true,
+                                            ctx,
+                                        )?;
+                                        Ok(())
+                                    }
+                                },
+                            );
+                    }
                     Some(section)
                 },
             );
@@ -992,6 +1045,14 @@ impl PlaylistsPane {
         Ok(())
     }
     fn open_selected_playlist(&mut self, ctx: &Ctx) -> Result<()> {
+        // Record whether the entered playlist is a read-only library file
+        // (guards the stored-playlist-only song ops while inside).
+        self.open_library_playlist = self.stack.root().selected().and_then(|item| match item {
+            DirOrSong::Dir { full_path, .. } if !full_path.is_empty() => {
+                Some(full_path.clone())
+            }
+            _ => None,
+        });
         self.stack_mut().enter();
         SongListCore::fetch_data_internal(self, ctx)?;
         ctx.render()?;
@@ -1007,7 +1068,11 @@ impl PlaylistsPane {
             .items
             .iter()
             .filter_map(|item| match item {
-                DirOrSong::Dir { name, .. } => Some(name.clone()),
+                // Library playlist files are read-only and never classify
+                // as stored playlists (their ♫ marker replaces ♪ / ▶).
+                DirOrSong::Dir { name, full_path, .. } if full_path.is_empty() => {
+                    Some(name.clone())
+                }
                 _ => None,
             })
             .collect();
@@ -1031,6 +1096,175 @@ impl PlaylistsPane {
             });
     }
 }
+
+/// One library playlist file found by the scoped enumeration walk —
+/// its library-relative MPD path plus the timestamp MPD reports.
+struct LibraryPlaylistFile {
+    full_path: String,
+    last_modified: chrono::DateTime<chrono::Utc>,
+}
+
+/// All library playlist files (`.m3u` / `.pls` / `.xspf`) reachable from
+/// the MPD database root, via a scoped per-directory `lsinfo` walk.
+///
+/// A bare `listall` only reports `playlist:` entries at the library root
+/// on live MPD 0.24.14 — the 28 real library `.m3u` files are all nested
+/// inside album folders and would be missed entirely (round-49 host
+/// finding). `lsinfo <uri>` returns a directory's direct children
+/// (including `playlist:` entries, verified live for nested files), so
+/// walking every directory the tree reports finds them. Each call is
+/// exact/non-recursive, so the walk does not depend on any server-side
+/// recursion quirk; directories are visited once.
+fn list_library_playlist_files(client: &mut Client<'_>) -> Result<Vec<LibraryPlaylistFile>> {
+    let mut found = Vec::new();
+    let mut visited: HashSet<String> = HashSet::new();
+    // None = the database root (bare `lsinfo`).
+    let mut pending: Vec<Option<String>> = vec![None];
+    while let Some(dir) = pending.pop() {
+        if !visited.insert(dir.clone().unwrap_or_default()) {
+            continue;
+        }
+        let entries = client
+            .lsinfo(dir.as_deref())
+            .with_context(|| format!("Cannot list library {}", dir.as_deref().unwrap_or("")))?;
+        for entry in entries {
+            match entry {
+                LsInfoEntry::Dir(dir) => pending.push(Some(dir.full_path)),
+                LsInfoEntry::Playlist(playlist) => found.push(LibraryPlaylistFile {
+                    full_path: playlist.full_path,
+                    last_modified: playlist.last_modified,
+                }),
+                LsInfoEntry::File(_) => {}
+            }
+        }
+    }
+    found.sort_by(|a, b| a.full_path.cmp(&b.full_path));
+    found.dedup_by(|a, b| a.full_path == b.full_path);
+    Ok(found)
+}
+
+/// Both Playlists-tab refresh paths (before_show + Database /
+/// StoredPlaylist events) build the root list from the stored playlists
+/// and — when the Settings > MPD toggle is on — the library playlist
+/// files (`.m3u` / `.pls` / `.xspf`, the radio favourites name excluded),
+/// sorted together by name (existing comparator). Library files are
+/// listed read-only: `full_path` carries the library-relative path.
+fn playlist_root_items(
+    client: &mut Client<'_>,
+    show_library_files: bool,
+    radio_playlist: &str,
+    compare: &StringCompare,
+) -> Result<Vec<DirOrSong>> {
+    let mut items: Vec<DirOrSong> = client
+        .list_playlists()
+        .context("Cannot list playlists")?
+        .into_iter()
+        .filter(|playlist| playlist.name != radio_playlist)
+        .map(|playlist| DirOrSong::playlist_name_only(playlist.name))
+        .collect();
+    if show_library_files {
+        items.extend(
+            list_library_playlist_files(client)?.into_iter().filter_map(|file| {
+                if !crate::shared::playlist_file::is_library_playlist_path(&file.full_path) {
+                    return None;
+                }
+                let name = crate::shared::playlist_file::playlist_stem(&file.full_path);
+                if name.is_empty() || name == radio_playlist {
+                    return None;
+                }
+                Some(DirOrSong::Dir {
+                    name,
+                    full_path: file.full_path,
+                    last_modified: file.last_modified,
+                    playlist: true,
+                })
+            }),
+        );
+    }
+    items.sort_by(|a, b| match (a, b) {
+        (DirOrSong::Dir { name: an, .. }, DirOrSong::Dir { name: bn, .. }) => {
+            compare.compare(an, bn)
+        }
+        _ => compare.compare(a.as_path(), b.as_path()),
+    });
+    Ok(items)
+}
+
+/// The music library root the pane reads library playlist files from:
+/// the Settings > MPD "library location" choice (state.ron, current
+/// session; the update/rescan scope), else the `music_directory` parsed
+/// from the mpd.conf candidates; `None` when neither is available — the
+/// pane then warns in the status bar and skips local parsing.
+fn library_music_dir() -> Option<String> {
+    let session = crate::config::state::AppStateFile::load()
+        .mpd_library_path
+        .filter(|path| !path.trim().is_empty());
+    session.or_else(crate::ui::modals::paste::music_directory)
+}
+
+/// The opened entries of a library playlist file as `Song`s: the title /
+/// artist come from the playlist metadata, the duration only when the
+/// format carries one. Errors (unknown music directory, unreadable file)
+/// show a status warning and yield an empty list — library playlist files
+/// are best-effort read-only extras.
+fn read_library_playlist_songs(full_path: &str) -> Vec<Song> {
+    match library_music_dir() {
+        Some(root) => {
+            match crate::shared::playlist_file::read_library_playlist(&root, full_path) {
+                Ok(entries) => entries.into_iter().map(library_entry_to_song).collect(),
+                Err(err) => {
+                    status_warn!("{err:#}");
+                    Vec::new()
+                }
+            }
+        }
+        None => {
+            status_warn!(
+                "MPD music directory unknown — cannot read library playlist '{full_path}' (set it in Settings > MPD or mpd.conf)"
+            );
+            Vec::new()
+        }
+    }
+}
+
+/// One parsed library-playlist entry as a playable `Song` row/queue item.
+fn library_entry_to_song(entry: crate::shared::playlist_file::PlaylistEntry) -> Song {
+    let mut metadata = HashMap::new();
+    if let Some(title) = entry.title.filter(|title| !title.is_empty()) {
+        metadata.insert("title".to_owned(), MetadataTag::Single(title));
+    }
+    if let Some(artist) = entry.artist.filter(|artist| !artist.is_empty()) {
+        metadata.insert("artist".to_owned(), MetadataTag::Single(artist));
+    }
+    Song {
+        file: entry.uri,
+        duration: entry.duration_ms.map(std::time::Duration::from_millis),
+        metadata,
+        ..Default::default()
+    }
+}
+
+/// The queue items behind a root playlist row's "Add / Replace Queue":
+/// stored playlists read MPD's playlist contents; library playlist files
+/// are parsed locally (read-only — the app never edits or deletes them).
+fn playlist_menu_items(
+    client: &mut Client<'_>,
+    playlist: &str,
+    library_path: Option<&str>,
+) -> Result<Vec<Enqueue>> {
+    if let Some(path) = library_path {
+        let Some(root) = library_music_dir() else {
+            bail!(
+                "MPD music directory unknown — cannot read '{path}' (set it in Settings > MPD or mpd.conf)"
+            );
+        };
+        let entries = crate::shared::playlist_file::read_library_playlist(&root, path)?;
+        return Ok(entries.into_iter().map(|entry| Enqueue::File { path: entry.uri }).collect());
+    }
+    let songs = client.list_playlist_info(playlist, None)?;
+    Ok(songs.into_iter().map(|song| Enqueue::File { path: song.file }).collect())
+}
+
 impl Pane for PlaylistsPane {
     fn render(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) -> Result<()> {
         let tree_w = self.tree_args.tree_width(area.width);
@@ -1085,6 +1319,7 @@ impl Pane for PlaylistsPane {
         let id = if self.initialized { REINIT } else { INIT };
         let compare = StringCompare::from(ctx.config.browser_song_sort.as_ref());
         let radio_playlist = ctx.config.radio.playlist.clone();
+        let show_library_files = ctx.config.ui.library_playlist_files;
         ctx.query()
             .id(id)
             .target(PaneType::Playlists {
@@ -1092,14 +1327,12 @@ impl Pane for PlaylistsPane {
             })
             .replace_id(id)
             .query(move |client| {
-                let result: Vec<_> = client
-                    .list_playlists()
-                    .context("Cannot list playlists")?
-                    .into_iter()
-                    .filter(|playlist| playlist.name != radio_playlist)
-                    .sorted_by(|a, b| compare.compare(&a.name, &b.name))
-                    .map(|playlist| DirOrSong::playlist_name_only(playlist.name))
-                    .collect();
+                let result = playlist_root_items(
+                    client,
+                    show_library_files,
+                    &radio_playlist,
+                    &compare,
+                )?;
                 Ok(MpdQueryResult::DirOrSong {
                     data: result,
                     path: None,
@@ -1123,6 +1356,7 @@ impl Pane for PlaylistsPane {
                 };
                 let sort_opts = ctx.config.browser_song_sort.clone();
                 let radio_playlist = ctx.config.radio.playlist.clone();
+                let show_library_files = ctx.config.ui.library_playlist_files;
                 ctx.query()
                     .id(id)
                     .replace_id(id)
@@ -1130,17 +1364,10 @@ impl Pane for PlaylistsPane {
                         tree: TreeBrowserArgs::default(),
                     })
                     .query(move |client| {
-                        let result: Vec<_> = client
-                            .list_playlists()
-                            .context("Cannot list playlists")?
-                            .into_iter()
-                            .filter(|playlist| playlist.name != radio_playlist)
-                            .sorted_by(|a, b| {
-                                StringCompare::from(sort_opts.as_ref())
-                                    .compare(&a.name, &b.name)
-                            })
-                            .map(|playlist| DirOrSong::playlist_name_only(playlist.name))
-                            .collect();
+                        let compare = StringCompare::from(sort_opts.as_ref());
+                        let result =
+                            playlist_root_items(client, show_library_files, &radio_playlist,
+                            &compare)?;
                         Ok(MpdQueryResult::DirOrSong {
                             data: result,
                             path: None,
@@ -1227,14 +1454,15 @@ impl Pane for PlaylistsPane {
                     if let Some(idx) = self.stack.root().state.get_at_rendered_row(row) {
                         let dir = self.stack.root_mut();
                         dir.select_idx(idx, ctx.config.scrolloff);
-                        let name = dir
-                            .selected()
-                            .and_then(|d| match d {
-                                DirOrSong::Dir { name, .. } => Some(name.clone()),
-                                _ => None,
-                            });
-                        if let Some(name) = name {
-                            return self.open_playlist_menu(&name, ctx, Some(position));
+                        let selected = dir.selected().cloned();
+                        if let Some(DirOrSong::Dir { name, full_path, .. }) = selected {
+                            let library_path = (!full_path.is_empty()).then_some(full_path);
+                            return self.open_playlist_menu(
+                                &name,
+                                library_path.as_deref(),
+                                ctx,
+                                Some(position),
+                            );
                         }
                     }
                     return Ok(());
@@ -1672,9 +1900,21 @@ impl SongListCore<DirOrSong, ListState> for PlaylistsPane {
         BrowserPane::list_area(self)
     }
     fn open(&mut self, autoplay: bool, ctx: &Ctx) -> Result<()> {
+        if self.stack.path().is_empty() {
+            // Same bookkeeping as open_selected_playlist, for the mouse /
+            // Enter-open paths through the shared BrowserPane.
+            self.open_library_playlist =
+                self.stack.root().selected().and_then(|item| match item {
+                    DirOrSong::Dir { full_path, .. } if !full_path.is_empty() => {
+                        Some(full_path.clone())
+                    }
+                    _ => None,
+                });
+        }
         BrowserPane::open(self, autoplay, ctx)
     }
     fn leave(&mut self, ctx: &Ctx) -> Result<()> {
+        self.open_library_playlist = None;
         BrowserPane::leave(self, ctx)
     }
     fn fetch_data_internal(&mut self, ctx: &Ctx) -> Result<()> {
@@ -1696,6 +1936,9 @@ impl SongListCore<DirOrSong, ListState> for PlaylistsPane {
         move |client| {
             Ok(
                 match item {
+                    DirOrSong::Dir { full_path, .. } if !full_path.is_empty() => {
+                        read_library_playlist_songs(&full_path)
+                    }
                     DirOrSong::Dir { name, .. } => {
                         client.list_playlist_info(&name, None)?
                     }
@@ -1707,7 +1950,7 @@ impl SongListCore<DirOrSong, ListState> for PlaylistsPane {
     fn fetch_data(&self, selected: &DirOrSong, ctx: &Ctx) -> Result<()> {
         match self.stack.path().as_slice() {
             [] => {
-                let DirOrSong::Dir { name: playlist, .. } = selected else {
+                let DirOrSong::Dir { name: playlist, full_path, .. } = selected else {
                     log::error!(
                         selected:? = selected; "Expected playlist to be selected"
                     );
@@ -1715,6 +1958,8 @@ impl SongListCore<DirOrSong, ListState> for PlaylistsPane {
                 };
                 let path = self.stack.next_path();
                 let playlist = playlist.to_owned();
+                let full_path = full_path.to_owned();
+                let library = !full_path.is_empty();
                 ctx.query()
                     .id(FETCH_DATA)
                     .replace_id("playlists_data")
@@ -1722,11 +1967,19 @@ impl SongListCore<DirOrSong, ListState> for PlaylistsPane {
                         tree: TreeBrowserArgs::default(),
                     })
                     .query(move |client| {
-                        let data = client
-                            .list_playlist_info(&playlist, None)?
-                            .into_iter()
-                            .map(DirOrSong::Song)
-                            .collect_vec();
+                        let data: Vec<DirOrSong> = if library {
+                            // Library playlist file: parse locally (read-only).
+                            read_library_playlist_songs(&full_path)
+                                .into_iter()
+                                .map(DirOrSong::Song)
+                                .collect()
+                        } else {
+                            client
+                                .list_playlist_info(&playlist, None)?
+                                .into_iter()
+                                .map(DirOrSong::Song)
+                                .collect_vec()
+                        };
                         Ok(MpdQueryResult::DirOrSong {
                             data,
                             path,
@@ -1739,8 +1992,9 @@ impl SongListCore<DirOrSong, ListState> for PlaylistsPane {
     }
     fn show_info(&self, item: &DirOrSong, ctx: &Ctx) -> Result<()> {
         match item {
-            DirOrSong::Dir { name, .. } => {
+            DirOrSong::Dir { name, full_path, .. } => {
                 let playlist = name.clone();
+                let library_path = (!full_path.is_empty()).then(|| full_path.clone());
                 ctx.query()
                     .target(PaneType::Playlists {
                         tree: TreeBrowserArgs::default(),
@@ -1748,9 +2002,13 @@ impl SongListCore<DirOrSong, ListState> for PlaylistsPane {
                     .replace_id(PLAYLIST_INFO)
                     .id(PLAYLIST_INFO)
                     .query(move |client| {
-                        let playlist = client.list_playlist_info(&playlist, None)?;
+                        let data = if let Some(path) = library_path {
+                            read_library_playlist_songs(&path)
+                        } else {
+                            client.list_playlist_info(&playlist, None)?
+                        };
                         Ok(MpdQueryResult::SongsList {
-                            data: playlist,
+                            data,
                             path: None,
                         })
                     });
@@ -1765,6 +2023,12 @@ impl SongListCore<DirOrSong, ListState> for PlaylistsPane {
     ) -> Vec<MpdDelete> {
         match self.stack().path().as_slice() {
             [playlist] => {
+                // Songs inside a library playlist file cannot be edited:
+                // the file is user-owned on disk (read-only) and MPD has
+                // no command to edit library playlist files.
+                if self.open_library_playlist.is_some() {
+                    return Vec::new();
+                }
                 let playlist: Arc<str> = Arc::from(playlist.as_str());
                 items
                     .filter_map(|(idx, item)| match item {
@@ -1781,12 +2045,14 @@ impl SongListCore<DirOrSong, ListState> for PlaylistsPane {
             [] => {
                 items
                     .filter_map(|(_, item)| match item {
-                        DirOrSong::Dir { name, .. } => {
+                        // Library playlist files are never deletable from
+                        // the app (`full_path` non-empty).
+                        DirOrSong::Dir { name, full_path, .. } if full_path.is_empty() => {
                             Some(MpdDelete::Playlist {
                                 name: name.clone(),
                             })
                         }
-                        DirOrSong::Song(_) => None,
+                        _ => None,
                     })
                     .collect_vec()
             }
@@ -1794,11 +2060,13 @@ impl SongListCore<DirOrSong, ListState> for PlaylistsPane {
         }
     }
     fn can_rename(&self, item: &DirOrSong) -> bool {
-        matches!(item, DirOrSong::Dir { .. })
+        // Stored playlists only: library playlist files are read-only
+        // (renaming would rewrite the user's own file).
+        matches!(item, DirOrSong::Dir { full_path, .. } if full_path.is_empty())
     }
     fn rename(item: &DirOrSong, ctx: &Ctx) -> Result<()> {
         match item {
-            DirOrSong::Dir { name: d, .. } => {
+            DirOrSong::Dir { name: d, full_path, .. } if full_path.is_empty() => {
                 let current_name = d.clone();
                 modal!(
                     ctx, InputModal::new(ctx).title("Rename playlist")
@@ -1811,11 +2079,19 @@ impl SongListCore<DirOrSong, ListState> for PlaylistsPane {
                     new_value); Ok(()) }); } Ok(()) })
                 );
             }
+            // Library playlist files are read-only: no rename.
+            DirOrSong::Dir { .. } => {}
             DirOrSong::Song(_) => {}
         }
         Ok(())
     }
     fn move_selected(&mut self, direction: MoveDirection, ctx: &Ctx) -> Result<()> {
+        // Songs inside a library playlist file cannot be reordered (MPD
+        // playlistmove only touches stored playlists; the file is
+        // read-only anyway).
+        if self.open_library_playlist.is_some() {
+            return Ok(());
+        }
         let Some(DirOrSong::Dir { name: playlist, .. }) = self
             .stack
             .previous()
