@@ -137,3 +137,4 @@ pub fn band_current_row(
         .min(len - 1),
     )
 }
+

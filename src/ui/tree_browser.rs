@@ -100,6 +100,11 @@ pub(in crate::ui) trait TreeBrowserCore: Pane {
         None
     }
 
+    /// Drag state of the items-list scrollbar (Round 48: press-and-hold on
+    /// the thumb/track grabs it; vertical movement anywhere then drives
+    /// the scroll until release).
+    fn items_scrollbar_drag(&mut self) -> &mut crate::shared::mouse_event::ScrollbarDrag;
+
     // ── required: behavior hooks ───────────────────────────────────────
 
     /// `a` / `←`: back out one level (parent's children on the right, the
@@ -480,11 +485,26 @@ pub(in crate::ui) trait TreeBrowserCore: Pane {
             // own pre-Phase-2 spacing (Phase 2.1 parity close-out).
             .title(format!("{}({}) ", self.items_title(), self.items_len()));
         let inner = block.inner(area);
-        self.set_items_area(inner);
+        // Round 48: the items list gets a 1-column scrollbar (the same
+        // split the queue table uses); the drag handler recomputes this
+        // column from `items_area()`.
+        let (list_area, scrollbar_area) = if ctx.config.theme.scrollbar.is_some()
+            && inner.width > 1
+        {
+            let [list, scrollbar] = ratatui::layout::Layout::horizontal([
+                ratatui::layout::Constraint::Percentage(100),
+                ratatui::layout::Constraint::Length(1),
+            ])
+            .areas(inner);
+            (list, scrollbar)
+        } else {
+            (inner, Rect::default())
+        };
+        self.set_items_area(list_area);
 
         let hover_idx = crate::ui::panes::hovered_item(
             ctx.mouse_pos(),
-            inner,
+            list_area,
             self.items_list().offset(),
             self.items_len(),
             self.item_row_height(),
@@ -498,10 +518,24 @@ pub(in crate::ui) trait TreeBrowserCore: Pane {
                 .highlight_style(self.items_highlight(hover_idx, ctx))
                 .style(ctx.config.as_list_name_style())
                 .row_height(self.item_row_height()),
-            inner,
+            list_area,
             frame.buffer_mut(),
             self.items_list_mut(),
         );
+        if let Some(scrollbar) = ctx.config.as_styled_scrollbar()
+            && scrollbar_area.width > 0
+        {
+            let viewport =
+                (list_area.height as usize) / (self.item_row_height().max(1) as usize);
+            let len = self.items_len();
+            let max_offset = len.saturating_sub(viewport);
+            let position = self.items_list().offset().min(max_offset);
+            let mut scrollbar_state = ratatui::widgets::ScrollbarState::new(
+                max_offset.saturating_add(1).max(1),
+            )
+            .position(position);
+            frame.render_stateful_widget(scrollbar, scrollbar_area, &mut scrollbar_state);
+        }
         ratatui::widgets::Widget::render(block, area, frame.buffer_mut());
     }
 
@@ -605,12 +639,76 @@ pub(in crate::ui) trait TreeBrowserCore: Pane {
     /// `handle_mouse_event`; jellyfin/radio insert their extra arms around
     /// it).
     fn handle_tree_mouse_event(&mut self, event: MouseEvent, ctx: &Ctx) -> Result<()> {
+        // Round 48: an armed items-scrollbar drag follows the pointer
+        // anywhere until release — intercept it before the area gates so
+        // the drag is not lost when the pointer leaves the list.
+        if ctx.config.theme.scrollbar.is_some()
+            && matches!(event.kind, MouseEventKind::LeftClick | MouseEventKind::Drag { .. })
+        {
+            let area = self.items_area();
+            let scrollbar_area = Rect {
+                x: area.right(),
+                y: area.y,
+                width: 1,
+                height: area.height,
+            };
+            if area.width > 0 && self.handle_items_scrollbar(event, scrollbar_area, ctx)?
+            {
+                return Ok(());
+            }
+        }
         if self.tree_area().contains(event.into()) {
             return self.handle_tree_mouse(event, ctx);
         }
         if self.items_area().contains(event.into()) {
             return self.handle_items_mouse(event, ctx);
         }
+        Ok(())
+    }
+    /// Feed a mouse event to the items-list scrollbar (thumb grab / track
+    /// jump / follow-anywhere drag, Round 48). Returns true when the event
+    /// was consumed by the scrollbar.
+    fn handle_items_scrollbar(
+        &mut self,
+        event: MouseEvent,
+        scrollbar_area: Rect,
+        ctx: &Ctx,
+    ) -> Result<bool> {
+        let len = self.items_len();
+        if len == 0 {
+            return Ok(false);
+        }
+        let viewport =
+            (self.items_area().height as usize) / (self.item_row_height().max(1) as usize);
+        let content_len = len.saturating_sub(viewport).saturating_add(1).max(1);
+        let position = self.items_list().offset();
+        let (begin_len, end_len) = ctx.config.scrollbar_ends_width();
+        if let Some(perc) = self.items_scrollbar_drag().handle(
+            event,
+            scrollbar_area,
+            content_len,
+            viewport,
+            position,
+            begin_len,
+            end_len,
+        ) {
+            self.scroll_items_to(perc, ctx)?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+    /// Scroll the items viewport to a 0..=1 fraction (scrollbar drag/track
+    /// click): the viewport moves, the selection stays.
+    fn scroll_items_to(&mut self, perc: f64, ctx: &Ctx) -> Result<()> {
+        let len = self.items_len();
+        let viewport =
+            (self.items_area().height as usize) / (self.item_row_height().max(1) as usize);
+        let max_offset = len.saturating_sub(viewport);
+        let offset = (perc.clamp(0.0, 1.0) * max_offset as f64).round() as usize;
+        if self.items_list().offset() != offset {
+            *self.items_list_mut().offset_mut() = offset;
+        }
+        ctx.render()?;
         Ok(())
     }
 

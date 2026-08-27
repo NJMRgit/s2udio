@@ -160,6 +160,9 @@ pub struct JellyfinPane {
     info_scrollbar_area: Rect,
     /// Drag state of the info text's scrollbar (thumb follows the pointer).
     info_scrollbar_drag: crate::shared::mouse_event::ScrollbarDrag,
+    /// Drag state of the items-list scrollbar (Round 48: press-and-hold on
+    /// the thumb/track, then the thumb follows the pointer anywhere).
+    item_scrollbar_drag: crate::shared::mouse_event::ScrollbarDrag,
 }
 impl JellyfinPane {
     pub fn new(ctx: &Ctx) -> Self {
@@ -193,6 +196,7 @@ impl JellyfinPane {
             info_song_shown_at: None,
             info_scrollbar_area: Rect::default(),
             info_scrollbar_drag: crate::shared::mouse_event::ScrollbarDrag::default(),
+            item_scrollbar_drag: crate::shared::mouse_event::ScrollbarDrag::default(),
         }
     }
     /// Load the server credentials (cheap file read; done on first show and
@@ -921,6 +925,9 @@ impl TreeBrowserCore for JellyfinPane {
     }
     fn items_list_mut(&mut self) -> &mut ListState {
         &mut self.item_list
+    }
+    fn items_scrollbar_drag(&mut self) -> &mut crate::shared::mouse_event::ScrollbarDrag {
+        &mut self.item_scrollbar_drag
     }
     fn items_area(&self) -> Rect {
         self.items_area

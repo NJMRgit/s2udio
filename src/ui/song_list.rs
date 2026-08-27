@@ -375,6 +375,22 @@ where
                     current.state.set_mark_anchor(idx_to_select);
                     current.state.clear_range_mark();
                     self.fetch_data_internal(ctx);
+                } else if let Some(edge) = crate::ui::band::band_current_row(
+                    event.y,
+                    area,
+                    self.list().state.offset(),
+                    self.list().len(),
+                    1,
+                ) {
+                    // Round 47: a press in the empty pane space below the
+                    // items arms the band at the clamped edge row, so a
+                    // drag can select from empty space into the list, and
+                    // a plain click there clears the multi-selection (the
+                    // release's deferred plain-click path applies it). The
+                    // selection cursor stays put.
+                    let clear_marks = !self.list().state.marked.is_empty();
+                    self.list_mut().state.band.arm(edge, clear_marks);
+                    ctx.render()?;
                 }
             }
             MouseEventKind::DoubleClick if area.contains(position) => {

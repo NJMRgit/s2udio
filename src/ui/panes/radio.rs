@@ -234,6 +234,9 @@ pub struct RadioPane {
     regions_area: Rect,
     stations_area: Rect,
     info_area: Rect,
+    /// Drag state of the stations-list scrollbar (Round 48: press-and-hold
+    /// on the thumb/track, then the thumb follows the pointer anywhere).
+    item_scrollbar_drag: crate::shared::mouse_event::ScrollbarDrag,
 }
 impl RadioPane {
     pub fn new(ctx: &Ctx) -> Self {
@@ -254,6 +257,7 @@ impl RadioPane {
             regions_area: Rect::default(),
             stations_area: Rect::default(),
             info_area: Rect::default(),
+            item_scrollbar_drag: crate::shared::mouse_event::ScrollbarDrag::default(),
         }
     }
     fn max_favourites(&self, ctx: &Ctx) -> usize {
@@ -942,6 +946,9 @@ impl TreeBrowserCore for RadioPane {
     }
     fn items_list_mut(&mut self) -> &mut ListState {
         &mut self.station_list
+    }
+    fn items_scrollbar_drag(&mut self) -> &mut crate::shared::mouse_event::ScrollbarDrag {
+        &mut self.item_scrollbar_drag
     }
     fn items_area(&self) -> Rect {
         self.stations_area

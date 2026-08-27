@@ -197,10 +197,13 @@ fn is_scrollbar_interaction(event: MouseEvent, scrollbar_area: Rect) -> bool {
         MouseEventKind::LeftClick => {
             event.x == scrollbar_x && scrollbar_area.contains(event.into())
         }
+        // A drag is a scrollbar drag when it *started* on the scrollbar
+        // column (Round 48: once a grab is armed the thumb follows the
+        // pointer anywhere, so the current position is deliberately not
+        // required to stay on the column).
         MouseEventKind::Drag { drag_start_position } => {
-            (drag_start_position.x == scrollbar_x
-                && scrollbar_area.contains(drag_start_position))
-                || (event.x == scrollbar_x && scrollbar_area.contains(event.into()))
+            drag_start_position.x == scrollbar_x
+                && scrollbar_area.contains(drag_start_position)
         }
         _ => false,
     }
@@ -320,27 +323,46 @@ impl ScrollbarDrag {
             }) else {
             return None;
         };
-        if geometry.track_len == 0 || !is_scrollbar_interaction(event, area) {
+        if geometry.track_len == 0 {
             return None;
         }
         match event.kind {
             MouseEventKind::LeftClick => {
+                if !is_scrollbar_interaction(event, area) {
+                    return None;
+                }
                 let y = event.y;
                 let thumb_top = geometry.thumb_top();
                 if y >= thumb_top && y < thumb_top + geometry.thumb_size {
                     self.grab_offset = Some(y.saturating_sub(thumb_top));
                     None
                 } else {
+                    // A track press also grabs the thumb (Round 48: the
+                    // press-and-hold then follows the pointer anywhere).
                     self.grab_offset = Some(0);
                     Some(Self::fraction_for_y(y, &geometry))
                 }
             }
-            MouseEventKind::Drag { .. } => {
-                if self.grab_offset.is_none() {
+            MouseEventKind::Drag { drag_start_position } => {
+                // Once the grab is armed the thumb follows vertical mouse
+                // movement anywhere until the button is released (band-like
+                // capture; the pointer row clamps to the track). The drag
+                // still has to *start* on the scrollbar column: a release
+                // outside the pane can leave the grab armed, and a later
+                // drag from elsewhere must not inherit it.
+                if self.grab_offset.is_none()
+                    || drag_start_position.x != area.right().saturating_sub(1)
+                    || !area.contains(drag_start_position)
+                {
                     return None;
                 }
-                let target_top = event
-                    .y
+                let y = event.y.clamp(
+                    geometry.track_top,
+                    geometry
+                        .track_top
+                        .saturating_add(geometry.track_len.saturating_sub(1)),
+                );
+                let target_top = y
                     .saturating_sub(self.grab_offset.unwrap_or(0))
                     .clamp(geometry.track_top, geometry.thumb_top_max());
                 let travel = geometry.track_len.saturating_sub(geometry.thumb_size);

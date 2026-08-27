@@ -836,6 +836,24 @@ impl Pane for QueuePane {
                             self.video_marked.clear_range();
                             ctx.render()?;
                             return Ok(());
+                        } else if let Some(edge) = crate::ui::band::band_current_row(
+                            event.y,
+                            table,
+                            self.video_state.offset(),
+                            self.video_items_len,
+                            1,
+                        ) {
+                            // Round 47: a press in the empty pane space
+                            // below the items arms the band at the clamped
+                            // edge row, so a drag can select from empty
+                            // space into the list, and a plain click there
+                            // clears the multi-selection (the release's
+                            // deferred plain-click path applies it). The
+                            // selection cursor stays put.
+                            let clear_marks = !self.video_marked.is_empty();
+                            self.video_band.arm(edge, clear_marks);
+                            ctx.render()?;
+                            return Ok(());
                         }
                     }
                     MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
@@ -1017,6 +1035,23 @@ impl Pane for QueuePane {
                     self.queue.select_idx(idx, ctx.config.scrolloff);
                     self.queue.state.set_mark_anchor(idx);
                     self.queue.state.clear_range_mark();
+                    ctx.render()?;
+                } else if let Some(edge) = crate::ui::band::band_current_row(
+                    event.y,
+                    self.areas[Areas::Table],
+                    self.queue.state.offset(),
+                    self.queue.len(),
+                    1,
+                ) {
+                    // Round 47: a press in the empty pane space below the
+                    // items arms the band at the clamped edge row, so a
+                    // drag can select from empty space into the list, and
+                    // a plain click there clears the multi-selection (the
+                    // release's deferred plain-click path applies it). The
+                    // selection cursor stays put. (Host fix 2026-08-27:
+                    // this arm was missing from the Round 47 commit.)
+                    let clear_marks = !self.queue.state.marked.is_empty();
+                    self.queue.state.band.arm(edge, clear_marks);
                     ctx.render()?;
                 }
             }

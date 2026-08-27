@@ -23,6 +23,7 @@ pub mod list_modal;
 pub use info_list_modal::InfoListModal;
 pub use list_modal::{ListConfirm, ListModal};
 pub mod menu;
+pub mod mpv_conf_editor;
 pub mod outputs;
 pub mod paste;
 pub mod remap_keys;

@@ -142,6 +142,10 @@ pub struct PlaylistsPane {
     browser: Browser<DirOrSong>,
     playlists_area: Rect,
     songs_area: Rect,
+    /// Area of the playlists (left) list's scrollbar column (Round 48: the
+    /// songs list's scrollbar is recorded in `browser.areas[Scrollbar]`,
+    /// which the shared `SongListCore` handler reads).
+    playlists_scrollbar_area: Rect,
     initialized: bool,
     /// Playlist name -> whether it holds audio or video content (from the
     /// background classification query), driving the ♪ / ▶ prefixes.
@@ -232,6 +236,7 @@ impl PlaylistsPane {
             browser: Browser::new(),
             playlists_area: Rect::default(),
             songs_area: Rect::default(),
+            playlists_scrollbar_area: Rect::default(),
             initialized: false,
             playlist_kinds: HashMap::new(),
             info_state: ListState::default(),
@@ -252,11 +257,12 @@ impl PlaylistsPane {
             .border_style(ctx.config.as_border_style())
             .title(" Playlists ");
         let inner = block.inner(area);
+        let (list_area, scrollbar_area) = Self::split_scrollbar(inner, ctx);
         let Dir { state, .. } = self.stack.root_mut();
-        state.set_content_and_viewport_len(items_snapshot.len(), inner.height.into());
+        state.set_content_and_viewport_len(items_snapshot.len(), list_area.height.into());
         let hover_idx = crate::ui::panes::hovered_item(
             ctx.mouse_pos(),
-            inner,
+            list_area,
             state.offset(),
             items_snapshot.len(),
             1,
@@ -278,12 +284,36 @@ impl PlaylistsPane {
                     },
                 )
                 .style(ctx.config.as_list_name_style()),
-            inner,
+            list_area,
             frame.buffer_mut(),
             state.as_render_state_ref(),
         );
+        if let Some(scrollbar) = ctx.config.as_styled_scrollbar()
+            && scrollbar_area.width > 0
+        {
+            frame.render_stateful_widget(
+                scrollbar,
+                scrollbar_area,
+                state.as_scrollbar_state_ref(),
+            );
+        }
         ratatui::widgets::Widget::render(block, area, frame.buffer_mut());
-        self.playlists_area = inner;
+        self.playlists_area = list_area;
+        self.playlists_scrollbar_area = scrollbar_area;
+    }
+    /// Split `inner` into the list area and a 1-column scrollbar area when
+    /// the theme has a scrollbar (the same split the queue table uses).
+    fn split_scrollbar(inner: Rect, ctx: &Ctx) -> (Rect, Rect) {
+        if ctx.config.theme.scrollbar.is_some() && inner.width > 1 {
+            let [list, scrollbar] = ratatui::layout::Layout::horizontal([
+                ratatui::layout::Constraint::Percentage(100),
+                ratatui::layout::Constraint::Length(1),
+            ])
+            .areas(inner);
+            (list, scrollbar)
+        } else {
+            (inner, Rect::default())
+        }
     }
     fn render_songs(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) {
         let at_root = self.stack.path().is_empty();
@@ -301,13 +331,14 @@ impl PlaylistsPane {
             .border_style(ctx.config.as_border_style())
             .title(title);
         let inner = block.inner(area);
+        let (list_area, scrollbar_area) = Self::split_scrollbar(inner, ctx);
         if at_root {
             let Dir { state, .. } = self.stack.root_mut();
             state
-                .set_content_and_viewport_len(items_snapshot.len(), inner.height.into());
+                .set_content_and_viewport_len(items_snapshot.len(), list_area.height.into());
             let hover_idx = crate::ui::panes::hovered_item(
                 ctx.mouse_pos(),
-                inner,
+                list_area,
                 state.offset(),
                 items_snapshot.len(),
                 1,
@@ -329,18 +360,27 @@ impl PlaylistsPane {
                         },
                     )
                     .style(ctx.config.as_list_name_style()),
-                inner,
+                list_area,
                 frame.buffer_mut(),
                 state.as_render_state_ref(),
             );
+            if let Some(scrollbar) = ctx.config.as_styled_scrollbar()
+                && scrollbar_area.width > 0
+            {
+                frame.render_stateful_widget(
+                    scrollbar,
+                    scrollbar_area,
+                    state.as_scrollbar_state_ref(),
+                );
+            }
             ratatui::widgets::Widget::render(block, area, frame.buffer_mut());
         } else {
             let Dir { state, .. } = self.stack.current_mut();
             state
-                .set_content_and_viewport_len(items_snapshot.len(), inner.height.into());
+                .set_content_and_viewport_len(items_snapshot.len(), list_area.height.into());
             let hover_idx = crate::ui::panes::hovered_item(
                 ctx.mouse_pos(),
-                inner,
+                list_area,
                 state.offset(),
                 items_snapshot.len(),
                 1,
@@ -362,14 +402,24 @@ impl PlaylistsPane {
                         },
                     )
                     .style(ctx.config.as_list_name_style()),
-                inner,
+                list_area,
                 frame.buffer_mut(),
                 state.as_render_state_ref(),
             );
+            if let Some(scrollbar) = ctx.config.as_styled_scrollbar()
+                && scrollbar_area.width > 0
+            {
+                frame.render_stateful_widget(
+                    scrollbar,
+                    scrollbar_area,
+                    state.as_scrollbar_state_ref(),
+                );
+            }
             ratatui::widgets::Widget::render(block, area, frame.buffer_mut());
         }
-        self.songs_area = inner;
-        self.browser.areas[BrowserArea::Current] = inner;
+        self.songs_area = list_area;
+        self.browser.areas[BrowserArea::Current] = list_area;
+        self.browser.areas[BrowserArea::Scrollbar] = scrollbar_area;
     }
     fn render_info(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) {
         let key = if self.stack.path().is_empty() {
@@ -1120,6 +1170,46 @@ impl Pane for PlaylistsPane {
                     return SongListCore::finish_band_drag(self, ctx);
                 }
                 _ => {}
+            }
+        }
+        // Round 48 scrollbars: the songs list (right) goes through the
+        // shared SongListCore handler (its scrollbar area is recorded in
+        // `browser.areas[Scrollbar]` during render); the playlists list
+        // (left) drives the root dir directly. Handled before the area
+        // gates so an armed drag follows the pointer anywhere.
+        if SongListCore::handle_scrollbar_interaction(self, event, ctx)? {
+            return Ok(());
+        }
+        if self.playlists_scrollbar_area.width > 0
+            && matches!(
+                event.kind, MouseEventKind::LeftClick | MouseEventKind::Drag { .. }
+            )
+        {
+            let dir = self.stack.root_mut();
+            let viewport_len = dir
+                .state
+                .viewport_len()
+                .unwrap_or(self.playlists_scrollbar_area.height as usize);
+            let content_len = dir
+                .items
+                .len()
+                .saturating_sub(viewport_len)
+                .saturating_add(1)
+                .max(1);
+            let offset = dir.state.inner.offset();
+            let (begin_len, end_len) = ctx.config.scrollbar_ends_width();
+            if let Some(perc) = dir.state.scrollbar_drag.handle(
+                event,
+                self.playlists_scrollbar_area,
+                content_len,
+                viewport_len,
+                offset,
+                begin_len,
+                end_len,
+            ) {
+                dir.scroll_to(perc, ctx.config.scrolloff);
+                ctx.render()?;
+                return Ok(());
             }
         }
         if self.playlists_area.contains(position)
