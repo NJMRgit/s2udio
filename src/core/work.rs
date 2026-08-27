@@ -741,7 +741,7 @@ fn jellyfin_handle(
     let jf = Jellyfin::load(config_file, Some(&sidecar))
         .ok_or_else(|| {
             anyhow::anyhow!(
-                "Jellyfin is not configured: cannot read {}", config_file.display()
+                "Jellyfin is not configured — sign in via Esc → Settings → Jellyfin."
             )
         })?;
     f(&jf)

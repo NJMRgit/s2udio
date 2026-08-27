@@ -192,11 +192,19 @@
             ),
         ),
         (
-            name: "Radio",
+            name: "Playlists",
             pane: Split(
                 size: "100%",
                 direction: Vertical,
-                panes: [(pane: Pane(Radio), size: "100%", borders: "ALL", border_symbols: Rounded)],
+                panes: [(pane: Pane(Playlists), size: "100%", borders: "ALL", border_symbols: Rounded)],
+            )
+        ),
+        (
+            name: "MPD",
+            pane: Split(
+                size: "100%",
+                direction: Vertical,
+                panes: [(pane: Pane(Directories()), size: "100%", borders: "ALL", border_symbols: Rounded)],
             )
         ),
         (
@@ -205,6 +213,14 @@
                 size: "100%",
                 direction: Vertical,
                 panes: [(pane: Pane(Jellyfin), size: "100%", borders: "ALL", border_symbols: Rounded)],
+            )
+        ),
+        (
+            name: "Radio",
+            pane: Split(
+                size: "100%",
+                direction: Vertical,
+                panes: [(pane: Pane(Radio), size: "100%", borders: "ALL", border_symbols: Rounded)],
             )
         ),
     ],

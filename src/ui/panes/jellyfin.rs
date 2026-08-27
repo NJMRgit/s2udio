@@ -206,16 +206,24 @@ impl JellyfinPane {
             let path = ctx.config.jellyfin.config_file.clone();
             let path_str = path.to_string_lossy().into_owned();
             let expanded = crate::config::utils::tilde_expand(&path_str);
-            if let Some(server) = Jellyfin::from_config_file(
-                std::path::Path::new(expanded.as_ref()),
-            ) {
+            // Round 51: s2udio's own Settings sidecar first
+            // (`~/.config/s2udio/jellyfin.ron`, legacy `~/.config/rmpc/…`
+            // honored), jellytui's config file is only an optional reuse
+            // fallback — same ordering as the playback/MPRIS call sites
+            // (`src/core/work.rs` jellyfin_handle).
+            let sidecar = crate::config::jellyfin::jellyfin_sidecar_path();
+            if let Some(server) =
+                Jellyfin::load(std::path::Path::new(expanded.as_ref()), Some(&sidecar))
+            {
                 self.server = Some(server);
+                // A successful load must clear the cached notice; the pane
+                // re-attempts the load whenever the error is set.
+                self.error = None;
             } else {
                 self.error = Some(
-                    format!(
-                        "Jellyfin is not configured — run jellytui once to create {}",
-                        path.display()
-                    ),
+                    "Jellyfin is not configured — press Esc → Settings → Jellyfin, \
+                     enter Server URL / Username / Password and Sign in."
+                        .to_owned(),
                 );
             }
         }
@@ -1024,12 +1032,34 @@ impl TreeBrowserCore for JellyfinPane {
         Ok(())
     }
     fn activate_selected(&mut self, ctx: &Ctx) -> Result<()> {
+        if self.server.is_none() {
+            // Round 51: no credentials yet — Enter / d / → / double-click
+            // opens Settings on the Jellyfin sign-in section instead of a
+            // silent no-op (the pane otherwise only shows the notice row).
+            crate::ui::modals::settings::SettingsModal::open_jellyfin(ctx);
+            return Ok(());
+        }
         let Some(item) = self.selected_item() else { return Ok(()) };
         if item.is_playable() {
             self.play_selected(ctx)
         } else {
             self.open_item(item, ctx)
         }
+    }
+    /// Round 51: clicking the (empty) items pane while no Jellyfin
+    /// credentials exist opens Settings on the Jellyfin sign-in section —
+    /// the pane is otherwise a dead click.
+    fn handle_items_left_click(
+        &mut self,
+        row: usize,
+        event: &MouseEvent,
+        ctx: &Ctx,
+    ) -> Result<()> {
+        if self.server.is_none() && row >= self.items_len() {
+            crate::ui::modals::settings::SettingsModal::open_jellyfin(ctx);
+            return Ok(());
+        }
+        TreeBrowserCore::handle_items_left_click(self, row, event, ctx)
     }
     fn open_context_menu(
         &mut self,
@@ -1789,6 +1819,20 @@ impl Pane for JellyfinPane {
             }
             UiEvent::Hidden if !is_visible => {
                 self.poster.hide(ctx);
+            }
+            // Round 51: a Settings sign-in may have written the jellyfin
+            // sidecar while the app runs (and the notice may be stale) —
+            // drop the cached server so credentials reload and the views
+            // are re-requested in the same session: immediately when the
+            // tab is on screen, on the next show otherwise.
+            UiEvent::ConfigChanged => {
+                self.server = None;
+                self.error = None;
+                if is_visible {
+                    self.fetch_views(ctx);
+                } else {
+                    self.initialized = false;
+                }
             }
             _ => {}
         }
