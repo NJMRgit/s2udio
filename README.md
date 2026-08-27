@@ -40,7 +40,7 @@ Right: RMPC ootb
   3.12) so SVPflow/RIFE frame interpolation runs without crashing mpv
 - full mouse controls
 - sensible and intuitive key binds
-- library playlist files — Settings > MPD "show .m3u/.pls/.xspf playlists from the music library": the Playlists tab also lists playlist files found inside the MPD music library (nested album .m3u files included), ♫-marked, opened with the app's own m3u/pls/xspf parsers (Add to Queue / Replace Queue); read-only — the app never edits or deletes the library files
+- automatically import library playlist files — m3u/pls/xspf support (toggled in settings > mpd)
    
 
 ## Showcase
