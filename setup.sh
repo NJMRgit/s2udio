@@ -87,6 +87,9 @@ SUMMARY_BIN="$BIN_DIR/s2udio"
 SUMMARY_MPV_FULL=0
 SUMMARY_MPD_ACTIVE=(systemctl --user is-active mpd.service)
 SUMMARY_MPDRIS2_ACTIVE=(systemctl --user is-active mpDris2.service)
+# mpd_readiness_check() sets this for summary_step (round 52): "" (backend
+# did not run the check), "+ ready", or "BROKEN - see above".
+SUMMARY_MPD_READY=""
 
 # ---------------------------------------------------------------------------
 # Distro detection (plan §6.2): /etc/os-release ID / ID_LIKE -> backend.
@@ -264,9 +267,12 @@ cava_step() { # $1 = version fallback command ("" = none); $2 = missing hint
     fi
 }
 
-# Non-Arch only: the user-level instance needs its own mpd.conf (the system
-# mpd of Debian/Ubuntu uses /etc/mpd.conf; Arch setups already have one).
-# Never overwrites an existing config; confirm-gated like every install.
+# Shared (round 52: every backend, incl. Arch): the user-level instance
+# needs its own mpd.conf. Debian/Ubuntu's system mpd uses /etc/mpd.conf;
+# a FRESH Arch/CachyOS install has no user config and the packaged SYSTEM
+# unit runs against root-owned /var/lib/mpd state (GitHub issue #1
+# symptom 3). Never overwrites an existing config; confirm-gated like
+# every install.
 ensure_mpd_conf() {
     if [[ -f "$MPD_CONF" ]]; then
         return 0
@@ -288,6 +294,214 @@ EOF
         ok "mpd.conf created at $MPD_CONF (user-level instance)"
     else
         warn "no MPD config at $MPD_CONF - set MPD_CONF=/path/to/mpd.conf and re-run"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Round 52 (GitHub issue #1 symptom 3) — MPD install-time readiness + repair.
+# Runs after the services step on EVERY distro path: resolve the config the
+# running instance actually uses, probe its state dirs, then verify over the
+# wire that a `status` query has no `error:` line (a broken db/state dir
+# appears verbatim there). Never aborts the install on any probe error.
+# Round 52 fix (FEEDBACK-2026-08-27-4): decide whether an existing user-unit
+# config can run as THIS user's instance — all four state-file parents must
+# resolve under $HOME and be existing+writable (or creatable). Mirrors the
+# readiness check's user-level defaults; system-level paths (e.g. /var/lib/
+# mpd) are NOT keep-able for a user instance.
+mpd_conf_state_user_writable() { # $1 = mpd.conf path; exit 0 = user-writable state
+    local conf="$1" key dir val
+    for key in db_file state_file sticker_file playlist_directory; do
+        val="$(sed -n "s/^[[:space:]]*${key}[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$conf" 2>/dev/null | head -1 || true)"
+        [[ -n "$val" ]] || case "$key" in
+            db_file) val="$HOME/.mpd/database" ;;
+            state_file) val="$HOME/.mpd/state" ;;
+            sticker_file) val="$HOME/.mpd/sticker.sql" ;;
+            playlist_directory) val="$HOME/.mpd/playlists" ;;
+        esac
+        val="${val/#\~/$HOME}"
+        dir="$(dirname "$val")"
+        [[ "$dir" == "$HOME"/* ]] || return 1
+        if [[ -e "$dir" ]]; then
+            [[ -w "$dir" ]] || return 1
+        elif ! mkdir -p "$dir" 2>/dev/null; then
+            return 1
+        fi
+    done
+    return 0
+}
+
+mpd_wire_probe() { # $1 = bind address (or unix socket path); $2 = port
+    # Speaks just enough of the MPD protocol: connect, send `status`, then
+    # read responses LINE BY LINE until the bare `OK` terminator. MPD keeps
+    # the connection open after replying — a read-to-EOF blocks until the 3s
+    # socket timeout on every healthy instance (round-52 blocker). The
+    # `OK MPD …` greeting is skipped by the exact-match; `error:` lines are
+    # collected and printed verbatim afterwards. Exit 0 = ok; 1 = MPD
+    # answered with an error:; 2 = no listener.
+    python3 - "$1" "$2" <<'PYEOF'
+import socket, sys
+
+addr, port = sys.argv[1], int(sys.argv[2])
+try:
+    if addr.startswith('/'):
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(3)
+        s.connect(addr)
+    else:
+        s = socket.create_connection((addr, port), timeout=3)
+    s.settimeout(3)
+    f = s.makefile('rwb')
+    f.write(b'status\n')
+    f.flush()
+    errors = []
+    while True:
+        raw = f.readline()
+        if not raw:
+            break
+        line = raw.decode('utf-8', 'replace').rstrip('\n')
+        if line.startswith('error:'):
+            errors.append(line)
+        if line == 'OK':
+            break
+    s.close()
+except OSError as e:
+    print(f'{e}')
+    sys.exit(2)
+for line in errors:
+    print(line)
+sys.exit(1 if errors else 0)
+PYEOF
+}
+
+mpd_readiness_check() { # $1 = optional info-header prefix (run_arch passes "8/9  ")
+    info "${1:-}MPD readiness check"
+    local fail=0 conf="" addr="127.0.0.1" port_no="6600" d unit exec_line
+    local svc_user="mpd"   # packaged SYSTEM units run as this user
+    # 1. Resolve the effective config: the running user unit's ExecStart
+    #    config argument, else $MPD_CONF, else MPD's search order.
+    unit="$HOME/.config/systemd/user/mpd.service"
+    exec_line="$(sed -n 's/^ExecStart=//p' "$unit" 2>/dev/null | head -1 || true)"
+    if [[ -n "$exec_line" ]]; then
+        # the config argument is the first token ending in .conf (systemd
+        # does not expand ~; a unit that passes none lets MPD's own search
+        # below run)
+        conf="$(tr ' ' '\n' <<<"$exec_line" | grep -m1 '\.conf$' || true)"
+        conf="${conf/#\~/$HOME}"
+    fi
+    [[ -n "$conf" && -r "$conf" ]] || conf="${MPD_CONF:-$HOME/.config/mpd/mpd.conf}"
+    if [[ ! -r "$conf" ]]; then
+        conf=""
+        for c in /etc/mpd.conf "$HOME/.mpdconf" "$HOME/.config/mpd/mpd.conf"; do
+            if [[ -r "$c" ]]; then conf="$c"; break; fi
+        done
+    fi
+    if [[ -z "$conf" ]]; then
+        warn "no readable mpd.conf found (searched \$MPD_CONF, /etc/mpd.conf, ~/.mpdconf, ~/.config/mpd/mpd.conf) - MPD readiness undetermined"
+        SUMMARY_MPD_READY="BROKEN - see above"
+        return 0
+    fi
+    ok "effective MPD config: $conf"
+
+    # 2. State dirs: db_file / state_file / sticker_file / playlist_directory
+    #    (MPD defaults when a key is absent) — the parent dir must exist and
+    #    be writable by the service user.
+    local db state sticker playlists
+    db="$(sed -n 's/^[[:space:]]*db_file[[:space:]]*"\([^"]*\)".*/\1/p' "$conf" 2>/dev/null | head -1 || true)"
+    db="${db:-$HOME/.mpd/database}"; db="${db/#\~/$HOME}"
+    state="$(sed -n 's/^[[:space:]]*state_file[[:space:]]*"\([^"]*\)".*/\1/p' "$conf" 2>/dev/null | head -1 || true)"
+    state="${state:-$HOME/.mpd/state}"; state="${state/#\~/$HOME}"
+    sticker="$(sed -n 's/^[[:space:]]*sticker_file[[:space:]]*"\([^"]*\)".*/\1/p' "$conf" 2>/dev/null | head -1 || true)"
+    sticker="${sticker:-$HOME/.mpd/sticker.sql}"; sticker="${sticker/#\~/$HOME}"
+    playlists="$(sed -n 's/^[[:space:]]*playlist_directory[[:space:]]*"\([^"]*\)".*/\1/p' "$conf" 2>/dev/null | head -1 || true)"
+    playlists="${playlists:-$HOME/.mpd/playlists}"; playlists="${playlists/#\~/$HOME}"
+    for d in "$db" "$state" "$sticker" "$playlists"; do
+        d="$(dirname "$d")"
+        if [[ "$d" == "$HOME"/* ]]; then
+            # user-level state: probed as THIS user (the --user unit runs as
+            # them); missing dirs are auto-created (no sudo needed).
+            if [[ ! -e "$d" ]]; then
+                if mkdir -p "$d" 2>/dev/null; then
+                    ok "created MPD state dir $d"
+                else
+                    warn "cannot create MPD state dir $d"
+                    fail=1
+                fi
+            elif [[ ! -w "$d" ]]; then
+                warn "MPD state dir $d exists but is not writable by you"
+                if command -v sudo >/dev/null 2>&1 && confirm "Re-chown it to you (sudo chown -R $(id -un):$(id -gn) $d)?"; then
+                    if sudo chown -R "$(id -un):$(id -gn)" "$d"; then
+                        ok "MPD state dir fixed: $d"
+                    else
+                        warn "could not re-chown $d (sudo failed?)"
+                        fail=1
+                    fi
+                else
+                    fail=1
+                fi
+            fi
+        else
+            # system-level state (e.g. /var/lib/mpd): writable by the
+            # service user? sudo probe; degrade to a printed hint when sudo
+            # is unavailable.
+            if command -v sudo >/dev/null 2>&1; then
+                if ! sudo -n -u "$svc_user" test -w "$d" 2>/dev/null; then
+                    warn "MPD state dir $d is not writable by the '$svc_user' service user"
+                    warn "Fix: sudo mkdir -p $d && sudo chown -R $svc_user:audio $d"
+                    if confirm "Apply the fix (sudo mkdir -p $d && sudo chown -R $svc_user:audio $d)?"; then
+                        local sflag=""
+                        [[ $ASSUME_YES -eq 1 ]] && sflag="-n"
+                        if sudo $sflag mkdir -p "$d" && sudo $sflag chown -R "$svc_user:audio" "$d"; then
+                            ok "MPD state dir fixed: $d"
+                        else
+                            warn "could not apply the MPD state-dir fix (sudo failed?)"
+                            fail=1
+                        fi
+                    else
+                        warn "not applied - re-run setup.sh (its user-level instance avoids root-owned state) or fix manually"
+                        fail=1
+                    fi
+                fi
+            else
+                warn "sudo unavailable - cannot verify/repair $d; fix manually: sudo mkdir -p $d && sudo chown -R $svc_user:audio $d"
+                fail=1
+            fi
+        fi
+    done
+
+    # 3. Wire check: connect to bind_to_address/port (MPD defaults
+    #    127.0.0.1:6600; a unix socket path is honored) and capture error:
+    #    lines. `systemctl enable --now` returns before the socket binds, so
+    #    retry briefly (MPD_READY_TRIES, default 3 tries 1s apart; tunable).
+    local bind_addr probe_out probe_rc try tries
+    bind_addr="$(sed -n 's/^[[:space:]]*bind_to_address[[:space:]]*"\([^"#]*\)".*/\1/p; s/^[[:space:]]*bind_to_address[[:space:]]*\([^"#]*\).*/\1/p' "$conf" 2>/dev/null | head -1 | tr -d ' ' || true)"
+    bind_addr="${bind_addr:-127.0.0.1}"
+    port_no="$(sed -n 's/^[[:space:]]*port[[:space:]]*"\([0-9]*\)".*/\1/p; s/^[[:space:]]*port[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$conf" 2>/dev/null | head -1 || true)"
+    port_no="${port_no:-6600}"
+    tries="${MPD_READY_TRIES:-3}"
+    probe_rc=2
+    for ((try = 1; try <= tries; try++)); do
+        probe_out="$(mpd_wire_probe "$bind_addr" "$port_no" 2>&1)" && probe_rc=0 || probe_rc=$?
+        [[ $probe_rc -eq 2 && $try -lt $tries ]] && sleep 1
+        [[ $probe_rc -ne 2 ]] && break
+    done
+    if [[ "$probe_rc" == "0" ]]; then
+        :
+    elif [[ "$probe_rc" == "1" ]]; then
+        warn "MPD reports an error over the wire: ${probe_out:-unknown error}"
+        warn "re-run setup.sh or check the MPD state dir permissions"
+        fail=1
+    else
+        warn "MPD not reachable at $bind_addr:$port_no (${probe_out:-connection refused}) - check that mpd is running"
+        warn "hint: re-run setup.sh (it enables/starts the user MPD unit)"
+        fail=1
+    fi
+
+    if [[ "$fail" == "0" ]]; then
+        SUMMARY_MPD_READY="+ ready"
+        ok "MPD ready (db OK, wire check passed)"
+    else
+        SUMMARY_MPD_READY="BROKEN - see above"
+        warn "MPD readiness FAIL - see the messages above (re-run setup.sh or repair the MPD state dirs)"
     fi
 }
 
@@ -314,7 +528,12 @@ summary_step() {
     fi
     printf '  yt-dlp : %s (%s)\n' "$(command -v yt-dlp >/dev/null && echo present || echo MISSING)" "$(yt-dlp --version 2>/dev/null || echo '?')"
     printf '  cava   : %s\n' "$(command -v cava >/dev/null && echo present || echo MISSING)"
-    printf '  mpd    : %s\n' "$("${SUMMARY_MPD_ACTIVE[@]}" 2>/dev/null || echo inactive)"
+    local mpd_state; mpd_state="$("${SUMMARY_MPD_ACTIVE[@]}" 2>/dev/null || echo inactive)"
+    if [[ -n "${SUMMARY_MPD_READY:-}" ]]; then
+        printf '  mpd    : %s %s\n' "$mpd_state" "$SUMMARY_MPD_READY"
+    else
+        printf '  mpd    : %s\n' "$mpd_state"
+    fi
     printf '  mpDris2: %s\n' "$("${SUMMARY_MPDRIS2_ACTIVE[@]}" 2>/dev/null || echo inactive)"
     printf '\n  All dependencies are official distro/AUR packages (no patched cava/mpDris2,\n'
     printf '  no yt-dlp-ejs). Restart s2udio to pick up the new binary: kill s2udio\n'
@@ -633,13 +852,63 @@ run_arch() {
     cava_step "pacman -Q cava" "install it (sudo pacman -S cava)"
 
     # ---------------------------------------------------------------------------
+    # Round 52 (GitHub issue #1 symptom 3): fresh Arch/CachyOS installs run
+    # the packaged SYSTEM mpd.service against /etc/mpd.conf with root-owned
+    # /var/lib/mpd state (the db open fails). Stop+disable it when present
+    # — the user-level instance takes over — and make sure a user unit
+    # targets $MPD_CONF.
+    ensure_mpd_conf
     info "7/8  MPD + mpDris2 user services"
     UNITS=$(systemctl --user list-unit-files 2>/dev/null || true)
-    if grep -q '^mpd.service' <<<"$UNITS"; then
-        systemctl --user is-enabled mpd.service >/dev/null 2>&1 \
-            && ok "mpd.service enabled" || { systemctl --user enable --now mpd.service; ok "mpd.service enabled+started"; }
+    if systemctl list-unit-files 2>/dev/null | grep -q '^mpd.service'; then
+        systemctl stop mpd.service >/dev/null 2>&1 || true
+        systemctl disable mpd.service >/dev/null 2>&1 || true
+        ok "system mpd.service stopped+disabled (user unit takes over)"
+    fi
+    MPD_USER_UNIT="$HOME/.config/systemd/user/mpd.service"
+    # Round 52 fix (FEEDBACK-2026-08-27-4 §3a): keep the unit when it targets
+    # $MPD_CONF exactly OR any OTHER existing config whose state dirs are
+    # user-writable (a working user instance must NOT be silently rewritten);
+    # overwrite a deviating unit only after warning that the template replaces
+    # it (its config is missing or its state dirs are system-level).
+    keep=0
+    if [[ -f "$MPD_USER_UNIT" ]] && grep -Fq "ExecStart=/usr/bin/mpd --no-daemon $MPD_CONF" "$MPD_USER_UNIT"; then
+        ok "mpd.service (user) already targets $MPD_CONF (user-writable state) - keeping it"
+        keep=1
+    elif [[ -f "$MPD_USER_UNIT" ]]; then
+        other_conf="$(sed -n 's/^ExecStart=//p' "$MPD_USER_UNIT" 2>/dev/null | head -1 | tr ' ' '\n' | grep -m1 '\.conf$' || true)"
+        other_conf="${other_conf/#\~/$HOME}"
+        if [[ -n "$other_conf" && -r "$other_conf" ]] && mpd_conf_state_user_writable "$other_conf"; then
+            ok "mpd.service (user) already targets $other_conf (user-writable state) - keeping it"
+            keep=1
+        else
+            warn "mpd.service (user) exists but does not target $MPD_CONF (or its state dirs are not user-writable) - overwriting with the s2udio template"
+        fi
+    fi
+    if [[ $keep -ne 1 ]]; then
+        mkdir -p "$HOME/.config/systemd/user"
+        if cat > "$MPD_USER_UNIT" <<EOF
+[Unit]
+Description=Music Player Daemon (s2udio user instance)
+After=network.target
+[Service]
+ExecStart=/usr/bin/mpd --no-daemon $MPD_CONF
+Restart=on-failure
+[Install]
+WantedBy=default.target
+EOF
+        then
+            systemctl --user daemon-reload 2>/dev/null || true
+            ok "mpd.service (user) written (user-level instance, $MPD_CONF)"
+        else
+            warn "mpd.service not found - install mpd and enable it: systemctl --user enable --now mpd"
+        fi
+    fi
+    if systemctl --user is-enabled mpd.service >/dev/null 2>&1 && systemctl --user is-active mpd.service >/dev/null 2>&1; then
+        ok "mpd.service enabled+active (user instance)"
     else
-        warn "mpd.service not found - install mpd and enable it: systemctl --user enable --now mpd"
+        systemctl --user enable --now mpd.service >/dev/null 2>&1 || true
+        ok "mpd.service enabled+started (user instance)"
     fi
     # mpDris2 runs through the s2u-mpdris2 shim: the official binary,
     # extended at runtime to serve the stream thumbnail s2udio writes to
@@ -672,6 +941,7 @@ EOF
         warn "mpDris2.service not found - install mpdris2-git and enable it"
     fi
     # ---------------------------------------------------------------------------
+    mpd_readiness_check "8/9  "
     pacman -Q mpv-full >/dev/null 2>&1 && SUMMARY_MPV_FULL=1
     summary_step
 }
@@ -723,6 +993,7 @@ run_dnf5() {
     cava_step "" "install it (sudo dnf5 install cava)"
     ensure_mpd_conf
     services_step_systemd
+    mpd_readiness_check
     mpv_plain_note
     summary_step
 }
@@ -762,6 +1033,7 @@ run_apt() {
     cava_step "" "install it (sudo apt-get install cava)"
     ensure_mpd_conf
     services_step_systemd
+    mpd_readiness_check
     mpv_plain_note
     summary_step
 }
@@ -820,6 +1092,7 @@ run_apk() {
     cava_step "" "install it or rebuild from source (see step 1)"
     ensure_mpd_conf
     services_step_launcher
+    mpd_readiness_check
     mpv_plain_note
     summary_step
 }
@@ -870,6 +1143,7 @@ run_xbps() {
     cava_step "" "install it (sudo xbps-install -S cava)"
     ensure_mpd_conf
     services_step_runit
+    mpd_readiness_check
     mpv_plain_note
     summary_step
 }
@@ -926,6 +1200,7 @@ run_nix() {
     # patch (plan §5 decision point) -> upstream python source at /usr/bin.
     install_upstream_mpdris2 "nixpkgs mpDris2 is a compiled ELF the s2u-mpdris2 shim cannot patch"
     services_step_launcher
+    mpd_readiness_check
     mpv_plain_note
     SUMMARY_BIN="$HOME/.nix-profile/bin/s2udio"
     summary_step
