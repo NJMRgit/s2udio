@@ -23,22 +23,31 @@ use crate::{
 };
 
 impl QueuePane {
-    pub(super) fn open_context_menu(&mut self, ctx: &Ctx) {
+    pub(super) fn open_context_menu(
+        &mut self,
+        ctx: &Ctx,
+        anchor: Option<ratatui::layout::Position>,
+    ) {
         // The menu acts on the list currently shown: in Video mode it
         // manages the video queue (never the MPD audio queue), and in Audio
-        // mode it manages the MPD queue.
+        // mode it manages the MPD queue. Mouse right-clicks anchor the menu
+        // at the cursor; keyboard-open stays centered (Round 46).
         if ctx.queue_tab.get() == crate::ctx::QueueTabMode::Video {
-            self.open_video_context_menu(ctx);
+            self.open_video_context_menu(ctx, anchor);
             return;
         }
-        self.open_audio_context_menu(ctx);
+        self.open_audio_context_menu(ctx, anchor);
     }
 
     /// Video-mode context menu: play / remove / clear the **video queue**
     /// (the persistent playlist). While a Jellyfin item plays, the list is
     /// the live mpv session's own playlist — Remove and Clear are hidden
     /// (live mpv state).
-    pub(super) fn open_video_context_menu(&mut self, ctx: &Ctx) {
+    pub(super) fn open_video_context_menu(
+        &mut self,
+        ctx: &Ctx,
+        anchor: Option<ratatui::layout::Position>,
+    ) {
         let jellyfin = crate::core::mpv::session_playlist_shown(ctx);
         let selected_idx = self.video_state.selected();
         let playlist: Vec<crate::core::mpv::MpvPlaylistEntry> = if jellyfin {
@@ -66,6 +75,7 @@ impl QueuePane {
         let menu = MenuModal::new(ctx)
             .width(60)
             .title(format!(" {title} "))
+            .anchor(anchor)
             .list_section(ctx, |section| {
                 let mut section = section;
                 if let Some(play_idx) = selected_idx {
@@ -184,7 +194,11 @@ impl QueuePane {
         modal!(ctx, menu);
     }
 
-    pub(super) fn open_audio_context_menu(&mut self, ctx: &Ctx) {
+    pub(super) fn open_audio_context_menu(
+        &mut self,
+        ctx: &Ctx,
+        anchor: Option<ratatui::layout::Position>,
+    ) {
         let selected_song = self.queue.selected().cloned();
         let selected_song_id = selected_song.as_ref().map(|s| s.id);
         // A resolved YouTube-style stream row (the queue entry holds the
@@ -220,6 +234,7 @@ impl QueuePane {
         };
 
         let modal = MenuModal::new(ctx)
+            .anchor(anchor)
             .list_section(ctx, |mut section| {
                 let play_song = selected_song.clone();
                 section.add_item("Play", move |ctx| {

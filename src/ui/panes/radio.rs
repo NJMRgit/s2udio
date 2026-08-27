@@ -691,7 +691,11 @@ impl RadioPane {
     fn is_favourite(&self, url: &str) -> bool {
         self.favourites.iter().any(|station| station.url == url)
     }
-    fn open_menu(&mut self, ctx: &Ctx) -> Result<()> {
+    fn open_menu(
+        &mut self,
+        ctx: &Ctx,
+        anchor: Option<ratatui::layout::Position>,
+    ) -> Result<()> {
         let Some(station) = self.selected_station() else { return Ok(()) };
         let name = station.name.clone();
         let url = station.url.clone();
@@ -700,6 +704,7 @@ impl RadioPane {
         let favourites = self.favourites.clone();
         let max = self.max_favourites(ctx);
         let menu = MenuModal::new(ctx)
+            .anchor(anchor)
             .list_section(
                 ctx,
                 |mut section| {
@@ -1013,8 +1018,12 @@ impl TreeBrowserCore for RadioPane {
             self.open_region(ctx)
         }
     }
-    fn open_context_menu(&mut self, ctx: &Ctx) -> Result<()> {
-        self.open_menu(ctx)
+    fn open_context_menu(
+        &mut self,
+        ctx: &Ctx,
+        anchor: Option<ratatui::layout::Position>,
+    ) -> Result<()> {
+        self.open_menu(ctx, anchor)
     }
     /// Keybinding hints, one line each, in the strip between the station list
     /// and the info panel (same spot as the Directories/Playlists tabs).
@@ -1504,7 +1513,7 @@ impl Pane for RadioPane {
                     if idx < self.stations.len() {
                         self.station_list.select(Some(idx));
                         ctx.render()?;
-                        return self.open_menu(ctx);
+                        return self.open_menu(ctx, Some(event.into()));
                     }
                 }
                 MouseEventKind::LeftClick | MouseEventKind::DoubleClick => {
@@ -1603,12 +1612,12 @@ impl Pane for RadioPane {
                 }
                 CommonAction::Confirm => {
                     return if self.focus == PaneFocus::Stations {
-                        self.open_menu(ctx)
+                        self.open_menu(ctx, None)
                     } else {
                         self.open_region(ctx)
                     };
                 }
-                CommonAction::ContextMenu => return self.open_menu(ctx),
+                CommonAction::ContextMenu => return self.open_menu(ctx, None),
                 CommonAction::Delete => {
                     if let Some(idx) = self.station_list.selected()
                         && let Some(StationRow::Favourite(station)) = self

@@ -36,6 +36,11 @@ pub struct MenuModal<'a> {
     /// same replacement id (the paste popup refreshes in place when a
     /// torrent scan completes).
     replacement_id: Option<Cow<'static, str>>,
+    /// Mouse position the popup is anchored at (right-click menus); the
+    /// popup's top-left lands under the cursor, clamped into the frame.
+    /// `None` keeps the centered placement (keyboard-opened menus and
+    /// every menu opened from inside another modal).
+    anchor: Option<Position>,
 }
 impl Modal for MenuModal<'_> {
     fn id(&self) -> Id {
@@ -50,9 +55,16 @@ impl Modal for MenuModal<'_> {
             .iter()
             .map(|section| section.preferred_height() as usize)
             .sum::<usize>() + 1 + self.sections.len();
-        let popup_area = frame
-            .area()
-            .centered(constraint!(== self.width), constraint!(== needed_height as u16));
+        let popup_area = self
+            .anchor
+            .map(|anchor| {
+                anchored_rect(anchor, self.width, needed_height as u16, frame.area())
+            })
+            .unwrap_or_else(|| {
+                frame
+                    .area()
+                    .centered(constraint!(== self.width), constraint!(== needed_height as u16))
+            });
         frame.render_widget(Clear, popup_area);
         if let Some(bg_color) = ctx.config.theme.modal_background_color {
             frame
@@ -263,6 +275,7 @@ impl<'a> MenuModal<'a> {
             filter_buffer_id: BufferId::new(),
             title: None,
             replacement_id: None,
+            anchor: None,
         }
     }
     /// The replacement id this modal refreshes in place under (see
@@ -367,6 +380,14 @@ impl<'a> MenuModal<'a> {
         self.title = Some(title.into());
         self
     }
+    /// Anchor the popup at a mouse position (right-click menus): the
+    /// content's top-left lands under the cursor, clamped so the popup
+    /// never leaves the frame. `None` keeps the centered placement
+    /// (keyboard-opened menus and menus opened from inside other modals).
+    pub fn anchor(mut self, anchor: Option<Position>) -> Self {
+        self.anchor = anchor;
+        self
+    }
     pub fn build(mut self) -> Self {
         if let Some((i, s)) = self
             .sections
@@ -451,3 +472,21 @@ impl<'a> MenuModal<'a> {
         self.areas.iter().enumerate().find(|(_, a)| a.contains(position)).map(|(i, _)| i)
     }
 }
+
+/// tfm-style clamped popup rect at a mouse position: the menu's top-left
+/// lands under the cursor, shifted back so its right/bottom edges never
+/// leave the frame (`px = max(0, frame_width - w - 1)`, same for y). A
+/// menu taller than the terminal pins to the top and overflows over the
+/// bottom edge, exactly like the centered placement does.
+fn anchored_rect(anchor: Position, width: u16, height: u16, frame: Rect) -> Rect {
+    let mut x = anchor.x;
+    let mut y = anchor.y;
+    if x.saturating_add(width).saturating_add(1) > frame.width {
+        x = frame.width.saturating_sub(width).saturating_sub(1);
+    }
+    if y.saturating_add(height).saturating_add(1) > frame.height {
+        y = frame.height.saturating_sub(height).saturating_sub(1);
+    }
+    Rect { x, y, width, height }
+}
+

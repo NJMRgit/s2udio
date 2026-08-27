@@ -524,8 +524,13 @@ impl PlaylistsPane {
         }
         self.info_scrollbar_area = scrollbar_area;
     }
-    /// Select the dir displayed in the songs pane (current dir when inside a
-    /// playlist, the next/preview dir at the root).
+    /// Whether the songs pane has an armed/active rubber band (only
+    /// meaningful inside a playlist: at the root the songs area shows the
+    /// playlist-name list, which has no band, Round 46).
+    fn songs_band_active(&self) -> bool {
+        self.stack.current().state.band.is_active()
+    }
+    /// Select the cell under the pointer in the songs pane.
     fn select_song_at(
         &mut self,
         row: usize,
@@ -604,8 +609,13 @@ impl PlaylistsPane {
     }
     /// Right-click / Enter menu for the highlighted item: the playlist
     /// menu at the root, the song menu inside a playlist (exactly what
-    /// right-click opens).
-    fn open_context_menu(&mut self, ctx: &Ctx) -> Result<()> {
+    /// right-click opens). Mouse right-clicks anchor the menu at the
+    /// cursor; keyboard-open stays centered (Round 46).
+    fn open_context_menu(
+        &mut self,
+        ctx: &Ctx,
+        anchor: Option<ratatui::layout::Position>,
+    ) -> Result<()> {
         if self.stack.path().is_empty() {
             let name = self
                 .stack
@@ -616,16 +626,23 @@ impl PlaylistsPane {
                     _ => None,
                 });
             if let Some(name) = name {
-                return self.open_playlist_menu(&name, ctx);
+                return self.open_playlist_menu(&name, ctx, anchor);
             }
             return Ok(());
         }
-        self.open_song_menu(ctx)
+        self.open_song_menu(ctx, anchor)
     }
-    /// Right-click / Enter menu for a playlist.
-    fn open_playlist_menu(&mut self, name: &str, ctx: &Ctx) -> Result<()> {
+    /// Right-click / Enter menu for a playlist (anchored at the cursor
+    /// when opened with the mouse).
+    fn open_playlist_menu(
+        &mut self,
+        name: &str,
+        ctx: &Ctx,
+        anchor: Option<ratatui::layout::Position>,
+    ) -> Result<()> {
         let playlist = name.to_owned();
         let menu = MenuModal::new(ctx)
+            .anchor(anchor)
             .list_section(
                 ctx,
                 |mut section| {
@@ -722,8 +739,13 @@ impl PlaylistsPane {
         crate::shared::macros::modal!(ctx, menu);
         Ok(())
     }
-    /// Right-click / Enter menu for a song in the songs pane.
-    fn open_song_menu(&mut self, ctx: &Ctx) -> Result<()> {
+    /// Right-click / Enter menu for a song in the songs pane (anchored
+    /// at the cursor when opened with the mouse).
+    fn open_song_menu(
+        &mut self,
+        ctx: &Ctx,
+        anchor: Option<ratatui::layout::Position>,
+    ) -> Result<()> {
         let Some(DirOrSong::Song(highlighted)) = self
             .songs_dir_mut()
             .and_then(|d| d.selected().cloned()) else {
@@ -760,6 +782,7 @@ impl PlaylistsPane {
         }
             .map(|info| (info, playlist_name.clone(), highlighted_file.clone()));
         let menu = MenuModal::new(ctx)
+            .anchor(anchor)
             .list_section(
                 ctx,
                 |mut section| {
@@ -1085,6 +1108,20 @@ impl Pane for PlaylistsPane {
     fn handle_mouse_event(&mut self, event: MouseEvent, ctx: &Ctx) -> Result<()> {
         let position = event.into();
         let at_root = self.stack.path().is_empty();
+        // Band capture (Round 46): once a band is armed in the songs list,
+        // drags and releases are accepted even when the pointer left the
+        // list area (the row clamps to the visible list).
+        if !at_root {
+            match event.kind {
+                MouseEventKind::Drag { .. } if self.songs_band_active() => {
+                    return SongListCore::update_band_drag(self, event, ctx);
+                }
+                MouseEventKind::LeftRelease if self.songs_band_active() => {
+                    return SongListCore::finish_band_drag(self, ctx);
+                }
+                _ => {}
+            }
+        }
         if self.playlists_area.contains(position)
             || (at_root && self.songs_area.contains(position))
         {
@@ -1095,6 +1132,7 @@ impl Pane for PlaylistsPane {
             };
             match event.kind {
                 MouseEventKind::RightClick => {
+                    self.stack.current_mut().state.band.cancel();
                     let row = usize::from(event.y.saturating_sub(list_area.y));
                     if let Some(idx) = self.stack.root().state.get_at_rendered_row(row) {
                         let dir = self.stack.root_mut();
@@ -1106,7 +1144,7 @@ impl Pane for PlaylistsPane {
                                 _ => None,
                             });
                         if let Some(name) = name {
-                            return self.open_playlist_menu(&name, ctx);
+                            return self.open_playlist_menu(&name, ctx, Some(position));
                         }
                     }
                     return Ok(());
@@ -1145,14 +1183,16 @@ impl Pane for PlaylistsPane {
         if self.songs_area.contains(position) {
             match event.kind {
                 MouseEventKind::RightClick => {
+                    self.stack.current_mut().state.band.cancel();
                     let row = usize::from(event.y.saturating_sub(self.songs_area.y));
                     self.select_song_at(
                         row,
                         |dir, idx| {
+                            dir.state.band.cancel();
                             dir.select_idx(idx, 0);
                         },
                     );
-                    return self.open_song_menu(ctx);
+                    return self.open_song_menu(ctx, Some(position));
                 }
                 MouseEventKind::LeftClick if event
                     .modifiers
@@ -1167,6 +1207,9 @@ impl Pane for PlaylistsPane {
                                 }
                             }
                             dir.state.mark(idx);
+                            // Arm the band so a ctrl+drag from here adds a
+                            // range (ctrl semantics keep existing marks).
+                            dir.state.band.arm(idx, false);
                             dir.select_idx(idx, 0);
                         },
                     );
@@ -1179,6 +1222,7 @@ impl Pane for PlaylistsPane {
                     self.select_song_at(
                         row,
                         |dir, idx| {
+                            dir.state.band.cancel();
                             if dir.state.mark_anchor().is_none() {
                                 dir.state.set_mark_anchor(idx);
                             }
@@ -1199,6 +1243,7 @@ impl Pane for PlaylistsPane {
                     ctx.render()?;
                 }
                 MouseEventKind::DoubleClick => {
+                    self.stack.current_mut().state.band.cancel();
                     let row = usize::from(event.y.saturating_sub(self.songs_area.y));
                     if let Some(idx) = self
                         .stack
@@ -1217,11 +1262,12 @@ impl Pane for PlaylistsPane {
                     self.select_song_at(
                         row,
                         |dir, idx| {
-                            if !dir.state.marked.is_empty()
-                                && Some(idx) != dir.state.get_selected()
-                            {
-                                dir.state.unmark_all();
-                            }
+                            // A plain press arms the band and defers the
+                            // multi-selection drop (click ≠ drag); the
+                            // release resolves it (Round 46).
+                            let click_on_different_row = !dir.state.marked.is_empty()
+                                && Some(idx) != dir.state.get_selected();
+                            dir.state.band.arm(idx, click_on_different_row);
                             dir.select_idx(idx, 0);
                             dir.state.set_mark_anchor(idx);
                             dir.state.clear_range_mark();
@@ -1230,6 +1276,7 @@ impl Pane for PlaylistsPane {
                     ctx.render()?;
                 }
                 MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                    self.stack.current_mut().state.band.cancel();
                     let dir = if matches!(event.kind, MouseEventKind::ScrollUp) {
                         -1
                     } else {
@@ -1311,8 +1358,8 @@ impl Pane for PlaylistsPane {
                 CommonAction::Left => {
                     return self.back_out(ctx);
                 }
-                CommonAction::Confirm => return self.open_context_menu(ctx),
-                CommonAction::ContextMenu => return self.open_context_menu(ctx),
+                CommonAction::Confirm => return self.open_context_menu(ctx, None),
+                CommonAction::ContextMenu => return self.open_context_menu(ctx, None),
                 CommonAction::SelectAll => {
                     if !self.stack.path().is_empty()
                         && let Some(dir) = self.songs_dir_mut() && dir.len() > 0

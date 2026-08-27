@@ -1,7 +1,7 @@
 use anyhow::Result;
 use ratatui::{
     Frame,
-    layout::{Constraint, Layout, Rect},
+    layout::{Constraint, Layout, Position, Rect},
     style::Style,
     text::{Line, Span},
     widgets::{Block, Borders, ListItem, ListState, Paragraph},
@@ -90,6 +90,16 @@ pub(in crate::ui) trait TreeBrowserCore: Pane {
         1
     }
 
+    /// Rubber-band (drag-rect) selection state of the items list (panes
+    /// that support drag-select expose it; the others return `None`,
+    /// Round 46).
+    fn items_band(&self) -> Option<&crate::ui::band::BandState> {
+        None
+    }
+    fn items_band_mut(&mut self) -> Option<&mut crate::ui::band::BandState> {
+        None
+    }
+
     // ── required: behavior hooks ───────────────────────────────────────
 
     /// `a` / `←`: back out one level (parent's children on the right, the
@@ -100,7 +110,14 @@ pub(in crate::ui) trait TreeBrowserCore: Pane {
     /// play the highlighted item.
     fn activate_selected(&mut self, ctx: &Ctx) -> Result<()>;
     /// Enter / right-click: the context menu of the highlighted item.
-    fn open_context_menu(&mut self, ctx: &Ctx) -> Result<()>;
+    /// `anchor` is the mouse position for right-click-opened menus
+    /// (anchored at the cursor, Round 46); keyboard-open passes `None`
+    /// (centered).
+    fn open_context_menu(
+        &mut self,
+        ctx: &Ctx,
+        anchor: Option<Position>,
+    ) -> Result<()>;
     /// The bottom info box (fully pane-specific: file preview / poster +
     /// metadata / station info).
     fn render_info(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx);
@@ -212,8 +229,13 @@ pub(in crate::ui) trait TreeBrowserCore: Pane {
     /// The tree pane was hidden (narrow TUI); panes reset their tree rect.
     fn on_tree_hidden(&mut self) {}
     /// Right-click on a tree row (default: nothing; the MPD browser opens
-    /// the folder menu).
-    fn tree_context_menu(&mut self, _idx: usize, _ctx: &Ctx) -> Result<()> {
+    /// the folder menu). `anchor` is the mouse position (Round 46).
+    fn tree_context_menu(
+        &mut self,
+        _idx: usize,
+        _ctx: &Ctx,
+        _anchor: Option<Position>,
+    ) -> Result<()> {
         Ok(())
     }
     /// Double-click on a tree row: highlight + toggle expandable rows.
@@ -601,7 +623,9 @@ pub(in crate::ui) trait TreeBrowserCore: Pane {
         match event.kind {
             MouseEventKind::LeftClick => self.highlight_tree_node(row, ctx),
             MouseEventKind::DoubleClick => self.on_tree_double_click(row, ctx),
-            MouseEventKind::RightClick => self.tree_context_menu(row, ctx),
+            MouseEventKind::RightClick => {
+                self.tree_context_menu(row, ctx, Some(event.into()))
+            }
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
                 let dir = if matches!(event.kind, MouseEventKind::ScrollUp) { -1 } else { 1 };
                 if self.wheel_scrolls_viewport() {
@@ -619,6 +643,14 @@ pub(in crate::ui) trait TreeBrowserCore: Pane {
     /// moves the cursor.
     fn handle_items_mouse(&mut self, event: MouseEvent, ctx: &Ctx) -> Result<()> {
         self.on_items_focus();
+        // Any interaction that is not a (band) left press/drag cancels an
+        // armed band without dropping its marks (release-outside-terminal
+        // safety); a fresh left press re-arms it below.
+        if !matches!(event.kind, MouseEventKind::LeftClick | MouseEventKind::Drag { .. })
+            && let Some(band) = self.items_band_mut()
+        {
+            band.cancel();
+        }
         let row = usize::from(event.y.saturating_sub(self.items_area().y))
             / usize::from(self.item_row_height())
             + self.items_list().offset();
@@ -637,7 +669,7 @@ pub(in crate::ui) trait TreeBrowserCore: Pane {
                 if row < self.items_len() {
                     self.items_list_mut().select(Some(row));
                     self.on_items_cursor_moved(ctx)?;
-                    self.open_context_menu(ctx)?;
+                    self.open_context_menu(ctx, Some(event.into()))?;
                 }
             }
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
@@ -707,7 +739,7 @@ pub(in crate::ui) trait TreeBrowserCore: Pane {
                     return Ok(true);
                 }
                 CommonAction::ContextMenu => {
-                    self.open_context_menu(ctx)?;
+                    self.open_context_menu(ctx, None)?;
                     return Ok(true);
                 }
                 CommonAction::Close => {

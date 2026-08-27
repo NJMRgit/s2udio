@@ -54,6 +54,7 @@ use crate::{
 };
 use unicode_width::UnicodeWidthStr;
 
+pub mod band;
 pub mod browser;
 pub mod dir_or_song;
 pub mod dirstack;

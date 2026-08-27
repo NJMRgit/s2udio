@@ -290,6 +290,10 @@ pub struct DirectoriesPane {
     /// Marked (multi-selected) rows of the right pane, with the queue
     /// tab's ctrl/alt-click + shift+up/down selection.
     marked: MarkState,
+    /// Rubber-band (drag-rect) selection state of the items list (Round
+    /// 46): armed by a left press, updated by `Drag` events, finalized by
+    /// `LeftRelease`.
+    items_band: crate::ui::band::BandState,
     /// Path of the node whose children are shown (None = the Library root).
     selected: Option<Path>,
     /// Tree-browser layout args from the config (defaults = today's
@@ -323,6 +327,7 @@ impl DirectoriesPane {
             item_list: ListState::default(),
             items_inner: Rect::default(),
             marked: MarkState::default(),
+            items_band: crate::ui::band::BandState::default(),
             selected: None,
             tree_args: ctx.config.tree_browser_args(PaneTypeDiscriminants::Directories),
             loaded: HashMap::new(),
@@ -511,7 +516,12 @@ impl DirectoriesPane {
     /// a tree row (folders).
     /// Context menu for a tree folder: add the whole subtree to the queue
     /// or to a playlist.
-    fn open_folder_menu(&mut self, path: &Path, ctx: &Ctx) -> Result<()> {
+    fn open_folder_menu(
+    &mut self,
+    path: &Path,
+    ctx: &Ctx,
+    anchor: Option<ratatui::layout::Position>,
+) -> Result<()> {
         let path_str = path.to_string();
         let folder_name = path
             .as_slice()
@@ -533,6 +543,7 @@ impl DirectoriesPane {
             )
         };
         let modal = MenuModal::new(ctx)
+            .anchor(anchor)
             .list_section(
                 ctx,
                 |mut section| {
@@ -631,7 +642,11 @@ impl DirectoriesPane {
     /// playlist. When songs are marked, the menu acts on every marked
     /// song (like the audio queue list's menu); otherwise the highlighted
     /// file.
-    fn open_song_menu(&mut self, ctx: &Ctx) -> Result<()> {
+    fn open_song_menu(
+        &mut self,
+        ctx: &Ctx,
+        anchor: Option<ratatui::layout::Position>,
+    ) -> Result<()> {
         let Some(item) = self.selected_item() else { return Ok(()) };
         let songs: Vec<Song> = if self.marked.is_empty() {
             match &item {
@@ -657,6 +672,7 @@ impl DirectoriesPane {
             Ok(songs.clone())
         };
         let modal = MenuModal::new(ctx)
+            .anchor(anchor)
             .list_section(
                 ctx,
                 |mut section| {
@@ -776,6 +792,54 @@ impl DirectoriesPane {
         );
         Ok(())
     }
+    /// Rubber-band motion of the items list (Round 46): plain drag
+    /// replaces every mark with the anchor→current range, ctrl+drag
+    /// adds/contracts the range keeping the other marks; release
+    /// finalizes (or applies the deferred plain-click unmark when the
+    /// press never moved).
+    fn handle_items_band(&mut self, event: MouseEvent, ctx: &Ctx) -> Result<()> {
+        match event.kind {
+            MouseEventKind::Drag { .. } => {
+                if !self.items_band.is_active() {
+                    return Ok(());
+                }
+                let control =
+                    event.modifiers.contains(crossterm::event::KeyModifiers::CONTROL);
+                let area = self.items_area();
+                let (offset, len) = (self.item_list.offset(), self.items_len());
+                let Some(current) =
+                    crate::ui::band::band_current_row(event.y, area, offset, len, 1)
+                else {
+                    return Ok(());
+                };
+                let anchor = self.items_band.anchor.unwrap_or(current);
+                self.items_band.update(current);
+                // The band anchor drives the range even after keyboard
+                // selection set the mark anchor elsewhere.
+                self.marked.set_anchor(anchor);
+                if control {
+                    self.marked.select_range(current);
+                } else {
+                    self.marked.clear();
+                    self.marked.set_anchor(anchor);
+                    self.marked.select_range(current);
+                }
+                ctx.render()?;
+            }
+            MouseEventKind::LeftRelease => {
+                let clear_marks = match self.items_band.release() {
+                    crate::ui::band::BandEnd::Click { clear_marks } => clear_marks,
+                    _ => false,
+                };
+                if clear_marks {
+                    self.marked.clear();
+                }
+                ctx.render()?;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
 }
 impl TreeBrowserCore for DirectoriesPane {
     type Item = DirOrSong;
@@ -837,6 +901,12 @@ impl TreeBrowserCore for DirectoriesPane {
     }
     fn item_at(&self, idx: usize) -> Option<Self::Item> {
         self.items.get(idx).cloned()
+    }
+    fn items_band(&self) -> Option<&crate::ui::band::BandState> {
+        Some(&self.items_band)
+    }
+    fn items_band_mut(&mut self) -> Option<&mut crate::ui::band::BandState> {
+        Some(&mut self.items_band)
     }
     fn item_row(&self, idx: usize, hovered: bool, ctx: &Ctx) -> ListItem<'static> {
         let is_marked = self.marked.contains(idx);
@@ -929,14 +999,18 @@ impl TreeBrowserCore for DirectoriesPane {
             self.open_item(item, ctx)
         }
     }
-    fn open_context_menu(&mut self, ctx: &Ctx) -> Result<()> {
+    fn open_context_menu(
+        &mut self,
+        ctx: &Ctx,
+        anchor: Option<ratatui::layout::Position>,
+    ) -> Result<()> {
         let Some(item) = self.selected_item() else { return Ok(()) };
         if item.is_file() {
-            self.open_song_menu(ctx)
+            self.open_song_menu(ctx, anchor)
         } else {
             let DirOrSong::Dir { full_path, .. } = item else { return Ok(()) };
             let path = split_path(&full_path);
-            self.open_folder_menu(&path, ctx)
+            self.open_folder_menu(&path, ctx, anchor)
         }
     }
     fn render_info(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) {
@@ -1103,7 +1177,7 @@ impl TreeBrowserCore for DirectoriesPane {
         }
     }
     fn on_confirm(&mut self, ctx: &mut Ctx) -> Result<()> {
-        self.open_context_menu(ctx)
+        self.open_context_menu(ctx, None)
     }
     fn on_select_range(&mut self, dir: i64, ctx: &mut Ctx) -> Result<bool> {
         let start = self.item_list.selected().unwrap_or(0);
@@ -1152,10 +1226,13 @@ impl TreeBrowserCore for DirectoriesPane {
                 }
             }
             self.marked.add(row);
+            // Arm the band so a ctrl+drag from here adds a range.
+            self.items_band.arm(row, false);
             self.item_list.select(Some(row));
             self.sync_tree_to_items_cursor();
             ctx.render()?;
         } else if event.modifiers.contains(crossterm::event::KeyModifiers::ALT) {
+            self.items_band.cancel();
             if self.marked.anchor().is_none() {
                 self.marked.set_anchor(row);
             }
@@ -1164,9 +1241,11 @@ impl TreeBrowserCore for DirectoriesPane {
             self.sync_tree_to_items_cursor();
             ctx.render()?;
         } else {
-            if !self.marked.is_empty() && Some(row) != self.item_list.selected() {
-                self.marked.clear();
-            }
+            // A plain press arms the band and defers the multi-selection
+            // drop (click ≠ drag); the release resolves it (Round 46).
+            let click_on_different_row =
+                !self.marked.is_empty() && Some(row) != self.item_list.selected();
+            self.items_band.arm(row, click_on_different_row);
             self.item_list.select(Some(row));
             self.marked.set_anchor(row);
             self.marked.clear_range();
@@ -1175,13 +1254,22 @@ impl TreeBrowserCore for DirectoriesPane {
         }
         Ok(())
     }
-    fn tree_context_menu(&mut self, idx: usize, ctx: &Ctx) -> Result<()> {
+    fn tree_context_menu(
+        &mut self,
+        idx: usize,
+        ctx: &Ctx,
+        anchor: Option<ratatui::layout::Position>,
+    ) -> Result<()> {
         let path = {
             let mut flat = Vec::new();
             self.tree.visible(&self.tree.root, 0, &mut flat);
             flat.get(idx).map(|(node, _)| Path::from(node.path.clone()))
         };
-        if let Some(path) = path { self.open_folder_menu(&path, ctx) } else { Ok(()) }
+        if let Some(path) = path {
+            self.open_folder_menu(&path, ctx, anchor)
+        } else {
+            Ok(())
+        }
     }
     fn on_reconnected(&mut self, ctx: &Ctx) -> Result<()> {
         self.initialized = false;
@@ -1263,8 +1351,20 @@ impl Pane for DirectoriesPane {
                     } else {
                         MpdTabMode::Search
                     };
+                    self.items_band.cancel();
                     return self.set_mode(mode, ctx);
                 }
+            }
+        }
+        // Band capture (Round 46): once a band is armed in the items
+        // list, drags and releases are accepted even when the pointer
+        // left the list area (the row clamps to the visible list).
+        if self.mode == MpdTabMode::Library && self.items_band.is_active() {
+            match event.kind {
+                MouseEventKind::Drag { .. } | MouseEventKind::LeftRelease => {
+                    return self.handle_items_band(event, ctx);
+                }
+                _ => {}
             }
         }
         match self.mode {

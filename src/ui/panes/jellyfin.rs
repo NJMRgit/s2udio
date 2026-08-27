@@ -1024,7 +1024,11 @@ impl TreeBrowserCore for JellyfinPane {
             self.open_item(item, ctx)
         }
     }
-    fn open_context_menu(&mut self, ctx: &Ctx) -> Result<()> {
+    fn open_context_menu(
+        &mut self,
+        ctx: &Ctx,
+        anchor: Option<ratatui::layout::Position>,
+    ) -> Result<()> {
         let Some(item) = self.selected_item() else { return Ok(()) };
         if !item.is_playable() {
             return Ok(());
@@ -1039,6 +1043,7 @@ impl TreeBrowserCore for JellyfinPane {
         let menu = MenuModal::new(ctx)
             .width(60)
             .title(format!(" {name} "))
+            .anchor(anchor)
             .list_section(
                 ctx,
                 |section| {

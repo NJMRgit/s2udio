@@ -6,6 +6,10 @@ pub struct DirState<T: ScrollingState> {
     pub scrollbar_state: ScrollbarState,
     pub inner: T,
     pub marked: BTreeSet<usize>,
+    /// Rubber-band (drag-rect) selection state (Round 46): armed by a
+    /// left press in the list, updated by `Drag` events, finalized by
+    /// `LeftRelease`.
+    pub band: crate::ui::band::BandState,
     mark_anchor: Option<usize>,
     /// The range last marked by shift+arrow selection, so contracting the
     /// range can unmark the items the cursor moved past.
