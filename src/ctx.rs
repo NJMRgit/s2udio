@@ -125,6 +125,11 @@ pub struct Ctx {
     /// pencil toggles edit mode; the cava pane swaps the visualizer for an
     /// edit-controls legend while it is set.
     pub(crate) lyrics_edit_mode: Cell<bool>,
+    /// Whether the album art pane should collapse entirely because there is
+    /// no art to display (Round 48): set by the album art pane as art state
+    /// changes; `is_pane_hidden` consults it so the layout hides the pane
+    /// (no default placeholder box) until art becomes available.
+    pub(crate) album_art_collapsed: Cell<bool>,
     /// Id of a file played via the Directories pane's right arrow /
     /// double-click (a temporary queue entry). The queue pane hides it from
     /// the list; the directories pane clears it when the entry is dropped.
@@ -345,6 +350,7 @@ impl Ctx {
             supported_commands,
             queue_selected_id: Cell::new(None),
             lyrics_edit_mode: Cell::new(false),
+            album_art_collapsed: Cell::new(false),
             temp_play_id: Cell::new(None),
             db_update_start: None,
             app_event_sender,
@@ -637,10 +643,16 @@ impl Ctx {
     /// Whether a pane should be hidden: the Settings toggles, plus the cava
     /// visualizer is hidden while a video plays in mpv (MPD is paused then,
     /// so the bars go flat — on every tab, not just the Queue tab) and
-    /// always on the Jellyfin tab.
+    /// always on the Jellyfin tab, plus the album art pane collapses
+    /// entirely when there is no art to display (Round 48).
     pub(crate) fn is_pane_hidden(&self, pane: &crate::config::tabs::PaneType) -> bool {
         if matches!(pane, crate ::config::tabs::PaneType::Cava)
             && self.cava_hidden_on(self.active_tab.as_str())
+        {
+            return true;
+        }
+        if matches!(pane, crate::config::tabs::PaneType::AlbumArt)
+            && self.album_art_collapsed.get()
         {
             return true;
         }

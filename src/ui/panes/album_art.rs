@@ -3,7 +3,7 @@ use ratatui::{Frame, layout::Rect};
 use super::Pane;
 use crate::{
     MpdQueryResult, config::{album_art::ImageMethod, tabs::PaneType},
-    ctx::Ctx, mpd::mpd_client::MpdClient,
+    ctx::Ctx, mpd::commands::{Song, State}, mpd::mpd_client::MpdClient,
     shared::{events::WorkRequest, keys::ActionEvent},
     ui::{UiEvent, image::facade::AlbumArtFacade},
 };
@@ -12,6 +12,9 @@ pub struct AlbumArtPane {
     album_art: AlbumArtFacade,
     is_modal_open: bool,
     fetch_needed: bool,
+    /// The file the paused/stopped art box fetched last (selection-driven;
+    /// avoids refetching every frame).
+    paused_art_file: Option<String>,
 }
 const ALBUM_ART: &str = "album_art";
 /// Result id of a YouTube thumbnail download (shown as album art while the
@@ -26,6 +29,7 @@ impl AlbumArtPane {
             album_art: AlbumArtFacade::new(ctx),
             is_modal_open: false,
             fetch_needed: false,
+            paused_art_file: None,
         }
     }
     /// The YouTube info of the current song when it is a resolved
@@ -46,22 +50,59 @@ impl AlbumArtPane {
                 log::error!(error:? = err; "Failed to request youtube thumbnail")
             });
     }
+    /// Collapse the pane entirely: there is no art to display, so the box
+    /// hides (Round 48 — replaces the old default-placeholder fallbacks).
+    /// The pane returns when art becomes available again (a fetch completes
+    /// with data, the next song, resume).
+    fn collapse(&mut self, ctx: &Ctx) -> Result<()> {
+        ctx.album_art_collapsed.set(true);
+        self.album_art.hide(ctx)
+    }
+    /// Show the already-known current art, or try to fetch it; collapse
+    /// only when there is genuinely nothing to display or fetch. Host fix
+    /// 2026-08-27: the round-48 version bailed out while collapsed, so the
+    /// pane could never re-arm itself (see on_query_finished / on_event).
+    fn show_current_or_collapse(&mut self, ctx: &Ctx) -> Result<()> {
+        if ctx.status.state != State::Play {
+            return self.check_selected_art(ctx);
+        }
+        if self.album_art.has_current() {
+            ctx.album_art_collapsed.set(false);
+            self.album_art.show_current(ctx)
+        } else if AlbumArtPane::fetch_album_art(ctx).is_none() {
+            self.collapse(ctx)
+        } else {
+            Ok(())
+        }
+    }
     /// returns none if album art is supposed to be hidden
     fn fetch_album_art(ctx: &Ctx) -> Option<()> {
         if matches!(ctx.config.album_art.method, ImageMethod::None) {
             return None;
         }
         let (_, current_song) = ctx.find_current_song_in_queue()?;
-        let disabled_protos = &ctx.config.album_art.disabled_protocols;
-        let song_uri = current_song.file.as_str();
-        if disabled_protos.iter().any(|proto| song_uri.starts_with(proto)) {
+        Self::fetch_art_query(ctx, current_song.file.clone())
+    }
+    /// Dispatch an album-art query for `song_uri` (replace_id dedupes
+    /// overlapping fetches). Returns None when art is disabled for the
+    /// method/protocol — the caller collapses the box in that case.
+    fn fetch_art_query(ctx: &Ctx, song_uri: String) -> Option<()> {
+        if matches!(ctx.config.album_art.method, ImageMethod::None) {
+            return None;
+        }
+        if ctx
+            .config
+            .album_art
+            .disabled_protocols
+            .iter()
+            .any(|proto| song_uri.starts_with(proto))
+        {
             log::debug!(
-                uri = song_uri;
+                uri = song_uri.as_str();
                 "Not downloading album art because the protocol is disabled"
             );
             return None;
         }
-        let song_uri = song_uri.to_owned();
         let order = ctx.config.album_art.order;
         ctx.query()
             .id(ALBUM_ART)
@@ -79,6 +120,32 @@ impl AlbumArtPane {
             });
         Some(())
     }
+    /// The song currently selected in the queue list. The queue pane syncs
+    /// its id into `ctx.queue_selected_id` on every render (same channel
+    /// the lyrics pane uses).
+    fn selected_queue_song(ctx: &Ctx) -> Option<&Song> {
+        ctx.queue_selected_id
+            .get()
+            .and_then(|id| ctx.queue.iter().find(|song| song.id == id))
+    }
+    /// Paused/stopped: the box follows the queue selection. Refetches only
+    /// when the selection's file changes; a cleared selection collapses.
+    fn check_selected_art(&mut self, ctx: &Ctx) -> Result<()> {
+        let file = Self::selected_queue_song(ctx).map(|song| song.file.clone());
+        if file == self.paused_art_file {
+            return Ok(());
+        }
+        self.paused_art_file = file.clone();
+        match file {
+            Some(uri) => {
+                if Self::fetch_art_query(ctx, uri).is_none() {
+                    self.collapse(ctx)?;
+                }
+                Ok(())
+            }
+            None => self.collapse(ctx),
+        }
+    }
     /// Draw the encoded image queued by the last `UiEvent::ImageEncoded`
     /// after the frame's buffer flush (the flush would otherwise overwrite
     /// the kitty placeholder cells and delete the transient image — the
@@ -89,6 +156,11 @@ impl AlbumArtPane {
         buffer: &ratatui::buffer::Buffer,
         ctx: &Ctx,
     ) -> Result<()> {
+        // Round 48 add-on: while paused/stopped the box follows the queue
+        // selection (refetch only when the selection's file changed).
+        if ctx.status.state != State::Play {
+            self.check_selected_art(ctx)?;
+        }
         self.album_art.frame_rendered(buffer);
         self.album_art.flush_display(ctx)
     }
@@ -109,7 +181,7 @@ impl Pane for AlbumArtPane {
         self.album_art.hide(ctx)
     }
     fn resize(&mut self, area: Rect, ctx: &Ctx) -> Result<()> {
-        if self.is_modal_open {
+        if self.is_modal_open || ctx.album_art_collapsed.get() {
             return Ok(());
         }
         self.album_art.set_size(area);
@@ -118,6 +190,12 @@ impl Pane for AlbumArtPane {
     fn before_show(&mut self, ctx: &Ctx) -> Result<()> {
         if self.is_modal_open {
             return Ok(());
+        }
+        // Paused/stopped: the art box follows the queue selection (checked
+        // every frame in flush_pending_display); the playing-song / video
+        // paths below apply only while actually playing.
+        if ctx.status.state != State::Play {
+            return self.check_selected_art(ctx);
         }
         if crate::core::mpv::mpv_is_ui_source(ctx) {
             if let Some(item_id) = ctx.mpv.item_id.as_deref() {
@@ -134,22 +212,22 @@ impl Pane for AlbumArtPane {
             if let Some(yt) = crate::ui::modals::paste::mpv_yt_info(ctx) {
                 match yt.thumbnail {
                     Some(thumbnail) => Self::fetch_yt_thumbnail(ctx, thumbnail),
-                    None => self.album_art.show_default(ctx)?,
+                    None => self.collapse(ctx)?,
                 }
                 return Ok(());
             }
-            self.album_art.show_default(ctx)?;
+            self.collapse(ctx)?;
             return Ok(());
         }
         if let Some(yt) = Self::current_yt_info(ctx) {
             match yt.thumbnail {
                 Some(thumbnail) => Self::fetch_yt_thumbnail(ctx, thumbnail),
-                None => self.album_art.show_default(ctx)?,
+                None => self.collapse(ctx)?,
             }
             return Ok(());
         }
         if AlbumArtPane::fetch_album_art(ctx).is_none() {
-            self.album_art.show_default(ctx)?;
+            self.collapse(ctx)?;
         }
         Ok(())
     }
@@ -157,28 +235,38 @@ impl Pane for AlbumArtPane {
         &mut self,
         id: &'static str,
         data: MpdQueryResult,
-        is_visible: bool,
+        _is_visible: bool,
         ctx: &Ctx,
     ) -> Result<()> {
-        if !is_visible || self.is_modal_open {
+        // Host fix 2026-08-27: a collapsed pane is "hidden" (is_pane_hidden
+        // consults album_art_collapsed), which made every arriving art
+        // result drop out here and the collapse become permanent. Results
+        // must be processed regardless of visibility (the modal is the only
+        // reason to defer).
+        if self.is_modal_open {
             return Ok(());
         }
         match (id, data) {
             (ALBUM_ART, MpdQueryResult::AlbumArt(Some(data))) => {
+                ctx.album_art_collapsed.set(false);
                 self.album_art.show(data, ctx)?;
             }
             (ALBUM_ART, MpdQueryResult::AlbumArt(None)) => {
-                self.album_art.show_default(ctx)?;
+                self.collapse(ctx)?;
             }
             (YT_THUMBNAIL, MpdQueryResult::Any(any)) => {
                 if let Ok(boxed) = any.downcast::<Result<Vec<u8>, String>>() {
                     match boxed.as_ref() {
-                        Ok(bytes) => self.album_art.show(bytes.clone(), ctx)?,
+                        Ok(bytes) if !bytes.is_empty() => {
+                            ctx.album_art_collapsed.set(false);
+                            self.album_art.show(bytes.clone(), ctx)?;
+                        }
+                        Ok(_) => self.collapse(ctx)?,
                         Err(err) => {
                             log::debug!(
                                 error:? = err; "Failed to fetch youtube thumbnail"
                             );
-                            self.album_art.show_default(ctx)?;
+                            self.collapse(ctx)?;
                         }
                     }
                 }
@@ -190,7 +278,10 @@ impl Pane for AlbumArtPane {
                     && crate::core::mpv::mpv_is_ui_source(ctx)
                     && ctx.mpv.item_id.as_deref() == Some(item_id.as_str())
                 {
+                    ctx.album_art_collapsed.set(false);
                     self.album_art.show(bytes.clone(), ctx)?;
+                } else {
+                    self.collapse(ctx)?;
                 }
             }
             _ => {}
@@ -204,16 +295,27 @@ impl Pane for AlbumArtPane {
         ctx: &Ctx,
     ) -> Result<()> {
         match event {
-            UiEvent::SongChanged | UiEvent::Reconnected if is_visible => {
+            UiEvent::SongChanged | UiEvent::Reconnected => {
                 if self.is_modal_open {
                     self.fetch_needed = true;
                     return Ok(());
                 }
                 self.before_show(ctx)?;
             }
-            UiEvent::Displayed if is_visible => {
-                if is_visible && !self.is_modal_open {
-                    self.album_art.show_current(ctx)?;
+            // Round 48: a pause/resume transition re-asserts the current
+            // track's art (SongChanged only fires when the song id
+            // changes). Runs before_show again; a paused box that has no
+            // art collapses instead of showing stale art.
+            UiEvent::PlaybackStateChanged => {
+                if self.is_modal_open {
+                    self.fetch_needed = true;
+                    return Ok(());
+                }
+                self.before_show(ctx)?;
+            }
+            UiEvent::Displayed => {
+                if !self.is_modal_open {
+                    self.show_current_or_collapse(ctx)?;
                 }
             }
             UiEvent::ModalOpened if is_visible => {
@@ -229,11 +331,11 @@ impl Pane for AlbumArtPane {
                     self.before_show(ctx)?;
                     return Ok(());
                 }
-                self.album_art.show_current(ctx)?;
+                self.show_current_or_collapse(ctx)?;
             }
             UiEvent::ConfigChanged => {
                 if is_visible && !self.is_modal_open {
-                    self.album_art.show_current(ctx)?;
+                    self.show_current_or_collapse(ctx)?;
                 }
             }
             UiEvent::Exit => {

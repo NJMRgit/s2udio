@@ -14,7 +14,6 @@ use crate::{
 pub struct AlbumArtFacade {
     image_backend: ImageBackend,
     current_album_art: Option<Arc<Vec<u8>>>,
-    default_album_art: Arc<Vec<u8>>,
     last_size: Rect,
     /// The pane size the currently-queued encode was made for (a flush at a
     /// different size is stale).
@@ -80,7 +79,6 @@ impl AlbumArtFacade {
             current_album_art: None,
             last_size: Rect::default(),
             last_show_size: Rect::default(),
-            default_album_art: Arc::new(config.theme.default_album_art.to_vec()),
             work_tx: ctx.work_sender.clone(),
             is_showing: false,
             request_queue: Vec::new(),
@@ -91,9 +89,10 @@ impl AlbumArtFacade {
             region_dirty: false,
         }
     }
-    pub fn show_default(&mut self, ctx: &Ctx) -> Result<()> {
-        self.current_album_art = Some(Arc::clone(&self.default_album_art));
-        self.show_current(ctx)
+    /// Whether real art was last shown. The album art pane uses it to
+    /// decide whether the pane collapses (Round 48: no art -> no box).
+    pub fn has_current(&self) -> bool {
+        self.current_album_art.is_some()
     }
     pub fn show_current(&mut self, ctx: &Ctx) -> Result<()> {
         let Some(current_album_art) = self.current_album_art.as_ref().map(Arc::clone)

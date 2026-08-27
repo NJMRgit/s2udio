@@ -12,7 +12,7 @@ use ratatui::{
 };
 use super::{
     Modal, confirm_modal::{Action, ConfirmModal},
-    input_modal::InputModal, remap_keys,
+    input_modal::InputModal, mpv_conf_editor::MpvConfEditorModal, remap_keys,
 };
 use crate::{
     AppEvent,
@@ -276,6 +276,9 @@ enum MpvRow {
     /// so SVP4's manager can drive frame interpolation (and s2udio tracks
     /// playback over the same socket).
     Svp,
+    /// Opens the in-TUI nano-style editor for `~/.config/mpv/mpv.conf`
+    /// (Round 48).
+    EditConf,
 }
 /// Which mpv preference the language picker is choosing for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -928,6 +931,7 @@ impl SettingsModal {
                 vec![
                     ContentRow::Mpv(MpvRow::Header), ContentRow::Mpv(MpvRow::AudioLang),
                     ContentRow::Mpv(MpvRow::Subtitles), ContentRow::Mpv(MpvRow::Svp),
+                    ContentRow::Mpv(MpvRow::EditConf),
                 ]
             }
             Section::Mpd => {
@@ -1151,6 +1155,10 @@ impl SettingsModal {
                     MpvRow::Svp => {
                         self.mpv_svp_pending = !self.mpv_svp_pending;
                         ctx.render()?;
+                        Ok(())
+                    }
+                    MpvRow::EditConf => {
+                        Self::open_mpv_conf_editor(ctx);
                         Ok(())
                     }
                     MpvRow::Header => Ok(()),
@@ -1817,6 +1825,17 @@ impl SettingsModal {
                     }
                     MpvRow::Svp => {
                         Self::toggle_row("svp support", self.mpv_svp_pending, style)
+                    }
+                    MpvRow::EditConf => {
+                        (
+                            vec![Span::styled(" edit mpv.conf", style)],
+                            vec![
+                                Span::styled(" [ open editor ]", style.bold()),
+                                Span::styled(" >", dim),
+                            ],
+                            Vec::new(),
+                            Some(Click::Activate),
+                        )
                     }
                 }
             }
@@ -2563,6 +2582,11 @@ impl SettingsModal {
             ("Arabic", "ar"),
             ("Hindi", "hi"),
         ]
+    }
+    /// Open the in-TUI nano-style editor for the user's mpv.conf (the
+    /// Settings -> mpv "Edit mpv.conf" row, Round 48).
+    fn open_mpv_conf_editor(ctx: &mut Ctx) {
+        modal!(ctx, MpvConfEditorModal::new());
     }
     /// Open the language picker (audio or subtitles); the chosen code is
     /// stored in `ctx.mpv_custom_audio_lang` / `ctx.mpv_custom_subtitle_lang`

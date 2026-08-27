@@ -294,6 +294,9 @@ pub struct DirectoriesPane {
     /// 46): armed by a left press, updated by `Drag` events, finalized by
     /// `LeftRelease`.
     items_band: crate::ui::band::BandState,
+    /// Drag state of the items-list scrollbar (Round 48: press-and-hold on
+    /// the thumb/track, then the thumb follows the pointer anywhere).
+    item_scrollbar_drag: crate::shared::mouse_event::ScrollbarDrag,
     /// Path of the node whose children are shown (None = the Library root).
     selected: Option<Path>,
     /// Tree-browser layout args from the config (defaults = today's
@@ -328,6 +331,7 @@ impl DirectoriesPane {
             items_inner: Rect::default(),
             marked: MarkState::default(),
             items_band: crate::ui::band::BandState::default(),
+            item_scrollbar_drag: crate::shared::mouse_event::ScrollbarDrag::default(),
             selected: None,
             tree_args: ctx.config.tree_browser_args(PaneTypeDiscriminants::Directories),
             loaded: HashMap::new(),
@@ -908,6 +912,9 @@ impl TreeBrowserCore for DirectoriesPane {
     fn items_band_mut(&mut self) -> Option<&mut crate::ui::band::BandState> {
         Some(&mut self.items_band)
     }
+    fn items_scrollbar_drag(&mut self) -> &mut crate::shared::mouse_event::ScrollbarDrag {
+        &mut self.item_scrollbar_drag
+    }
     fn item_row(&self, idx: usize, hovered: bool, ctx: &Ctx) -> ListItem<'static> {
         let is_marked = self.marked.contains(idx);
         let item = match &self.items[idx] {
@@ -1217,6 +1224,29 @@ impl TreeBrowserCore for DirectoriesPane {
         ctx: &Ctx,
     ) -> Result<()> {
         if row >= self.items_len() {
+            // Round 47: a press in the empty pane space below the items
+            // arms the band at the clamped edge row, so a drag can select
+            // from empty space into the list, and a plain click there
+            // clears the multi-selection (the release's deferred plain-
+            // click path applies it). The selection cursor stays put.
+            // Ctrl/alt presses have no row to act on — only the plain arm.
+            if !event.modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
+                && !event.modifiers.contains(crossterm::event::KeyModifiers::ALT)
+            {
+                let area = self.items_area();
+                let Some(edge) = crate::ui::band::band_current_row(
+                    event.y,
+                    area,
+                    self.item_list.offset(),
+                    self.items_len(),
+                    1,
+                ) else {
+                    return Ok(());
+                };
+                let clear_marks = !self.marked.is_empty();
+                self.items_band.arm(edge, clear_marks);
+                ctx.render()?;
+            }
             return Ok(());
         }
         if event.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) {

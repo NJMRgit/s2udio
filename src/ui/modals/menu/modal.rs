@@ -41,6 +41,10 @@ pub struct MenuModal<'a> {
     /// `None` keeps the centered placement (keyboard-opened menus and
     /// every menu opened from inside another modal).
     anchor: Option<Position>,
+    /// The popup's rect from the most recent render (computed fresh each
+    /// frame); the mouse handler uses it to dismiss the menu on a
+    /// left-click outside the popup (Round 47).
+    popup_area: Rect,
 }
 impl Modal for MenuModal<'_> {
     fn id(&self) -> Id {
@@ -65,6 +69,7 @@ impl Modal for MenuModal<'_> {
                     .area()
                     .centered(constraint!(== self.width), constraint!(== needed_height as u16))
             });
+        self.popup_area = popup_area;
         frame.render_widget(Clear, popup_area);
         if let Some(bg_color) = ctx.config.theme.modal_background_color {
             frame
@@ -226,6 +231,13 @@ impl Modal for MenuModal<'_> {
     fn handle_mouse_event(&mut self, event: MouseEvent, ctx: &mut Ctx) -> Result<()> {
         match event.kind {
             MouseEventKind::LeftClick => {
+                // Round 47: a plain click outside the popup dismisses the
+                // menu (same as right-click / Esc). Clicks inside — on a
+                // section, the title row, borders or separators — keep the
+                // menu open.
+                if !self.popup_area.contains(event.into()) {
+                    return self.destroy(ctx);
+                }
                 if let Some(idx) = self.section_idx_at_position(event.into()) {
                     if idx != self.current_section_idx {
                         self.sections[self.current_section_idx].unselect(ctx);
@@ -276,6 +288,7 @@ impl<'a> MenuModal<'a> {
             title: None,
             replacement_id: None,
             anchor: None,
+            popup_area: Rect::default(),
         }
     }
     /// The replacement id this modal refreshes in place under (see
