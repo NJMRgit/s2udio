@@ -354,14 +354,22 @@ impl AlbumArtFacade {
         Ok(())
     }
     pub fn hide(&mut self, ctx: &Ctx) -> Result<()> {
-        self.is_showing = false;
         self.last_drawn = None;
         self.region_dirty = false;
+        self.request_queue.clear();
+        if !self.is_showing {
+            // Nothing is on screen: skip the backend erase. The erase
+            // (clear_area) blanks the stale art region with cells the
+            // frame diff will not repaint, so repeated no-art collapses
+            // left a permanent blank box where the art used to be. Host
+            // fix 2026-08-27.
+            return Ok(());
+        }
+        self.is_showing = false;
         let w = TERMINAL.writer();
         let mut w = w.lock();
         let w = w.by_ref();
         let c = ctx.config.theme.background_color.map(|c| c.into_crossterm());
-        self.request_queue.clear();
         match &mut self.image_backend {
             ImageBackend::Kitty(s) => s.hide(w, self.last_size, c)?,
             ImageBackend::Ueberzug(s) => s.hide(w, self.last_size, c)?,
