@@ -368,6 +368,11 @@ pub(crate) enum AppEvent {
     /// `Ctx.dl_state` so the modal's progress / the status line stay
     /// fresh.
     DlStatePoll,
+    /// Round 56.6 (56.6-3): a yt-dlp queue entry was removed in place
+    /// (the Downloads modal's "Remove from list"); refresh the list and
+    /// re-render (the same refresh the yt-dlp download-finished path
+    /// sends).
+    YtDlpDownloadsUpdated,
     /// A round-54 download wait finished: the daemon response (stream
     /// URLs to play through the daemon engine) is ready, an error
     /// occurred, or the wait was cancelled.

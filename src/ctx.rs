@@ -251,6 +251,12 @@ pub struct Ctx {
     /// files; cleared on `MpvSessionEnded` / app exit.
     #[debug(skip)]
     pub(crate) dl_streaming_jobs: RefCell<std::collections::HashSet<String>>,
+    /// Round 56 (56-1): job ids whose completion notice was already
+    /// shown in this TUI session (seeded at startup from pending
+    /// `Completed` rows, extended on every `DlStatePoll`) — the one-shot
+    /// status-line notice fires once per download per TUI.
+    #[debug(skip)]
+    pub(crate) dl_completed_notified: RefCell<std::collections::HashSet<String>>,
     /// Torrents the TUI is currently PLAIN-streaming on its own ephemeral
     /// engines (round 54, R2): forgotten (partials kept) when the stream
     /// ends or is replaced, so a stopped stream never keeps downloading or
@@ -406,6 +412,7 @@ impl Ctx {
             dl_state: RefCell::new(None),
             dl_wait: RefCell::new(None),
             dl_streaming_jobs: RefCell::new(std::collections::HashSet::new()),
+            dl_completed_notified: RefCell::new(std::collections::HashSet::new()),
             plain_stream_torrents: RefCell::new(Vec::new()),
             torrent_webui_engine: RefCell::new(None),
             torrent_socks_proxy_input: RefCell::new(None),

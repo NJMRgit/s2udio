@@ -93,6 +93,25 @@ fn main_task<B: Backend + std::io::Write>(
             "{count} torrent download(s) in progress (Downloads modal / `s2udio dl status`)"
         );
     }
+    // Round 56 (56-1) + 56.6 (56.6-4): seed the seen-set with EVERY
+    // persisted `Completed` row so a later poll never re-notices them,
+    // but surface only the ones that finished recently — a TUI restarted
+    // right after a download completed still sees it; old rows must not
+    // spam on every launch now that completed rows persist indefinitely.
+    if let Some(state) = &initial_dl_state {
+        let mut notified = ctx.dl_completed_notified.borrow_mut();
+        for job in state
+            .jobs
+            .iter()
+            .filter(|job| job.status == crate::core::dlctl::DlStatus::Completed)
+        {
+            if notified.insert(job.job_id.clone())
+                && crate::core::dlctl::completed_recently(job)
+            {
+                status_info!("{}", crate::core::dlctl::completion_notice(job));
+            }
+        }
+    }
     ctx.dl_state.replace(initial_dl_state);
     if dl_jobs_active {
         dl_state_guard = Some(ctx.scheduler.repeated(Duration::from_secs(1), move |(tx, _)| {
@@ -557,6 +576,23 @@ fn main_task<B: Backend + std::io::Write>(
                         .as_ref()
                         .is_some_and(|s| crate::core::dlctl::active_job_count(s) > 0);
                     ctx.dl_state.replace(state);
+                    // Round 56 (56-1): one-shot completion notice for
+                    // jobs that transitioned to `Completed` since the
+                    // last poll (the per-session seen-set suppresses
+                    // duplicates).
+                    let mut notified = ctx.dl_completed_notified.borrow_mut();
+                    if let Some(state) = ctx.dl_state.borrow().as_ref() {
+                        for job in state
+                            .jobs
+                            .iter()
+                            .filter(|job| job.status == crate::core::dlctl::DlStatus::Completed)
+                        {
+                            if notified.insert(job.job_id.clone()) {
+                                status_info!("{}", crate::core::dlctl::completion_notice(job));
+                            }
+                        }
+                    }
+                    drop(notified);
                     if let Err(err) = ui.on_event(UiEvent::DownloadsUpdated, &mut ctx) {
                         log::error!(error:? = err; "UI failed to handle DownloadsUpdated event");
                     }
@@ -572,6 +608,16 @@ fn main_task<B: Backend + std::io::Write>(
                         }
                     } else {
                         dl_state_guard = None;
+                    }
+                    render_wanted = true;
+                }
+                AppEvent::YtDlpDownloadsUpdated => {
+                    // Round 56.6 (56.6-3): a yt-dlp queue entry was
+                    // removed in place (the Downloads modal's "Remove from
+                    // list" — the same refresh the download-finished path
+                    // sends, so the list + cursor update immediately).
+                    if let Err(err) = ui.on_event(UiEvent::DownloadsUpdated, &mut ctx) {
+                        log::error!(error:? = err; "UI failed to handle DownloadsUpdated event");
                     }
                     render_wanted = true;
                 }
