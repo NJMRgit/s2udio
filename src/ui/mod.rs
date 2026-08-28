@@ -1152,6 +1152,13 @@ impl Ui {
                 state.mpv_audio_lang = Some(staged.mpv_audio_lang.as_str().to_owned());
                 state.mpv_subtitles = Some(staged.mpv_subtitles.as_str());
                 state.mpv_svp = Some(staged.mpv_svp);
+                // MPD replay gain mode (Settings > MPD, round 53): persisted
+                // only when the user cycled the row (the server was already
+                // switched live); legacy state.ron stays without the field
+                // and the server mode is left untouched.
+                if let Some(mode) = staged.replay_gain {
+                    state.mpd_replay_gain = Some(mode.as_str().to_owned());
+                }
                 // The UI toggles (incl. auto chapters + library playlist
                 // files) and the appearance colors are not part of the
                 // config.ron schema; persist them here so a restart keeps

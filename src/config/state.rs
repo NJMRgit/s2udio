@@ -32,6 +32,11 @@ pub struct AppStateFile {
     /// mpv subtitle preference ("signs" / "off") chosen in the settings
     /// panel; overrides the config default when present.
     pub mpv_subtitles: Option<String>,
+    /// The MPD replay gain mode ("off" / "track" / "album") chosen in
+    /// Settings -> MPD. `None` = legacy users — the server mode is left
+    /// untouched until the user changes it. Re-applied on every MPD
+    /// connect / reconnect (round 53).
+    pub mpd_replay_gain: Option<String>,
     /// The "svp support" toggle (Settings -> mpv): mpv gets
     /// `--input-ipc-server=/tmp/mpvsocket`; overrides the config default
     /// when present.
