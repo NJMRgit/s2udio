@@ -132,8 +132,9 @@ pub fn stop_registered() -> Result<bool, String> {
     let _ = unregister();
     Ok(true)
 }
-/// SIGTERM, poll for exit (~2 s), then SIGKILL.
-fn kill_pid(pid: u32) {
+/// SIGTERM, poll for exit (~2 s), then SIGKILL. Pub for the round-54
+/// downloader daemon (`s2udio dl stop` kills the same way).
+pub fn kill_pid(pid: u32) {
     unsafe {
         libc::kill(pid as i32, libc::SIGTERM);
     }

@@ -3,7 +3,7 @@ use serde::Serialize;
 
 use crate::mpd::{FromMpd, LineHandled, ParseErrorExt, errors::MpdError};
 
-/// The MPD per-client replay gain mode (SET `replay_gain_mode
+/// The MPD replay gain mode (SET `replay_gain_mode
 /// {off|track|album}`, GET `replay_gain_status` -> `replay_gain_mode:`).
 /// Round 53: exposed in Settings > MPD and persisted/restored across
 /// connects.

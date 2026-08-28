@@ -66,6 +66,8 @@
             ">":          NextTrack,
             "Q":          Quit,
             "<Esc>":      ShowSettings,
+            // Round 55.5: Ctrl+D opens the downloads modal.
+            "<C-d>":      ShowDownloads,
         },
 
         navigation: {

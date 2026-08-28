@@ -38,6 +38,7 @@ impl Command {
             Command::DebugInfo => bail!("Cannot use debuginfo command here."),
             Command::Raw { .. } => bail!("Cannot use raw command here."),
             Command::Remote { .. } => bail!("Cannot use remote command here."),
+            Command::Dl { .. } => bail!("Cannot use dl command here."),
             Command::AddRandom { tag, count } => Ok(Box::new(move |client| {
                 match tag {
                     AddRandom::Song => {

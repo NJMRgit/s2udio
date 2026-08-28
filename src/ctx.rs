@@ -232,11 +232,33 @@ pub struct Ctx {
     pub(crate) torrent_engine: RefCell<
         Option<std::sync::Arc<crate::core::torrent::TorrentEngine>>,
     >,
-    /// The active "Play and Download" job (None unless the user picked
-    /// that action): the event loop polls the engine's stats once per
-    /// second and moves the completed file to `s2udio-downloads`.
+    /// The round-54 downloader daemon's shared state
+    /// (`~/.cache/s2udio/downloads.json`), refreshed by the 1 s
+    /// `AppEvent::DlStatePoll` while the daemon has jobs: feeds the
+    /// Downloads modal's Torrent section, the startup status line and the
+    /// TUI's re-stream routing decision.
     #[debug(skip)]
-    pub(crate) torrent_download: RefCell<Option<crate::core::torrent::TorrentDownload>>,
+    pub(crate) dl_state: RefCell<Option<crate::core::dlctl::DlStateFile>>,
+    /// An open "Preparing downloader…" wait (round 54): a committed
+    /// "Stream and download" / "Download & Play" enqueued a job and is
+    /// waiting for the daemon's response (stream URLs to play through the
+    /// daemon engine). Esc cancels the wait (the daemon job is stopped).
+    #[debug(skip)]
+    pub(crate) dl_wait: RefCell<Option<crate::ui::modals::paste::DlWaitState>>,
+    /// Job ids the TUI is currently streaming through the daemon engine
+    /// (one mpv session at a time). Written into the `dl-streaming.json`
+    /// marker (R2.5) so the daemon defers moving those jobs' completed
+    /// files; cleared on `MpvSessionEnded` / app exit.
+    #[debug(skip)]
+    pub(crate) dl_streaming_jobs: RefCell<std::collections::HashSet<String>>,
+    /// Torrents the TUI is currently PLAIN-streaming on its own ephemeral
+    /// engines (round 54, R2): forgotten (partials kept) when the stream
+    /// ends or is replaced, so a stopped stream never keeps downloading or
+    /// seeding.
+    #[debug(skip)]
+    pub(crate) plain_stream_torrents: RefCell<
+        Vec<crate::core::torrent::PlainTorrentStream>,
+    >,
     /// The standalone rqbit engine behind Settings -> torrent -> web ui
     /// (None until first opened): spawned on demand and kept alive (its
     /// `Drop` kills the child) until the user stops it or the app exits —
@@ -381,7 +403,10 @@ impl Ctx {
             modal_mouse_pos: Cell::new(None),
             seekbar: RefCell::new(crate::ui::seekbar::SeekbarState::default()),
             torrent_engine: RefCell::new(None),
-            torrent_download: RefCell::new(None),
+            dl_state: RefCell::new(None),
+            dl_wait: RefCell::new(None),
+            dl_streaming_jobs: RefCell::new(std::collections::HashSet::new()),
+            plain_stream_torrents: RefCell::new(Vec::new()),
             torrent_webui_engine: RefCell::new(None),
             torrent_socks_proxy_input: RefCell::new(None),
             torrent_scans: RefCell::new(HashMap::new()),

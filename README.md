@@ -156,7 +156,19 @@ s2udio rq stop     stop the standalone engine
 s2udio rq open     open the web UI in the browser
 s2udio rq check    verify the proxy: /web/ + API answer without credentials
                    (200) while the engine port still rejects them (401)
+s2udio dl status   torrent downloads in progress (name, status, %)
+s2udio dl start    start the downloader daemon (idempotent; normally the
+                   TUI starts it on the first committed download)
+s2udio dl stop     stop the downloader daemon (partials stay)
 ```
+
+Committed torrent downloads ("Stream and download", the file picker's
+"Download & Play", "Download", "Download all") run in a detached
+`s2udio dl` daemon, one rqbit engine per job, so a download finishes
+even when the TUI exits mid-download; progress + per-job Stop live in
+the Downloads modal (state: `~/.cache/s2udio/downloads.json`). Plain
+streams keep the ephemeral in-TUI engines and stop their download when
+the stream ends.
 
 - `rq start` spawns a detached daemon that owns the engine and the
   auth-injecting proxy; it reuses an engine the Settings panel started,

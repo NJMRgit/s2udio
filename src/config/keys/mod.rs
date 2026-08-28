@@ -64,6 +64,9 @@ impl Default for KeyConfigFile {
             (s().char('>'), G::NextTrack),
             (s().char('q'), G::Quit),
             (s().esc(), G::ShowSettings),
+            // Round 55.5: Ctrl+D opens the downloads modal (no conflicts
+            // with the defaults above; navigation keeps <C-a>/<C-s>/<C-c>).
+            (s().char('d').ctrl(), G::ShowDownloads),
         ]);
         let navigation = HashMap::from([
             (s().esc(), C::Close),

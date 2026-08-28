@@ -3,11 +3,21 @@
 //! capture the new key, rebind it in the runtime config. Persisting to the
 //! `keybinds.ron` sidecar is deferred to the panel's Save action.
 
+use std::sync::Arc;
+
 use anyhow::Result;
 use itertools::Itertools;
+use strum::VariantArray;
 
 use crate::{
-    config::keys::{Key, KeyConfig, KeySequence, QueueActions},
+    config::{
+        keys::{
+            actions::{AddKind, DeleteKind, RateKind, SaveKind},
+            CommonAction, DirectoriesActions, GlobalAction, Key, KeyConfig, KeySequence,
+            QueueActions,
+        },
+        tabs::TabName,
+    },
     ctx::Ctx,
     shared::keys::{Actions, KeyResolver},
 };
@@ -195,12 +205,183 @@ pub(crate) fn remap_description(action: &Actions) -> String {
     }
 }
 
+/// The complete remapable Global-action catalog: every persistable action
+/// in its base form. Payload-carrying actions appear with their default
+/// payload so a fresh bind produces a working, persistable binding (the
+/// row's `actions_eq` then matches only the same payload — different
+/// configured payloads keep their own rows when bound).
+fn global_catalog() -> Vec<GlobalAction> {
+    use crate::config::keys::actions::GlobalActionDiscriminants as D;
+    D::VARIANTS
+        .iter()
+        .map(|disc| match disc {
+            D::Quit => GlobalAction::Quit,
+            D::ShowHelp => GlobalAction::ShowHelp,
+            D::ShowSettings => GlobalAction::ShowSettings,
+            D::ShowCurrentSongInfo => GlobalAction::ShowCurrentSongInfo,
+            D::ShowOutputs => GlobalAction::ShowOutputs,
+            D::ShowDecoders => GlobalAction::ShowDecoders,
+            D::ShowDownloads => GlobalAction::ShowDownloads,
+            D::Partition => GlobalAction::Partition { name: None, autocreate: false },
+            D::AddRandom => GlobalAction::AddRandom,
+            D::NextTrack => GlobalAction::NextTrack,
+            D::PreviousTrack => GlobalAction::PreviousTrack,
+            D::Stop => GlobalAction::Stop,
+            D::ToggleRepeat => GlobalAction::ToggleRepeat,
+            D::ToggleSingle => GlobalAction::ToggleSingle,
+            D::ToggleRandom => GlobalAction::ToggleRandom,
+            D::ToggleConsume => GlobalAction::ToggleConsume,
+            D::ToggleSingleOnOff => GlobalAction::ToggleSingleOnOff,
+            D::ToggleConsumeOnOff => GlobalAction::ToggleConsumeOnOff,
+            D::TogglePause => GlobalAction::TogglePause,
+            D::VolumeUp => GlobalAction::VolumeUp,
+            D::VolumeDown => GlobalAction::VolumeDown,
+            D::CrossfadeUp => GlobalAction::CrossfadeUp,
+            D::CrossfadeDown => GlobalAction::CrossfadeDown,
+            D::SeekForward => GlobalAction::SeekForward,
+            D::SeekBack => GlobalAction::SeekBack,
+            D::SeekToStart => GlobalAction::SeekToStart,
+            D::Update => GlobalAction::Update,
+            D::Rescan => GlobalAction::Rescan,
+            D::CommandMode => GlobalAction::CommandMode,
+            D::NextTab => GlobalAction::NextTab,
+            D::PreviousTab => GlobalAction::PreviousTab,
+            D::ToggleMpdMode => GlobalAction::ToggleMpdMode,
+            D::SwitchToTab => GlobalAction::SwitchToTab(TabName::from("Queue")),
+            D::Command => GlobalAction::Command { command: String::new(), description: None },
+            D::ExternalCommand => GlobalAction::ExternalCommand {
+                command: Arc::new(Vec::new()),
+                description: None,
+            },
+        })
+        .collect()
+}
+
+/// The complete remapable Navigation (Common) action catalog, base form.
+fn common_catalog() -> Vec<CommonAction> {
+    use crate::config::keys::actions::CommonActionDiscriminants as D;
+    D::VARIANTS
+        .iter()
+        .map(|disc| match disc {
+            D::Down => CommonAction::Down,
+            D::Up => CommonAction::Up,
+            D::Right => CommonAction::Right,
+            D::Left => CommonAction::Left,
+            D::PaneDown => CommonAction::PaneDown,
+            D::PaneUp => CommonAction::PaneUp,
+            D::PaneRight => CommonAction::PaneRight,
+            D::PaneLeft => CommonAction::PaneLeft,
+            D::MoveDown => CommonAction::MoveDown,
+            D::MoveUp => CommonAction::MoveUp,
+            D::DownHalf => CommonAction::DownHalf,
+            D::UpHalf => CommonAction::UpHalf,
+            D::PageUp => CommonAction::PageUp,
+            D::PageDown => CommonAction::PageDown,
+            D::Top => CommonAction::Top,
+            D::Bottom => CommonAction::Bottom,
+            D::EnterSearch => CommonAction::EnterSearch,
+            D::NextResult => CommonAction::NextResult,
+            D::PreviousResult => CommonAction::PreviousResult,
+            D::Select => CommonAction::Select,
+            D::SelectAll => CommonAction::SelectAll,
+            D::InvertSelection => CommonAction::InvertSelection,
+            D::SelectDown => CommonAction::SelectDown,
+            D::SelectUp => CommonAction::SelectUp,
+            D::Delete => CommonAction::Delete,
+            D::Rename => CommonAction::Rename,
+            D::Close => CommonAction::Close,
+            D::Confirm => CommonAction::Confirm,
+            D::FocusInput => CommonAction::FocusInput,
+            D::LyricsNudgeUp => CommonAction::LyricsNudgeUp,
+            D::LyricsNudgeDown => CommonAction::LyricsNudgeDown,
+            D::LyricsSave => CommonAction::LyricsSave,
+            D::LyricsDeleteWord => CommonAction::LyricsDeleteWord,
+            D::LyricsEditLine => CommonAction::LyricsEditLine,
+            D::LyricsInsertBefore => CommonAction::LyricsInsertBefore,
+            D::LyricsInsertAfter => CommonAction::LyricsInsertAfter,
+            D::LyricsAddLineBefore => CommonAction::LyricsAddLineBefore,
+            D::LyricsAddLineAfter => CommonAction::LyricsAddLineAfter,
+            D::LyricsLineTime => CommonAction::LyricsLineTime,
+            D::LyricsSaveAndExit => CommonAction::LyricsSaveAndExit,
+            D::AddOptions => CommonAction::AddOptions { kind: AddKind::default() },
+            D::ShowInfo => CommonAction::ShowInfo,
+            D::ContextMenu => CommonAction::ContextMenu,
+            D::Rate => CommonAction::Rate {
+                kind: RateKind::default(),
+                current: false,
+                min_rating: 0,
+                max_rating: 10,
+            },
+            D::Save => CommonAction::Save { kind: SaveKind::default() },
+            D::DeleteFromPlaylist => {
+                CommonAction::DeleteFromPlaylist { kind: DeleteKind::default() }
+            }
+        })
+        .collect()
+}
+
+/// The complete remapable Queue-action catalog, base form (`Unused` is not
+/// persistable and stays skipped).
+fn queue_catalog() -> Vec<QueueActions> {
+    use crate::config::keys::actions::QueueActionsDiscriminants as D;
+    D::VARIANTS
+        .iter()
+        .filter(|disc| !matches!(disc, D::Unused))
+        .map(|disc| match disc {
+            D::Delete => QueueActions::Delete,
+            D::DeleteAll => QueueActions::DeleteAll,
+            D::Play => QueueActions::Play,
+            D::JumpToCurrent => QueueActions::JumpToCurrent,
+            D::Shuffle => QueueActions::Shuffle,
+            D::SortByColumn => QueueActions::SortByColumn(0),
+            D::ToggleChapters => QueueActions::ToggleChapters,
+            D::Unused => unreachable!("filtered out above"),
+        })
+        .collect()
+}
+
+/// The complete remapable Regions / browser catalog (unit-only enum).
+const DIRECTORIES_CATALOG: [DirectoriesActions; 5] = [
+    DirectoriesActions::FolderUp,
+    DirectoriesActions::FolderDown,
+    DirectoriesActions::FolderCollapse,
+    DirectoriesActions::FolderExpand,
+    DirectoriesActions::PlayFile,
+];
+
+/// Every remapable action in its base/persisted form, grouped by section.
+/// Used to seed the keybinds list with ALL actions — bound or not.
+fn action_catalog() -> Vec<(Section, Actions)> {
+    let mut catalog: Vec<(Section, Actions)> = Vec::new();
+    catalog.extend(global_catalog().into_iter().map(|a| (Section::Global, Actions::Global(a))));
+    catalog.extend(common_catalog().into_iter().map(|a| (Section::Navigation, Actions::Common(a))));
+    catalog.extend(queue_catalog().into_iter().map(|a| (Section::Queue, Actions::Queue(a))));
+    catalog.extend(
+        DIRECTORIES_CATALOG
+            .iter()
+            .copied()
+            .map(|a| (Section::Directories, Actions::Directories(a))),
+    );
+    catalog
+}
+
 /// The remapable actions with their current keys, grouped and sorted.
+///
+/// The list is seeded from the full per-section action catalog, so actions
+/// with no bound key (e.g. `ShowDownloads`) get a row with an empty key
+/// cell and still participate in capture/rebind. Bound keys then attach to
+/// their catalog row; configured actions whose payload differs from any
+/// catalog base form keep their own rows so no live binding is hidden.
 pub(crate) fn build_remap_rows(ctx: &Ctx) -> Vec<RemapRow> {
-    let keybinds: &KeyConfig = &ctx.config.keybinds;
+    build_remap_rows_from(&ctx.config.keybinds)
+}
+
+/// Pure core of [`build_remap_rows`] (no `Ctx` needed): seeds the rows from
+/// the action catalog, then attaches every bound key.
+fn build_remap_rows_from(keybinds: &KeyConfig) -> Vec<RemapRow> {
     let mut rows: Vec<RemapRow> = Vec::new();
 
-    let mut push = |section: Section, seq: KeySequence, action: Actions| {
+    let mut upsert = |section: Section, seq: Option<KeySequence>, action: Actions| {
         // Skip actions that cannot be persisted back to the config format.
         if matches!(action, Actions::Queue(QueueActions::Unused)) {
             return;
@@ -209,25 +390,33 @@ pub(crate) fn build_remap_rows(ctx: &Ctx) -> Vec<RemapRow> {
         if let Some(row) =
             rows.iter_mut().find(|row| row.section == section && actions_eq(&row.action, &action))
         {
-            row.keys.push(seq);
+            if let Some(seq) = seq {
+                row.keys.push(seq);
+            }
         } else {
-            rows.push(RemapRow { section, action, keys: vec![seq], display });
+            rows.push(RemapRow { section, action, keys: seq.into_iter().collect(), display });
         }
     };
 
+    for (section, action) in action_catalog() {
+        upsert(section, None, action);
+    }
     for (seq, action) in &keybinds.global {
-        push(Section::Global, seq.clone(), Actions::Global(action.clone()));
+        upsert(Section::Global, Some(seq.clone()), Actions::Global(action.clone()));
     }
     for (seq, action) in &keybinds.navigation {
-        push(Section::Navigation, seq.clone(), Actions::Common(action.clone()));
+        upsert(Section::Navigation, Some(seq.clone()), Actions::Common(action.clone()));
     }
     for (seq, action) in &keybinds.queue {
-        push(Section::Queue, seq.clone(), Actions::Queue(*action));
+        upsert(Section::Queue, Some(seq.clone()), Actions::Queue(*action));
     }
     for (seq, action) in &keybinds.directories {
-        push(Section::Directories, seq.clone(), Actions::Directories(*action));
+        upsert(Section::Directories, Some(seq.clone()), Actions::Directories(*action));
     }
 
+    for row in &mut rows {
+        row.keys.sort_by(|a, b| a.to_string().cmp(&b.to_string()));
+    }
     rows.sort_by(|a, b| a.section.order().cmp(&b.section.order()).then(a.display.cmp(&b.display)));
     rows
 }

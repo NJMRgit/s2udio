@@ -70,10 +70,41 @@ fn main_task<B: Backend + std::io::Write>(
     // per-poll repeat of the same error stays quiet; a distinct error or a
     // recovery prints once. Kept per session; re-shown on reconnect.
     let mut last_reported_mpd_error: Option<String> = None;
+    // Round-54 downloader daemon state: re-reads `downloads.json` once
+    // per second while the daemon has jobs (or the Downloads modal is
+    // open), feeding the Downloads modal's Torrent section and the
+    // startup status line.
+    let mut dl_state_guard: Option<
+        crate::core::scheduler::TaskGuard<(Sender<AppEvent>, Sender<ClientRequest>)>,
+    > = None;
+    // Round 54: the downloader daemon's jobs may outlive the TUI — show a
+    // status line when downloads are in flight at startup, cache the
+    // state for the Downloads modal, and keep the 1 s refresh running
+    // while the daemon works.
+    let initial_dl_state = crate::core::dlctl::read_state();
+    let dl_jobs_active = initial_dl_state
+        .as_ref()
+        .is_some_and(|state| crate::core::dlctl::active_job_count(state) > 0);
+    if let Some(state) = &initial_dl_state
+        && dl_jobs_active
+    {
+        let count = crate::core::dlctl::active_job_count(state);
+        status_info!(
+            "{count} torrent download(s) in progress (Downloads modal / `s2udio dl status`)"
+        );
+    }
+    ctx.dl_state.replace(initial_dl_state);
+    if dl_jobs_active {
+        dl_state_guard = Some(ctx.scheduler.repeated(Duration::from_secs(1), move |(tx, _)| {
+            let _ = tx.send(AppEvent::DlStatePoll);
+            Ok(())
+        }));
+    }
     ui.before_show(area, &mut ctx).expect("Initial render init to succeed");
     // Round 53: re-apply the persisted replay gain mode on the initial
-    // connect (the mode is per-client — MPD forgets it when the connection
-    // closes; AppEvent::Reconnected below covers later reconnects).
+    // connect. The mode is partition-level server state: it survives client
+    // disconnects but MPD does NOT persist it, so it is lost on MPD restarts
+    // (AppEvent::Reconnected below covers later reconnects).
     apply_replay_gain(&ctx);
     let mut _update_loop_guard = None;
     let mut _update_db_loop_guard = None;
@@ -81,12 +112,6 @@ fn main_task<B: Backend + std::io::Write>(
     // mpv video session: poll its IPC socket while active and report
     // playback progress back to Jellyfin (throttled).
     let mut mpv_poll_guard: Option<
-        crate::core::scheduler::TaskGuard<(Sender<AppEvent>, Sender<ClientRequest>)>,
-    > = None;
-    // "Play and Download" torrent job: polls the engine's stats once per
-    // second while a download is active (stopped when the job finishes or
-    // is abandoned).
-    let mut torrent_download_guard: Option<
         crate::core::scheduler::TaskGuard<(Sender<AppEvent>, Sender<ClientRequest>)>,
     > = None;
     let mut last_mpv_report = Instant::now() - Duration::from_secs(30);
@@ -501,29 +526,13 @@ fn main_task<B: Backend + std::io::Write>(
                     // Drop the mpv state file so mpDris2 falls back to MPD.
                     crate::ui::modals::paste::delete_mpv_mpris_state(&ctx);
                     ctx.mpv = crate::core::mpv::MpvSession::default();
-                    // A "Play and Download" torrent whose download finished
-                    // while mpv was still playing its stream: the stream is
-                    // gone now, so move the completed file to
-                    // the completed download and drop the job.
-                    if ctx
-                        .torrent_download
-                        .borrow()
-                        .as_ref()
-                        .is_some_and(|job| job.complete && job.deferred)
-                    {
-                        let base_url = ctx
-                            .torrent_download
-                            .borrow()
-                            .as_ref()
-                            .map(|job| job.engine_base_url.clone())
-                            .unwrap_or_default();
-                        let engine = ctx.torrent_engine.borrow();
-                        if let Some(engine) = engine.as_ref().filter(|e| e.base_url() == base_url) {
-                            finish_torrent_download(&ctx, engine);
-                        }
-                        *ctx.torrent_download.borrow_mut() = None;
-                        torrent_download_guard = None;
-                    }
+                    // R2.5: the daemon may move this job's completed files
+                    // now ("streams over").
+                    crate::ui::modals::paste::untrack_daemon_streams(&ctx);
+                    // R2: plain-streamed torrents stop downloading/seeding
+                    // when the stream ends (forget keeps the partials; a
+                    // re-stream resumes from them).
+                    stop_finished_plain_streams(&mut ctx, None);
                     // The album art overlay belongs to the audio source
                     // again: restore the current song's art (or the default).
                     if let Err(err) = ui.refresh_album_art(&ctx) {
@@ -539,174 +548,65 @@ fn main_task<B: Backend + std::io::Write>(
                     mpv_poll_guard = None;
                     render_wanted = true;
                 }
-                AppEvent::TorrentDownloadPoll => {
-                    // A stale event (the job was finished or abandoned
-                    // since it was queued): nothing to poll.
-                    if torrent_download_guard.is_none() {
-                        continue;
+                AppEvent::DlStatePoll => {
+                    // Refresh the cached `downloads.json` (the Downloads
+                    // modal's Torrent section + the status line) and keep
+                    // the poll running while the daemon has active jobs.
+                    let state = crate::core::dlctl::read_state();
+                    let active = state
+                        .as_ref()
+                        .is_some_and(|s| crate::core::dlctl::active_job_count(s) > 0);
+                    ctx.dl_state.replace(state);
+                    if let Err(err) = ui.on_event(UiEvent::DownloadsUpdated, &mut ctx) {
+                        log::error!(error:? = err; "UI failed to handle DownloadsUpdated event");
                     }
-                    // One "Play and Download" tick: poll the engine's
-                    // stats; when the torrent's download is complete, move
-                    // the picked file to s2udio-downloads — unless mpv is
-                    // still playing the stream, in which case the move is
-                    // deferred to MpvSessionEnded.
-                    enum PollOutcome {
-                        InProgress,
-                        /// Download finished but mpv is still playing the
-                        /// stream: mark the job complete+deferred.
-                        Defer,
-                        Complete,
-                        Abandon(String),
-                    }
-                    let outcome = {
-                        let job = ctx.torrent_download.borrow();
-                        let Some(job) = job.as_ref() else { continue };
-                        let engine = ctx.torrent_engine.borrow();
-                        let Some(engine) = engine.as_ref() else { continue };
-                        if engine.base_url() != job.engine_base_url {
-                            // The engine was replaced by another torrent
-                            // play: the download died with it.
-                            PollOutcome::Abandon("Torrent download interrupted".to_owned())
-                        } else {
-                            match crate::core::torrent::torrent_stats(engine, &job.torrent_id) {
-                                Ok(stats)
-                                    if crate::core::torrent::download_complete(&stats, job) =>
-                                {
-                                    // Is mpv still playing one of the kept
-                                    // streams? Moving a file away (and
-                                    // deleting the torrent) would break
-                                    // playback — defer the whole move to
-                                    // MpvSessionEnded (round 21: any kept
-                                    // file, not just the first).
-                                    let playing = ctx.mpv.active
-                                        && ctx.mpv.playlist.borrow().iter().any(|entry| {
-                                            job.files.iter().any(|f| f.stream_url == entry.url)
-                                        });
-                                    if playing { PollOutcome::Defer } else { PollOutcome::Complete }
-                                }
-                                Ok(_) => PollOutcome::InProgress,
-                                Err(err) => {
-                                    let msg = format!("Torrent download interrupted: {err}");
-                                    let mut job = ctx.torrent_download.borrow_mut();
-                                    let Some(job) = job.as_mut() else { continue };
-                                    job.failures += 1;
-                                    if job.failures >= 3 {
-                                        PollOutcome::Abandon(msg)
-                                    } else {
-                                        PollOutcome::InProgress
-                                    }
-                                }
-                            }
+                    if active {
+                        if dl_state_guard.is_none() {
+                            dl_state_guard = Some(ctx.scheduler.repeated(
+                                Duration::from_secs(1),
+                                move |(tx, _)| {
+                                    let _ = tx.send(AppEvent::DlStatePoll);
+                                    Ok(())
+                                },
+                            ));
                         }
-                    };
-                    match outcome {
-                        PollOutcome::InProgress => {}
-                        PollOutcome::Defer => {
-                            // The file is complete but mpv still plays the
-                            // stream: keep the job; MpvSessionEnded moves
-                            // the file.
-                            let mut job = ctx.torrent_download.borrow_mut();
-                            if let Some(job) = job.as_mut() {
-                                job.complete = true;
-                                job.deferred = true;
-                            }
-                        }
-                        PollOutcome::Complete => {
-                            let base_url = ctx
-                                .torrent_download
-                                .borrow()
-                                .as_ref()
-                                .map(|job| job.engine_base_url.clone())
-                                .unwrap_or_default();
-                            let engine = ctx.torrent_engine.borrow();
-                            if let Some(engine) =
-                                engine.as_ref().filter(|e| e.base_url() == base_url)
-                            {
-                                finish_torrent_download(&ctx, engine);
-                            }
-                            *ctx.torrent_download.borrow_mut() = None;
-                            torrent_download_guard = None;
-                        }
-                        PollOutcome::Abandon(msg) => {
-                            status_warn!("{msg}");
-                            *ctx.torrent_download.borrow_mut() = None;
-                            torrent_download_guard = None;
-                        }
+                    } else {
+                        dl_state_guard = None;
                     }
                     render_wanted = true;
                 }
-                AppEvent::TorrentScannedPlay { scan, file_indices, download } => {
-                    // Round 17: the paste popup's play action on an
-                    // already-scanned torrent — the engine is running and
-                    // the file list is known, so playback starts here (the
-                    // event loop owns the download job's scheduler guard)
+                AppEvent::DlWaitReady { request_id, result } => {
+                    crate::ui::modals::paste::on_dl_wait_ready(&mut ctx, &request_id, result);
+                    render_wanted = true;
+                }
+                AppEvent::DlWaitProgress { request_id, elapsed_secs } => {
+                    crate::ui::modals::paste::on_dl_wait_progress(
+                        &ctx,
+                        &request_id,
+                        elapsed_secs,
+                    );
+                    render_wanted = true;
+                }
+                AppEvent::TorrentScannedPlay { scan, file_indices } => {
+                    // Round 17: the paste popup's plain-stream action on
+                    // an already-scanned torrent — the engine is running
+                    // and the file list is known, so playback starts here
                     // instead of re-scanning on the work thread. Round 20:
                     // the scan map keeps its own `Arc` clone of the engine
                     // (the played scan is NOT consumed), so a repeat paste
                     // of the same torrent reuses the engine instead of
                     // spawning a second rqbit on the same cache dir.
+                    // Round 54: committed actions never arrive here — they
+                    // run on the `s2udio dl` daemon.
                     let entries = crate::ui::modals::paste::torrent_entries(&scan, &file_indices);
-                    // "Play and Download" / the picker's "Download & Play"
-                    // (round 21): the job tracks every played file's
-                    // completion — one job per torrent.
-                    let cache_dir = ctx.config.torrent.cache_dir.clone();
                     let torrent_name = scan.torrent_name.clone();
-                    let download: Vec<crate::core::torrent::TorrentDownloadFile> = if download {
-                        file_indices
-                            .iter()
-                            .filter_map(|i| scan.files.get(*i))
-                            .map(|f| crate::core::torrent::TorrentDownloadFile {
-                                file_idx: f.index,
-                                file_length: f.length,
-                                file_name: f.name.clone(),
-                                source_path: cache_dir.join(&torrent_name).join(&f.name),
-                                stream_url: scan
-                                    .engine
-                                    .stream_url(&scan.torrent_id, f.index as u64),
-                            })
-                            .collect()
-                    } else {
-                        Vec::new()
-                    };
                     start_torrent_playback(
                         &mut ctx,
                         scan.engine,
                         scan.torrent_id.clone(),
                         torrent_name,
                         entries,
-                        download,
-                        &mut torrent_download_guard,
-                    );
-                    render_wanted = true;
-                }
-                AppEvent::TorrentScannedDownload { scan, file_indices } => {
-                    // Round 21: the popup's download-only actions
-                    // ("Download" / "Download all") — keep the scanned
-                    // engine alive and move the chosen files to
-                    // `s2udio-downloads` once the torrent's download
-                    // completes. No playback (unlike TorrentScannedPlay
-                    // with `download: true`); the job owns the scheduler
-                    // guard here.
-                    let cache_dir = ctx.config.torrent.cache_dir.clone();
-                    let torrent_name = scan.torrent_name.clone();
-                    let files: Vec<crate::core::torrent::TorrentDownloadFile> = file_indices
-                        .iter()
-                        .filter_map(|i| scan.files.get(*i))
-                        .map(|f| crate::core::torrent::TorrentDownloadFile {
-                            file_idx: f.index,
-                            file_length: f.length,
-                            file_name: f.name.clone(),
-                            source_path: cache_dir.join(&torrent_name).join(&f.name),
-                            stream_url: scan.engine.stream_url(&scan.torrent_id, f.index as u64),
-                        })
-                        .collect();
-                    start_torrent_download(
-                        &mut ctx,
-                        scan.engine,
-                        scan.torrent_id,
-                        torrent_name,
-                        files,
-                        &mut torrent_download_guard,
+                        scan.info_hash.clone(),
                     );
                     render_wanted = true;
                 }
@@ -970,11 +870,10 @@ fn main_task<B: Backend + std::io::Write>(
                     match ui.handle_action(&mut action, &mut ctx) {
                         Ok(KeyHandleResult::None) => continue,
                         Ok(KeyHandleResult::Quit) => {
-                            // Round 45: quitting must not orphan a
-                            // completed torrent download that is still
-                            // marked deferred (its mpv-session-end move
-                            // will never run after the process exits).
-                            finalize_complete_torrent_download(&mut ctx);
+                            // R2.5: the streaming marker goes away with the
+                            // TUI — the daemon's stale-marker handling
+                            // (mpv /proc probe + bounded wait) takes over.
+                            crate::ui::modals::paste::untrack_daemon_streams(&ctx);
                             if let Err(err) = ui.on_event(UiEvent::Exit, &mut ctx) {
                                 log::error!(error:? = err; "UI failed to handle quit event");
                             }
@@ -1066,6 +965,14 @@ fn main_task<B: Backend + std::io::Write>(
                         crate::ui::modals::paste::on_torrent_scanned(&ctx, key, result);
                         render_wanted = true;
                     }
+                    WorkDone::DlDaemonStarted { result } => {
+                        // Round 54: the daemon's spawn failed — abort an
+                        // open "Preparing downloader…" wait with the error
+                        // (a success is a no-op; the response watcher
+                        // drives the wait).
+                        crate::ui::modals::paste::on_dl_daemon_started(&ctx, result);
+                        render_wanted = true;
+                    }
                     WorkDone::TorrentScanProgress { key, progress } => {
                         // Round 18: refresh the paste popup's wait window
                         // (elapsed counter + DL-speed / needed-speed check)
@@ -1082,12 +989,13 @@ fn main_task<B: Backend + std::io::Write>(
                         torrent_id,
                         file_idx,
                         file_length,
-                        download,
+                        info_hash,
                     } => {
-                        // M2 single-file play (the fresh-engine fallback —
-                        // the scanned path arrives as
-                        // AppEvent::TorrentScannedPlay). M3 inserts the
-                        // bandwidth gate before this point.
+                        // M2 single-file plain play (the fresh-engine
+                        // fallback — the scanned path arrives as
+                        // AppEvent::TorrentScannedPlay). Round 54:
+                        // committed actions never arrive here (they run on
+                        // the `s2udio dl` daemon).
                         // Round 20: register the prepared play as a
                         // single-file scan under the item's canonical key —
                         // the engine is shared via `Arc`, so a repeat
@@ -1100,6 +1008,7 @@ fn main_task<B: Backend + std::io::Write>(
                                 engine: engine.clone(),
                                 torrent_id: torrent_id.clone(),
                                 torrent_name: torrent_name.clone(),
+                                info_hash: info_hash.clone(),
                                 files: vec![crate::core::torrent::ScannedFile {
                                     index: file_idx,
                                     name: file_name.clone(),
@@ -1112,70 +1021,13 @@ fn main_task<B: Backend + std::io::Write>(
                             stream_url.clone(),
                             None,
                         );
-                        let cache_dir = ctx.config.torrent.cache_dir.clone();
-                        let download: Vec<crate::core::torrent::TorrentDownloadFile> = download
-                            .then(|| {
-                                vec![crate::core::torrent::TorrentDownloadFile {
-                                    file_idx,
-                                    file_length,
-                                    file_name: file_name.clone(),
-                                    source_path: cache_dir.join(&torrent_name).join(&file_name),
-                                    stream_url: stream_url.clone(),
-                                }]
-                            })
-                            .unwrap_or_default();
                         start_torrent_playback(
                             &mut ctx,
                             engine,
                             torrent_id,
                             torrent_name,
                             vec![entry],
-                            download,
-                            &mut torrent_download_guard,
-                        );
-                        render_wanted = true;
-                    }
-                    WorkDone::TorrentDownloadPrepared {
-                        key,
-                        engine,
-                        torrent_id,
-                        torrent_name,
-                        files,
-                    } => {
-                        // Round 21: the fresh-engine fallback of the
-                        // popup's download-only actions — register the
-                        // prepared download as a scan under the item's
-                        // canonical key (engine Arc-shared for reuse, like
-                        // the round-20 prepared-play path) and start the
-                        // download job (no playback).
-                        let engine = std::sync::Arc::new(engine);
-                        ctx.torrent_scans.borrow_mut().insert(
-                            key,
-                            Ok(crate::core::torrent::TorrentScan {
-                                engine: engine.clone(),
-                                torrent_id: torrent_id.clone(),
-                                torrent_name: torrent_name.clone(),
-                                files: files.clone(),
-                            }),
-                        );
-                        let cache_dir = ctx.config.torrent.cache_dir.clone();
-                        let download: Vec<crate::core::torrent::TorrentDownloadFile> = files
-                            .iter()
-                            .map(|f| crate::core::torrent::TorrentDownloadFile {
-                                file_idx: f.index,
-                                file_length: f.length,
-                                file_name: f.name.clone(),
-                                source_path: cache_dir.join(&torrent_name).join(&f.name),
-                                stream_url: engine.stream_url(&torrent_id, f.index as u64),
-                            })
-                            .collect();
-                        start_torrent_download(
-                            &mut ctx,
-                            engine,
-                            torrent_id,
-                            torrent_name,
-                            download,
-                            &mut torrent_download_guard,
+                            info_hash.clone(),
                         );
                         render_wanted = true;
                     }
@@ -1955,9 +1807,9 @@ fn main_task<B: Backend + std::io::Write>(
                     }
                 }
                 AppEvent::Reconnected => {
-                    // Round 53: the persisted replay gain mode is per-client
-                    // and lost on disconnect — re-apply it on every
-                    // reconnect (MPD restart included).
+                    // Round 53: the persisted replay gain mode is partition-level
+                    // server state, lost on MPD restarts only — re-assert it on
+                    // every reconnect (MPD restart included).
                     apply_replay_gain(&ctx);
                     for ev in [IdleEvent::Player, IdleEvent::Playlist, IdleEvent::Options] {
                         handle_idle_event(ev, &ctx, &mut additional_evs);
@@ -2077,25 +1929,29 @@ fn main_task<B: Backend + std::io::Write>(
 
 /// Start mpv on a torrent's stream entries (round 17; the fresh-engine
 /// single-file path and the scanned Play all / Select files… path
-/// converge here): keep the engine alive in `Ctx.torrent_engine`, record
+/// converge here — round 54: the PLAIN-stream path only; committed
+/// "Stream and download" plays route through the `s2udio dl` daemon's
+/// engine instead): keep the engine alive in `Ctx.torrent_engine`, record
 /// the session playlist (the Queue tab's Video list, like a Jellyfin
-/// season play), insert synthetic yt-info entries (title = file name,
+/// season play) and insert synthetic yt-info entries (title = file name,
 /// channel = torrent name — in memory only, never persisted: the stream
-/// URL embeds the rqbit auth token) and — for "Play and Download" — start
-/// the 1 s stats-poll job. `download` carries `(torrent_id, file_idx,
-/// file_length, file_name, stream_url)` of the picked file.
-#[allow(clippy::too_many_arguments)]
+/// URL embeds the rqbit auth token).
 fn start_torrent_playback(
     ctx: &mut Ctx,
     engine: std::sync::Arc<crate::core::torrent::TorrentEngine>,
     torrent_id: String,
     torrent_name: String,
     entries: Vec<crate::core::mpv::MpvPlaylistEntry>,
-    download: Vec<crate::core::torrent::TorrentDownloadFile>,
-    torrent_download_guard: &mut Option<
-        crate::core::scheduler::TaskGuard<(Sender<AppEvent>, Sender<ClientRequest>)>,
-    >,
+    infohash: Option<String>,
 ) {
+    // R2: the outgoing session's plain-streamed torrents stop here — the
+    // playlist was replaced (new files added). Their transfers AND
+    // seeding stop (forget keeps partials); emptied engines are pruned.
+    // The incoming play itself is exempt (`keep`): re-streaming the very
+    // torrent that is already playing on the same engine (a repeat paste
+    // of the same magnet) must NOT forget its own torrent — the play's
+    // ref is pushed below, after the stop.
+    stop_finished_plain_streams(ctx, Some((engine.base_url().to_owned(), torrent_id.clone())));
     // Keep the engine alive for the whole session (the last Arc clone's
     // Drop kills the rqbit child on app exit). M4 adds the
     // keep_after_play/cleanup policy.
@@ -2108,153 +1964,74 @@ fn start_torrent_playback(
     ctx.mpv.artist = torrent_name.clone();
     crate::ui::modals::paste::remember_torrent_entries(ctx, &torrent_name, &entries);
     crate::core::mpv::play_video_entries(ctx, entries);
-    if !download.is_empty() {
-        // "Play and Download" / the picker's "Download & Play": keep the
-        // engine downloading and move the completed file(s) to
-        // s2udio-downloads once done (deferred until mpv stops using a
-        // stream).
-        start_torrent_download(
-            ctx,
-            engine,
+    // R2 bookkeeping: remember the plain stream so it is forgotten
+    // (transfer AND seeding stop, partials stay) when the session ends or
+    // a later play replaces it. One ref per (engine, torrent): a repeat
+    // paste replay dedupes instead of stacking duplicates.
+    let mut refs = ctx.plain_stream_torrents.borrow_mut();
+    if !refs.iter().any(|stream| {
+        stream.engine.base_url() == engine.base_url() && stream.torrent_id == torrent_id
+    }) {
+        refs.push(crate::core::torrent::PlainTorrentStream {
+            engine: engine.clone(),
             torrent_id,
-            torrent_name,
-            download,
-            torrent_download_guard,
-        );
+            infohash,
+        });
     }
 }
 
-/// Finalize a torrent download job whose files are fully downloaded
-/// (`job.complete`): move the kept files to `s2udio-downloads` and drop
-/// the job. Used where a complete-but-deferred job would otherwise never
-/// be finished — a new download job is about to replace it, or the app
-/// is quitting (round 45: restarting the app / starting the next
-/// episode's download orphaned the previous episode's complete file in
-/// the torrent cache, since the deferred move waits on an mpv session
-/// end that never comes). Move-only: the live paths
-/// (`finish_torrent_download`) also delete the torrent from the engine.
-fn finalize_complete_torrent_download(ctx: &mut Ctx) {
-    let complete = ctx
-        .torrent_download
-        .borrow()
-        .as_ref()
-        .is_some_and(|job| job.complete);
-    if !complete {
+/// R2 (round 54): stop every plain-streamed torrent that is no longer
+/// playing. Called from `MpvSessionEnded` (the user stopped playback) and
+/// from `start_torrent_playback` (a new play replaced the session's
+/// streams). Each outgoing torrent is forgotten on its own engine
+/// (`POST /torrents/{id}/forget` — transfer AND seeding stop, partials
+/// stay in the cache, a re-stream resumes from them) — UNLESS a committed
+/// downloader-daemon job for the same infohash is active (the daemon
+/// engine owns the cache dir). Engines left with zero torrents are pruned
+/// (no idle rqbit lingers).
+fn stop_finished_plain_streams(ctx: &mut Ctx, keep: Option<(String, String)>) {
+    let refs = ctx.plain_stream_torrents.borrow().clone();
+    if refs.is_empty() {
         return;
     }
-    let Some(dest_dir) = crate::ui::modals::paste::downloads_dir() else {
-        status_warn!(
-            "Cannot determine the downloads folder (~/Downloads) — the downloaded file stays in the torrent cache"
-        );
-        return;
+    let daemon_has_job = |infohash: &Option<String>| -> bool {
+        infohash.as_deref().is_some_and(|hash| {
+            crate::core::dlctl::read_state().as_ref().is_some_and(|state| {
+                crate::core::dlctl::job_active_for_infohash(state, hash)
+            })
+        })
     };
-    let files = ctx
-        .torrent_download
-        .borrow()
-        .as_ref()
-        .map(|job| job.files.clone());
-    let Some(files) = files else { return };
-    for file in &files {
-        match crate::core::torrent::move_completed_file(&file.source_path, &dest_dir) {
-            Ok(_) => {
-                status_info!("Downloaded '{}' to s2udio-downloads", file.file_name);
-            }
-            Err(err) => {
-                status_warn!("Failed to keep downloaded file '{}': {err}", file.file_name);
-            }
+    for stream in &refs {
+        // The incoming play re-streams this very torrent on this very
+        // engine: it is still playing, nothing stops.
+        if keep.as_ref().is_some_and(|(base, id)| {
+            *base == stream.engine.base_url() && *id == stream.torrent_id
+        }) {
+            continue;
+        }
+        if daemon_has_job(&stream.infohash) {
+            log::debug!(
+                infohash:? = stream.infohash; "Not forgetting a plain-streamed torrent: an active committed job owns it"
+            );
+            continue;
+        }
+        if let Err(err) = crate::core::torrent::forget_torrent(&stream.engine, &stream.torrent_id)
+        {
+            log::warn!(error:? = err; "Failed to forget a plain-streamed torrent");
+        } else {
+            log::debug!(torrent_id:? = stream.torrent_id; "Forgot a plain-streamed torrent (stop download/seeding)");
         }
     }
-    *ctx.torrent_download.borrow_mut() = None;
-}
-
-/// Start a download-only torrent job (round 21): keep the engine running
-/// (the popup's "Download" / "Download all", and the fresh
-/// `TorrentDownloadPrepared` path), poll its stats once per second and
-/// move every kept file to `s2udio-downloads` when the torrent's download
-/// is complete. No playback.
-fn start_torrent_download(
-    ctx: &mut Ctx,
-    engine: std::sync::Arc<crate::core::torrent::TorrentEngine>,
-    torrent_id: String,
-    torrent_name: String,
-    files: Vec<crate::core::torrent::TorrentDownloadFile>,
-    torrent_download_guard: &mut Option<
-        crate::core::scheduler::TaskGuard<(Sender<AppEvent>, Sender<ClientRequest>)>,
-    >,
-) {
-    if files.is_empty() {
-        status_warn!("No files to download");
-        return;
-    }
-    // Round 45: a previous job whose download finished but whose move is
-    // still deferred would be orphaned by the job replacement below (its
-    // file would sit complete in the torrent cache forever). Finalize it
-    // first.
-    finalize_complete_torrent_download(ctx);
-    // Keep the engine alive for the whole job (the last Arc clone's Drop
-    // kills the rqbit child on app exit).
-    *ctx.torrent_engine.borrow_mut() = Some(engine.clone());
-    let files_n = files.len();
-    status_info!(
-        "Downloading {} ({} file{})…",
-        torrent_name,
-        files_n,
-        if files_n == 1 { "" } else { "s" }
-    );
-    *ctx.torrent_download.borrow_mut() = Some(crate::core::torrent::TorrentDownload {
-        engine_base_url: engine.base_url().to_owned(),
-        torrent_id,
-        torrent_name,
-        files,
-        complete: false,
-        deferred: false,
-        failures: 0,
+    // Keep the incoming play's ref(s) (the event-loop push below adds the
+    // current one); drop every outgoing ref.
+    ctx.plain_stream_torrents.borrow_mut().retain(|stream| {
+        keep.as_ref().is_some_and(|(base, id)| {
+            *base == stream.engine.base_url() && *id == stream.torrent_id
+        })
     });
-    *torrent_download_guard =
-        Some(ctx.scheduler.repeated(Duration::from_secs(1), move |(tx, _)| {
-            let _ = tx.send(AppEvent::TorrentDownloadPoll);
-            Ok(())
-        }));
-}
-
-/// Move a completed "Play and Download" torrent file into
-/// `~/Downloads/s2udio-downloads` (outside the MPD library; the browser
-/// of the folder and delete the torrent from the engine (which removes
-/// the remaining cache files — subtitles, poster, partials). Called when
-/// the download's poll reports completion while mpv is not using the
-/// stream, or from MpvSessionEnded for a deferred completion.
-fn finish_torrent_download(ctx: &Ctx, engine: &crate::core::torrent::TorrentEngine) {
-    let (torrent_id, files) = {
-        let job = ctx.torrent_download.borrow();
-        let Some(job) = job.as_ref() else { return };
-        (job.torrent_id.clone(), job.files.clone())
-    };
-    let Some(dest_dir) = crate::ui::modals::paste::downloads_dir() else {
-        status_warn!(
-            "Cannot determine the downloads folder (~/Downloads) — the downloaded file stays in the torrent cache"
-        );
-        return;
-    };
-    // No MPD update needed: the folder lives outside the MPD library and
-    // the browser lists it from disk. Round 21: every kept file moves
-    // (a "Download all" job keeps the whole season).
-    let mut moved = 0usize;
-    for file in &files {
-        match crate::core::torrent::move_completed_file(&file.source_path, &dest_dir) {
-            Ok(_) => {
-                status_info!("Downloaded '{}' to s2udio-downloads", file.file_name);
-                moved += 1;
-            }
-            Err(err) => {
-                status_warn!("Failed to keep downloaded file '{}': {err}", file.file_name);
-            }
-        }
-    }
-    if moved > 0
-        && let Err(err) = crate::core::torrent::delete_torrent(engine, &torrent_id)
-    {
-        log::warn!(error:? = err; "Failed to delete the completed torrent from the engine");
-    }
+    // Engines that now host nothing are pruned (their torrent was
+    // forgotten; the outgoing refs are drained).
+    crate::ui::modals::paste::prune_empty_engines(ctx);
 }
 
 /// Finish a stream download (`s2udio-downloads` save-as): run the spec's
@@ -2350,10 +2127,11 @@ fn complete_stream_download(
 }
 
 /// Re-apply the persisted MPD replay gain mode (Settings > MPD, round 53)
-/// after an (initial) connect or reconnect: `replay_gain` is a per-client
-/// runtime mode that MPD forgets when the connection closes, so the choice
-/// would otherwise be lost on s2udio or MPD restarts. No-op for legacy
-/// state files without `mpd_replay_gain` (the server mode stays untouched).
+/// after an (initial) connect or reconnect: the mode is partition-level
+/// server runtime state that MPD does not persist, so it is lost on MPD
+/// restarts (it survives client disconnects) — re-asserting it keeps the
+/// choice across s2udio and MPD restarts. No-op for legacy state files
+/// without `mpd_replay_gain` (the server mode stays untouched).
 fn apply_replay_gain(ctx: &Ctx) {
     let Some(mode) = crate::config::state::AppStateFile::load().mpd_replay_gain else {
         return;

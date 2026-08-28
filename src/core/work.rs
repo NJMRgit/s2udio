@@ -131,7 +131,7 @@ fn handle_work_request(
                 failures,
             })
         }
-        WorkRequest::PlayTorrent { item, download } => {
+        WorkRequest::PlayTorrent { item } => {
             let key = item.source_key();
             let event_tx = event_tx.clone();
             let torrent_config = torrent_config.clone();
@@ -177,7 +177,10 @@ fn handle_work_request(
                             torrent_id: id,
                             file_idx,
                             file_length,
-                            download,
+                            info_hash: details
+                                .info_hash
+                                .as_deref()
+                                .map(|h| h.to_lowercase()),
                         })
                     })();
                     try_skip!(
@@ -190,77 +193,41 @@ fn handle_work_request(
                 })?;
             Ok(WorkDone::None)
         }
-        WorkRequest::DownloadTorrent { item, indices } => {
-            let key = item.source_key();
+        WorkRequest::StartDlDaemon => {
             let event_tx = event_tx.clone();
-            let torrent_config = torrent_config.clone();
             std::thread::Builder::new()
-                .name(
-                    format!("torrent-dl-{}", key.chars().take(24).collect::< String > ()),
-                )
+                .name("dl-daemon-start".to_owned())
                 .spawn(move || {
-                    let result: Result<WorkDone> = (|| {
-                        let engine = crate::core::torrent::start_engine(&torrent_config)
-                            .map_err(|err| anyhow::anyhow!("{err}"))?;
-                        let id = crate::core::torrent::add_torrent(
-                                &engine,
-                                item.source(),
-                            )
-                            .map_err(|err| anyhow::anyhow!("{err}"))?;
-                        let details = crate::core::torrent::wait_for_files(
-                                &engine,
-                                &id,
-                                None,
-                            )
-                            .map_err(|err| anyhow::anyhow!("{err}"))?;
-                        let torrent_name = details
-                            .name
-                            .clone()
-                            .unwrap_or_else(|| item.label());
-                        let files: Vec<crate::core::torrent::ScannedFile> = if indices
-                            .is_empty()
-                        {
-                            crate::core::torrent::pick_playable_file(&details.files)
-                                .into_iter()
-                                .map(|(idx, file)| crate::core::torrent::ScannedFile {
-                                    index: idx,
-                                    name: file.name.clone(),
-                                    length: file.length,
-                                })
-                                .collect()
-                        } else {
-                            indices
-                                .iter()
-                                .filter_map(|i| {
-                                    details.files.get(*i).map(|file| (*i, file))
-                                })
-                                .map(|(idx, file)| crate::core::torrent::ScannedFile {
-                                    index: idx,
-                                    name: file.name.clone(),
-                                    length: file.length,
-                                })
-                                .collect()
-                        };
-                        if files.is_empty() {
-                            return Err(
-                                anyhow::anyhow!("No playable media in this torrent"),
-                            );
-                        }
-                        Ok(WorkDone::TorrentDownloadPrepared {
-                            key,
-                            engine,
-                            torrent_id: id,
-                            torrent_name,
-                            files,
-                        })
-                    })();
-                    try_skip!(
-                        event_tx.send(AppEvent::WorkDone(result)),
-                        "Failed to send work done notification"
-                    );
+                    // Idempotent: a running daemon is reported as ok (it
+                    // already owns the spool). The spawn blocks ≤ 15 s on
+                    // the daemon's READY line.
+                    let result = crate::core::dlctl::start_daemon_for_tui();
+                    let _ = event_tx.send(AppEvent::WorkDone(Ok(WorkDone::DlDaemonStarted {
+                        result,
+                    })));
                 })
                 .map_err(|err| {
-                    anyhow::anyhow!("Failed to spawn torrent download thread: {err}")
+                    anyhow::anyhow!("Failed to spawn the downloader daemon start thread: {err}")
+                })?;
+            Ok(WorkDone::None)
+        }
+        WorkRequest::WatchDlResponse { request_id, cancel } => {
+            let event_tx = event_tx.clone();
+            std::thread::Builder::new()
+                .name(format!("dl-wait-{}", request_id.chars().take(24).collect::<String>()))
+                .spawn(move || {
+                    let result = crate::core::dlctl::wait_for_response(
+                        &request_id,
+                        &cancel,
+                        Some(&event_tx),
+                    );
+                    let _ = event_tx.send(AppEvent::DlWaitReady {
+                        request_id,
+                        result,
+                    });
+                })
+                .map_err(|err| {
+                    anyhow::anyhow!("Failed to spawn the downloader wait thread: {err}")
                 })?;
             Ok(WorkDone::None)
         }

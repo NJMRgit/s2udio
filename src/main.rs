@@ -70,6 +70,9 @@ fn main() -> Result<()> {
         Some(Command::Rq { cmd }) => {
             crate::core::rqctl::run(cmd).map_err(anyhow::Error::msg)?;
         }
+        Some(Command::Dl { cmd }) => {
+            crate::core::dlctl::run(cmd).map_err(anyhow::Error::msg)?;
+        }
         Some(Command::Remote { command, pid }) => {
             handle_remote(command, pid);
         }
