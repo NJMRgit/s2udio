@@ -31,8 +31,10 @@
 //!   starting a second engine (the same-cache-dir hazard guard, §2.2);
 //! - on completion the kept files are moved to
 //!   `~/Downloads/s2udio-downloads` (deferred while the TUI is streaming
-//!   them — R2.5), the torrent is forgotten, the job is dropped, and when
-//!   no active jobs remain the daemon exits and unregisters.
+//!   them — R2.5), the torrent is forgotten, and the job stays listed as
+//!   `Completed` until the user removes it (round 56.6: terminal rows
+//!   persist — no auto-prune; the daemon exits and unregisters when no
+//!   active jobs remain, leaving the rows with pid 0).
 //!
 //! A plain stream of a torrent WITH an active committed job is routed
 //! through the daemon engine too (no second TUI engine on the cache dir);
@@ -77,6 +79,12 @@ const MOVE_DEFER_LIMIT: Duration = Duration::from_secs(10 * 60);
 /// A spool file that fails to parse is retried for this long before it is
 /// dropped with a warning (guards against a torn write).
 const SPOOL_PARSE_RETRY: Duration = Duration::from_secs(30);
+/// Round 56.6 (56.6-4): the window in which a `Completed` row persisted
+/// in `downloads.json` is surfaced at TUI startup ("Download complete:
+/// …"). Rows completed longer ago stay listed but are NOT re-noticed —
+/// a TUI restarted right after a download finished still sees it, old
+/// rows do not spam every launch (rows now persist indefinitely).
+const COMPLETED_NOTICE_STARTUP_WINDOW: Duration = Duration::from_secs(10 * 60);
 
 /// The per-job status shown in `downloads.json` / the Downloads modal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -96,6 +104,11 @@ pub enum DlStatus {
     Failed,
     /// The user stopped the job (torrent forgotten, partials kept).
     Stopped,
+    /// Round 56 (56-1): the download finished and the kept files were
+    /// moved to `s2udio-downloads`. Round 56.6: the row stays listed
+    /// (`done_at` + `moved_to`) until the user removes it — completed
+    /// downloads are never pruned automatically.
+    Completed,
 }
 impl std::fmt::Display for DlStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -106,6 +119,7 @@ impl std::fmt::Display for DlStatus {
             Self::Moving => "moving",
             Self::Failed => "failed",
             Self::Stopped => "stopped",
+            Self::Completed => "completed",
         };
         f.write_str(s)
     }
@@ -173,6 +187,14 @@ pub struct DlJob {
     pub error: Option<String>,
     /// Unix seconds of the last state change (UI ordering).
     pub updated_at: u64,
+    /// Round 56 (56-1): unix seconds when the download completed (set on
+    /// `Completed` only).
+    #[serde(default)]
+    pub done_at: Option<u64>,
+    /// Round 56 (56-1): the destination folder the kept files were moved
+    /// to (set on `Completed` only — `~/Downloads/s2udio-downloads`).
+    #[serde(default)]
+    pub moved_to: Option<String>,
 }
 
 /// The shared state file: daemon identity + every job.
@@ -287,6 +309,20 @@ pub enum DlJobRequest {
         #[serde(default)]
         infohash: Option<String>,
     },
+    /// Round 56.6 (56.6-2): remove a TERMINAL job's row from
+    /// `downloads.json` (the Downloads modal's "Remove from list" on a
+    /// Completed/Stopped/Failed row — the downloaded files are never
+    /// touched). Matched exactly like `Stop` (job id, then creating
+    /// request id, then infohash). Active rows keep using `Stop`.
+    Remove {
+        id: String,
+        #[serde(default)]
+        job_id: Option<String>,
+        #[serde(default)]
+        request_id: Option<String>,
+        #[serde(default)]
+        infohash: Option<String>,
+    },
 }
 
 /// One file of a daemon response with its stream URL.
@@ -353,19 +389,26 @@ pub fn read_state() -> Option<DlStateFile> {
     let content = std::fs::read_to_string(path).ok()?;
     serde_json::from_str(&content).ok()
 }
-/// Persist the state file (creates the cache dir as needed).
+/// Persist the state file (creates the cache dir as needed). Written
+/// atomically (tmp + rename) so a reader never sees a torn file — the
+/// TUI also edits `downloads.json` directly when the daemon is dead
+/// (round 56.6-2).
 pub fn write_state(state: &DlStateFile) -> Result<(), String> {
     let Some(path) = state_path() else {
         return Err("Could not determine the s2udio cache dir".to_owned());
     };
     let content = serde_json::to_string_pretty(state)
         .map_err(|err| format!("Failed to serialize downloads.json: {err}"))?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|err| format!("Cannot create {}: {err}", parent.display()))?;
-    }
-    std::fs::write(&path, content)
-        .map_err(|err| format!("Cannot write {}: {err}", path.display()))
+    let Some(parent) = path.parent() else {
+        return Err("Bad downloads.json path".to_owned());
+    };
+    std::fs::create_dir_all(parent)
+        .map_err(|err| format!("Cannot create {}: {err}", parent.display()))?;
+    let tmp = parent.join(".downloads.json.tmp");
+    std::fs::write(&tmp, content)
+        .map_err(|err| format!("Cannot write {}: {err}", tmp.display()))?;
+    std::fs::rename(&tmp, &path)
+        .map_err(|err| format!("Cannot move {} into place: {err}", path.display()))
 }
 
 /// Whether the registered daemon pid is a live process.
@@ -376,6 +419,16 @@ pub fn daemon_running(state: &DlStateFile) -> bool {
 /// The number of jobs the daemon is currently working on.
 pub fn active_job_count(state: &DlStateFile) -> usize {
     state.jobs.iter().filter(|job| job.status.active()).count()
+}
+
+/// Round 56 (56-1): the one-shot status-line notice for a `Completed`
+/// job — "Download complete: <name> → ~/Downloads/s2udio-downloads".
+pub fn completion_notice(job: &DlJob) -> String {
+    let dest = job
+        .moved_to
+        .as_deref()
+        .unwrap_or("~/Downloads/s2udio-downloads");
+    format!("Download complete: {} → {dest}", job.torrent_name)
 }
 /// Whether any ACTIVE committed job matches the infohash (the TUI's
 /// re-stream routing rule: playback goes through the daemon engine).
@@ -417,7 +470,8 @@ pub fn write_request(request: &DlJobRequest) -> Result<(), String> {
     let id = match request {
         DlJobRequest::Enqueue { id, .. }
         | DlJobRequest::Stream { id, .. }
-        | DlJobRequest::Stop { id, .. } => id,
+        | DlJobRequest::Stop { id, .. }
+        | DlJobRequest::Remove { id, .. } => id,
     };
     let Some(final_path) = request_path(id) else {
         return Err("Could not determine the s2udio cache dir".to_owned());
@@ -451,6 +505,64 @@ pub fn write_stop_request(
     .map_err(|err| {
         log::debug!(job_id:?, request_id:?, error:? = err; "Failed to write a stop request for the downloader daemon");
         format!("Cannot reach the downloader daemon: {err}")
+    })
+}
+
+/// Round 56.6 (56.6-2): write a remove request (the Downloads modal's
+/// "Remove from list" on a Completed/Stopped/Failed row — the daemon
+/// drops the row; the downloaded files stay). Matched by job id, request
+/// id or infohash, exactly like a stop.
+pub fn write_remove_request(
+    job_id: Option<&str>,
+    request_id: Option<&str>,
+    infohash: Option<&str>,
+) -> Result<(), String> {
+    write_request(&DlJobRequest::Remove {
+        id: new_request_id(),
+        job_id: job_id.map(str::to_owned),
+        request_id: request_id.map(str::to_owned),
+        infohash: infohash.map(|h| h.to_lowercase()),
+    })
+    .map_err(|err| {
+        log::debug!(job_id:?, request_id:?, error:? = err; "Failed to write a remove request for the downloader daemon");
+        format!("Cannot reach the downloader daemon: {err}")
+    })
+}
+
+/// Round 56.6 (56.6-2): remove a TERMINAL job's row directly from
+/// `downloads.json` — the TUI's path when the daemon is NOT running (no
+/// daemon writer to race; the other rows are preserved). Refuses to run
+/// while a daemon is alive (then the TUI must spool a `Remove` instead).
+/// Removing the last row deletes the state file — a clean state (the
+/// daemon's own clean-exit shape). The downloaded files are never
+/// touched.
+pub fn remove_job_offline(job_id: &str) -> Result<(), String> {
+    let mut state =
+        read_state().ok_or_else(|| "No downloader state file to edit".to_owned())?;
+    if daemon_running(&state) {
+        return Err("The downloader daemon is running — spool a remove instead".to_owned());
+    }
+    let before = state.jobs.len();
+    state.jobs.retain(|job| job.job_id != job_id);
+    if state.jobs.len() == before {
+        return Ok(());
+    }
+    if state.jobs.is_empty() {
+        if let Some(path) = state_path() {
+            let _ = std::fs::remove_file(path);
+        }
+        return Ok(());
+    }
+    write_state(&state)
+}
+
+/// Round 56.6 (56.6-4): whether a `Completed` job finished within the
+/// startup notice window — the TUI surfaces these once at launch; older
+/// persisted rows stay listed quietly (their ids still seed the seen-set
+/// so a later poll does not notice them either).
+pub fn completed_recently(job: &DlJob) -> bool {
+    job.done_at.is_some_and(|t| {
+        now_unix().saturating_sub(t) < COMPLETED_NOTICE_STARTUP_WINDOW.as_secs()
     })
 }
 
@@ -550,17 +662,31 @@ pub fn start_daemon_for_tui() -> Result<(), String> {
         let _ = tx.send(line);
     });
     match rx.recv_timeout(DAEMON_READY_TIMEOUT) {
-        Ok(line) if line.starts_with("READY") => {}
+        Ok(line) if line.starts_with("READY") => {
+            reap_daemon_child(child);
+        }
         Ok(other) => {
             let _ = child.kill();
+            reap_daemon_child(child);
             return Err(format!("downloader daemon failed to start: {other}"));
         }
         Err(_) => {
             let _ = child.kill();
+            reap_daemon_child(child);
             return Err("downloader daemon did not become ready within 15 s".to_owned());
         }
     }
     Ok(())
+}
+
+/// Round 56 (56-3): reap the daemon child once it exits. The daemon is
+/// spawned detached and outlives the READY handshake; a child that is
+/// never `wait()`ed leaves a zombie under the TUI (observed after every
+/// daemon exit), accumulating across a long-lived session.
+fn reap_daemon_child(mut child: std::process::Child) {
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
 }
 
 /// `s2udio dl status` — the shell view of `downloads.json`.
@@ -668,7 +794,9 @@ impl Daemon {
     /// Resume jobs a previous daemon instance left in `downloads.json`
     /// (a crashed/killed daemon): active jobs are re-added (engines die
     /// with the machine; the re-add adopts the surviving cache partials),
-    /// terminal ones stay listed until stopped or revived.
+    /// terminal ones stay listed until removed. Round 56.6 (56.6-1):
+    /// `Completed` rows are NEVER pruned on restart — completed
+    /// downloads persist until the user removes them.
     fn adopt_existing_jobs(&mut self) {
         let Some(state) = read_state() else { return };
         for job in state.jobs {
@@ -770,8 +898,12 @@ impl Daemon {
         write_state(&self.to_state())
     }
 
-    /// Whether the daemon must keep running: any active job, an in-flight
-    /// add, or a pending response the user is waiting for.
+    /// Whether the daemon must keep running: an active job, an in-flight
+    /// add, or a pending response the user is waiting for. Terminal rows
+    /// (`Completed`/`Stopped`/`Failed`) never count — round 56.6
+    /// (56.6-1): completed rows persist in `downloads.json` until the
+    /// user removes them; with only terminal rows the daemon exits via
+    /// the pid-0 branch, leaving them listed.
     fn has_work(&self) -> bool {
         self.runtimes.iter().any(|runtime| {
             runtime.job.status.active()
@@ -879,6 +1011,8 @@ impl Daemon {
                     torrent_id: None,
                     error: None,
                     updated_at: now_unix(),
+                    done_at: None,
+                    moved_to: None,
                 };
                 self.runtimes.push(JobRuntime {
                     job,
@@ -928,7 +1062,19 @@ impl Daemon {
                     self.respond_error(&pending.request_id, "The downloader job for this torrent is not active");
                 }
             }
+            // `Stop` (active rows) and `Remove` (terminal rows, round
+            // 56.6-2) resolve their target identically — by job id, then
+            // creating request id, then infohash — and then drop the job
+            // (`stop_job` cancels the add, forgets the engine, removes
+            // the token sidecar + pending responses and removes the row;
+            // for a terminal row all of that is a no-op except the drop).
             DlJobRequest::Stop {
+                job_id,
+                request_id,
+                infohash,
+                id: _,
+            }
+            | DlJobRequest::Remove {
                 job_id,
                 request_id,
                 infohash,
@@ -1418,7 +1564,14 @@ impl Daemon {
             }
             log::info!(file:?; "Moved a completed torrent download to s2udio-downloads");
         }
-        // Done: forget the torrent (leftover cache stays), drop the job.
+        // Done: forget the torrent (leftover cache stays). Round 56
+        // (56-1) + 56.6: keep the job listed as `Completed` instead of
+        // dropping it — `done_at` + `moved_to` carry the completion
+        // facts, the TUI shows the done row and fires the one-shot
+        // notice, and the row persists until the user removes it (56.6:
+        // no more auto-prune). The engine is dropped here (as
+        // `remove_runtime` did: the rqbit child dies, the token sidecar
+        // goes).
         let forget_result = {
             let runtime = &self.runtimes[idx];
             match runtime.engine.as_ref() {
@@ -1429,7 +1582,21 @@ impl Daemon {
         if let Err(err) = forget_result {
             log::warn!(error:? = err; "Failed to forget a completed torrent on its engine");
         }
-        self.remove_runtime(idx);
+        let now = now_unix();
+        log::info!(job_id:? = job_id, dest:? = dest_dir.display().to_string();
+            "Committed torrent download completed");
+        let runtime = &mut self.runtimes[idx];
+        runtime.job.status = DlStatus::Completed;
+        runtime.job.progress_percent = 100.0;
+        runtime.job.done_at = Some(now);
+        runtime.job.moved_to = Some(dest_dir.display().to_string());
+        runtime.job.updated_at = now;
+        runtime.engine = None;
+        runtime.details = None;
+        runtime.add_result = None;
+        runtime.add_cancel = None;
+        remove_token_sidecar(&job_id);
+        self.dirty = true;
     }
 
     /// Whether the completed job's move must wait: the TUI's streaming

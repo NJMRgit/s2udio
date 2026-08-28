@@ -179,6 +179,15 @@ impl YtDlpManager {
         }
     }
 
+    /// Round 56.6 (56.6-3): drop the entry from the Downloads list (the
+    /// modal's "Remove from list"). List removal only — the downloaded /
+    /// cached files are NOT deleted (`delete_cached` untouched). The
+    /// caller sends the refresh (`DownloadsUpdated` + rerender) so the
+    /// list updates in place.
+    pub fn remove(&self, id: DownloadId) {
+        self.queue.borrow_mut().remove(&id);
+    }
+
     pub fn queue_download(&self, item: YtDlpItem, position: Option<QueuePosition>) {
         self.queue.borrow_mut().insert(
             DownloadId::new(),

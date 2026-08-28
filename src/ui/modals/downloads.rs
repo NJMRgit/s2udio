@@ -39,17 +39,12 @@ pub struct DownloadsModal {
     id: Id,
     queue: Dir<DownloadId, TableState>,
     table_area: Rect,
-    /// Torrent-section cursor: whether the keyboard selection is on the
-    /// round-54 downloader-daemon rows (the modal's second section) and
-    /// which row. The yt-dlp table keeps its own `queue` cursor; Down at
-    /// the bottom of it enters the torrent section, Up at its top leaves.
-    torrent_focus: bool,
-    torrent_selected: usize,
-    /// The torrent rows as rendered (job ids from `ctx.dl_state`), so the
-    /// context menu knows what the selection points at.
+    /// Round 56.5: the daemon torrent jobs whose rows are appended to the
+    /// unified `Id | Source | State` table (the yt-dlp rows first, then the
+    /// torrent rows). One cursor spans the whole list; this id prefix is
+    /// what tells the context menu that a selected row is a torrent row
+    /// (and which daemon job it points at when the menu opens).
     torrent_jobs: Vec<String>,
-    /// The area of the torrent section (mouse hit-testing).
-    torrent_area: Rect,
 }
 
 impl Modal for DownloadsModal {
@@ -78,7 +73,10 @@ impl Modal for DownloadsModal {
 
         let table_area = block.inner(popup_area);
 
-        let rows = ctx.ytdlp_manager.map_values(|item| {
+        // Round 56.5: ONE list for all downloads — the daemon torrent jobs
+        // are ordinary rows of the same `Id | Source | State` table,
+        // appended after the yt-dlp rows (`Source` = "Torrent").
+        let mut rows: Vec<Row> = ctx.ytdlp_manager.map_values(|item| {
             Row::new([
                 Cell::from(""), // marker
                 Cell::from(item.inner.id.clone()),
@@ -86,129 +84,70 @@ impl Modal for DownloadsModal {
                 Cell::from(item.state.to_string()).style(item.state.as_style(ctx)),
             ])
         });
-        let item_count = rows.len();
-        let table = Table::new(rows, constraints![==1, ==33%, ==33%, ==34%])
-            .row_highlight_style(ctx.config.theme.current_item_style)
-            .header(Row::new(["", "Id", "Source", "State"]));
-
-        self.queue
-            .state
-            .set_content_and_viewport_len(ctx.ytdlp_manager.len(), table_area.height as usize);
-        frame.render_stateful_widget(table, table_area, self.queue.state.as_render_state_ref());
-
-        // Round 54: the downloader-daemon (torrent) section below the
-        // yt-dlp table — fed by `~/.cache/s2udio/downloads.json` (the
+        // Torrent rows come from `~/.cache/s2udio/downloads.json` (the
         // shared state the daemon writes; `Ctx.dl_state` is refreshed by
-        // the 1 s `DlStatePoll`). Rows: name | status | progress; active
-        // jobs offer "Stop download" (the daemon forgets the torrent,
-        // partials stay).
-        let job_count = ctx
-            .dl_state
-            .borrow()
-            .as_ref()
-            .map(|state| state.jobs.len())
-            .unwrap_or(0);
+        // the 1 s `DlStatePoll`).
         self.torrent_jobs = ctx
             .dl_state
             .borrow()
             .as_ref()
             .map(|state| state.jobs.iter().map(|job| job.job_id.clone()).collect())
             .unwrap_or_default();
-        if self.torrent_selected >= job_count {
-            self.torrent_selected = job_count.saturating_sub(1);
-        }
-        // Reserve 1 header row + 1 separator row; the torrent table shares
-        // the popup's lower half.
-        let yt_height = table_area
-            .height
-            .saturating_sub(if job_count > 0 { job_count as u16 + 2 } else { 0 });
-        let torrent_area = ratatui::layout::Rect {
-            x: table_area.x,
-            y: table_area.y + yt_height.min(table_area.height),
-            width: table_area.width,
-            height: table_area.height.saturating_sub(yt_height.min(table_area.height)),
-        };
-        if job_count > 0 {
-            frame.render_widget(
-                Block::default()
-                    .borders(ratatui::widgets::Borders::TOP)
-                    .border_set(border::PLAIN)
-                    .border_style(ctx.config.as_border_style())
-                    .title_alignment(ratatui::prelude::Alignment::Left)
-                    .title("Torrent downloads"),
-                torrent_area,
-            );
-            let inner = torrent_area.inner(Margin {
-                horizontal: 0,
-                vertical: 1,
-            });
+        {
             let jobs = ctx.dl_state.borrow();
-            let rows: Vec<Row> = jobs
-                .as_ref()
-                .map(|state| {
-                    state
-                        .jobs
-                        .iter()
-                        .map(|job| {
-                            let name = if job.torrent_name.len() > 40 {
-                                let (head, _) = job.torrent_name.split_at(40);
-                                format!("{head}…")
-                            } else {
-                                job.torrent_name.clone()
-                            };
-                            let progress = if job.status.active() {
-                                format!("{:.0}%", job.progress_percent)
-                            } else {
-                                job.status.to_string()
-                            };
-                            let style = match job.status {
-                                crate::core::dlctl::DlStatus::Failed => {
-                                    ctx.config.theme.level_styles.error
-                                }
-                                crate::core::dlctl::DlStatus::Downloading
-                                | crate::core::dlctl::DlStatus::Adding
-                                | crate::core::dlctl::DlStatus::Moving
-                                | crate::core::dlctl::DlStatus::Queued => {
-                                    ctx.config.theme.level_styles.warn
-                                }
-                                crate::core::dlctl::DlStatus::Stopped => {
-                                    ctx.config.theme.level_styles.info
-                                }
-                            };
-                            let daemon_offline = jobs
-                                .as_ref()
-                                .is_some_and(|s| !crate::core::dlctl::daemon_running(s));
-                            let status_text = if daemon_offline && job.status.active() {
-                                format!("offline ({})", job.status)
-                            } else {
-                                progress
-                            };
-                            Row::new([
-                                Cell::from(""),
-                                Cell::from(name),
-                                Cell::from(status_text).style(style),
-                            ])
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-            let torrent_table = Table::new(rows, constraints![==1, ==60%, ==39%])
-                .row_highlight_style(ctx.config.theme.current_item_style)
-                .header(Row::new(["", "Torrent", "Status"]));
-            let mut torrent_state = ratatui::widgets::TableState::default();
-            if self.torrent_focus {
-                torrent_state.select(Some(self.torrent_selected.min(job_count.saturating_sub(1))));
+            if let Some(state) = jobs.as_ref() {
+                let daemon_offline = !crate::core::dlctl::daemon_running(state);
+                for job in &state.jobs {
+                    let name = if job.torrent_name.len() > 40 {
+                        let (head, _) = job.torrent_name.split_at(40);
+                        format!("{head}…")
+                    } else {
+                        job.torrent_name.clone()
+                    };
+                    // The round-54 status rendering, moved into the State
+                    // column (round 56 (56-1): a finished download shows a
+                    // distinct done row while the daemon keeps it in the
+                    // grace window).
+                    let progress = if job.status.active() {
+                        format!("{:.0}%", job.progress_percent)
+                    } else if job.status == crate::core::dlctl::DlStatus::Completed {
+                        "done ✓ 100%".to_owned()
+                    } else {
+                        job.status.to_string()
+                    };
+                    let style = Self::torrent_status_style(job.status, ctx);
+                    let status_text = if daemon_offline && job.status.active() {
+                        format!("offline ({})", job.status)
+                    } else {
+                        progress
+                    };
+                    rows.push(Row::new([
+                        Cell::from(""),
+                        Cell::from(name),
+                        Cell::from("Torrent"),
+                        Cell::from(status_text).style(style),
+                    ]));
+                }
             }
-            frame.render_stateful_widget(
-                torrent_table,
-                inner,
-                &mut torrent_state,
-            );
-            self.torrent_area = inner;
-        } else {
-            self.torrent_area = ratatui::layout::Rect::default();
-            self.torrent_focus = false;
         }
+
+        let item_count = rows.len();
+        // Round 56.7 (host fix): the modal must come up with a usable
+        // selection whenever rows exist — with only terminal rows (no
+        // active jobs, so the 1 s `DlStatePoll` guard never runs) the
+        // `DownloadsUpdated` auto-select never fires, and Enter / the
+        // context-menu key would do nothing until the user navigates.
+        if item_count > 0 && self.queue.state.get_selected().is_none() {
+            self.queue.state.select(Some(0), 0);
+        }
+        let table = Table::new(rows, constraints![==1, ==33%, ==33%, ==34%])
+            .row_highlight_style(ctx.config.theme.current_item_style)
+            .header(Row::new(["", "Id", "Source", "State"]));
+
+        self.queue
+            .state
+            .set_content_and_viewport_len(item_count, table_area.height as usize);
+        frame.render_stateful_widget(table, table_area, self.queue.state.as_render_state_ref());
 
         frame.render_widget(block, popup_area);
         if let Some(scrollbar) = ctx.config.as_styled_scrollbar()
@@ -230,102 +169,45 @@ impl Modal for DownloadsModal {
         if let Some(action) = key.claim_common() {
             match action {
                 CommonAction::Down => {
-                    let job_count = self.torrent_jobs.len();
-                    if job_count > 0 && !self.torrent_focus && self.at_yt_bottom() {
-                        // Move from the yt table into the torrent section.
-                        self.torrent_focus = true;
-                        self.torrent_selected = 0;
-                    } else if self.torrent_focus {
-                        if self.torrent_selected + 1 < job_count {
-                            self.torrent_selected += 1;
-                        } else if ctx.config.wrap_navigation && job_count > 0 {
-                            self.torrent_selected = 0;
-                        }
-                    } else {
-                        self.queue.next(ctx.config.scrolloff, ctx.config.wrap_navigation);
-                    }
+                    self.queue.next(ctx.config.scrolloff, ctx.config.wrap_navigation);
                     ctx.render()?;
                 }
                 CommonAction::Up => {
-                    if self.torrent_focus {
-                        if self.torrent_selected == 0 {
-                            self.torrent_focus = false;
-                        } else {
-                            self.torrent_selected -= 1;
-                        }
-                    } else {
-                        self.queue.prev(ctx.config.scrolloff, ctx.config.wrap_navigation);
-                    }
+                    self.queue.prev(ctx.config.scrolloff, ctx.config.wrap_navigation);
                     ctx.render()?;
                 }
                 CommonAction::Close => {
                     self.hide(ctx)?;
                 }
                 CommonAction::Confirm => {
-                    if self.torrent_focus {
+                    if self.selected_is_torrent(ctx) {
                         self.create_torrent_menu(ctx);
                     } else {
                         self.create_menu(ctx);
                     }
                 }
                 CommonAction::DownHalf => {
-                    if self.torrent_focus {
-                        let step = (self.torrent_area.height / 2).max(1) as usize;
-                        for _ in 0..step {
-                            if self.torrent_selected + 1 < self.torrent_jobs.len() {
-                                self.torrent_selected += 1;
-                            }
-                        }
-                    } else {
-                        self.queue.next_half_viewport(ctx.config.scrolloff);
-                    }
+                    self.queue.next_half_viewport(ctx.config.scrolloff);
                     ctx.render()?;
                 }
                 CommonAction::UpHalf => {
-                    if self.torrent_focus {
-                        let step = (self.torrent_area.height / 2).max(1) as usize;
-                        for _ in 0..step {
-                            if self.torrent_selected > 0 {
-                                self.torrent_selected -= 1;
-                            }
-                        }
-                    } else {
-                        self.queue.prev_viewport(ctx.config.scrolloff);
-                    }
+                    self.queue.prev_half_viewport(ctx.config.scrolloff);
                     ctx.render()?;
                 }
                 CommonAction::PageUp => {
-                    if self.torrent_focus {
-                        self.torrent_selected = 0;
-                    } else {
-                        self.queue.prev_viewport(ctx.config.scrolloff);
-                    }
+                    self.queue.prev_viewport(ctx.config.scrolloff);
                     ctx.render()?;
                 }
                 CommonAction::PageDown => {
-                    if self.torrent_focus {
-                        self.torrent_selected = self.torrent_jobs.len().saturating_sub(1);
-                    } else {
-                        self.queue.next_viewport(ctx.config.scrolloff);
-                    }
+                    self.queue.next_viewport(ctx.config.scrolloff);
                     ctx.render()?;
                 }
                 CommonAction::Top => {
-                    if self.torrent_focus && self.torrent_selected == 0 {
-                        self.torrent_focus = false;
-                    } else if self.torrent_focus {
-                        self.torrent_selected = 0;
-                    } else {
-                        self.queue.first();
-                    }
+                    self.queue.first();
                     ctx.render()?;
                 }
                 CommonAction::Bottom => {
-                    if self.torrent_focus {
-                        self.torrent_selected = self.torrent_jobs.len().saturating_sub(1);
-                    } else {
-                        self.queue.last();
-                    }
+                    self.queue.last();
                     ctx.render()?;
                 }
                 CommonAction::Select => {}
@@ -342,45 +224,6 @@ impl Modal for DownloadsModal {
             return Ok(());
         }
 
-        // Round 54: clicks in the torrent section select torrent rows.
-        if !self.torrent_area.is_empty() && self.torrent_area.contains(event.into()) {
-            let clicked_row: usize = event.y.saturating_sub(self.torrent_area.y).into();
-            let Some(idx) = clicked_row.checked_sub(1) else {
-                // The header line itself.
-                return Ok(());
-            };
-            if idx >= self.torrent_jobs.len() {
-                return Ok(());
-            }
-            match event.kind {
-                MouseEventKind::LeftClick => {
-                    self.torrent_focus = true;
-                    self.torrent_selected = idx;
-                    ctx.render()?;
-                }
-                MouseEventKind::DoubleClick | MouseEventKind::MiddleClick | MouseEventKind::RightClick => {
-                    self.torrent_focus = true;
-                    self.torrent_selected = idx;
-                    self.create_torrent_menu(ctx);
-                    ctx.render()?;
-                }
-                MouseEventKind::ScrollDown => {
-                    if self.torrent_selected + 1 < self.torrent_jobs.len() {
-                        self.torrent_selected += 1;
-                    }
-                    ctx.render()?;
-                }
-                MouseEventKind::ScrollUp => {
-                    if self.torrent_selected > 0 {
-                        self.torrent_selected -= 1;
-                    }
-                    ctx.render()?;
-                }
-                _ => {}
-            }
-            return Ok(());
-        }
-
         let clicked_row: usize = event.y.saturating_sub(self.table_area.y).into();
         let Some(idx) = self.queue.state.get_at_rendered_row(clicked_row) else {
             return Ok(());
@@ -391,26 +234,16 @@ impl Modal for DownloadsModal {
                 self.queue.select_idx(idx, ctx.config.scrolloff);
                 ctx.render()?;
             }
-            MouseEventKind::DoubleClick => {
+            MouseEventKind::DoubleClick | MouseEventKind::MiddleClick | MouseEventKind::RightClick => {
                 self.queue.select_idx(idx, ctx.config.scrolloff);
-                self.create_menu(ctx);
+                if idx >= ctx.ytdlp_manager.len() {
+                    self.create_torrent_menu(ctx);
+                } else {
+                    self.create_menu(ctx);
+                }
                 ctx.render()?;
             }
-            MouseEventKind::MiddleClick => {
-                self.queue.select_idx(idx, ctx.config.scrolloff);
-                self.create_menu(ctx);
-                ctx.render()?;
-            }
-            MouseEventKind::RightClick => {
-                self.queue.select_idx(idx, ctx.config.scrolloff);
-                self.create_menu(ctx);
-                ctx.render()?;
-            }
-            MouseEventKind::ScrollDown => {
-                self.queue.scroll_up(ctx.config.scroll_amount, ctx.config.scrolloff);
-                ctx.render()?;
-            }
-            MouseEventKind::ScrollUp => {
+            MouseEventKind::ScrollDown | MouseEventKind::ScrollUp => {
                 self.queue.scroll_up(ctx.config.scroll_amount, ctx.config.scrolloff);
                 ctx.render()?;
             }
@@ -425,18 +258,16 @@ impl Modal for DownloadsModal {
         match event {
             UiEvent::DownloadsUpdated => {
                 self.queue.items = ctx.ytdlp_manager.ids();
-                if !self.queue.items.is_empty() && self.queue.selected().is_none() {
-                    self.queue.state.select(Some(0), 0);
-                }
-                if self.torrent_selected >= ctx
-                    .dl_state
-                    .borrow()
-                    .as_ref()
-                    .map(|state| state.jobs.len())
-                    .unwrap_or(0)
+                let total = self.queue.items.len() + self.torrent_jobs.len();
+                if total == 0 {
+                    self.queue.state.select(None, 0);
+                } else if self
+                    .queue
+                    .state
+                    .get_selected()
+                    .is_none_or(|selected| selected >= total)
                 {
-                    self.torrent_selected = 0;
-                    self.torrent_focus = false;
+                    self.queue.state.select(Some(0), 0);
                 }
                 ctx.render()?;
             }
@@ -457,29 +288,47 @@ impl DownloadsModal {
             id: id::new(),
             queue,
             table_area: Rect::default(),
-            torrent_focus: false,
-            torrent_selected: 0,
             torrent_jobs: Vec::new(),
-            torrent_area: Rect::default(),
         }
     }
 
-    /// Whether the yt-dlp cursor is on its last row (Down moves into the
-    /// torrent section).
-    fn at_yt_bottom(&self) -> bool {
-        let selected = self
-            .queue
-            .selected_with_idx()
-            .map(|(idx, _)| idx);
-        selected == Some(self.queue.len().saturating_sub(1))
+    /// Whether the unified cursor is on a torrent row (the yt-dlp rows
+    /// come first, so any index at or past their count is a torrent row).
+    fn selected_is_torrent(&self, ctx: &Ctx) -> bool {
+        let yt_count = ctx.ytdlp_manager.len();
+        self.queue.state.get_selected().is_some_and(|idx| idx >= yt_count)
     }
 
-    /// The torrent section's context menu (Confirm / double-click /
-    /// right-click on a daemon job row): active jobs get "Stop download"
-    /// (the daemon forgets the torrent — partials stay — and drops the
-    /// job). Terminal jobs have no actions.
+    /// The torrent row's per-status style (round 54 mapping: error for
+    /// failed, debug/success for completed, warn for active states, info
+    /// for stopped).
+    fn torrent_status_style(status: crate::core::dlctl::DlStatus, ctx: &Ctx) -> Style {
+        match status {
+            crate::core::dlctl::DlStatus::Failed => ctx.config.theme.level_styles.error,
+            crate::core::dlctl::DlStatus::Completed => ctx.config.theme.level_styles.debug,
+            crate::core::dlctl::DlStatus::Downloading
+            | crate::core::dlctl::DlStatus::Adding
+            | crate::core::dlctl::DlStatus::Moving
+            | crate::core::dlctl::DlStatus::Queued => ctx.config.theme.level_styles.warn,
+            crate::core::dlctl::DlStatus::Stopped => ctx.config.theme.level_styles.info,
+        }
+    }
+
+    /// The torrent row's context menu (Confirm / double-click / right-click
+    /// on a daemon job row): ACTIVE jobs get "Stop download" (the daemon
+    /// forgets the torrent — partials stay — and drops the job); terminal
+    /// jobs (`Completed`/`Stopped`/`Failed`) get "Remove from list"
+    /// (round 56.6-2: the row leaves `downloads.json` + the modal; the
+    /// downloaded files are never touched — a spooled `Remove` when the
+    /// daemon runs, a direct state edit when it is dead). The selected row
+    /// is mapped back to a daemon job via the yt-dlp row-count prefix; the
+    /// job must still exist in `ctx.dl_state` when the menu opens.
     pub fn create_torrent_menu(&self, ctx: &mut Ctx) {
-        let Some(job_id) = self.torrent_jobs.get(self.torrent_selected).cloned() else {
+        let Some(selected) = self.queue.state.get_selected() else {
+            return;
+        };
+        let yt_count = ctx.ytdlp_manager.len();
+        let Some(job_id) = self.torrent_jobs.get(selected.saturating_sub(yt_count)).cloned() else {
             return;
         };
         let state_ref = ctx.dl_state.borrow();
@@ -489,22 +338,59 @@ impl DownloadsModal {
         else {
             return;
         };
-        if !job.status.active() {
-            return;
-        }
+        let active = job.status.active();
         drop(state_ref);
+        let remove_job_id = job_id.clone();
         let modal = MenuModal::new(ctx)
             .list_section(ctx, |mut section| {
-                section.add_item("Stop download", move |_| {
-                    if let Err(err) =
-                        crate::core::dlctl::write_stop_request(Some(&job_id), None, None)
-                    {
-                        status_warn!("{err}");
-                    } else {
-                        status_info!("Stopping download of {job_id}… (partials stay in the torrent cache)");
-                    }
-                    Ok(())
-                });
+                if active {
+                    section.add_item("Stop download", move |_| {
+                        if let Err(err) =
+                            crate::core::dlctl::write_stop_request(Some(&job_id), None, None)
+                        {
+                            status_warn!("{err}");
+                        } else {
+                            status_info!("Stopping download of {job_id}… (partials stay in the torrent cache)");
+                        }
+                        Ok(())
+                    });
+                } else {
+                    // Round 56.6-2: remove the terminal row. The daemon
+                    // path spools a `Remove`; with no daemon the TUI edits
+                    // `downloads.json` directly (both atomic; the files are
+                    // kept). Re-poll the state immediately so the row
+                    // disappears from the modal, plus one shot 600 ms later
+                    // — long enough for the daemon (spool scan ~300 ms) to
+                    // consume a `Remove` request.
+                    section.add_item("Remove from list", move |ctx| {
+                        let daemon_running = ctx
+                            .dl_state
+                            .borrow()
+                            .as_ref()
+                            .is_some_and(crate::core::dlctl::daemon_running);
+                        let result = if daemon_running {
+                            crate::core::dlctl::write_remove_request(Some(&remove_job_id), None, None)
+                        } else {
+                            crate::core::dlctl::remove_job_offline(&remove_job_id)
+                        };
+                        if let Err(err) = result {
+                            status_warn!("{err}");
+                        } else {
+                            status_info!("Removed {remove_job_id} from the downloads list (files kept)");
+                            let _ = ctx
+                                .app_event_sender
+                                .send(crate::AppEvent::DlStatePoll);
+                            ctx.scheduler.schedule(
+                                std::time::Duration::from_millis(600),
+                                move |(tx, _)| {
+                                    let _ = tx.send(crate::AppEvent::DlStatePoll);
+                                    Ok(())
+                                },
+                            );
+                        }
+                        Ok(())
+                    });
+                }
                 Some(section)
             })
             .build();
@@ -515,18 +401,28 @@ impl DownloadsModal {
         if let Some((id, current)) =
             self.queue.selected().and_then(|id| ctx.ytdlp_manager.get(*id).map(|item| (id, item)))
         {
+            // Round 56.6-3: EVERY state has a context menu —
+            // Downloading can be cancelled; Completed / Failed / Canceled
+            // / AlreadyDownloaded rows can be removed from the list (the
+            // files are kept). Add/Retry/Logs/Requeue unchanged.
             let actions = match &current.state {
                 DownloadState::Queued => vec![ContextAction::Cancel(*id)],
-                DownloadState::Downloading => vec![],
-                DownloadState::Completed { logs, path } => {
-                    vec![ContextAction::Add(path.clone()), ContextAction::Logs(logs.clone())]
+                DownloadState::Downloading => vec![ContextAction::Cancel(*id)],
+                DownloadState::Completed { logs, path } => vec![
+                    ContextAction::Remove(*id),
+                    ContextAction::Add(path.clone()),
+                    ContextAction::Logs(logs.clone()),
+                ],
+                DownloadState::Failed { logs } => vec![
+                    ContextAction::Remove(*id),
+                    ContextAction::Retry(*id),
+                    ContextAction::Logs(logs.clone()),
+                ],
+                DownloadState::Canceled => {
+                    vec![ContextAction::Remove(*id), ContextAction::Requeue(*id)]
                 }
-                DownloadState::Failed { logs } => {
-                    vec![ContextAction::Retry(*id), ContextAction::Logs(logs.clone())]
-                }
-                DownloadState::Canceled => vec![ContextAction::Requeue(*id)],
                 DownloadState::AlreadyDownloaded { path } => {
-                    vec![ContextAction::Add(path.clone())]
+                    vec![ContextAction::Remove(*id), ContextAction::Add(path.clone())]
                 }
             };
 
@@ -585,6 +481,19 @@ impl DownloadsModal {
                                     Ok(())
                                 });
                             }
+                            // Round 56.6-3: drop the entry from the list
+                            // (files kept) and send the refresh so the
+                            // modal's rows + cursor update in place.
+                            ContextAction::Remove(id) => {
+                                section.add_item(action.to_string(), move |ctx| {
+                                    ctx.ytdlp_manager.remove(id);
+                                    status_info!("Removed download from the list (files kept)");
+                                    let _ = ctx
+                                        .app_event_sender
+                                        .send(crate::AppEvent::YtDlpDownloadsUpdated);
+                                    Ok(())
+                                });
+                            }
                         }
                     }
 
@@ -610,6 +519,8 @@ enum ContextAction {
     Logs(Vec<String>),
     #[strum(to_string = "Retry")]
     Retry(DownloadId),
+    #[strum(to_string = "Remove from list")]
+    Remove(DownloadId),
 }
 
 impl DownloadState {

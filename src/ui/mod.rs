@@ -905,6 +905,16 @@ impl Ui {
                     modal!(ctx, AddRandomModal::new(ctx));
                 }
                 GlobalAction::ShowDownloads => {
+                    // Round 56 (56-2): refresh the cached daemon state
+                    // before the modal opens — the 1 s `DlStatePoll`
+                    // guard may not be running (a TUI that started before
+                    // any daemon jobs would otherwise show an empty
+                    // torrent section forever). Both messages share the
+                    // app-event channel, so the poll is processed before
+                    // the modal renders.
+                    let _ = ctx
+                        .app_event_sender
+                        .send(crate::AppEvent::DlStatePoll);
                     modal!(ctx, DownloadsModal::new(ctx));
                 }
             }
