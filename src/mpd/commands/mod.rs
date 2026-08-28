@@ -13,6 +13,7 @@ pub mod metadata_tag;
 pub mod mpd_config;
 pub mod outputs;
 pub mod playlist_info;
+pub mod replay_gain;
 pub mod status;
 pub mod stickers;
 pub mod update;
@@ -27,6 +28,7 @@ pub use self::{
     list_mounts::Mounts,
     list_playlists::Playlist,
     lsinfo::LsInfo,
+    replay_gain::ReplayGain,
     status::{State, Status},
     update::Update,
     volume::Volume,

@@ -14,7 +14,7 @@ use crate::{
     config::{Config, LyricsSource, cli::RemoteCommandQuery},
     ctx::Ctx,
     mpd::{
-        commands::{IdleEvent, State, volume::Bound as _},
+        commands::{IdleEvent, ReplayGain, State, volume::Bound as _},
         mpd_client::{MpdClient, SaveMode},
     },
     shared::{
@@ -71,6 +71,10 @@ fn main_task<B: Backend + std::io::Write>(
     // recovery prints once. Kept per session; re-shown on reconnect.
     let mut last_reported_mpd_error: Option<String> = None;
     ui.before_show(area, &mut ctx).expect("Initial render init to succeed");
+    // Round 53: re-apply the persisted replay gain mode on the initial
+    // connect (the mode is per-client — MPD forgets it when the connection
+    // closes; AppEvent::Reconnected below covers later reconnects).
+    apply_replay_gain(&ctx);
     let mut _update_loop_guard = None;
     let mut _update_db_loop_guard = None;
 
@@ -1951,6 +1955,10 @@ fn main_task<B: Backend + std::io::Write>(
                     }
                 }
                 AppEvent::Reconnected => {
+                    // Round 53: the persisted replay gain mode is per-client
+                    // and lost on disconnect — re-apply it on every
+                    // reconnect (MPD restart included).
+                    apply_replay_gain(&ctx);
                     for ev in [IdleEvent::Player, IdleEvent::Playlist, IdleEvent::Options] {
                         handle_idle_event(ev, &ctx, &mut additional_evs);
                     }
@@ -2339,6 +2347,25 @@ fn complete_stream_download(
         ReplaceAction::VideoPlaylist { .. } => {}
     }
     status_info!("Saved {} file(s) to s2udio-downloads", files.len());
+}
+
+/// Re-apply the persisted MPD replay gain mode (Settings > MPD, round 53)
+/// after an (initial) connect or reconnect: `replay_gain` is a per-client
+/// runtime mode that MPD forgets when the connection closes, so the choice
+/// would otherwise be lost on s2udio or MPD restarts. No-op for legacy
+/// state files without `mpd_replay_gain` (the server mode stays untouched).
+fn apply_replay_gain(ctx: &Ctx) {
+    let Some(mode) = crate::config::state::AppStateFile::load().mpd_replay_gain else {
+        return;
+    };
+    let Ok(mode) = mode.parse::<ReplayGain>() else {
+        log::warn!(mode = mode.as_str(); "Stored replay gain mode is invalid; ignoring");
+        return;
+    };
+    ctx.command(move |client| {
+        client.replay_gain(mode)?;
+        Ok(())
+    });
 }
 
 fn handle_idle_event(event: IdleEvent, ctx: &Ctx, result_ui_evs: &mut HashSet<IdleEvent>) {

@@ -15,12 +15,16 @@ use super::{
     input_modal::InputModal, mpv_conf_editor::MpvConfEditorModal, remap_keys,
 };
 use crate::{
-    AppEvent,
+    AppEvent, MpdQueryResult,
     config::{
         Config, UiSettings, cava::CavaOverridesFile, keys::{Key, KeyConfig, KeySequence},
         scale_color, state::AppStateFile, theme::UiConfig,
     },
-    ctx::Ctx, mpd::{commands::status::OnOffOneshot, mpd_client::MpdClient},
+    ctx::Ctx,
+    mpd::{
+        commands::{replay_gain::ReplayGain, status::OnOffOneshot},
+        mpd_client::MpdClient,
+    },
     shared::{
         id::{self, Id},
         keys::{ActionEvent, Actions},
@@ -301,6 +305,9 @@ enum MpdRow {
     Random,
     Single,
     Consume,
+    /// Replay gain mode cycle (off / track / album) — acts immediately on
+    /// the live server, persisted to state.ron on Save (round 53).
+    ReplayGain,
     DevicesHeader,
     Outputs,
 }
@@ -430,6 +437,10 @@ pub(crate) struct StagedSettings {
     /// rqbit SOCKS5 proxy URL staged in the settings panel; applied to the
     /// engine config + persisted to state.ron on Save ("" = no proxy).
     pub torrent_socks_proxy: String,
+    /// The MPD replay gain mode cycled in the settings panel; `None` = the
+    /// user never touched the row (legacy state.ron stays without the
+    /// field and the server mode is left untouched).
+    pub replay_gain: Option<ReplayGain>,
 }
 /// Which theme color an appearance row edits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -684,6 +695,9 @@ fn truncate_col(s: &str, width: usize) -> String {
 }
 const FREQ_MIN_LIMIT: i64 = 20;
 const FREQ_MAX_LIMIT: i64 = 22_000;
+/// Query id for the live `replay_gain_status` snapshot fetched when the
+/// panel opens (round 53; MPD `status` does not carry the mode).
+const REPLAY_GAIN_SNAPSHOT: &str = "open_settings_replay_gain";
 const DEFAULT_FREQ_MIN: u16 = 50;
 const DEFAULT_FREQ_MAX: u32 = 15_000;
 const FPS_MIN: u16 = 15;
@@ -737,6 +751,16 @@ pub struct SettingsModal {
     mpv_subtitles_initial: crate::config::mpv::MpvSubtitleMode,
     /// Staged mpv subtitle mode (applied + persisted on Save).
     mpv_subtitles_pending: crate::config::mpv::MpvSubtitleMode,
+    /// MPD replay gain mode when the panel opened (the persisted value;
+    /// replaced by the live `replay_gain_status` snapshot when it answers
+    /// before any cycle).
+    replay_gain_initial: ReplayGain,
+    /// Staged MPD replay gain mode — cycling acts on the live server
+    /// immediately and the value is persisted to state.ron on Save.
+    replay_gain_pending: ReplayGain,
+    /// The user cycled the replay gain row: a late live snapshot must not
+    /// clobber the staged choice.
+    replay_gain_cycled: bool,
     /// SVP support when the panel opened.
     mpv_svp_initial: bool,
     /// Staged SVP support (applied + persisted on Save).
@@ -833,6 +857,13 @@ impl SettingsModal {
             }
         };
         let cava_initial = StagedCava::from_config(&ctx.config);
+        // Round 53: replay gain baseline = the persisted value (fallback
+        // "off"); the LIVE mode is snapshotted via `replay_gain_status`
+        // below — an unparsable/hand-edited state value degrades to off.
+        let replay_gain = AppStateFile::load()
+            .mpd_replay_gain
+            .and_then(|mode| mode.parse::<ReplayGain>().ok())
+            .unwrap_or_default();
         let torrent_socks_proxy = ctx
             .config
             .torrent
@@ -868,6 +899,9 @@ impl SettingsModal {
             mpv_audio_pending: mpv_audio_initial,
             mpv_subtitles_initial: mpv_subtitles_initial.clone(),
             mpv_subtitles_pending: mpv_subtitles_initial,
+            replay_gain_initial: replay_gain,
+            replay_gain_pending: replay_gain,
+            replay_gain_cycled: false,
             mpv_svp_initial,
             mpv_svp_pending: mpv_svp_initial,
             mpv_custom_lang,
@@ -890,6 +924,16 @@ impl SettingsModal {
         };
         modal.refresh_nodes();
         modal.rows = modal.build_rows(ctx);
+        // Round 53: snapshot the LIVE replay gain mode (`replay_gain_status`
+        // — `status` does not carry it). A fetch error (dead server / too
+        // old MPD) leaves the persisted value / "off" in place without
+        // failing the panel.
+        ctx.query()
+            .id(REPLAY_GAIN_SNAPSHOT)
+            .replace_id(REPLAY_GAIN_SNAPSHOT)
+            .query(move |client| {
+                Ok(crate::MpdQueryResult::Any(Box::new(client.get_replay_gain()?)))
+            });
         modal
     }
     /// Refresh the PipeWire capture-source list (with the "auto" entry
@@ -966,7 +1010,7 @@ impl SettingsModal {
                     ContentRow::Mpd(MpdRow::PlaybackHeader),
                     ContentRow::Mpd(MpdRow::Crossfade), ContentRow::Mpd(MpdRow::Repeat),
                     ContentRow::Mpd(MpdRow::Random), ContentRow::Mpd(MpdRow::Single),
-                    ContentRow::Mpd(MpdRow::Consume),
+                    ContentRow::Mpd(MpdRow::Consume), ContentRow::Mpd(MpdRow::ReplayGain),
                     ContentRow::Mpd(MpdRow::DevicesHeader),
                     ContentRow::Mpd(MpdRow::Outputs),
                 ]
@@ -1223,6 +1267,24 @@ impl SettingsModal {
                     }
                     MpdRow::Single => Self::cycle_single_consume(ctx, true),
                     MpdRow::Consume => Self::cycle_single_consume(ctx, false),
+                    MpdRow::ReplayGain => {
+                        let idx = ReplayGain::ALL
+                            .iter()
+                            .position(|m| *m == self.replay_gain_pending)
+                            .unwrap_or(0) as i64;
+                        let next = ReplayGain::ALL
+                            [(idx + delta).rem_euclid(ReplayGain::ALL.len() as i64) as usize];
+                        self.replay_gain_pending = next;
+                        self.replay_gain_cycled = true;
+                        // Round 53: act on the live server immediately; the
+                        // staged value is persisted on Save.
+                        ctx.command(move |client| {
+                            client.replay_gain(next)?;
+                            Ok(())
+                        });
+                        ctx.render()?;
+                        Ok(())
+                    }
                     _ => Ok(()),
                 }
             }
@@ -1722,7 +1784,8 @@ impl SettingsModal {
                     | MpdRow::Repeat
                     | MpdRow::Random
                     | MpdRow::Single
-                    | MpdRow::Consume => self.adjust(ctx, 1),
+                    | MpdRow::Consume
+                    | MpdRow::ReplayGain => self.adjust(ctx, 1),
                     _ => Ok(()),
                 }
             }
@@ -1756,6 +1819,7 @@ impl SettingsModal {
             || self.mpv_audio_pending != self.mpv_audio_initial
             || self.mpv_subtitles_pending != self.mpv_subtitles_initial
             || self.mpv_svp_pending != self.mpv_svp_initial
+            || self.replay_gain_pending != self.replay_gain_initial
             || self.cava_pending != self.cava_initial
             || self
                 .appearance_pending
@@ -1777,6 +1841,7 @@ impl SettingsModal {
             mpv_svp: self.mpv_svp_pending,
             jellyfin: self.jellyfin_credentials.clone(),
             torrent_socks_proxy: self.torrent_socks_proxy_pending.clone(),
+            replay_gain: self.replay_gain_cycled.then_some(self.replay_gain_pending),
         }
     }
     fn do_click(&mut self, click: Click, ctx: &mut Ctx) -> Result<()> {
@@ -2134,6 +2199,22 @@ impl SettingsModal {
                             _ => unreachable!(),
                         };
                         Self::toggle_row(label, enabled, style)
+                    }
+                    MpdRow::ReplayGain => {
+                        // Mode-cycle row (off / track / album): the current
+                        // mode is bold, the others dim — same shape as the
+                        // video playback preference cycle.
+                        let current = self.replay_gain_pending;
+                        Self::option_row(
+                            "replay gain",
+                            style,
+                            dim,
+                            &[
+                                ("off", current == ReplayGain::Off),
+                                ("track", current == ReplayGain::Track),
+                                ("album", current == ReplayGain::Album),
+                            ],
+                        )
                     }
                     _ => (Vec::new(), Vec::new(), Vec::new(), None),
                 }
@@ -2661,6 +2742,30 @@ impl Modal for SettingsModal {
     /// get the save/discard prompt (the generic close would drop them).
     fn right_click_closes(&self) -> bool {
         false
+    }
+    fn on_query_finished(
+        &mut self,
+        id: &'static str,
+        data: &mut MpdQueryResult,
+        ctx: &Ctx,
+    ) -> Result<()> {
+        // Round 53: the live replay gain mode snapshot taken when the panel
+        // opened. Applied to both the baseline and the staged value so a
+        // fresh open with no edits never triggers a spurious save prompt.
+        // A late snapshot after the user already cycled the row is ignored
+        // (it must not clobber the staged choice).
+        if id == REPLAY_GAIN_SNAPSHOT && !self.replay_gain_cycled {
+            if let MpdQueryResult::Any(any) = data {
+                let any: &dyn std::any::Any = &**any;
+                if let Some(mode) = any.downcast_ref::<ReplayGain>() {
+                    let mode = *mode;
+                    self.replay_gain_initial = mode;
+                    self.replay_gain_pending = mode;
+                    ctx.render()?;
+                }
+            }
+        }
+        Ok(())
     }
     fn render(&mut self, frame: &mut Frame, ctx: &mut Ctx) -> Result<()> {
         if let Some(lang) = ctx.mpv_custom_subtitle_lang.borrow_mut().take() {

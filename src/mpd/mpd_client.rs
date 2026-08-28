@@ -9,9 +9,10 @@ use strum::{AsRefStr, Display};
 use super::{
     QueuePosition, client::Client,
     commands::{
-        AddId, IdleEvent, ListFiles, LsInfo, Mounts, Playlist, Song, Status, Update,
-        Volume, decoders::Decoders, list::MpdList, list_playlist::FileList,
-        mpd_config::MpdConfig, outputs::Outputs, status::OnOffOneshot,
+        AddId, IdleEvent, ListFiles, LsInfo, Mounts, Playlist, ReplayGain, Song,
+        Status, Update, Volume, decoders::Decoders, list::MpdList,
+        list_playlist::FileList, mpd_config::MpdConfig, outputs::Outputs,
+        status::OnOffOneshot,
         stickers::{Sticker, Stickers, StickersWithFile},
         volume::Bound,
     },
@@ -103,6 +104,8 @@ pub trait MpdCommand {
     fn send_random(&mut self, enabled: bool) -> MpdResult<()>;
     fn send_single(&mut self, single: OnOffOneshot) -> MpdResult<()>;
     fn send_consume(&mut self, consume: OnOffOneshot) -> MpdResult<()>;
+    fn send_replay_gain(&mut self, mode: ReplayGain) -> MpdResult<()>;
+    fn send_get_replay_gain(&mut self) -> MpdResult<()>;
     fn send_mount(&mut self, name: &str, path: &str) -> MpdResult<()>;
     fn send_unmount(&mut self, name: &str) -> MpdResult<()>;
     fn send_list_mounts(&mut self) -> MpdResult<()>;
@@ -246,6 +249,8 @@ pub trait MpdClient: Sized {
     fn random(&mut self, enabled: bool) -> MpdResult<()>;
     fn single(&mut self, single: OnOffOneshot) -> MpdResult<()>;
     fn consume(&mut self, consume: OnOffOneshot) -> MpdResult<()>;
+    fn replay_gain(&mut self, mode: ReplayGain) -> MpdResult<()>;
+    fn get_replay_gain(&mut self) -> MpdResult<ReplayGain>;
     fn mount(&mut self, name: &str, path: &str) -> MpdResult<()>;
     fn unmount(&mut self, name: &str) -> MpdResult<()>;
     fn list_mounts(&mut self) -> MpdResult<Mounts>;
@@ -562,6 +567,12 @@ impl MpdClient for Client<'_> {
     }
     fn consume(&mut self, consume: OnOffOneshot) -> MpdResult<()> {
         self.send_consume(consume).and_then(|()| self.read_ok())
+    }
+    fn replay_gain(&mut self, mode: ReplayGain) -> MpdResult<()> {
+        self.send_replay_gain(mode).and_then(|()| self.read_ok())
+    }
+    fn get_replay_gain(&mut self) -> MpdResult<ReplayGain> {
+        self.send_get_replay_gain().and_then(|()| self.read_response())
     }
     fn mount(&mut self, name: &str, path: &str) -> MpdResult<()> {
         self.send_mount(name, path).and_then(|()| self.read_ok())
@@ -1120,6 +1131,29 @@ impl<T: SocketClient> MpdCommand for T {
             )
         } else {
             self.execute(&format!("consume {}", consume.to_mpd_value()))
+        }
+    }
+    fn send_replay_gain(&mut self, mode: ReplayGain) -> MpdResult<()> {
+        if self.version() < Version::new(0, 18, 0) {
+            Err(MpdError::UnsupportedMpdVersion(
+                "replay_gain_mode can be used since MPD 0.18.0",
+            ))
+        } else {
+            // Round 53: MPD renamed the SET command `replay_gain` ->
+            // `replay_gain_mode` before 0.18 (verified against MPD
+            // 0.20-0.24 source: the command table only carries
+            // replay_gain_mode). `replay_gain` answers "unknown command"
+            // on every modern MPD, so the modern name is sent.
+            self.execute(&format!("replay_gain_mode {}", mode.as_str()))
+        }
+    }
+    fn send_get_replay_gain(&mut self) -> MpdResult<()> {
+        if self.version() < Version::new(0, 18, 0) {
+            Err(MpdError::UnsupportedMpdVersion(
+                "replay_gain_status can be used since MPD 0.18.0",
+            ))
+        } else {
+            self.execute("replay_gain_status")
         }
     }
     fn send_mount(&mut self, name: &str, path: &str) -> MpdResult<()> {
