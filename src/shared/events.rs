@@ -178,24 +178,28 @@ pub(crate) enum WorkRequest {
     /// Prepare a torrent stream (M2): start the rqbit engine, add the
     /// torrent, pick the largest playable file and build the mpv stream
     /// URL. Runs on the work thread; the engine is moved back to the UI
-    /// (`WorkDone::TorrentStreamPrepared`) so it stays alive.
+    /// (`WorkDone::TorrentStreamPrepared`) so it stays alive. Round 54:
+    /// this is the PLAIN-stream path only — committed downloads run on
+    /// the `s2udio dl` daemon (see `WorkRequest::StartDlDaemon`).
     PlayTorrent {
         item: crate::core::torrent::TorrentItem,
-        /// `true` for the "Play and Download" action: after the stream
-        /// starts, the engine keeps downloading the torrent and the
-        /// completed file is moved to `s2udio-downloads`.
-        download: bool,
     },
-    /// Prepare a torrent for download-only (round 21, the fresh-engine
-    /// fallback of the popup's "Download" / "Download all" when the scan
-    /// is gone): start the engine, add the torrent, wait for its file
-    /// list and hand the running engine + chosen files back as
-    /// `WorkDone::TorrentDownloadPrepared` — no stream playback.
-    DownloadTorrent {
-        item: crate::core::torrent::TorrentItem,
-        /// The files to keep, as positional indices (empty = the single
-        /// best playable file).
-        indices: Vec<usize>,
+    /// Start the round-54 downloader daemon (`s2udio dl serve`, detached,
+    /// survives the TUI) if it is not running. The work thread spawns it
+    /// and waits for its READY line (≤ 15 s); the outcome arrives as
+    /// `WorkDone::DlDaemonStarted`. Only the first committed action per
+    /// daemon lifetime needs to send this.
+    StartDlDaemon,
+    /// Watch a pending "Preparing downloader…" wait (round 54, the
+    /// "Stream and download" / "Download & Play" wait window): polls the
+    /// daemon's response file for `request_id` until it appears, the
+    /// request is cancelled (Esc — `cancel` fires), or the daemon proves
+    /// dead. One `AppEvent::DlWaitReady` is sent, then the thread exits.
+    WatchDlResponse {
+        /// The request id whose response file the thread polls.
+        request_id: String,
+        /// The wait window's cancel signal (Esc on the wait modal).
+        cancel: crossbeam::channel::Receiver<()>,
     },
     /// Scan a pasted torrent/magnet (round 17): start the engine, add the
     /// torrent, wait (round 18: **open-ended**, no deadline) for its
@@ -263,7 +267,9 @@ pub(crate) enum WorkDone {
     /// A torrent stream is prepared (M2): the rqbit engine is running and
     /// `stream_url` is ready for mpv. The engine handle is moved to the UI
     /// (kept in `Ctx.torrent_engine` — its `Drop` kills rqbit when the app
-    /// exits; M4 replaces this with the full session lifecycle).
+    /// exits; M4 replaces this with the full session lifecycle). Round 54:
+    /// this is the PLAIN-stream path only (committed downloads run on the
+    /// `s2udio dl` daemon).
     TorrentStreamPrepared {
         /// The item's canonical scan key (round 20): the UI registers the
         /// prepared single-file scan under it so a repeat paste reuses the
@@ -278,37 +284,23 @@ pub(crate) enum WorkDone {
         torrent_name: String,
         /// The picked file's name (used as the mpv playlist title).
         file_name: String,
-        /// The engine's torrent id (the "Play and Download" job polls its
-        /// stats and deletes it once the file is kept).
+        /// The engine's torrent id.
         torrent_id: String,
-        /// The picked file's positional index in the torrent's file list
-        /// (completion check against `stats.file_progress`).
+        /// The picked file's positional index in the torrent's file list.
         file_idx: usize,
-        /// The picked file's length in bytes (completion check).
+        /// The picked file's length in bytes.
         file_length: u64,
-        /// `true` when the action was "Play and Download" (the UI keeps a
-        /// download job polling until the file is moved to
-        /// `s2udio-downloads`).
-        download: bool,
+        /// The torrent's infohash (canonical lowercase hex) when rqbit
+        /// reported it — registered scan reuse + the round-54 daemon
+        /// routing decision need it.
+        info_hash: Option<String>,
     },
-    /// A torrent is prepared for download-only (round 21): the engine is
-    /// running and the file list is known — the UI registers the scan
-    /// under the item's canonical key and starts a download job for the
-    /// chosen files (no playback; the fresh-engine fallback of the
-    /// popup's "Download" / "Download all").
-    TorrentDownloadPrepared {
-        /// The item's canonical scan key (round 20): the UI registers the
-        /// prepared download as a scan under it so a repeat paste reuses
-        /// the engine instead of spawning a second rqbit on the same cache.
-        key: String,
-        /// The running engine, kept alive for the whole download job.
-        engine: crate::core::torrent::TorrentEngine,
-        /// The engine's torrent id (stats + delete).
-        torrent_id: String,
-        /// The torrent's display name (rqbit details, or the item label).
-        torrent_name: String,
-        /// The files to keep in `s2udio-downloads`, in scan order.
-        files: Vec<crate::core::torrent::ScannedFile>,
+    /// The round-54 downloader daemon finished starting (or failed to):
+    /// the "Preparing downloader…" wait window shows the failure; a
+    /// successful start is also detected by the response watcher, so this
+    /// is mostly an early-error channel.
+    DlDaemonStarted {
+        result: Result<(), String>,
     },
     /// A torrent/magnet scan finished (round 17). The UI stores the scan
     /// (engine + torrent id + file list) in `Ctx.torrent_scans` keyed by
@@ -357,14 +349,11 @@ pub(crate) enum AppEvent {
     /// Periodic tick while an mpv video plays: read its state from the IPC
     /// socket and refresh the UI.
     MpvPoll,
-    /// Periodic tick while a "Play and Download" torrent job is active:
-    /// poll the engine's stats and move the completed file to
-    /// `s2udio-downloads` once it is done.
-    TorrentDownloadPoll,
     /// The paste popup's play action on an already-scanned torrent (round
     /// 17): the engine is running and the file list is known, so playback
-    /// starts directly in the event loop (which owns the download job's
-    /// scheduler guard) instead of re-scanning on the work thread.
+    /// starts directly in the event loop. Round 54: the PLAIN-stream path
+    /// only (committed "Stream and download" / "Download & Play" go
+    /// through the `s2udio dl` daemon).
     TorrentScannedPlay {
         /// The scanned torrent (the engine moves here from the scan map;
         /// `Ctx.torrent_engine` keeps it alive once playing).
@@ -373,20 +362,26 @@ pub(crate) enum AppEvent {
         /// ("Play (stream)" = the single picked file, "Play all" = every
         /// video, "Select files…" = the user's choice).
         file_indices: Vec<usize>,
-        /// `true` for the "Play and Download" / picker "Download & Play"
-        /// actions (the download job tracks every played file).
-        download: bool,
     },
-    /// The paste popup's download-only action on an already-scanned
-    /// torrent (round 21): keep the scanned engine running and move the
-    /// chosen files to `s2udio-downloads` once the torrent's download is
-    /// complete — no playback (unlike `TorrentScannedPlay { download: true }`).
-    TorrentScannedDownload {
-        /// The scanned torrent (the engine is Arc-shared with the scan map).
-        scan: crate::core::torrent::TorrentScan,
-        /// The files to keep, as indices into `scan.files` ("Download" =
-        /// the single picked file, "Download all" = every video).
-        file_indices: Vec<usize>,
+    /// Periodic tick while the round-54 downloader daemon has jobs (or
+    /// the Downloads modal is open): re-read `downloads.json` into
+    /// `Ctx.dl_state` so the modal's progress / the status line stay
+    /// fresh.
+    DlStatePoll,
+    /// A round-54 download wait finished: the daemon response (stream
+    /// URLs to play through the daemon engine) is ready, an error
+    /// occurred, or the wait was cancelled.
+    DlWaitReady {
+        /// The request id the wait window tracked.
+        request_id: String,
+        result: Result<crate::core::dlctl::DlJobResponse, String>,
+    },
+    /// The round-54 wait window's 1 s tick: refresh the "Preparing
+    /// downloader…" modal's elapsed counter (like the scan wait window).
+    DlWaitProgress {
+        /// The request id the wait window tracks.
+        request_id: String,
+        elapsed_secs: u64,
     },
     KeyTimeout,
     ActionResolved(ActionEvent),

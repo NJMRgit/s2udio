@@ -224,6 +224,38 @@ impl TorrentEngine {
             }
         }
     }
+    /// The engine's configured cache/download folder.
+    pub fn cache_dir(&self) -> &std::path::Path {
+        &self.cache_dir
+    }
+    /// The HTTP API port the engine listens on (parsed from `base_url`).
+    pub fn http_port(&self) -> u16 {
+        self.base_url
+            .rsplit(':')
+            .next()
+            .and_then(|p| p.parse::<u16>().ok())
+            .unwrap_or(0)
+    }
+    /// The raw `user:pass` pair this engine was spawned with (the mpv
+    /// stream URLs embed it as URL userinfo). The round-54 downloader
+    /// daemon writes it to a 0600 per-job sidecar so the TUI can build
+    /// token-bearing stream URLs without the token ever appearing in the
+    /// shared state file (which stores proxy URLs only).
+    pub fn auth_user_pass(&self) -> &str {
+        &self.user_pass
+    }
+    /// The auth-injecting proxy base URL (`http://127.0.0.1:<proxy
+    /// port>`) — an unauthenticated client (the TUI reading the daemon's
+    /// per-job progress via `downloads.json`) can reach the engine's REST
+    /// API through it WITHOUT the token, while the engine port itself
+    /// stays auth-protected. Falls back to the raw engine base URL (401
+    /// for unauthenticated callers) when the proxy could not be spawned.
+    pub fn proxy_base_url(&self) -> String {
+        match &self.webui_proxy {
+            Some(proxy) => format!("http://127.0.0.1:{}", proxy.port()),
+            None => self.base_url.clone(),
+        }
+    }
     /// The engine child's pid (used by the CLI `s2udio rq` registration
     /// file so a separate process can stop the engine).
     pub fn pid(&self) -> u32 {
@@ -310,16 +342,29 @@ fn api_post(engine: &TorrentEngine, path: &str, body: &[u8]) -> Result<String, S
 }
 /// Torrent info as returned by `GET /torrents/{id}` (the fields the app
 /// uses; unknown fields are ignored).
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 pub struct TorrentDetails {
     pub name: Option<String>,
+    /// The on-disk folder rqbit v9 actually wrote the torrent into (its
+    /// own `output_folder` answer). Multi-file torrents: `<cache>/<info
+    /// _name>` — the per-torrent folder. SINGLE-file torrents: the cache
+    /// dir ITSELF (rqbit v9 stores single-file torrents flat). Round 55
+    /// (F2): the move source is `output_folder.join(components…)`, never
+    /// a hand-built `cache/info_name/name` path.
+    #[serde(default)]
+    pub output_folder: Option<String>,
+    /// The torrent's infohash as rqbit reports it (hex; the round-54
+    /// downloader daemon's dedup key — one committed job per infohash).
+    /// Optional because not every fake-engine fixture returns it.
+    #[serde(default)]
+    pub info_hash: Option<String>,
     #[serde(default)]
     pub files: Vec<TorrentFileInfo>,
 }
 /// One entry of `TorrentDetails.files` (rqbit v9 shape: `name`,
 /// `length`, `included`; there is no per-file `id` — the stream endpoint
 /// addresses files by their positional index in the `files` array).
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 pub struct TorrentFileInfo {
     pub name: String,
     /// Byte length of the file (rqbit's `length` field).
@@ -328,6 +373,12 @@ pub struct TorrentFileInfo {
     #[serde(default)]
     #[allow(dead_code)]
     pub included: bool,
+    /// The file's path components relative to `output_folder` (rqbit's
+    /// per-file `components`): `["dir", "file.mp4"]` for a nested
+    /// multi-file torrent, just `["file.mp4"]` for a single-file torrent.
+    /// Round 55 (F2): used to build the on-disk move source.
+    #[serde(default)]
+    pub components: Vec<String>,
 }
 /// `GET /torrents/{id}/stats/v1` — the bandwidth-gate (M3) and the
 /// "Play and Download" completion check inputs.
@@ -520,6 +571,41 @@ pub fn torrent_stats(engine: &TorrentEngine, id: &str) -> Result<TorrentStats, S
 pub fn delete_torrent(engine: &TorrentEngine, id: &str) -> Result<(), String> {
     api_post(engine, &format!("/torrents/{id}/delete"), &[]).map(|_| ())
 }
+/// Stop a torrent's transfer AND seeding on the engine while KEEPING its
+/// cache files on disk (`POST /torrents/{id}/forget` — rqbit forgets the
+/// torrent, the partials stay). Round 54: plain-stream stop (R2) and the
+/// downloader daemon's stop/move-complete paths — a re-add later adopts
+/// the existing partials (`?overwrite=true`, fast start).
+pub fn forget_torrent(engine: &TorrentEngine, id: &str) -> Result<(), String> {
+    api_post(engine, &format!("/torrents/{id}/forget"), &[]).map(|_| ())
+}
+/// The engine's torrent ids (`GET /torrents` — rqbit v9 answers
+/// `{"torrents": [ {id, info_hash, name, …} ]}`). Used by the plain-stream
+/// prune check: an engine with no torrents left is killed instead of
+/// lingering idle.
+pub fn list_torrents(engine: &TorrentEngine) -> Result<Vec<String>, String> {
+    let body = api_get(engine, "/torrents")?;
+    let value: serde_json::Value = serde_json::from_str(&body)
+        .map_err(|err| format!("Cannot parse torrent list: {err}"))?;
+    // Round 55 (F3): rqbit v9 wraps the list in an object (`torrents`
+    // key); older engines and fakes return a bare array — tolerate both.
+    let array = value
+        .get("torrents")
+        .and_then(|v| v.as_array())
+        .or_else(|| value.as_array())
+        .ok_or_else(|| {
+            "Torrent list was neither a bare array nor an object with a \"torrents\" array".to_owned()
+        })?;
+    let mut ids = Vec::new();
+    for entry in array {
+        if let Some(id) = entry.get("id").and_then(|v| {
+            v.as_str().map(str::to_owned).or_else(|| v.as_i64().map(|n| n.to_string()))
+        }) {
+            ids.push(id);
+        }
+    }
+    Ok(ids)
+}
 /// The largest playable file of a torrent: the largest file with a video
 /// extension, else the largest with an audio extension (the extension
 /// lists from the paste pipeline). Returns the file's positional index
@@ -610,6 +696,12 @@ pub struct TorrentScan {
     pub engine: Arc<TorrentEngine>,
     pub torrent_id: String,
     pub torrent_name: String,
+    /// The torrent's infohash (canonical lowercase hex, from rqbit's
+    /// `GET /torrents/{id}`), when the engine reported it. Round 54: the
+    /// downloader daemon's dedup key — the TUI routes re-streams through
+    /// the daemon engine when a committed job for the same infohash is
+    /// active.
+    pub info_hash: Option<String>,
     pub files: Vec<ScannedFile>,
 }
 impl TorrentScan {
@@ -744,6 +836,10 @@ pub fn scan_torrent(
                         engine: Arc::new(engine),
                         torrent_id,
                         torrent_name,
+                        info_hash: details
+                            .info_hash
+                            .as_deref()
+                            .map(|h| h.to_lowercase()),
                         files,
                     });
                 }
@@ -776,68 +872,82 @@ pub fn scan_torrent(
         std::thread::sleep(READY_POLL_INTERVAL);
     }
 }
-/// A "Play and Download" job: the stream is playing and the engine keeps
-/// downloading the torrent; once the picked file is complete it is moved
-/// to `s2udio-downloads` (deferred until mpv stops using the stream when
-/// a file completes mid-playback). Lives in `Ctx.torrent_download`,
-/// polled once per second by the event loop. One job per torrent: the
-/// popup's "Download" / "Download all" (round 21), the picker's
-/// "Download & Play" and the classic single-file "Play and Download" all
-/// track their kept files through the same job.
-#[derive(Debug)]
-pub struct TorrentDownload {
-    /// The engine this download runs on, identified by its API base URL
-    /// (a replaced engine — another torrent played — abandons the job).
-    pub engine_base_url: String,
-    /// The torrent's id on the engine (stats + delete).
-    pub torrent_id: String,
-    /// The torrent's display name (the output folder under the cache dir).
-    pub torrent_name: String,
-    /// The files to keep in `s2udio-downloads` once the download is done.
-    pub files: Vec<TorrentDownloadFile>,
-    /// The download finished; the move may still be deferred.
-    pub complete: bool,
-    /// Complete while mpv was still playing a stream: move on session end.
-    pub deferred: bool,
-    /// Consecutive stats failures (engine gone): abandon after 3.
-    pub failures: u8,
-}
-/// One file of a torrent download job: the engine keeps the whole torrent
-/// downloading and, once it is complete, every kept file is moved to
-/// `s2udio-downloads`.
+/// A torrent the TUI is currently PLAIN-streaming on its own ephemeral
+/// engine (round 54, R2): remembered so the stream's download/seeding can
+/// be stopped (`POST /torrents/{id}/forget` — partials stay, a re-stream
+/// resumes from them) when the stream ends or is replaced. Only ever
+/// refers to TUI engines — daemon-routed streams (torrents with an active
+/// committed download) are NOT tracked here. The engine is held by `Arc`
+/// so the forget can run even after the engine was replaced (the last
+/// clone's `Drop` then kills rqbit).
 #[derive(Debug, Clone)]
-pub struct TorrentDownloadFile {
-    /// The file's positional index (completion via `file_progress`).
-    pub file_idx: usize,
-    /// The file's length in bytes (completion check).
-    pub file_length: u64,
-    /// The file's name (display + the moved file's name).
-    pub file_name: String,
-    /// The completed file's location inside the engine's cache dir.
-    pub source_path: std::path::PathBuf,
-    /// The stream URL mpv may be playing (the file must not be moved away
-    /// while the stream is still in use).
-    pub stream_url: String,
+pub struct PlainTorrentStream {
+    /// The TUI engine hosting the stream (Arc-shared like the scan map).
+    pub engine: std::sync::Arc<TorrentEngine>,
+    /// The torrent's id on that engine (`POST /torrents/{id}/forget`).
+    pub torrent_id: String,
+    /// The torrent's infohash (canonical lowercase hex) — matched against
+    /// the downloader daemon's jobs so a torrent with an active committed
+    /// download is never forgotten (R2: "no committed job anywhere").
+    pub infohash: Option<String>,
 }
-/// Whether the torrent's download is complete (every kept file fully
-/// downloaded): `stats.finished` is torrent-level, and `file_progress` is
+/// Whether every kept file of a downloader-daemon job is fully
+/// downloaded: `stats.finished` is torrent-level and `file_progress` is
 /// aligned with the torrent's file list, so each kept file's index must
-/// show its full length. (rqbit preallocates files on disk, so sizes are
-/// not a progress signal.)
-pub fn download_complete(stats: &TorrentStats, job: &TorrentDownload) -> bool {
+/// show its full length. (rqbit preallocates files on disk, so on-disk
+/// sizes are not a progress signal.)
+pub fn files_downloaded(
+    stats: &TorrentStats,
+    kept: &[(usize, u64)],
+) -> bool {
     stats.finished
-        && job
-            .files
+        && kept
             .iter()
-            .all(|file| {
-                stats.file_progress.get(file.file_idx).copied().unwrap_or(0)
-                    >= file.file_length
+            .all(|(index, length)| {
+                stats.file_progress.get(*index).copied().unwrap_or(0) >= *length
             })
 }
 /// Whether a URL is an rqbit torrent stream URL (used to prefer the
 /// playlist entry's saved file name over mpv's raw URL media-title).
 pub fn is_torrent_stream_url(url: &str) -> bool {
     url.starts_with("http://") && url.contains("/torrents/")
+}
+/// The on-disk source path of a kept file, laid out the way rqbit v9
+/// actually wrote it (round 55 F2): `output_folder.join(components…)`.
+/// rqbit stores SINGLE-file torrents FLAT — `output_folder` IS the cache
+/// dir and `components` is just the file name — while multi-file torrents
+/// land under `<cache>/<info_name>/<components…>`. The classic
+/// `cache_dir/info_name/file_name` join (the pre-round-54 assumption) is
+/// only the fallback for engines that do not report the fields (fakes).
+/// The engine's answer wins in every real case: single-file torrents
+/// moved to `s2udio-downloads` correctly, nested multi-file files keep
+/// their sub-folder components, and top-level multi-file files are
+/// unchanged from the old layout.
+pub fn kept_file_source(
+    cache_dir: &std::path::Path,
+    torrent_name: &str,
+    details: Option<&TorrentDetails>,
+    file: &crate::core::dlctl::DlKeptFile,
+) -> std::path::PathBuf {
+    let engine_layout = details.and_then(|d| d.output_folder.as_deref()).map(|folder| {
+        let mut path = std::path::PathBuf::from(folder);
+        let components = details
+            .and_then(|d| d.files.get(file.index))
+            .map(|f| f.components.as_slice())
+            .unwrap_or_default();
+        if components.is_empty() {
+            // The file entry did not report components — the folder is
+            // the authoritative answer (single-file flat or a
+            // components-less serialization): join the file name itself.
+            path.push(&file.name);
+        } else {
+            for part in components {
+                path.push(part);
+            }
+        }
+        path
+    });
+    engine_layout.unwrap_or_else(|| cache_dir.join(torrent_name).join(&file.name))
 }
 /// Move a completed torrent file into `dest_dir`, picking a unique name
 /// (`name`, `name (1)`, …) so an existing file is never overwritten.

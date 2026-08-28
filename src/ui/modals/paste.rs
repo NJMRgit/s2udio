@@ -21,7 +21,8 @@ use crate::{
     },
     ctx::Ctx, mpd::{QueuePosition, mpd_client::MpdClient},
     shared::{
-        events::WorkRequest, macros::{modal, status_info, status_warn},
+        events::WorkRequest,
+        macros::{modal, status_error, status_info, status_warn},
         mpd_client_ext::{Enqueue, MpdClientExt as _},
         ytdlp::YtDlpContent,
     },
@@ -796,7 +797,7 @@ fn paste_menu(ctx: &Ctx, items: Vec<PastedItem>) -> MenuModal<'static> {
                                                         .and_then(|r| r.as_ref().ok())
                                                         .map(|s| s.videos().iter().map(|f| f.index).collect())
                                                         .unwrap_or_default();
-                                                    play_scanned_or_fresh(
+                                                    play_torrent_route(
                                                         ctx,
                                                         &all_item,
                                                         &all_key,
@@ -818,7 +819,7 @@ fn paste_menu(ctx: &Ctx, items: Vec<PastedItem>) -> MenuModal<'static> {
                                                         .and_then(|r| r.as_ref().ok())
                                                         .map(|s| s.videos().iter().map(|f| f.index).collect())
                                                         .unwrap_or_default();
-                                                    download_scanned_or_fresh(ctx, &dl_item, &dl_key, indices)
+                                                    commit_to_daemon(ctx, &dl_item, &dl_key, indices, false)
                                                 },
                                             );
                                         let pick_item = item.clone();
@@ -837,7 +838,7 @@ fn paste_menu(ctx: &Ctx, items: Vec<PastedItem>) -> MenuModal<'static> {
                                             .item(
                                                 "Stream",
                                                 move |ctx| {
-                                                    play_scanned_or_fresh(
+                                                    play_torrent_route(
                                                         ctx,
                                                         &play_item,
                                                         &play_key,
@@ -852,7 +853,7 @@ fn paste_menu(ctx: &Ctx, items: Vec<PastedItem>) -> MenuModal<'static> {
                                             .item(
                                                 "Stream and download",
                                                 move |ctx| {
-                                                    play_scanned_or_fresh(
+                                                    play_torrent_route(
                                                         ctx,
                                                         &both_item,
                                                         &both_key,
@@ -867,12 +868,7 @@ fn paste_menu(ctx: &Ctx, items: Vec<PastedItem>) -> MenuModal<'static> {
                                             .item(
                                                 "Download",
                                                 move |ctx| {
-                                                    download_scanned_or_fresh(
-                                                        ctx,
-                                                        &dl_item,
-                                                        &dl_key,
-                                                        Vec::new(),
-                                                    )
+                                                    commit_to_daemon(ctx, &dl_item, &dl_key, Vec::new(), false)
                                                 },
                                             );
                                     }
@@ -1002,10 +998,18 @@ pub fn on_torrent_scan_progress(
 /// the paste popup's close hook (Esc / Cancel / an action) and by the
 /// playback-start cleanup paths that drop the popup without its hook.
 fn cancel_in_flight_scans(ctx: &Ctx) {
-    for key in ctx.torrent_scans_pending.borrow().iter() {
-        if let Some(cancel) = ctx.torrent_scan_cancels.borrow().get(key) {
-            let _ = cancel.send(());
-        }
+    // Clone the cancel senders first (round 55 F1 sweep): the `for`/`if
+    // let` scrutinee borrows live for the whole loop, so no `borrow_mut()`
+    // may fire on the same RefCell inside it — collect, then signal, then
+    // clear as separate statements.
+    let cancels: Vec<crossbeam::channel::Sender<()>> = ctx
+        .torrent_scans_pending
+        .borrow()
+        .iter()
+        .filter_map(|key| ctx.torrent_scan_cancels.borrow().get(key).cloned())
+        .collect();
+    for cancel in cancels {
+        let _ = cancel.send(());
     }
     ctx.torrent_scan_cancels.borrow_mut().clear();
     ctx.torrent_scan_progress.borrow_mut().clear();
@@ -1022,46 +1026,516 @@ pub fn refresh_paste_modal(ctx: &Ctx) {
     let menu = paste_menu(ctx, items);
     modal!(ctx, menu);
 }
-/// Play a scanned torrent's files (round 17): take the scanned engine out
-/// of `Ctx.torrent_scans` and hand playback to the event loop
-/// (`AppEvent::TorrentScannedPlay` — it owns the download-job guard).
-/// `indices` empty = the single best playable file; when the scan is gone
-/// (replaced engine, closed popup) the fresh-engine `play_torrent` path
-/// takes over.
-fn play_scanned_or_fresh(
+/// Route a torrent play action (round 54). Committed actions
+/// (`download: true` — "Stream and download" / the picker's "Download &
+/// Play") always go to the downloader daemon: the job survives the TUI
+/// and playback runs through the daemon engine. Plain streams go through
+/// the daemon engine too when a committed job for the same torrent is
+/// active (§2.2 — one engine per cache dir); otherwise they use the
+/// ephemeral TUI engine exactly as before round 54.
+fn play_torrent_route(
     ctx: &Ctx,
     item: &PastedItem,
     key: &str,
     indices: Vec<usize>,
     download: bool,
 ) -> Result<()> {
+    if download {
+        return commit_to_daemon(ctx, item, key, indices, true);
+    }
+    let infohash = scan_infohash(ctx, key, item);
+    let daemon_routed = infohash.as_deref().is_some_and(|hash| {
+        crate::core::dlctl::read_state().as_ref().is_some_and(|state| {
+            crate::core::dlctl::job_active_for_infohash(state, hash)
+        })
+    });
+    if daemon_routed {
+        log::debug!(
+            key:?; "Plain re-stream routed through the downloader daemon (active committed job)"
+        );
+        return stream_via_daemon(ctx, item, key, indices);
+    }
+    play_scanned_or_fresh(ctx, item, key, indices)
+}
+/// The infohash of a scanned torrent (the scan's engine-reported value,
+/// falling back to the magnet URI's for magnets scanned before the field
+/// existed or with the scan gone).
+fn scan_infohash(ctx: &Ctx, key: &str, item: &PastedItem) -> Option<String> {
+    ctx.torrent_scans
+        .borrow()
+        .get(key)
+        .cloned()
+        .and_then(Result::ok)
+        .and_then(|scan| scan.info_hash.clone())
+        .or_else(|| match item {
+            PastedItem::Magnet(magnet) => magnet_infohash_full(magnet),
+            _ => None,
+        })
+}
+/// Play a scanned torrent's files (round 17, the PLAIN-stream path): take
+/// the scanned engine out of `Ctx.torrent_scans` and hand playback to the
+/// event loop (`AppEvent::TorrentScannedPlay`). `indices` empty = the
+/// single best playable file; when the scan is gone (replaced engine,
+/// closed popup) the fresh-engine `play_torrent` path takes over.
+fn play_scanned_or_fresh(
+    ctx: &Ctx,
+    item: &PastedItem,
+    key: &str,
+    indices: Vec<usize>,
+) -> Result<()> {
     let scan = ctx.torrent_scans.borrow().get(key).cloned().and_then(Result::ok);
     log::debug!(
         key:?; "play_scanned_or_fresh found={} indices={}", scan.is_some(), indices.len()
     );
     let Some(scan) = scan else {
-        return play_torrent(ctx, std::slice::from_ref(item), download);
+        return play_torrent(ctx, std::slice::from_ref(item));
     };
     let file_indices: Vec<usize> = if indices.is_empty() {
         match scan.pick_playable() {
             Some(pick) => vec![pick.index],
-            None => return play_torrent(ctx, std::slice::from_ref(item), download),
+            None => return play_torrent(ctx, std::slice::from_ref(item)),
         }
     } else {
         indices.into_iter().filter(|i| *i < scan.files.len()).collect()
     };
     if file_indices.is_empty() {
-        return play_torrent(ctx, std::slice::from_ref(item), download);
+        return play_torrent(ctx, std::slice::from_ref(item));
     }
     ctx.app_event_sender
         .send(crate::shared::events::AppEvent::TorrentScannedPlay {
             scan,
             file_indices,
-            download,
         })
         .map_err(|err| anyhow::anyhow!("Failed to start torrent playback: {err}"))?;
     Ok(())
 }
+
+// ============================================================================
+// Round 54 — downloader daemon client (committed torrent downloads)
+// ============================================================================
+
+/// The replacement id of the "Preparing downloader…" wait window: the
+/// rebuilt modal (elapsed counter tick) replaces the open one in place.
+const DL_WAIT_REPLACEMENT_ID: &str = "dl_wait";
+/// An open round-54 download wait ("Preparing downloader…"): a committed
+/// enqueue-with-play or a daemon-routed re-stream is waiting for the
+/// daemon's response file. The wait shows while the daemon adds the
+/// torrent (a cold magnet can take minutes — open-ended, like the scan
+/// wait); Esc cancels it (a stop request stops the daemon job).
+pub struct DlWaitState {
+    /// The request id whose response file the wait polls.
+    pub request_id: String,
+    /// The open wait modal (popped by the ready/failure path without
+    /// running its Esc-cancel close hook).
+    pub modal_id: Option<crate::shared::id::Id>,
+    /// The wait watcher thread's cancel signal (fired on Esc).
+    pub cancel: crossbeam::channel::Sender<()>,
+}
+
+/// The wait window's elapsed counter ("mm:ss", same renderer as the scan
+/// wait).
+fn dl_wait_elapsed(secs: u64) -> String {
+    format!("{:02}:{:02}", secs / 60, secs % 60)
+}
+
+/// Open the "Preparing downloader…" wait window and start its watcher
+/// thread (`WorkRequest::WatchDlResponse` polls the daemon's response
+/// file, sends `DlWaitProgress` every second and `DlWaitReady` when the
+/// response lands).
+fn open_dl_wait(ctx: &Ctx, request_id: String) {
+    let (cancel_tx, cancel_rx) = crossbeam::channel::unbounded();
+    let menu = dl_wait_menu(ctx, request_id.clone(), 0);
+    let modal_id = crate::ui::modals::Modal::id(&menu);
+    *ctx.dl_wait.borrow_mut() = Some(DlWaitState {
+        request_id: request_id.clone(),
+        modal_id: Some(modal_id),
+        cancel: cancel_tx,
+    });
+    modal!(ctx, menu);
+    let _ = ctx.work_sender.send(WorkRequest::WatchDlResponse {
+        request_id,
+        cancel: cancel_rx,
+    });
+}
+
+/// The wait window modal: a live "Preparing downloader… mm:ss" header
+/// (rebuilt with a `dl_wait` replacement id so the tick replaces it in
+/// place), an "esc to cancel" hint and a Cancel item. Its close hook
+/// (Esc / Cancel / any destroy) stops the daemon job and cancels the
+/// watcher.
+fn dl_wait_menu(ctx: &Ctx, request_id: String, elapsed_secs: u64) -> MenuModal<'static> {
+    MenuModal::new(ctx)
+        .replacement_id(DL_WAIT_REPLACEMENT_ID)
+        .list_section(ctx, |mut section| {
+            section.header(format!(
+                "Preparing downloader… {}",
+                dl_wait_elapsed(elapsed_secs)
+            ));
+            section.header("esc to cancel");
+            section.set_on_close(move |ctx| {
+                // The user cancelled the wait: stop the daemon job (the
+                // daemon matches it by the creating request id).
+                let cancel = ctx.dl_wait.borrow().as_ref().map(|w| w.cancel.clone());
+                let _ = crate::core::dlctl::write_stop_request(
+                    None,
+                    Some(&request_id),
+                    None,
+                );
+                if let Some(cancel) = cancel {
+                    let _ = cancel.send(());
+                }
+                ctx.dl_wait.borrow_mut().take();
+            });
+            section.add_item("Cancel", |_ctx| Ok(()));
+            Some(section)
+        })
+        .build()
+}
+
+/// The wait window's 1 s tick: refresh the open modal's elapsed counter
+/// (replacement id — the rebuilt modal replaces the open one in place).
+pub fn on_dl_wait_progress(ctx: &Ctx, request_id: &str, elapsed_secs: u64) {
+    let is_current = ctx
+        .dl_wait
+        .borrow()
+        .as_ref()
+        .is_some_and(|w| w.request_id == request_id);
+    if !is_current {
+        return;
+    }
+    let menu = dl_wait_menu(ctx, request_id.to_owned(), elapsed_secs);
+    let modal_id = crate::ui::modals::Modal::id(&menu);
+    if let Some(wait) = ctx.dl_wait.borrow_mut().as_mut() {
+        wait.modal_id = Some(modal_id);
+    }
+    modal!(ctx, menu);
+}
+
+/// A downloader wait finished: the daemon response is ready — close the
+/// wait modal (without its Esc hook — the job exists, a stop request must
+/// NOT fire) and play through the daemon engine (or report the error).
+/// Stale events (the wait was cancelled / a newer wait replaced it) are
+/// dropped.
+pub fn on_dl_wait_ready(
+    ctx: &mut Ctx,
+    request_id: &str,
+    result: Result<crate::core::dlctl::DlJobResponse, String>,
+) {
+    let is_current = ctx
+        .dl_wait
+        .borrow()
+        .as_ref()
+        .is_some_and(|w| w.request_id == request_id);
+    if !is_current {
+        return;
+    }
+    let wait = ctx.dl_wait.borrow_mut().take().expect("the current wait exists");
+    if let Some(modal_id) = wait.modal_id {
+        let _ = ctx
+            .app_event_sender
+            .send(crate::AppEvent::UiEvent(crate::ui::UiAppEvent::PopModal(modal_id)));
+    }
+    match result {
+        Ok(response) if response.error.is_none() => {
+            start_daemon_play(ctx, &response);
+        }
+        Ok(response) => {
+            status_error!("{}", response.error.clone().unwrap_or_else(|| "Downloader failed".to_owned()));
+        }
+        Err(err) => {
+            status_error!("{err}");
+        }
+    }
+}
+
+/// The daemon's start finished on the work thread: a failure aborts an
+/// open wait (closes the modal, cancels the watcher, removes the spool
+/// request so it cannot fire later); a success is a no-op (the watcher
+/// handles the rest).
+pub fn on_dl_daemon_started(ctx: &Ctx, result: Result<(), String>) {
+    if result.is_ok() {
+        return;
+    }
+    let err = result.unwrap_err();
+    let Some(wait) = ctx.dl_wait.borrow_mut().take() else {
+        // Download-only commits keep their spool request: a later
+        // `s2udio dl start` resumes the download (R1 — the commit must
+        // not vanish).
+        return;
+    };
+    let _ = wait.cancel.send(());
+    if let Some(path) = crate::core::dlctl::request_path(&wait.request_id) {
+        let _ = std::fs::remove_file(path);
+    }
+    if let Some(modal_id) = wait.modal_id {
+        let _ = ctx
+            .app_event_sender
+            .send(crate::AppEvent::UiEvent(crate::ui::UiAppEvent::PopModal(modal_id)));
+    }
+    status_error!("The downloader daemon failed to start: {err}");
+}
+
+/// Round-54 hazard guard (§2.2): before a torrent gets a daemon engine on
+/// the cache dir, no TUI engine may still download it. Forget it on the
+/// scan engine and on every engine currently plain-streaming it (matched
+/// by infohash), and drop the scan entry. A plain stream still playing on
+/// a TUI engine stalls briefly — the daemon response replays it through
+/// the daemon engine.
+fn release_torrent_from_tui(ctx: &Ctx, key: &str, infohash: Option<&str>) {
+    // Clone first (round 55 F1): a `borrow()` Ref live across the
+    // `borrow_mut()` below panicked with `RefCell already borrowed` — the
+    // `if let` scrutinee's temporary lives through the whole block.
+    let scanned = ctx.torrent_scans.borrow().get(key).cloned();
+    if let Some(Ok(scan)) = scanned {
+        let _ = crate::core::torrent::forget_torrent(&scan.engine, &scan.torrent_id);
+        ctx.torrent_scans.borrow_mut().remove(key);
+        log::debug!(
+            key:?; "Forgot the scanned torrent on its TUI engine (daemon takes over)"
+        );
+    }
+    if let Some(hash) = infohash {
+        let mut refs = ctx.plain_stream_torrents.borrow_mut();
+        refs.retain(|stream| {
+            if stream.infohash.as_deref() == Some(hash) {
+                let _ = crate::core::torrent::forget_torrent(&stream.engine, &stream.torrent_id);
+                log::debug!(
+                    hash:?; "Forgot a plain-streamed torrent on its TUI engine (daemon takes over)"
+                );
+                false
+            } else {
+                true
+            }
+        });
+    }
+}
+
+/// Close the paste popup (used by the daemon flows: the committed action
+/// takes over from the popup, and a leftover popup could re-offer the
+/// stale scan's TUI-engine actions).
+fn close_paste_popup(ctx: &Ctx) {
+    if let Some(id) = ctx.paste_modal_id.take() {
+        let _ = ctx
+            .app_event_sender
+            .send(crate::AppEvent::UiEvent(crate::ui::UiAppEvent::PopModal(id)));
+    }
+    ctx.paste_modal_items.borrow_mut().take();
+    cancel_in_flight_scans(ctx);
+}
+
+/// Ensure the downloader daemon is running (the work thread spawns
+/// `s2udio dl serve` when it is not; the wait watcher covers the spawn
+/// window).
+fn ensure_daemon_started(ctx: &Ctx) {
+    let running = crate::core::dlctl::read_state()
+        .as_ref()
+        .is_some_and(crate::core::dlctl::daemon_running);
+    if !running {
+        let _ = ctx.work_sender.send(WorkRequest::StartDlDaemon);
+    }
+}
+
+/// A committed torrent action (round 54): enqueue a downloader-daemon job
+/// (deduped by infohash — a second committed action extends the existing
+/// job's kept-file list) and — for "Stream and download" / the picker's
+/// "Download & Play" (`play: true`) — wait for the daemon's response,
+/// then play through the daemon engine (survives the TUI, R1). For
+/// download-only the Downloads modal shows the progress.
+fn commit_to_daemon(
+    ctx: &Ctx,
+    item: &PastedItem,
+    key: &str,
+    indices: Vec<usize>,
+    play: bool,
+) -> Result<()> {
+    if !ctx.config.torrent.enabled {
+        status_warn!("Torrent streaming is disabled in the config");
+        return Ok(());
+    }
+    let scan = ctx.torrent_scans.borrow().get(key).cloned().and_then(Result::ok);
+    let (infohash, torrent_name, kept) = match &scan {
+        Some(scan) => {
+            let file_indices: Vec<usize> = if indices.is_empty() {
+                scan.pick_playable().into_iter().map(|f| f.index).collect()
+            } else {
+                indices.iter().filter(|i| **i < scan.files.len()).copied().collect()
+            };
+            let kept = file_indices
+                .iter()
+                .filter_map(|i| scan.files.get(*i))
+                .map(|f| crate::core::dlctl::DlKeptFile {
+                    index: f.index,
+                    name: f.name.clone(),
+                    length: f.length,
+                })
+                .collect::<Vec<_>>();
+            (scan.info_hash.clone(), Some(scan.torrent_name.clone()), kept)
+        }
+        None => (None, None, Vec::new()),
+    };
+    let infohash = infohash.or_else(|| match item {
+        PastedItem::Magnet(magnet) => magnet_infohash_full(magnet),
+        _ => None,
+    });
+    release_torrent_from_tui(ctx, key, infohash.as_deref());
+    let request_id = crate::core::dlctl::new_request_id();
+    let request = crate::core::dlctl::DlJobRequest::Enqueue {
+        id: request_id.clone(),
+        infohash,
+        source_key: key.to_owned(),
+        torrent_item: torrent_item(item).into(),
+        torrent_name,
+        files: kept,
+        play,
+    };
+    crate::core::dlctl::write_request(&request)
+        .map_err(|err| anyhow::anyhow!("{err}"))?;
+    ensure_daemon_started(ctx);
+    // Refresh + keep `Ctx.dl_state` fresh while the job runs (the event
+    // loop's `DlStatePoll` arm restarts its 1 s guard while jobs are
+    // active).
+    let _ = ctx
+        .app_event_sender
+        .send(crate::AppEvent::DlStatePoll);
+    close_paste_popup(ctx);
+    if play {
+        open_dl_wait(ctx, request_id);
+    } else {
+        let label = scan
+            .as_ref()
+            .map(|scan| scan.torrent_name.clone())
+            .unwrap_or_else(|| item.label());
+        status_info!("Downloading {label}… (progress in the Downloads modal)");
+    }
+    Ok(())
+}
+
+/// A plain re-stream of a torrent that has an ACTIVE committed job
+/// (round 54, §2.2): playback routes through the daemon engine — no
+/// second TUI engine on the cache dir. The stream request does NOT extend
+/// the job's kept-file list.
+fn stream_via_daemon(ctx: &Ctx, item: &PastedItem, key: &str, indices: Vec<usize>) -> Result<()> {
+    let scan = ctx.torrent_scans.borrow().get(key).cloned().and_then(Result::ok);
+    let (infohash, torrent_name) = match &scan {
+        Some(scan) => (scan.info_hash.clone(), Some(scan.torrent_name.clone())),
+        None => (None, None),
+    };
+    let infohash = infohash.or_else(|| match item {
+        PastedItem::Magnet(magnet) => magnet_infohash_full(magnet),
+        _ => None,
+    });
+    release_torrent_from_tui(ctx, key, infohash.as_deref());
+    let request_id = crate::core::dlctl::new_request_id();
+    let request = crate::core::dlctl::DlJobRequest::Stream {
+        id: request_id.clone(),
+        infohash,
+        source_key: key.to_owned(),
+        torrent_item: torrent_item(item).into(),
+        torrent_name,
+        file_indices: indices,
+    };
+    crate::core::dlctl::write_request(&request)
+        .map_err(|err| anyhow::anyhow!("{err}"))?;
+    ensure_daemon_started(ctx);
+    let _ = ctx
+        .app_event_sender
+        .send(crate::AppEvent::DlStatePoll);
+    close_paste_popup(ctx);
+    open_dl_wait(ctx, request_id);
+    Ok(())
+}
+
+/// Play a downloader-daemon response (round 54, §2.3): build the mpv
+/// entries from the response's stream URLs (userinfo auth), insert the
+/// synthetic yt-info entries (title = file name, channel = torrent name —
+/// exactly like a TUI torrent play), record the job in the streaming
+/// marker (R2.5 — the daemon defers moving its files) and prune TUI
+/// engines the commit path left idle.
+pub fn start_daemon_play(ctx: &mut Ctx, response: &crate::core::dlctl::DlJobResponse) {
+    let entries: Vec<crate::core::mpv::MpvPlaylistEntry> = response
+        .files
+        .iter()
+        .map(|file| {
+            crate::core::mpv::MpvPlaylistEntry::new(
+                file.name.clone(),
+                file.stream_url.clone(),
+                None,
+            )
+        })
+        .collect();
+    if entries.is_empty() {
+        status_warn!("The downloader response had no playable files");
+        return;
+    }
+    ctx.mpv.artist = response.torrent_name.clone();
+    remember_torrent_entries(ctx, &response.torrent_name, &entries);
+    crate::core::mpv::play_video_entries(ctx, entries);
+    // R2.5: while the TUI streams this job, its completed files must not
+    // be moved away from under mpv.
+    ctx.dl_streaming_jobs.borrow_mut().insert(response.job_id.clone());
+    let jobs: Vec<String> = ctx.dl_streaming_jobs.borrow().iter().cloned().collect();
+    crate::core::dlctl::write_streaming_marker(&jobs);
+    prune_empty_engines(ctx);
+    status_info!("Streaming {}…", response.torrent_name);
+}
+
+/// The mpv session ended (R2.5): clear the streaming marker so the daemon
+/// stops deferring completed moves ("streams over").
+pub fn untrack_daemon_streams(ctx: &Ctx) {
+    ctx.dl_streaming_jobs.borrow_mut().clear();
+    crate::core::dlctl::clear_streaming_marker();
+}
+
+/// Kill TUI engines that no longer host any torrent (round 54, §2.4
+/// prune): an engine whose `GET /torrents` list is empty has nothing to
+/// do — drop its scan entries and, when it is the current engine, clear
+/// `Ctx.torrent_engine`. The last `Arc`'s `Drop` kills rqbit (no idle
+/// engine lingers).
+pub fn prune_empty_engines(ctx: &Ctx) {
+    let bases: std::collections::HashSet<String> = {
+        let mut bases: Vec<String> = ctx
+            .torrent_scans
+            .borrow()
+            .values()
+            .filter_map(|result| result.as_ref().ok())
+            .map(|scan| scan.engine.base_url().to_owned())
+            .collect();
+        if let Some(engine) = ctx.torrent_engine.borrow().as_ref() {
+            bases.push(engine.base_url().to_owned());
+        }
+        bases.into_iter().collect()
+    };
+    for base in bases {
+        let engine = ctx
+            .torrent_scans
+            .borrow()
+            .values()
+            .filter_map(|result| result.as_ref().ok())
+            .map(|scan| scan.engine.clone())
+            .find(|engine| engine.base_url() == base)
+            .or_else(|| ctx.torrent_engine.borrow().clone())
+            .filter(|engine| engine.base_url() == base);
+        let Some(engine) = engine else { continue };
+        let empty = crate::core::torrent::list_torrents(&engine)
+            .map(|ids| ids.is_empty())
+            .unwrap_or(false);
+        if !empty {
+            continue;
+        }
+        log::debug!(base:?; "Pruning an idle TUI torrent engine");
+        ctx.torrent_scans.borrow_mut().retain(|_, result| {
+            !(result.as_ref().is_ok_and(|scan| scan.engine.base_url() == base))
+        });
+        if ctx
+            .torrent_engine
+            .borrow()
+            .as_ref()
+            .is_some_and(|engine| engine.base_url() == base)
+        {
+            *ctx.torrent_engine.borrow_mut() = None;
+        }
+    }
+}
+
 /// "Select files…" (round 17): a multi-select modal over the torrent's
 /// video files (name + size); confirming plays the marked files.
 ///
@@ -1083,7 +1557,7 @@ fn play_scanned_or_fresh(
 fn open_torrent_file_picker(ctx: &Ctx, item: &PastedItem, key: &str) -> Result<()> {
     let scan = ctx.torrent_scans.borrow().get(key).cloned().and_then(Result::ok);
     let Some(scan) = scan else {
-        return play_torrent(ctx, std::slice::from_ref(item), false);
+        return play_torrent(ctx, std::slice::from_ref(item));
     };
     let mut videos: Vec<(usize, String, u64)> = scan
         .videos()
@@ -1093,16 +1567,18 @@ fn open_torrent_file_picker(ctx: &Ctx, item: &PastedItem, key: &str) -> Result<(
     videos.sort_by(|a, b| a.1.to_lowercase().cmp(&b.1.to_lowercase()));
     let title = format!("▶ files — {} ", scan.torrent_name);
     let item = item.clone();
+    let key = key.to_owned();
     modal!(
         ctx, crate ::ui::modals::torrent_file_picker::TorrentFilePicker::new(ctx, title,
         videos, move | ctx, indices, action | { let file_indices : Vec < usize > =
         indices.into_iter().filter(| i | * i < scan.files.len()).collect(); let download
         = action == crate
         ::ui::modals::torrent_file_picker::TorrentPickerAction::DownloadAndPlay; let
-        result = if file_indices.is_empty() { play_torrent(ctx, std::slice::from_ref(&
-        item), download) } else { ctx.app_event_sender.send(crate
-        ::shared::events::AppEvent::TorrentScannedPlay { scan, file_indices, download, })
-        .map_err(| err | anyhow::anyhow!("Failed to start torrent playback: {err}")) };
+        result = if file_indices.is_empty() { if download {
+            commit_to_daemon(ctx, &item, &key, Vec::new(), true) } else {
+            play_torrent_route(ctx, &item, &key, Vec::new(), false) } } else {
+            if download { commit_to_daemon(ctx, &item, &key, file_indices.clone(), true) }
+            else { play_torrent_route(ctx, &item, &key, file_indices.clone(), false) } };
         if let Some(id) = ctx.paste_modal_id.take() { let _ = ctx.app_event_sender
         .send(crate ::AppEvent::UiEvent(crate ::ui::UiAppEvent::PopModal(id))); } ctx
         .paste_modal_items.borrow_mut().take(); cancel_in_flight_scans(ctx); result },)
@@ -1201,84 +1677,22 @@ fn play_item(ctx: &Ctx, item: &PastedItem) -> Result<()> {
         }
         PastedItem::Yt(url) => yt_play_audio(ctx, url),
         PastedItem::Torrent(_) | PastedItem::Magnet(_) => {
-            play_torrent(ctx, std::slice::from_ref(item), false)
+            play_torrent(ctx, std::slice::from_ref(item))
         }
     }
 }
-/// Download a scanned torrent's files without playback (round 21): keep
-/// the scanned engine and hand the files to the event loop
-/// (`AppEvent::TorrentScannedDownload` — it owns the download-job guard).
-/// `indices` empty = the single best playable file ("Download"), non-empty
-/// = the exact files to keep ("Download all" passes every video). When the
-/// scan is gone (replaced engine, closed popup) the fresh-engine
-/// `download_torrent` path takes over.
-fn download_scanned_or_fresh(
-    ctx: &Ctx,
-    item: &PastedItem,
-    key: &str,
-    indices: Vec<usize>,
-) -> Result<()> {
-    let scan = ctx.torrent_scans.borrow().get(key).cloned().and_then(Result::ok);
-    log::debug!(
-        key:?; "download_scanned_or_fresh found={} indices={}", scan.is_some(), indices
-        .len()
-    );
-    let Some(scan) = scan else {
-        return download_torrent(ctx, std::slice::from_ref(item), Vec::new());
-    };
-    let file_indices: Vec<usize> = if indices.is_empty() {
-        match scan.pick_playable() {
-            Some(pick) => vec![pick.index],
-            None => return download_torrent(ctx, std::slice::from_ref(item), Vec::new()),
-        }
-    } else {
-        indices.into_iter().filter(|i| *i < scan.files.len()).collect()
-    };
-    if file_indices.is_empty() {
-        return download_torrent(ctx, std::slice::from_ref(item), Vec::new());
-    }
-    ctx.app_event_sender
-        .send(crate::shared::events::AppEvent::TorrentScannedDownload {
-            scan,
-            file_indices,
-        })
-        .map_err(|err| anyhow::anyhow!("Failed to start torrent download: {err}"))?;
-    Ok(())
-}
-/// Download a pasted torrent/magnet on a fresh engine without playback
-/// (round 21, the fallback when the scanned engine is gone — replaced or
-/// the popup closed): `WorkRequest::DownloadTorrent` prepares the engine
-/// and the UI starts the download job from `TorrentDownloadPrepared`.
-fn download_torrent(ctx: &Ctx, items: &[PastedItem], indices: Vec<usize>) -> Result<()> {
-    let Some(item) = items.first() else { return Ok(()) };
-    let torrent_item = torrent_item(item);
-    if !ctx.config.torrent.enabled {
-        status_warn!("Torrent streaming is disabled in the config");
-        return Ok(());
-    }
-    ctx.work_sender
-        .send(WorkRequest::DownloadTorrent {
-            item: torrent_item,
-            indices,
-        })
-        .map_err(|err| anyhow::anyhow!("Failed to request torrent download: {err}"))?;
-    status_info!("Starting torrent download…");
-    Ok(())
-}
-/// Stream a pasted torrent/magnet on a fresh engine: start rqbit,
-/// add the torrent, pick the largest playable file and hand its stream
-/// URL to mpv. The engine work runs on the work thread
-/// (`WorkRequest::PlayTorrent`); the prepared stream arrives as
-/// `WorkDone::TorrentStreamPrepared`, which keeps the engine alive and
-/// launches the mpv session. `download` is the "Play and Download" / picker "Download & Play"
-/// action: the engine keeps downloading after the stream starts and the
-/// completed file is moved to `s2udio-downloads`.
+
+/// Stream a pasted torrent/magnet on a fresh engine (the PLAIN-stream
+/// path, round 54): start rqbit, add the torrent, pick the largest
+/// playable file and hand its stream URL to mpv. The engine work runs on
+/// the work thread (`WorkRequest::PlayTorrent`); the prepared stream
+/// arrives as `WorkDone::TorrentStreamPrepared`, which keeps the engine
+/// alive and launches the mpv session.
 ///
 /// Round 17: this is the fallback for the scanned play actions (the
-/// scanned engine is gone — replaced or the popup closed); M2 wired the
-/// end-to-end path, the bandwidth gate (M3) and `only_files_regex` /
-/// cleanup triggers (M4) refine it.
-fn play_torrent(ctx: &Ctx, items: &[PastedItem], download: bool) -> Result<()> {
+/// scanned engine is gone — replaced or the popup closed). Committed
+/// downloads never come here — they go to the downloader daemon.
+fn play_torrent(ctx: &Ctx, items: &[PastedItem]) -> Result<()> {
     let Some(item) = items.first() else { return Ok(()) };
     let torrent_item = torrent_item(item);
     if !ctx.config.torrent.enabled {
@@ -1288,14 +1702,9 @@ fn play_torrent(ctx: &Ctx, items: &[PastedItem], download: bool) -> Result<()> {
     ctx.work_sender
         .send(WorkRequest::PlayTorrent {
             item: torrent_item,
-            download,
         })
         .map_err(|err| anyhow::anyhow!("Failed to request torrent stream: {err}"))?;
-    if download {
-        status_info!("Starting torrent stream + download…");
-    } else {
-        status_info!("Starting torrent stream…");
-    }
+    status_info!("Starting torrent stream…");
     Ok(())
 }
 /// Play a pasted item's audio through MPD as a temporary entry.

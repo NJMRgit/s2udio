@@ -289,6 +289,14 @@ pub enum Command {
     /// Control the standalone rqbit engine (start / stop / open the web
     /// UI). Shares the engine with Settings -> torrent.
     Rq { #[command(subcommand)] cmd: RqCmd },
+    /// Control the durable torrent downloader daemon (round 54): committed
+    /// torrent downloads ("Stream and download", "Download & Play",
+    /// "Download", "Download all") run in a detached `s2udio dl serve`
+    /// process that survives the TUI, so a download finishes even when the
+    /// TUI exits before it completes. `start` (or the TUI's first
+    /// committed action) spawns the daemon; it exits when the last job is
+    /// done; progress lives in `~/.cache/s2udio/downloads.json`.
+    Dl { #[command(subcommand)] cmd: DlCmd },
 }
 #[derive(Subcommand, Clone, Debug, PartialEq)]
 #[clap(rename_all = "lower")]
@@ -306,6 +314,27 @@ pub enum RqCmd {
     Check,
     /// Hidden daemon entry point for `rq start`: owns the engine + the
     /// auth proxy and stays alive until stopped (never typed by users).
+    #[clap(hide = true)]
+    Serve,
+}
+#[derive(Subcommand, Clone, Debug, PartialEq)]
+#[clap(rename_all = "lower")]
+pub enum DlCmd {
+    /// Start the downloader daemon (idempotent) and print the current job
+    /// summary. The daemon owns one rqbit engine per committed download
+    /// and runs until no jobs remain.
+    Start,
+    /// Print the daemon status + one line per download job (status,
+    /// progress, kept files).
+    Status,
+    /// Stop the downloader daemon (SIGTERM, then SIGKILL after ~2 s).
+    /// In-flight downloads die with their engines; partials stay in the
+    /// torrent cache.
+    Stop,
+    /// Hidden daemon entry point for `dl start` / the TUI's first
+    /// committed action: watches the job spool, owns the engines and
+    /// writes `downloads.json` until no jobs remain (never typed by
+    /// users).
     #[clap(hide = true)]
     Serve,
 }
