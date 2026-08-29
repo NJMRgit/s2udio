@@ -94,6 +94,12 @@ impl AlbumArtFacade {
     pub fn has_current(&self) -> bool {
         self.current_album_art.is_some()
     }
+    /// Whether an image is currently active on screen (drives the
+    /// off-tab hide: only an erase that really writes cells needs a
+    /// full-refresh repair afterwards).
+    pub(crate) fn is_showing(&self) -> bool {
+        self.is_showing
+    }
     pub fn show_current(&mut self, ctx: &Ctx) -> Result<()> {
         let Some(current_album_art) = self.current_album_art.as_ref().map(Arc::clone)
         else {

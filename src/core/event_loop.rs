@@ -1920,11 +1920,19 @@ fn main_task<B: Backend + std::io::Write>(
             // entering the Jellyfin tab): clear the whole window and draw
             // twice so the visualizer's terminal-side overlay leaves no
             // stale cells.
-            if ui.take_cava_refresh() {
+            if ui.take_cava_refresh() || ui.take_album_art_refresh() {
                 if let Err(err) = terminal.clear() {
                     log::error!(error:? = err; "Failed to clear terminal after hiding cava");
                 }
                 resize_render_passes = 2;
+                // Round 58: the clear deleted every kitty overlay. The
+                // Jellyfin poster only re-draws when its area changes, so
+                // it must be told to re-place on the next frame — targeted
+                // at the poster only (a global Displayed dispatch caused
+                // an album-art re-show/hide feedback loop, reverted).
+                if let Err(err) = ui.refresh_overlays_after_clear(&ctx) {
+                    log::error!(error:? = err; "Failed to refresh the Jellyfin poster after a full redraw");
+                }
             }
             let completed_frame = terminal
                 .draw(|frame| {

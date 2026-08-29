@@ -39,6 +39,10 @@ impl AlbumArtPane {
     fn current_yt_info(ctx: &Ctx) -> Option<crate::shared::ytdlp::YtStreamInfo> {
         crate::ui::modals::paste::current_yt_info(ctx)
     }
+    /// Whether the facade currently has an image on screen.
+    pub(crate) fn is_displaying(&self) -> bool {
+        self.album_art.is_showing()
+    }
     /// Download and show the current YouTube video's thumbnail.
     fn fetch_yt_thumbnail(ctx: &Ctx, thumbnail: String) {
         let _ = ctx
@@ -63,6 +67,37 @@ impl AlbumArtPane {
     /// 2026-08-27: the round-48 version bailed out while collapsed, so the
     /// pane could never re-arm itself (see on_query_finished / on_event).
     fn show_current_or_collapse(&mut self, ctx: &Ctx) -> Result<()> {
+        // The art box is video-owned while mpv is the UI source (even when
+        // the video paused MPD): show the video's thumbnail instead of
+        // falling into the paused-song/selection paths (round 58).
+        if crate::core::mpv::mpv_is_ui_source(ctx) {
+            if self.album_art.has_current() {
+                ctx.album_art_collapsed.set(false);
+                self.album_art.show_current(ctx)?;
+                return Ok(());
+            }
+            // No video art known yet: dispatch it (mirrors before_show's
+            // video branch).
+            if let Some(item_id) = ctx.mpv.item_id.as_deref() {
+                let _ = ctx
+                    .work_sender
+                    .send(WorkRequest::FetchJellyfinVideoArt {
+                        item_id: item_id.to_owned(),
+                    })
+                    .map_err(|err| {
+                        log::error!(error:? = err; "Failed to request video art")
+                    });
+                return Ok(());
+            }
+            if let Some(yt) = crate::ui::modals::paste::mpv_yt_info(ctx) {
+                match yt.thumbnail {
+                    Some(thumbnail) => Self::fetch_yt_thumbnail(ctx, thumbnail),
+                    None => self.collapse(ctx)?,
+                }
+                return Ok(());
+            }
+            return self.collapse(ctx);
+        }
         if ctx.status.state != State::Play {
             return self.check_selected_art(ctx);
         }
@@ -158,7 +193,10 @@ impl AlbumArtPane {
     ) -> Result<()> {
         // Round 48 add-on: while paused/stopped the box follows the queue
         // selection (refetch only when the selection's file changed).
-        if ctx.status.state != State::Play {
+        // Round 58: a video owns the box while mpv is the UI source —
+        // skip the selection-follow so a refetch cannot paint the paused
+        // song's cover over the video thumbnail.
+        if ctx.status.state != State::Play && !crate::core::mpv::mpv_is_ui_source(ctx) {
             self.check_selected_art(ctx)?;
         }
         self.album_art.frame_rendered(buffer);
@@ -191,12 +229,12 @@ impl Pane for AlbumArtPane {
         if self.is_modal_open {
             return Ok(());
         }
-        // Paused/stopped: the art box follows the queue selection (checked
-        // every frame in flush_pending_display); the playing-song / video
-        // paths below apply only while actually playing.
-        if ctx.status.state != State::Play {
-            return self.check_selected_art(ctx);
-        }
+        // The art box is video-owned while mpv is the UI source — even
+        // when the video paused MPD (the normal state during video
+        // playback). Round 58: this used to run after the state != Play
+        // guard, so the video branch was unreachable exactly while a video
+        // played and the pane showed the paused song's cover instead of
+        // the video thumbnail (YouTube thumbnails never displayed).
         if crate::core::mpv::mpv_is_ui_source(ctx) {
             if let Some(item_id) = ctx.mpv.item_id.as_deref() {
                 let _ = ctx
@@ -218,6 +256,12 @@ impl Pane for AlbumArtPane {
             }
             self.collapse(ctx)?;
             return Ok(());
+        }
+        // Paused/stopped (no video): the art box follows the queue
+        // selection (checked every frame in flush_pending_display); the
+        // playing-song paths below apply only while actually playing.
+        if ctx.status.state != State::Play {
+            return self.check_selected_art(ctx);
         }
         if let Some(yt) = Self::current_yt_info(ctx) {
             match yt.thumbnail {
@@ -248,16 +292,30 @@ impl Pane for AlbumArtPane {
         }
         match (id, data) {
             (ALBUM_ART, MpdQueryResult::AlbumArt(Some(data))) => {
-                ctx.album_art_collapsed.set(false);
-                self.album_art.show(data, ctx)?;
+                // Round 58: a stale audio-art result must not paint over
+                // the video-owned box.
+                if !crate::core::mpv::mpv_is_ui_source(ctx) {
+                    ctx.album_art_collapsed.set(false);
+                    self.album_art.show(data, ctx)?;
+                }
             }
             (ALBUM_ART, MpdQueryResult::AlbumArt(None)) => {
-                self.collapse(ctx)?;
+                if !crate::core::mpv::mpv_is_ui_source(ctx) {
+                    self.collapse(ctx)?;
+                }
             }
             (YT_THUMBNAIL, MpdQueryResult::Any(any)) => {
                 if let Ok(boxed) = any.downcast::<Result<Vec<u8>, String>>() {
                     match boxed.as_ref() {
                         Ok(bytes) if !bytes.is_empty() => {
+                            // Round 58: while a Jellyfin video owns the
+                            // box, a stale YouTube thumbnail must not
+                            // overwrite it.
+                            if crate::core::mpv::mpv_is_ui_source(ctx)
+                                && ctx.mpv.item_id.is_some()
+                            {
+                                return Ok(());
+                            }
                             ctx.album_art_collapsed.set(false);
                             self.album_art.show(bytes.clone(), ctx)?;
                         }

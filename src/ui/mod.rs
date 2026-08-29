@@ -90,6 +90,10 @@ pub struct Ui {
     /// the terminal and repaints fully, so the visualizer's terminal-side
     /// bars can never leave stale cells behind.
     cava_refresh_pending: bool,
+    /// Set when an off-tab album-art hide erased the pane's rect after the
+    /// frame flush: the event loop clears the terminal and repaints fully
+    /// so the erased area cannot stay blank.
+    album_art_refresh_pending: bool,
     /// Runtime show/hide toggles from the Settings panel; re-applied to the
     /// config on every config reload so they survive within the session.
     ui_settings: UiSettings,
@@ -121,6 +125,7 @@ impl Ui {
             overlays_hidden: false,
             cava_hidden: false,
             cava_refresh_pending: false,
+            album_art_refresh_pending: false,
             ui_settings: ctx.config.ui,
         })
     }
@@ -1423,8 +1428,37 @@ impl Ui {
     /// (the flush would otherwise overwrite the overlay's terminal-side
     /// cells) with the flushed frame's buffer, so the facade can tell
     /// whether the art pane area actually changed.
+    ///
+    /// Round 58: the overlay is only drawn on tabs whose layout actually
+    /// contains the AlbumArt pane. A video-art result can arrive while
+    /// another tab is active (mpv launched from the Jellyfin tab) — drawn
+    /// unconditionally it would paint at the pane's last rect over that
+    /// tab's content, and because the leave-tab `on_hide` only fires for
+    /// panes of the tab being left, the stale image would keep being
+    /// re-placed on every tab switch until the Queue tab was visited.
+    /// When the pane is not on the active tab, hide any stale overlay
+    /// instead of drawing.
     pub fn flush_album_art(&mut self, buffer: &ratatui::buffer::Buffer, ctx: &Ctx) -> Result<()> {
-        self.panes.album_art.flush_pending_display(buffer, ctx)
+        let visible =
+            self.tabs.get(&ctx.active_tab).is_some_and(|tab| {
+                tab.panes.panes_iter().any(|pane| pane.pane == PaneType::AlbumArt)
+            }) || self.layout.panes_iter().any(|pane| pane.pane == PaneType::AlbumArt);
+        if visible && !ctx.is_pane_hidden(&PaneType::AlbumArt) {
+            self.panes.album_art.flush_pending_display(buffer, ctx)?;
+        } else {
+            // The backend erase (clear_area) writes background cells over
+            // the rect *after* this frame's buffer was already flushed, so
+            // the next frame's diff will not repaint them — leaving a
+            // permanent blank box where the pane's rect is on this tab.
+            // When an image was really on screen, repair with a full
+            // clear + double render pass (same recovery as the cava row).
+            let was_showing = self.panes.album_art.is_displaying();
+            self.panes.album_art.on_hide(ctx)?;
+            if was_showing {
+                self.album_art_refresh_pending = true;
+            }
+        }
+        Ok(())
     }
 
     /// Display any overlay queued by the last frame (the Jellyfin tab's
@@ -1444,6 +1478,30 @@ impl Ui {
         let mut pane = self.panes.get_mut(&pane.pane, ctx)?;
         if let Panes::Jellyfin(jellyfin) = &mut pane {
             jellyfin.flush_pending_poster(ctx);
+        }
+        Ok(())
+    }
+
+    /// A full terminal clear (the cava-row drop, the album-art erase
+    /// repair) deletes every kitty overlay, but the Jellyfin poster only
+    /// re-draws when its area changes — leaving the info box blank until
+    /// the next selection or tab redraw. Target the poster alone: reset
+    /// its draw state so the next frame re-places it (no global events,
+    /// no other pane touched).
+    pub(crate) fn refresh_overlays_after_clear(&mut self, ctx: &Ctx) -> Result<()> {
+        let Some(tab) = self.tabs.get_mut(&ctx.active_tab) else {
+            return Ok(());
+        };
+        let Some(pane) = tab
+            .panes
+            .panes_iter()
+            .find(|p| p.pane == PaneType::Jellyfin { tree: TreeBrowserArgs::default() })
+        else {
+            return Ok(());
+        };
+        let mut pane = self.panes.get_mut(&pane.pane, ctx)?;
+        if let Panes::Jellyfin(jellyfin) = &mut pane {
+            jellyfin.redraw_poster_after_clear(ctx);
         }
         Ok(())
     }
@@ -1493,6 +1551,13 @@ impl Ui {
     /// terminal and forces two render passes).
     pub(crate) fn take_cava_refresh(&mut self) -> bool {
         std::mem::take(&mut self.cava_refresh_pending)
+    }
+
+    /// Consume the album-art repair refresh request (an off-tab hide
+    /// erased the pane's rect after the frame flush; a full redraw
+    /// restores the tab content there).
+    pub(crate) fn take_album_art_refresh(&mut self) -> bool {
+        std::mem::take(&mut self.album_art_refresh_pending)
     }
 
     /// Fire any cava Start that was deferred so the bars paint *after* the
