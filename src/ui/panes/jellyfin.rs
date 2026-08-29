@@ -887,6 +887,15 @@ impl JellyfinPane {
     pub(crate) fn flush_pending_poster(&mut self, ctx: &Ctx) {
         self.poster.flush_pending(ctx);
     }
+
+    /// A full terminal clear deleted every kitty overlay (the cava-row
+    /// drop repaint). The poster facade only re-draws when its area
+    /// changes, so without this the info-box image would stay blank until
+    /// the next selection/tab redraw. Force the next render to re-place
+    /// it (identical recovery to the tab re-entry path).
+    pub(crate) fn redraw_poster_after_clear(&mut self, ctx: &Ctx) {
+        self.poster.redraw_next_render(ctx);
+    }
     /// Hide the poster overlay (window resizing / transient state).
     pub(crate) fn hide_pending_poster(&mut self, ctx: &Ctx) {
         self.poster.hide(ctx);
@@ -1052,14 +1061,23 @@ impl TreeBrowserCore for JellyfinPane {
     fn handle_items_left_click(
         &mut self,
         row: usize,
-        event: &MouseEvent,
+        _event: &MouseEvent,
         ctx: &Ctx,
     ) -> Result<()> {
         if self.server.is_none() && row >= self.items_len() {
             crate::ui::modals::settings::SettingsModal::open_jellyfin(ctx);
             return Ok(());
         }
-        TreeBrowserCore::handle_items_left_click(self, row, event, ctx)
+        // Round 57 (P0): a qualified TreeBrowserCore::...(self, ...) call
+        // on a concrete receiver dispatches to THIS override again (UFCS),
+        // not to the trait default - infinite recursion; at -O1+ LLVM
+        // tail-calls it into a self-jmp loop that freezes the TUI at 100%
+        // CPU. Inline the default body instead.
+        if row < self.items_len() {
+            self.items_list_mut().select(Some(row));
+            self.on_items_cursor_moved(ctx)?;
+        }
+        Ok(())
     }
     fn open_context_menu(
         &mut self,
