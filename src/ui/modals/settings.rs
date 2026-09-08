@@ -251,7 +251,9 @@ enum GeneralRow {
     AlbumArt,
     Lyrics,
     Cava,
-    Radio,
+    // Round 62 (Q4): the "show radio tab" toggle is gone — Radio is not a
+    // tab anymore (it lives on the Queue page), so there is nothing to
+    // show/hide. The radio favourites reload row stays (RadioReload).
     RadioReload,
     Jellyfin,
     VideoPlayback,
@@ -955,7 +957,6 @@ impl SettingsModal {
                     ContentRow::General(GeneralRow::AlbumArt),
                     ContentRow::General(GeneralRow::Lyrics),
                     ContentRow::General(GeneralRow::Cava),
-                    ContentRow::General(GeneralRow::Radio),
                     ContentRow::General(GeneralRow::RadioReload),
                     ContentRow::General(GeneralRow::Jellyfin),
                     ContentRow::General(GeneralRow::VideoPlayback),
@@ -1102,7 +1103,6 @@ impl SettingsModal {
             GeneralRow::AlbumArt => self.ui_pending.show_album_art = value,
             GeneralRow::Lyrics => self.ui_pending.show_lyrics = value,
             GeneralRow::Cava => self.ui_pending.show_cava = value,
-            GeneralRow::Radio => self.ui_pending.show_radio_tab = value,
             GeneralRow::Jellyfin => self.ui_pending.show_jellyfin_tab = value,
             GeneralRow::AutoChapters => self.ui_pending.auto_show_chapters = value,
             GeneralRow::Mpdris2Notifications => {
@@ -1496,7 +1496,6 @@ impl SettingsModal {
                     GeneralRow::AlbumArt
                     | GeneralRow::Lyrics
                     | GeneralRow::Cava
-                    | GeneralRow::Radio
                     | GeneralRow::Jellyfin
                     | GeneralRow::AutoChapters
                     | GeneralRow::Mpdris2Notifications => {
@@ -1504,7 +1503,6 @@ impl SettingsModal {
                             GeneralRow::AlbumArt => !self.ui_pending.show_album_art,
                             GeneralRow::Lyrics => !self.ui_pending.show_lyrics,
                             GeneralRow::Cava => !self.ui_pending.show_cava,
-                            GeneralRow::Radio => !self.ui_pending.show_radio_tab,
                             GeneralRow::Jellyfin => !self.ui_pending.show_jellyfin_tab,
                             GeneralRow::AutoChapters => {
                                 !self.ui_pending.auto_show_chapters
@@ -1940,7 +1938,6 @@ impl SettingsModal {
                     GeneralRow::AlbumArt
                     | GeneralRow::Lyrics
                     | GeneralRow::Cava
-                    | GeneralRow::Radio
                     | GeneralRow::Jellyfin
                     | GeneralRow::AutoChapters
                     | GeneralRow::Mpdris2Notifications
@@ -1956,9 +1953,6 @@ impl SettingsModal {
                                 ("show lyrics", self.ui_pending.show_lyrics)
                             }
                             GeneralRow::Cava => ("show cava", self.ui_pending.show_cava),
-                            GeneralRow::Radio => {
-                                ("show radio tab", self.ui_pending.show_radio_tab)
-                            }
                             GeneralRow::Jellyfin => {
                                 ("show jellyfin tab", self.ui_pending.show_jellyfin_tab)
                             }

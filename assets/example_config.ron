@@ -68,6 +68,16 @@
             "<Esc>":      ShowSettings,
             // Round 55.5: Ctrl+D opens the downloads modal.
             "<C-d>":      ShowDownloads,
+            // Round 62 (N1): the key system cannot tell Shift+E from bare E
+            // (both normalize to `Char('E') + SHIFT`), so the E/Q bindings
+            // THEMSELVES cycle the libraries (wrapping, no-op from the
+            // Queue tab) — bare E/Q and Shift+E/Q all do it, mirroring
+            // Shift+Right/Left. Tab stays the only Queue<->Libraries
+            // flipper; the separate <S-e>/<S-q> entries are gone.
+            "E":          NextLibraryTab,
+            "Q":          PreviousLibraryTab,
+            "<S-Right>":  NextLibraryTab,
+            "<S-Left>":   PreviousLibraryTab,
         },
 
         navigation: {
@@ -117,6 +127,40 @@
             pane: Split(
                 direction: Vertical,
                 panes: [
+                    (
+                        // Round 62 (Q3): the Audio/Video/Radio/Chapters
+                        // toggle row lives at the TOP of the queue page,
+                        // directly under the navbar. This 1-row bare strip
+                        // is where QueuePane::render_toggle_on_border paints
+                        // it (it renders even while the queue pane is hidden
+                        // in Radio mode).
+                        size: "1",
+                        pane: Split(
+                            direction: Horizontal,
+                            panes: [
+                                (
+                                    size: "1",
+                                    pane: Pane(Empty())
+                                ),
+                                (
+                                    size: "100%",
+                                    pane: Pane(Empty())
+                                ),
+                            ]
+                        )
+                    ),
+                    (
+                        // Round 62 (Q2): the radio browser sub-page. It
+                        // fills the whole queue body only while the toggle
+                        // is in Radio mode (the mode-aware pane hiding
+                        // collapses the art/lyrics/queue panes then); in
+                        // every other mode this pane is hidden and the
+                        // normal queue content shows.
+                        size: "100%",
+                        borders: "ALL",
+                        border_symbols: Rounded,
+                        pane: Pane(Radio)
+                    ),
                     (
                         size: "20",
                         window_sizes: [(65, "20"), (55, "10"), (43, "10"), (33, "0")],
@@ -178,11 +222,12 @@
                                             ),
                                             (
                                                 size: "100%",
+                                                // Round 60c (S5): the scrollbar strip's own
+                                                // 2-char right margin now sits directly
+                                                // against the box border (no 2-col filler to
+                                                // its right — the Queue list matches every
+                                                // other pane's margin).
                                                 pane: Pane(Queue)
-                                            ),
-                                            (
-                                                size: "2",
-                                                pane: Pane(Empty())
                                             ),
                                         ]
                                     )
@@ -202,6 +247,14 @@
             )
         ),
         (
+            name: "Downloads",
+            pane: Split(
+                size: "100%",
+                direction: Vertical,
+                panes: [(pane: Pane(Downloads), size: "100%", borders: "ALL", border_symbols: Rounded)],
+            )
+        ),
+        (
             name: "MPD",
             pane: Split(
                 size: "100%",
@@ -217,13 +270,9 @@
                 panes: [(pane: Pane(Jellyfin), size: "100%", borders: "ALL", border_symbols: Rounded)],
             )
         ),
-        (
-            name: "Radio",
-            pane: Split(
-                size: "100%",
-                direction: Vertical,
-                panes: [(pane: Pane(Radio), size: "100%", borders: "ALL", border_symbols: Rounded)],
-            )
-        ),
+        // Round 62 (Q4): there is NO standalone Radio tab anymore — Radio
+        // left the Libraries group and lives on the Queue page as the
+        // `● Radio` sub-page (see the Queue tab layout above). Any leftover
+        // "Radio" tab in an older config is always hidden by the app.
     ],
 )

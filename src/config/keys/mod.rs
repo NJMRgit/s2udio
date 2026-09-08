@@ -59,8 +59,18 @@ impl Default for KeyConfigFile {
             (s().char(' '), G::TogglePause),
             (s().tab(), G::NextTab),
             (s().tab().shift(), G::ToggleMpdMode),
-            (s().char('E'), G::NextTab),
-            (s().char('Q'), G::PreviousTab),
+            // Round 62 (N1): the key system cannot tell Shift+E from bare E
+            // (both normalize to `Key{ Char('E'), SHIFT }`), so the E/Q
+            // bindings THEMSELVES are the library cyclers — bare E/Q and
+            // Shift+E/Q all cycle the libraries (wrapping, no-op while the
+            // Queue tab is active), exactly like Shift+Right/Left. Tab
+            // stays the only Queue <-> Libraries flipper. The separate
+            // `<S-E>`/`<S-Q>` entries are gone (the same key would pile
+            // duplicate actions into one trie node).
+            (s().char('E'), G::NextLibraryTab),
+            (s().char('Q'), G::PreviousLibraryTab),
+            (s().right().shift(), G::NextLibraryTab),
+            (s().left().shift(), G::PreviousLibraryTab),
             (s().char('>'), G::NextTrack),
             (s().char('q'), G::Quit),
             (s().esc(), G::ShowSettings),

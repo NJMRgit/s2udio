@@ -200,6 +200,8 @@ where
             }
             InputResultEvent::Confirm => {}
             InputResultEvent::NoChange => {}
+            InputResultEvent::AtStart => {}
+            InputResultEvent::CursorLeft => {}
             InputResultEvent::Cancel => {
                 self.list_mut().set_filter_active(false);
                 ctx.input.clear_buffer(self.list().filter_buffer_id);

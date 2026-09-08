@@ -81,6 +81,13 @@ impl JfItem {
     pub fn is_playable(&self) -> bool {
         self.is_audio() || matches!(self.kind.as_str(), "Movie" | "Episode" | "Video")
     }
+    /// Round 64: kinds that get the small poster shelf beside the list
+    /// (everything sync_poster fetches an image for — playables plus the
+    /// season/folder containers). The shelf replaces the old full-box art
+    /// and the 40%-column poster split.
+    pub fn kind_matches_poster(&self) -> bool {
+        self.is_playable() || self.is_container()
+    }
 }
 /// Any result routed from the work thread back to the Jellyfin pane.
 #[derive(Debug)]
@@ -103,6 +110,8 @@ pub enum JellyfinResult {
     /// The whole season's episodes as a playlist (built when an episode
     /// plays), with the index of the episode that was clicked.
     SeasonPlaylist { entries: Vec<SeasonEntry>, start_index: usize },
+    /// Server-side search results (round 60 B2, `SearchHints`).
+    SearchHints { items: Vec<JfItem> },
     /// A fetch/config failure; the pane shows it as a notice row.
     Error(String),
 }
@@ -297,6 +306,30 @@ impl Jellyfin {
             .cloned()
             .unwrap_or_default();
         Ok(items.iter().filter_map(|v| item_from_value(v, false)).collect())
+    }
+    /// Server-side search across the user's libraries (round 60 B2): the
+    /// Jellyfin `SearchHints` endpoint returns matching items of every
+    /// kind (movies, episodes, music albums/artists/songs, folders…)
+    /// with the primary-image + overview fields the pane displays.
+    pub fn search_hints(&self, query: &str) -> Result<Vec<JfItem>> {
+        let encoded: String =
+            url::form_urlencoded::byte_serialize(query.as_bytes()).collect();
+        let path = format!(
+            "/Search/Hints?SearchTerm={encoded}&UserId={}&Limit=60",
+            self.user_id
+        );
+        let data = self.get(&path)?;
+        let hints = data
+            .get("SearchHints")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        Ok(
+            hints
+                .iter()
+                .filter_map(search_hint_item)
+                .collect(),
+        )
     }
     /// The stream URL MPD plays for an audio item. `static=true` serves the
     /// original file (no transcoding).
@@ -533,6 +566,17 @@ fn iso639_2_to_1(code: &str) -> Option<&'static str> {
         },
     )
 }
+/// Convert one `SearchHints` entry (JSON shape: `ItemId` instead of
+/// `Id`, plus `StartDate`, `PrimaryImageTag`, …) into a [`JfItem`] by
+/// normalizing its id, then reusing the shared item parser.
+fn search_hint_item(value: &serde_json::Value) -> Option<JfItem> {
+    let mut normalized = value.clone();
+    if let Some(id) = value.get("ItemId").and_then(serde_json::Value::as_str) {
+        normalized.as_object_mut()?.insert("Id".to_owned(), serde_json::Value::String(id.to_owned()));
+    }
+    item_from_value(&normalized, false)
+}
+
 fn item_from_value(value: &serde_json::Value, is_music_view: bool) -> Option<JfItem> {
     let id = value.get("Id")?.as_str()?.to_owned();
     let name = value

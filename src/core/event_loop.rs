@@ -1243,49 +1243,32 @@ fn main_task<B: Backend + std::io::Write>(
                                         entries.rotate_left(idx);
                                     }
                                     if let Some(socket) = ctx.mpv.socket.clone()
-                                        && let Some(first) = entries.first()
+                                        && !entries.is_empty()
                                     {
-                                        // Clear the old entries; the current
-                                        // file survives at position 0.
-                                        crate::core::mpv::mpv_playlist_clear(&socket);
-                                        // The switch prompt already loaded the
-                                        // clicked episode (`loadfile …
-                                        // replace`): when it is still the
-                                        // current file, only the rest of the
-                                        // season needs appending — reloading
-                                        // it would restart the episode and
-                                        // drop an already-applied resume
-                                        // seek. Reload only when the current
-                                        // file is not the first entry (the
-                                        // prompt's load raced or failed).
-                                        // Compare by Jellyfin item id (mpv
-                                        // may report the path with
-                                        // different query params), falling
-                                        // back to the exact URL.
-                                        let current_is_first = crate::core::mpv::read_mpv_path(
-                                            &socket,
-                                        )
-                                        .is_some_and(|p| {
-                                            let a = crate::jellyfin::item_id_from_url(&p);
-                                            let b = crate::jellyfin::item_id_from_url(&first.url);
-                                            match (a, b) {
-                                                (Some(a), Some(b)) => a == b,
-                                                _ => p == first.url,
-                                            }
-                                        });
-                                        if current_is_first {
-                                            for entry in entries.iter().skip(1) {
-                                                crate::core::mpv::mpv_append_load(
-                                                    &socket, &entry.url,
-                                                );
-                                            }
-                                        } else {
-                                            crate::core::mpv::mpv_loadfile(&socket, &first.url);
-                                            for entry in entries.iter().skip(1) {
-                                                crate::core::mpv::mpv_append_load(
-                                                    &socket, &entry.url,
-                                                );
-                                            }
+                                        // Round 68: rebuild mpv's whole
+                                        // playlist from a titled .m3u so
+                                        // every episode keeps its correct
+                                        // name. URL-only loadfiles cannot
+                                        // carry titles over IPC on mpv
+                                        // v0.41 (appends stay untitled and a
+                                        // replace inherits the stale title
+                                        // of the old current entry — that
+                                        // left the OSD on the wrong episode
+                                        // name after a mid-play season
+                                        // switch).
+                                        let m3u = crate::core::mpv::write_mpv_m3u(&entries);
+                                        crate::core::mpv::mpv_load_playlist(&socket, &m3u);
+                                        // The replace restarts the current
+                                        // file from 0; re-apply the last
+                                        // known position (same socket, same
+                                        // thread, so the seek lands after
+                                        // the new file is loaded) so the
+                                        // clicked episode continues where
+                                        // it was.
+                                        if ctx.mpv.position > 5.0 {
+                                            crate::core::mpv::mpv_seek(
+                                                &socket, ctx.mpv.position,
+                                            );
                                         }
                                     }
                                     *ctx.mpv.playlist.borrow_mut() = entries;
@@ -1610,7 +1593,18 @@ fn main_task<B: Backend + std::io::Write>(
                                 }
                                 State::Play => {}
                                 State::Pause => {
-                                    _update_loop_guard = None;
+                                    // Round 63.1 (1): KEEP the status-update
+                                    // loop alive while paused. It is the
+                                    // frame driver (every status reply sets
+                                    // `render_wanted`), so the wall-clock
+                                    // marquee keeps visibly scrolling after
+                                    // `mpc pause` — the round-63 anchor
+                                    // advanced but no frames were drawn.
+                                    // The elapsed accumulation above keys
+                                    // off `State::Play` only, so
+                                    // `song_played` cannot drift while
+                                    // paused; the next Play arm replaces
+                                    // the guard (dropping it cancels).
                                 }
                                 State::Stop => {
                                     song_changed = true;
@@ -1921,6 +1915,7 @@ fn main_task<B: Backend + std::io::Write>(
             // twice so the visualizer's terminal-side overlay leaves no
             // stale cells.
             if ui.take_cava_refresh() || ui.take_album_art_refresh() {
+                log::debug!("Full terminal clear (cava-row drop / album-art erase repair)");
                 if let Err(err) = terminal.clear() {
                     log::error!(error:? = err; "Failed to clear terminal after hiding cava");
                 }

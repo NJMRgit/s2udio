@@ -147,10 +147,10 @@ impl QueuePane {
             // content_length = max + 1 so the bottom position is reachable
             // (ratatui clamps positions to content_length - 1); the viewport
             // length keeps the thumb proportional to the visible rows.
-            StatefulWidget::render(
+            crate::ui::render_scrollbar_strip(
+                frame,
                 scrollbar,
                 self.areas[Areas::Scrollbar],
-                frame.buffer_mut(),
                 &mut ratatui::widgets::ScrollbarState::new(max + 1)
                     .position(position)
                     .viewport_content_length(self.areas[Areas::Table].height as usize),
@@ -159,19 +159,23 @@ impl QueuePane {
         Ok(())
     }
 
-    /// Play the visible Video list from `idx` onwards: the entries are
-    /// handed to mpv (a fresh instance when none runs, otherwise the
-    /// running one is switched to them); neither the Jellyfin session
-    /// playlist nor the persistent playlist is mutated.
+    /// Play the selected row of the Video list: the WHOLE list is handed to
+    /// mpv (nothing is trimmed) and playback starts at `idx` — the season
+    /// keeps every episode and only the position moves (Round 69, user
+    /// feedback: selecting an episode must not remove the ones before it).
+    /// A fresh mpv is launched when none runs, otherwise the running one is
+    /// kept and switched in place (same list = playlist-pos jump, different
+    /// list = titled .m3u `loadlist replace` + position).
     pub(super) fn video_load_entry(&self, idx: usize, ctx: &Ctx) {
         let entries: Vec<crate::core::mpv::MpvPlaylistEntry> =
             if crate::core::mpv::session_playlist_shown(ctx) {
-                ctx.mpv.playlist.borrow().iter().skip(idx).cloned().collect()
+                ctx.mpv.playlist.borrow().clone()
             } else {
-                ctx.video_playlist.borrow().iter().skip(idx).cloned().collect()
+                ctx.video_playlist.borrow().clone()
             };
         if !entries.is_empty() {
-            crate::core::mpv::play_video_entries(ctx, entries);
+            let idx = idx.min(entries.len() - 1);
+            crate::core::mpv::play_video_entries_at(ctx, entries, idx);
         }
     }
 

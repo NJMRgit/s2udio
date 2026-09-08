@@ -7,20 +7,22 @@ use ratatui::{
     Frame, layout::{Alignment, Constraint, Layout, Rect},
     prelude::IntoCrossterm, style::{Color, Modifier},
     text::{Line, Span},
-    widgets::{Borders, List, ListItem, ListState, Paragraph},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
 };
 use super::Pane;
 use crate::{
     MpdQueryResult, config::tabs::{PaneType, PaneTypeDiscriminants, TreeBrowserArgs},
     ctx::Ctx, jellyfin::{Jellyfin, JfItem},
     mpd::{commands::State, mpd_client::MpdClient},
+    shared::mpd_client_ext::{Enqueue, MpdClientExt},
+    config::keys::{CommonAction, DirectoriesActions, GlobalAction},
     shared::{
         events::WorkRequest, keys::ActionEvent,
         macros::{modal, status_info, status_warn},
         mouse_event::{MouseEvent, MouseEventKind},
     },
     ui::{
-        UiEvent,
+        UiEvent, input::InputResultEvent,
         image::{
             Backend as _, block::Block as ImageBlock, facade::EncodeData, iterm2::Iterm2,
             kitty::Kitty, sixel::Sixel, ueberzug::{Layer, Ueberzug},
@@ -42,7 +44,35 @@ pub const JF_MPRIS: &str = "jellyfin_mpris";
 pub const JF_CHAPTERS: &str = "jellyfin_chapters";
 /// An episode's season as an mpv playlist (played starting at the episode).
 pub const JF_SEASON_PLAY: &str = "jellyfin_season_play";
+/// Server-side search results (round 60 B2, `SearchHints`).
+pub const JF_SEARCH: &str = "jellyfin_search";
 const JF_PLAY: &str = "jellyfin_play";
+/// Round 64: the small poster shelf between the items list and the Info
+/// box (user feedback: the poster/preview must not dominate the Info box;
+/// show a compact preview in the gap instead of a 40%-column art block).
+/// The shelf is carved out of the items list's bottom when the terminal
+/// has room for it. Round 65: shelf height doubled (9 -> 18) per user
+/// feedback (poster/preview twice as tall). Round 66: the shelf WIDTH
+/// follows the artwork — the image always displays at the full inner
+/// height (POSTER_SHELF_H - 2) and the box widens for wider images (stays
+/// centered; a 1-char blank margin between the artwork and the box on both
+/// sides, outside the 1-char outline). Round 67: the framing outline is
+/// removed (it resized while the artwork loaded) — the image keeps its
+/// size/position, borderless.
+const POSTER_SHELF_H: u16 = 18;
+/// Default shelf width while the artwork bytes are still loading (also the
+/// min sensible width); once the image is known the shelf expands to the
+/// image's own aspect at the fixed height.
+const POSTER_SHELF_W: u16 = 26;
+const POSTER_SHELF_RIGHT_MARGIN: u16 = 6;
+/// The tab's mode (round 60 B2): the library browser, or server-side
+/// search across every library. Startup default: Libraries; the search
+/// state lives for the session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum JellyfinTabMode {
+    Libraries,
+    Search,
+}
 /// A node of the left tree. The tree mirrors the server: views (libraries),
 /// artists and albums of music libraries, plain folders elsewhere.
 #[derive(Debug, Clone, PartialEq)]
@@ -86,6 +116,51 @@ impl JfNodeKind {
         };
         format!("{kind}:{}", self.id())
     }
+}
+/// One search-result row: the item name (bold-ish white) with a dim
+/// sublabel of its type + artist/album/series, so the match kind is
+/// clear at a glance.
+fn search_result_rows(items: &[JfItem]) -> Vec<ListItem<'static>> {
+    items
+        .iter()
+        .map(|item| {
+            let mut parts: Vec<String> = Vec::new();
+            parts.push(match item.kind.as_str() {
+                "Audio" => "Song".to_owned(),
+                "MusicAlbum" => "Album".to_owned(),
+                "MusicArtist" => "Artist".to_owned(),
+                "Movie" => "Movie".to_owned(),
+                "Episode" => "Episode".to_owned(),
+                "Series" => "Series".to_owned(),
+                other => other.to_owned(),
+            });
+            match item.kind.as_str() {
+                "Audio" => {
+                    if let Some(artist) = &item.artist {
+                        parts.push(artist.clone());
+                    }
+                    if let Some(album) = &item.album {
+                        parts.push(album.clone());
+                    }
+                }
+                "Episode" => {
+                    if let Some(series) = &item.series_name {
+                        parts.push(series.clone());
+                    }
+                }
+                _ => {}
+            }
+            let mut line = Line::from(Span::styled(
+                item.name.clone(),
+                ratatui::style::Style::default().fg(ratatui::style::Color::White),
+            ));
+            line.push_span(Span::styled(
+                format!("  — {}", parts.join(" · ")),
+                ratatui::style::Style::default().add_modifier(ratatui::style::Modifier::DIM),
+            ));
+            ListItem::from(line)
+        })
+        .collect()
 }
 #[derive(Debug, Clone)]
 struct JfNode {
@@ -143,6 +218,12 @@ pub struct JellyfinPane {
     /// Whether a modal (settings panel, popup, ...) is open on top of the
     /// tab; the poster overlay is not drawn while one is up.
     is_modal_open: bool,
+    /// Round 64: the small poster shelf carved out of the items list's
+    /// bottom (between the list and the info box); `None` when the
+    /// terminal is too short for the shelf (the poster is then hidden).
+    /// The poster is drawn here as a small overlay instead of filling a
+    /// 40% column of the Info box.
+    poster_shelf: Option<Rect>,
     /// Scroll state of the info-box text (below the poster).
     info_state: ListState,
     /// Number of rows in the info text (for the scroll bounds).
@@ -163,6 +244,33 @@ pub struct JellyfinPane {
     /// Drag state of the items-list scrollbar (Round 48: press-and-hold on
     /// the thumb/track, then the thumb follows the pointer anywhere).
     item_scrollbar_drag: crate::shared::mouse_event::ScrollbarDrag,
+    /// Round 60 (B2): the active mode (Libraries browser or Search).
+    mode: JellyfinTabMode,
+    /// Click areas of the toggle row's two labels (Libraries, Search).
+    toggle_areas: [Rect; 2],
+    /// Click area of the `↰ Back` button (round 60 B3).
+    back_area: Rect,
+    /// Buffer id of the search query input (session-lived).
+    search_buffer: crate::ui::input::BufferId,
+    /// Keyboard phase of the search mode: true = the input row is focused,
+    /// false = the results list is focused.
+    search_input_focused: bool,
+    /// Consecutive Left presses at the search bar (round 63.1): the first
+    /// Left navigates the text cursor, the second consecutive Left exits
+    /// the search exactly like Esc #2. Reset by any other input result.
+    search_left_presses: u8,
+    /// A search request is in flight (dedupe rapid typing).
+    search_pending: bool,
+    /// The query of the last sent request; a result that no longer
+    /// matches the input fires another request (typed-ahead keystrokes
+    /// are never lost).
+    last_sent_query: String,
+    /// The current server-side search results.
+    search_results: Vec<JfItem>,
+    /// List state (selection) of the search results.
+    search_results_state: ListState,
+    /// Area of the search results list (mouse math).
+    search_results_area: Rect,
 }
 impl JellyfinPane {
     pub fn new(ctx: &Ctx) -> Self {
@@ -189,6 +297,7 @@ impl JellyfinPane {
             info_area: Rect::default(),
             poster: JfPoster::new(ctx),
             is_modal_open: false,
+            poster_shelf: None,
             info_state: ListState::default(),
             info_items_len: 0,
             info_song_id: None,
@@ -197,6 +306,17 @@ impl JellyfinPane {
             info_scrollbar_area: Rect::default(),
             info_scrollbar_drag: crate::shared::mouse_event::ScrollbarDrag::default(),
             item_scrollbar_drag: crate::shared::mouse_event::ScrollbarDrag::default(),
+            mode: JellyfinTabMode::Libraries,
+            toggle_areas: [Rect::default(); 2],
+            back_area: Rect::default(),
+            search_buffer: crate::ui::input::BufferId::new(),
+            search_input_focused: true,
+            search_left_presses: 0,
+            search_pending: false,
+            last_sent_query: String::new(),
+            search_results: Vec::new(),
+            search_results_state: ListState::default(),
+            search_results_area: Rect::default(),
         }
     }
     /// Load the server credentials (cheap file read; done on first show and
@@ -605,6 +725,18 @@ impl JellyfinPane {
             self.expanded.insert(key);
         }
     }
+    /// Round 64: whether the selected item gets the small poster shelf.
+    /// Every kind sync_poster fetches an image for (playables + the
+    /// season/folder containers) is shelf-worthy; the shelf replaces both
+    /// the old full-box art (`image_only`) and the 40%-column split.
+    fn poster_relevant(&self) -> bool {
+        self.selected_item()
+            .is_some_and(|i| i.kind_matches_poster())
+            || self
+                .selected
+                .as_ref()
+                .is_some_and(|k| k.item().kind_matches_poster())
+    }
     /// Fetch the primary image of the item selected in the right pane (or of
     /// the opened node when nothing is selected) and display it in the info
     /// box.
@@ -724,6 +856,9 @@ impl JellyfinPane {
             let season_id = season_id.clone();
             let item_id = item_id.clone();
             let url = url.clone();
+            // Round 64: pass the content name to mpv (the window title
+            // previously showed the raw stream URL).
+            let name = name.clone();
             move |ctx: &Ctx| {
                 if let Some(season_id) = season_id.clone() {
                     let _ = ctx
@@ -733,7 +868,7 @@ impl JellyfinPane {
                             episode_id: item_id.clone(),
                         });
                 } else {
-                    crate::core::mpv::run_mpv(ctx, &url);
+                    crate::core::mpv::run_mpv_titled(ctx, &url, &name);
                 }
             }
         };
@@ -945,6 +1080,60 @@ impl TreeBrowserCore for JellyfinPane {
     }
     fn items_scrollbar_drag(&mut self) -> &mut crate::shared::mouse_event::ScrollbarDrag {
         &mut self.item_scrollbar_drag
+    }
+    /// Round 64: carve a poster shelf out of the items list's bottom
+    /// (between the list and the Info box) when a poster-relevant item is
+    /// selected and the terminal has room. The poster is drawn there as a
+    /// compact overlay instead of filling a 40% column of the Info box
+    /// (user feedback: info-box layout + poster/preview rework).
+    ///
+    /// Round 65: the Info box takes the SAME capped height as the other
+    /// library pages (MPD/Playlists/Downloads: info_box_height(2/3) with
+    /// the configured cap, default 15 rows) instead of a fixed 33% share,
+    /// and the poster shelf is twice as tall (18 rows).
+    fn layout_vertical(&mut self, right: Rect) -> (Rect, Rect) {
+        let info_h = self.tree_args.info_box_height(right.height * 2 / 3);
+        let items_h = right.height.saturating_sub(info_h);
+        let [items, info] = Layout::vertical([
+            Constraint::Length(items_h),
+            Constraint::Length(info_h),
+        ])
+        .areas(right);
+        self.poster_shelf = None;
+        // Round 64-2 (user): the preview is centered over the pane (was
+        // right-aligned). Round 66: the shelf WIDTH follows the artwork —
+        // the image always displays at the full inner height and the box
+        // widens for wider images, centered, with a 1-char outline ring
+        // each side.
+        if self.poster_relevant() {
+            let shelf_w = self
+                .poster
+                .natural_width_cells(POSTER_SHELF_H.saturating_sub(2))
+                .saturating_add(4);
+            // The shelf reserves artwork + 4 columns so the rendered image
+            // (centered inside the shelf inset by one cell) keeps its exact
+            // pre-round-67 size/position; the framing outline is gone, so
+            // this is just empty padding around the borderless image.
+            // The shelf is carved from the items area (never the Info box),
+            // so only the items side needs room for it — the Info box keeps
+            // the same 15-row cap as the other library pages even when the
+            // poster is shown.
+            let fits_horizontally = right.width >= shelf_w + POSTER_SHELF_RIGHT_MARGIN * 2;
+            if fits_horizontally && items.height > POSTER_SHELF_H + 6 {
+                self.poster_shelf = Some(Rect {
+                    x: right.x + (right.width - shelf_w) / 2,
+                    y: items.y + items.height - POSTER_SHELF_H,
+                    width: shelf_w,
+                    height: POSTER_SHELF_H,
+                });
+                let items_shrunk = Rect {
+                    height: items.height - POSTER_SHELF_H,
+                    ..items
+                };
+                return (items_shrunk, info);
+            }
+        }
+        (items, info)
     }
     fn items_area(&self) -> Rect {
         self.items_area
@@ -1254,9 +1443,9 @@ impl TreeBrowserCore for JellyfinPane {
                     .as_deref()
                     .filter(|d| !d.trim().is_empty())
                 {
-                    let text_width = (((area.width.saturating_sub(2)) * 3 / 5)
-                        .saturating_sub(3))
-                        .max(10) as usize;
+                    // Round 64: full-width text (the poster column is gone),
+                    // wrapped to fit the one-cell side margins.
+                    let text_width = (area.width.saturating_sub(6)).max(10) as usize;
                     for line in crate::ui::widgets::wrap::wrap_to_width(
                         &crate::ui::panes::lyrics::scrub_emoji(overview),
                         text_width,
@@ -1302,6 +1491,20 @@ impl TreeBrowserCore for JellyfinPane {
                                 ],
                             ),
                         );
+                }
+                // Round 64: a `----` separator between the description body
+                // and the credits block (user's Info-box mockup).
+                if !credits.is_empty() {
+                    rows.push(
+                        ListItem::new(
+                            Line::from(
+                                Span::styled(
+                                    " ----",
+                                    dim,
+                                ),
+                            ),
+                        ),
+                    );
                 }
             }
             Some(item) => {
@@ -1455,38 +1658,45 @@ impl TreeBrowserCore for JellyfinPane {
         }
         let block = ratatui::widgets::Block::default()
             .borders(Borders::ALL)
+            .border_set(ctx.config.as_border_set())
             .border_style(ctx.config.as_border_style())
             .title(" Info ");
         let inner = block.inner(area);
-        let image_only = selected
-            .as_ref()
-            .is_some_and(|item| {
-                matches!(item.kind.as_str(), "CollectionFolder" | "Season")
-            })
-            || (selected.is_none()
-                && self
-                    .selected
-                    .as_ref()
-                    .is_some_and(|k| {
-                        matches!(k.item().kind.as_str(), "CollectionFolder" | "Season")
-                    }));
-        if image_only {
-            if !self.is_modal_open {
-                self.poster.draw(inner, ctx);
-            }
-            frame.render_widget(block, area);
-            self.info_area = Rect::default();
-            self.info_scrollbar_area = Rect::default();
-            return;
-        }
-        let [poster_area, text_area] = Layout::horizontal([
-                Constraint::Percentage(40),
-                Constraint::Percentage(60),
-            ])
-            .areas(inner);
+        // Round 64: the poster/preview moved out of the Info box into the
+        // small shelf beside the list (see `layout_vertical`); the Info
+        // text reclaims the whole inner width. When the terminal is too
+        // short for the shelf the poster is hidden instead of re-tiling
+        // the Info box.
         if !self.is_modal_open {
-            self.poster.draw(poster_area, ctx);
+            match self.poster_shelf {
+                // Round 67 (user): no framing border around the preview —
+                // the adaptive border resized while the artwork loaded and
+                // was distracting. The image keeps its exact size/position
+                // (drawn in the same area as before, just without the box).
+                Some(shelf) => {
+                    let inner = Rect {
+                        x: shelf.x.saturating_add(1),
+                        y: shelf.y.saturating_add(1),
+                        width: shelf.width.saturating_sub(2),
+                        height: shelf.height.saturating_sub(2),
+                    };
+                    if inner.width >= 3 && inner.height >= 3 {
+                        self.poster.draw(inner, ctx);
+                    } else {
+                        self.poster.hide(ctx);
+                    }
+                }
+                None => self.poster.hide(ctx),
+            }
         }
+        // Round 64-2 (user): the Info text keeps a one-cell margin on both
+        // sides (the mockup's `│ Description ↴` / indented description).
+        let text_area = Rect {
+            x: inner.x.saturating_add(1),
+            y: inner.y,
+            width: inner.width.saturating_sub(2),
+            height: inner.height,
+        };
         let header_h = usize::from(header_title.is_some())
             + usize::from(
                 !header_episode_left.is_empty() || !header_episode_right.is_empty(),
@@ -1661,12 +1871,7 @@ impl TreeBrowserCore for JellyfinPane {
         let (list_area, scrollbar_area) = if overflow
             && ctx.config.as_styled_scrollbar().is_some()
         {
-            let [a, b] = Layout::horizontal([
-                    Constraint::Percentage(100),
-                    Constraint::Length(1),
-                ])
-                .areas(body_area);
-            (a, b)
+            crate::ui::scrollbar_strip(body_area)
         } else {
             (body_area, Rect::default())
         };
@@ -1683,10 +1888,10 @@ impl TreeBrowserCore for JellyfinPane {
                 .info_items_len
                 .saturating_sub(list_area.height as usize);
             let position = self.info_state.offset().min(max_offset);
-            ratatui::widgets::StatefulWidget::render(
+            crate::ui::render_scrollbar_strip(
+                frame,
                 scrollbar,
                 scrollbar_area,
-                frame.buffer_mut(),
                 &mut ratatui::widgets::ScrollbarState::new(max_offset + 1)
                     .position(position)
                     .viewport_content_length(list_area.height as usize),
@@ -1710,18 +1915,6 @@ impl TreeBrowserCore for JellyfinPane {
             .as_ref()
             .map(|kind| format!(" {} ", kind.label()))
             .unwrap_or_else(|| " Items ".to_owned())
-    }
-    fn tips_lines(&self, ctx: &Ctx) -> Vec<Line<'static>> {
-        let base = ctx.config.as_list_name_style();
-        let dim = ctx.config.as_list_text_style();
-        vec![
-            Line::from(vec![Span::styled("w/s · ↑/↓", base),
-            Span::styled("  libraries · items", dim),]),
-            Line::from(vec![Span::styled("d / a", base),
-            Span::styled("  expand · collapse", dim)]),
-            Line::from(vec![Span::styled("Enter · →", base),
-            Span::styled("  play track · open", dim),]),
-        ]
     }
     /// The configured tree-browser args drive the shared `split_tree`
     /// (tree min width / hide threshold).
@@ -1796,20 +1989,625 @@ impl TreeBrowserCore for JellyfinPane {
         Ok(())
     }
 }
+
+
+impl JellyfinPane {
+    // ── search mode (round 60 B2) ────────────────────────────────────
+
+    /// The selected search result, if any.
+    fn search_selected(&self) -> Option<&JfItem> {
+        self.search_results_state
+            .selected()
+            .and_then(|idx| self.search_results.get(idx))
+    }
+
+    /// Flip Libraries <-> Search (Shift+Tab / toggle click). The search
+    /// state stays for the session.
+    fn toggle_mode(&mut self, ctx: &mut Ctx) -> Result<()> {
+        self.mode = match self.mode {
+            JellyfinTabMode::Libraries => JellyfinTabMode::Search,
+            JellyfinTabMode::Search => JellyfinTabMode::Libraries,
+        };
+        if self.mode == JellyfinTabMode::Search {
+            self.focus_search_input(ctx);
+        } else {
+            self.release_search_input(ctx);
+        }
+        ctx.render()?;
+        Ok(())
+    }
+    /// Round 62.1 (S1/S2 parity): leave the search page back to the
+    /// Jellyfin browser — clears the query + results and returns to
+    /// keyboard navigation.
+    fn exit_search(&mut self, ctx: &mut Ctx) -> Result<()> {
+        self.mode = JellyfinTabMode::Libraries;
+        self.release_search_input(ctx);
+        self.search_results_state.select(None);
+        self.search_results.clear();
+        ctx.input.clear_buffer(self.search_buffer);
+        ctx.render()?;
+        Ok(())
+    }
+    /// Focus the search input row: the buffer becomes the active
+    /// insert-mode buffer so printable keys type into the query (round
+    /// 60b D4 — the buffer was never activated before, so typing reached
+    /// no handler and `SearchHints` never fired).
+    fn focus_search_input(&mut self, ctx: &Ctx) {
+        self.search_input_focused = true;
+        self.search_left_presses = 0;
+        ctx.input.insert_mode(self.search_buffer);
+    }
+    /// Leave the input (results / mode toggle / tab switch): drop insert
+    /// mode when this pane's buffer is the active one — the input manager
+    /// is global, so an unattended insert buffer would swallow keys meant
+    /// for other panes, tabs and modals.
+    fn release_search_input(&mut self, ctx: &Ctx) {
+        self.search_input_focused = false;
+        if ctx.input.is_active(self.search_buffer) {
+            ctx.input.normal_mode();
+        }
+    }
+
+    /// Fire a server-side search for the current query (deduped; an empty
+    /// query clears the results). Results arrive as `JF_SEARCH`.
+    fn run_search(&mut self, ctx: &Ctx) {
+        let query = ctx.input.value(self.search_buffer).trim().to_owned();
+        if query.is_empty() {
+            self.search_results.clear();
+            self.search_results_state = ListState::default();
+            let _ = ctx.render();
+            return;
+        }
+        if self.search_pending {
+            return;
+        }
+        if self.load_server(ctx).is_none() {
+            return;
+        }
+        self.search_pending = true;
+        self.last_sent_query = query.clone();
+        let _ = ctx
+            .work_sender
+            .send(WorkRequest::FetchJellyfinSearch { query })
+            .map_err(|err| {
+                log::error!(error:? = err; "Failed to request jellyfin search")
+            });
+    }
+
+    /// `d`/`→`/double-click on a result: play it with the existing
+    /// Jellyfin behavior (audio via MPD temp stream, video via mpv).
+    fn search_activate(&mut self, ctx: &Ctx) -> Result<()> {
+        let Some(item) = self.search_selected().cloned() else { return Ok(()) };
+        if !item.is_playable() {
+            // Containers just select (their subtree is browsable in
+            // Libraries mode); nothing to play.
+            return Ok(());
+        }
+        let Some(server) = self.load_server(ctx) else {
+            return Ok(());
+        };
+        if item.is_audio() {
+            let url = server.stream_url(&item.id);
+            self.play_temp_url(
+                ctx,
+                JF_PLAY,
+                PaneType::Jellyfin {
+                    tree: TreeBrowserArgs::default(),
+                },
+                url,
+            );
+            status_info!("Playing {}", item.name);
+        } else {
+            let url = server.video_stream_url(&item.id);
+            Self::play_video(
+                ctx,
+                url,
+                item.name.clone(),
+                item.id.clone(),
+                item.season_id.clone(),
+            )?;
+        }
+        Ok(())
+    }
+
+    /// The search results' options menu (Enter / right-click): the same
+    /// play / add-to-queue / replace-queue actions as the item menu.
+    fn search_context_menu(&mut self, ctx: &Ctx) -> Result<()> {
+        let Some(item) = self.search_selected().cloned() else { return Ok(()) };
+        if !item.is_playable() {
+            return Ok(());
+        }
+        let name = item.name.clone();
+        let Some(server) = self.load_server(ctx) else {
+            return Ok(());
+        };
+        let play_url = if item.is_audio() {
+            server.stream_url(&item.id)
+        } else {
+            server.video_stream_url(&item.id)
+        };
+        let item_id = item.id.clone();
+        let item_name = item.name.clone();
+        let is_audio_item = item.is_audio();
+        let add_url = play_url.clone();
+        let append_url = play_url.clone();
+        let menu = MenuModal::new(ctx)
+            .width(60)
+            .title(format!(" {name} "))
+            .list_section(
+                ctx,
+                |section| {
+                    let mut section = section;
+                    if is_audio_item {
+                        section = section
+                            .item(
+                                "Play now",
+                                move |ctx| {
+                                    ctx.query()
+                                        .id(JF_PLAY)
+                                        .replace_id(JF_PLAY)
+                                        .target(PaneType::Jellyfin {
+                                            tree: TreeBrowserArgs::default(),
+                                        })
+                                        .query(move |client| {
+                                            let id = client.add_id(&play_url, None)?;
+                                            client.play_id(id)?;
+                                            Ok(MpdQueryResult::Any(Box::new(id)))
+                                        });
+                                    Ok(())
+                                },
+                            );
+                    } else {
+                        let mpv_url = play_url.clone();
+                        let season_id = item.season_id.clone();
+                        section = section
+                            .item(
+                                "Play with MPV (video)",
+                                move |ctx| {
+                                    JellyfinPane::play_video(
+                                        ctx,
+                                        mpv_url.clone(),
+                                        item_name.clone(),
+                                        item_id.clone(),
+                                        season_id.clone(),
+                                    )
+                                },
+                            );
+                    }
+                    section = section
+                        .item("Add to queue", move |ctx| {
+                            let add_url = add_url.clone();
+                            ctx.command(move |client| {
+                                client.enqueue_multiple(
+                                    vec![Enqueue::File { path: add_url }],
+                                    None,
+                                    None,
+                                    false,
+                                )?;
+                                Ok(())
+                            });
+                            Ok(())
+                        })
+                        .item("Replace queue", move |ctx| {
+                            let append_url = append_url.clone();
+                            ctx.command(move |client| {
+                                client.enqueue_multiple(
+                                    vec![Enqueue::File { path: append_url }],
+                                    None,
+                                    None,
+                                    true,
+                                )?;
+                                Ok(())
+                            });
+                            Ok(())
+                        });
+                    Some(section)
+                },
+            )
+            .list_section(
+                ctx,
+                |section| {
+                    let section = section.item("Cancel", |_ctx| Ok(()));
+                    Some(section)
+                },
+            )
+            .build();
+        crate::shared::macros::modal!(ctx, menu);
+        Ok(())
+    }
+
+    /// Search-mode keys (parity with the MPD/playlists search): `d`/`→`
+    /// move from the input into the results, `a`/`←` return, Enter opens
+    /// the options menu, Esc clears nothing (results are not markable
+    /// here — the list keeps single selection).
+    fn handle_search_action(&mut self, event: &mut ActionEvent, ctx: &mut Ctx) -> Result<()> {
+        if let Some(action) = event.claim_directories() {
+            match action {
+                DirectoriesActions::FolderExpand | DirectoriesActions::PlayFile => {
+                    if self.search_input_focused && !self.search_results.is_empty() {
+                        self.release_search_input(ctx);
+                        ctx.render()?;
+                    } else if !self.search_input_focused {
+                        self.search_activate(ctx)?;
+                    }
+                    return Ok(());
+                }
+                DirectoriesActions::FolderCollapse => {
+                    if self.search_input_focused {
+                        // Round 62.1 (S2): Left #2 from the search bar
+                        // behaves exactly like Esc #2 — leave the search
+                        // page back to the Jellyfin browser.
+                        self.exit_search(ctx)?;
+                    } else {
+                        self.focus_search_input(ctx);
+                        ctx.render()?;
+                    }
+                    return Ok(());
+                }
+                _ => event.abandon(),
+            }
+        }
+        if let Some(action) = event.claim_common() {
+            match action {
+                CommonAction::Up | CommonAction::Down if !self.search_input_focused => {
+                    if self.search_results.is_empty() {
+                        return Ok(());
+                    }
+                    let len = self.search_results.len();
+                    let sel = self.search_results_state.selected().unwrap_or(0);
+                    let next = if matches!(action, CommonAction::Up) {
+                        sel.saturating_sub(1)
+                    } else {
+                        (sel + 1).min(len - 1)
+                    };
+                    self.search_results_state.select(Some(next));
+                    ctx.render()?;
+                    return Ok(());
+                }
+                CommonAction::Right if !self.search_results.is_empty() => {
+                    self.release_search_input(ctx);
+                    ctx.render()?;
+                    return Ok(());
+                }
+                CommonAction::Left if !self.search_input_focused => {
+                    self.focus_search_input(ctx);
+                    ctx.render()?;
+                    return Ok(());
+                }
+                CommonAction::Confirm => {
+                    return self.search_context_menu(ctx);
+                }
+                CommonAction::ContextMenu => {
+                    return self.search_context_menu(ctx);
+                }
+                CommonAction::Close => {
+                    // Round 62.1 (S1/S2): staged search exit — Esc #1 from
+                    // results goes back to the search bar, Esc #2 from the
+                    // bar leaves the search page; both are consumed so the
+                    // app-level ShowSettings half never fires.
+                    if self.search_input_focused {
+                        self.exit_search(ctx)?;
+                    } else {
+                        self.focus_search_input(ctx);
+                        ctx.render()?;
+                    }
+                    event.consume();
+                    return Ok(());
+                }
+                _ => event.abandon(),
+            }
+        }
+        Ok(())
+    }
+
+    /// Search-mode mouse: clicks on the input row focus it; clicks on the
+    /// results select; double-click plays; right-click opens the menu;
+    /// the wheel moves the selection.
+    fn handle_search_mouse(&mut self, event: MouseEvent, ctx: &Ctx) -> Result<()> {
+        let position: ratatui::layout::Position = event.into();
+        if matches!(event.kind, MouseEventKind::LeftClick)
+            && self.search_results_area.y > 0
+            && self.toggle_areas[0].y > 0
+            && position.y > self.toggle_areas[0].y
+            && position.y < self.search_results_area.y
+        {
+            self.focus_search_input(ctx);
+            ctx.render()?;
+            return Ok(());
+        }
+        let area = self.search_results_area;
+        if !area.contains(position) {
+            return Ok(());
+        }
+        let row = usize::from(event.y.saturating_sub(area.y));
+        match event.kind {
+            MouseEventKind::LeftClick => {
+                if row < self.search_results.len() {
+                    self.search_results_state.select(Some(row));
+                    self.release_search_input(ctx);
+                    ctx.render()?;
+                }
+            }
+            MouseEventKind::DoubleClick => {
+                if row < self.search_results.len() {
+                    self.search_results_state.select(Some(row));
+                    self.search_activate(ctx)?;
+                }
+            }
+            MouseEventKind::RightClick => {
+                if row < self.search_results.len() {
+                    self.search_results_state.select(Some(row));
+                    self.release_search_input(ctx);
+                    return self.search_context_menu(ctx);
+                }
+            }
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                if self.search_results.is_empty() {
+                    return Ok(());
+                }
+                let len = self.search_results.len();
+                let sel = self.search_results_state.selected().unwrap_or(0);
+                let next = if matches!(event.kind, MouseEventKind::ScrollUp) {
+                    sel.saturating_sub(1)
+                } else {
+                    (sel + 1).min(len - 1)
+                };
+                self.search_results_state.select(Some(next));
+                ctx.render()?;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+fn render_toggle(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) {
+        self.toggle_areas = [Rect::default(); 2];
+        self.back_area = Rect::default();
+        if area.height == 0 {
+            return;
+        }
+        let segments = [
+            crate::ui::widgets::sub_tab_bar::Segment {
+                label: "Libraries",
+                active: self.mode == JellyfinTabMode::Libraries,
+            },
+            crate::ui::widgets::sub_tab_bar::Segment {
+                label: "Search",
+                active: self.mode == JellyfinTabMode::Search,
+            },
+        ];
+        let x = area.x.saturating_add(1);
+        let bar = crate::ui::widgets::sub_tab_bar::SubTabBar::new(
+            &segments,
+            x,
+            area.y,
+            area.right().saturating_sub(1),
+        );
+        let areas = bar.render(frame, ctx);
+        for (idx, seg_area) in areas.into_iter().take(2).enumerate() {
+            self.toggle_areas[idx] = seg_area;
+        }
+        // Round 60 (B3): `↰ Back` at the right end of the row, visible
+        // only inside a folder/collection (hidden at the libraries root
+        // and in search mode).
+        let visible = self.mode == JellyfinTabMode::Libraries && self.selected.is_some();
+        self.back_area = crate::ui::draw_back_button(frame, area, visible, ctx);
+    }
+    /// Search mode (round 60 B2): `Search:` input row + separator, the
+    /// scrollable results list and the info box.
+    fn render_search(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) -> Result<()> {
+        // Round 60c (S1): ONE combined frame (same shared layout as the
+        // Playlists search) — `Search:` input row on top, connected
+        // `├───…───┤` divider, results list in the same box, `Results`
+        // on the bottom edge (`╰─Results───…──╯`). The Info Box stays
+        // below.
+        let [frame_area, info_area] = Layout::vertical([
+                Constraint::Min(4),
+                Constraint::Percentage(33),
+            ])
+            .areas(area);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_set(ctx.config.as_border_set())
+            .border_style(ctx.config.as_border_style())
+            .title_bottom(ratatui::text::Line::from("─Results"));
+        let inner = block.inner(frame_area);
+        // Render the box first so the connected divider's `├`/`┤`
+        // junctions can overwrite the box's border cells at that row.
+        frame.render_widget(block, frame_area);
+        let query = ctx.input.value(self.search_buffer);
+        let content = crate::ui::render_search_frame_top(
+            frame,
+            inner,
+            &query,
+            self.search_input_focused,
+            ctx,
+        );
+        let (list_area, scrollbar_area) = if ctx.config.theme.scrollbar.is_some() {
+            crate::ui::scrollbar_strip(content)
+        } else {
+            (content, Rect::default())
+        };
+        self.search_results_area = list_area;
+        let list = List::new(search_result_rows(&self.search_results))
+            .style(ctx.config.as_list_name_style())
+            .highlight_style(
+                if !self.search_input_focused {
+                    ctx.config.theme.hovered_item_style
+                } else {
+                    ctx.config.theme.current_item_style
+                },
+            );
+        ratatui::widgets::StatefulWidget::render(
+            list,
+            list_area,
+            frame.buffer_mut(),
+            &mut self.search_results_state,
+        );
+        if let Some(scrollbar) = ctx.config.as_styled_scrollbar()
+            && scrollbar_area.width > 0
+        {
+            let max_offset =
+                self.search_results.len().saturating_sub(list_area.height as usize);
+            let position = self.search_results_state.offset().min(max_offset);
+            crate::ui::render_scrollbar_strip(
+                frame,
+                scrollbar,
+                scrollbar_area,
+                &mut ratatui::widgets::ScrollbarState::new(max_offset + 1)
+                    .position(position),
+            );
+        }
+        self.render_search_info(frame, info_area, ctx);
+        Ok(())
+    }
+    /// The search info box: the selected result's details (the standard
+    /// key-value layout, no poster).
+    fn render_search_info(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) {
+        let mut items: Vec<ListItem> = Vec::new();
+        if let Some(item) = self.search_selected() {
+            let key_style = ctx.config.theme.preview_label_style;
+            let group = ctx.config.theme.preview_metadata_group_style;
+            items.push(ListItem::new(Line::styled(" --- [Item]", group)));
+            items.push(
+                ListItem::new(
+                    Line::from(
+                        vec![
+                            Span::styled("Title", key_style), Span::raw(": "),
+                            Span::raw(item.name.clone()),
+                        ],
+                    ),
+                ),
+            );
+            if let Some(artist) = &item.artist {
+                items.push(
+                    ListItem::new(
+                        Line::from(
+                            vec![
+                                Span::styled("Artist", key_style), Span::raw(": "),
+                                Span::raw(artist.clone()),
+                            ],
+                        ),
+                    ),
+                );
+            }
+            if let Some(album) = &item.album {
+                items.push(
+                    ListItem::new(
+                        Line::from(
+                            vec![
+                                Span::styled("Album", key_style), Span::raw(": "),
+                                Span::raw(album.clone()),
+                            ],
+                        ),
+                    ),
+                );
+            }
+            if let Some(series) = &item.series_name {
+                items.push(
+                    ListItem::new(
+                        Line::from(
+                            vec![
+                                Span::styled("Series", key_style), Span::raw(": "),
+                                Span::raw(series.clone()),
+                            ],
+                        ),
+                    ),
+                );
+            }
+            if let Some(year) = item.year {
+                items.push(
+                    ListItem::new(
+                        Line::from(
+                            vec![
+                                Span::styled("Year", key_style), Span::raw(": "),
+                                Span::raw(year.to_string()),
+                            ],
+                        ),
+                    ),
+                );
+            }
+            items.push(
+                ListItem::new(
+                    Line::from(
+                        vec![
+                            Span::styled("Type", key_style), Span::raw(": "),
+                            Span::raw(item.kind.clone()),
+                        ],
+                    ),
+                ),
+            );
+        } else {
+            items.push(ListItem::new(
+                Line::styled("Type a search term to find items across your libraries", ctx.config.as_list_text_style()),
+            ));
+        }
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_set(ctx.config.as_border_set())
+            .border_style(ctx.config.as_border_style())
+            .title(" Info ");
+        let inner = block.inner(area);
+        let list = List::new(items).style(ctx.config.as_list_name_style());
+        ratatui::widgets::StatefulWidget::render(
+            list,
+            inner,
+            frame.buffer_mut(),
+            &mut self.info_state,
+        );
+        frame.render_widget(block, area);
+    }
+
+
+}
 impl Pane for JellyfinPane {
     fn render(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) -> Result<()> {
-        self.render_tree_browser(frame, area, ctx)
+        if area.height < 2 {
+            return Ok(());
+        }
+        let [toggle_area, content] = Layout::vertical([
+                Constraint::Length(1),
+                Constraint::Min(0),
+            ])
+            .areas(area);
+        self.render_toggle(frame, toggle_area, ctx);
+        match self.mode {
+            JellyfinTabMode::Libraries => {
+                self.render_tree_browser(frame, content, ctx)
+            }
+            JellyfinTabMode::Search => self.render_search(frame, content, ctx),
+        }
     }
+    /// The mode toggle row (`⭘ Libraries ● Search`) + the `↰ Back` button.
     fn before_show(&mut self, ctx: &Ctx) -> Result<()> {
         if !self.initialized || self.error.is_some() {
             self.fetch_views(ctx);
         }
         self.initialized = true;
         self.poster.redraw_next_render(ctx);
+        // Round 60b (D4): returning to a tab left in search mode with the
+        // input focused re-attaches the search buffer (on_hide released
+        // it while the tab was away).
+        if self.mode == JellyfinTabMode::Search && self.search_input_focused {
+            ctx.input.insert_mode(self.search_buffer);
+        }
+        Ok(())
+    }
+    /// Round 63.1 (3): any release ends an armed scrollbar grab (the
+    /// routed release may have landed on another pane).
+    fn on_global_mouse_release(&mut self, _ctx: &Ctx) -> Result<()> {
+        self.info_scrollbar_drag.disarm();
+        self.item_scrollbar_drag.disarm();
         Ok(())
     }
     fn on_hide(&mut self, ctx: &Ctx) -> Result<()> {
         self.poster.hide(ctx);
+        // Round 60b (D4): leaving the tab must drop the search input's
+        // insert mode — the input manager is global and an unattended
+        // insert buffer would swallow keys meant for the other tab.
+        if ctx.input.is_active(self.search_buffer) {
+            ctx.input.normal_mode();
+        }
         Ok(())
     }
     fn on_event(
@@ -1857,13 +2655,43 @@ impl Pane for JellyfinPane {
         Ok(())
     }
     fn handle_mouse_event(&mut self, event: MouseEvent, ctx: &Ctx) -> Result<()> {
+        let position = event.into();
+        if matches!(
+            event.kind, MouseEventKind::LeftClick | MouseEventKind::DoubleClick
+        ) {
+            // The mode toggle row (Libraries | Search).
+            for (idx, area) in self.toggle_areas.iter().enumerate() {
+                if area.contains(position) {
+                    let mode = if idx == 0 {
+                        JellyfinTabMode::Libraries
+                    } else {
+                        JellyfinTabMode::Search
+                    };
+                    if self.mode != mode {
+                        self.mode = mode;
+                        self.poster.hide(ctx);
+                        ctx.render()?;
+                    }
+                    return Ok(());
+                }
+            }
+            // Round 60 (B3): the `↰ Back` button.
+            if self.back_area.width > 0 && self.back_area.contains(position) {
+                return self.select_parent(ctx);
+            }
+        }
+        if self.mode == JellyfinTabMode::Search {
+            return self.handle_search_mouse(event, ctx);
+        }
         if self.tree_area.contains(event.into()) {
             return self.handle_tree_mouse(event, ctx);
         }
         if self.info_scrollbar_area.height > 0
             && matches!(
                 event.kind, MouseEventKind::LeftClick | MouseEventKind::Drag { .. }
-            ) && self.info_scrollbar_area.contains(event.into())
+            ) && (self.info_scrollbar_area.contains(event.into())
+                || (matches!(event.kind, MouseEventKind::Drag { .. })
+                    && self.info_scrollbar_drag.is_active()))
         {
             let max = self.info_items_len.saturating_sub(self.info_area.height as usize);
             if max > 0 {
@@ -1914,7 +2742,67 @@ impl Pane for JellyfinPane {
         Ok(())
     }
     fn handle_action(&mut self, event: &mut ActionEvent, ctx: &mut Ctx) -> Result<()> {
+        if let Some(action) = event.claim_global() {
+            // Round 60 (B2): Shift+Tab toggles the mode while this tab is
+            // focused (same claim as the playlists/MPD toggles).
+            if matches!(action, GlobalAction::ToggleMpdMode) {
+                return self.toggle_mode(ctx);
+            }
+            event.abandon();
+        }
+        if self.mode == JellyfinTabMode::Search {
+            return self.handle_search_action(event, ctx);
+        }
         self.handle_tree_action(event, ctx)?;
+        Ok(())
+    }
+    fn handle_insert_mode(&mut self, kind: InputResultEvent, ctx: &mut Ctx) -> Result<()> {
+        if self.mode == JellyfinTabMode::Search {
+            match kind {
+                InputResultEvent::Push | InputResultEvent::Pop => {
+                    self.search_left_presses = 0;
+                    self.run_search(ctx);
+                }
+                InputResultEvent::Confirm => {
+                    // Enter inside the input row moves the focus to the
+                    // results: the shared input manager drops insert mode
+                    // right after this handler, so an input that stays
+                    // "focused" would render its cursor but never receive
+                    // another keystroke (round 60b D4).
+                    self.search_left_presses = 0;
+                    self.release_search_input(ctx);
+                }
+                InputResultEvent::Cancel => {
+                    // Round 62.1 (S2): Esc inside the search bar leaves the
+                    // search page back to the Jellyfin browser (clear query
+                    // + results).
+                    self.exit_search(ctx)?;
+                }
+                InputResultEvent::AtStart => {
+                    // Round 63.1 (2): Left with the cursor already at the
+                    // input's start (empty query, or the cursor reached
+                    // position 0) is the exit press — the buffer no longer
+                    // swallows it as a text-cursor move.
+                    self.exit_search(ctx)?;
+                }
+                InputResultEvent::CursorLeft => {
+                    // Round 63.1 (2): the first Left at the bar navigates
+                    // the text cursor; the SECOND consecutive Left exits
+                    // exactly like Esc #2 (Left #2 parity with MPD).
+                    if self.search_left_presses > 0 {
+                        self.search_left_presses = 0;
+                        self.exit_search(ctx)?;
+                    } else {
+                        self.search_left_presses = 1;
+                    }
+                }
+                InputResultEvent::NoChange => {
+                    self.search_left_presses = 0;
+                }
+            }
+            ctx.render()?;
+            return Ok(());
+        }
         Ok(())
     }
     fn on_query_finished(
@@ -1965,8 +2853,28 @@ impl Pane for JellyfinPane {
                         ctx.render()?;
                     }
                     (crate::jellyfin::JellyfinResult::Error(err), _) => {
+                        if id == JF_SEARCH {
+                            self.search_pending = false;
+                        }
                         self.error = Some(err.clone());
                         status_warn!("Jellyfin: {err}");
+                        ctx.render()?;
+                    }
+                    (crate::jellyfin::JellyfinResult::SearchHints { items }, JF_SEARCH) => {
+                        self.search_pending = false;
+                        self.search_results = items;
+                        // Typed-ahead queries are re-sent until the
+                        // results match the current input.
+                        let current = ctx.input.value(self.search_buffer).trim().to_owned();
+                        if current != self.last_sent_query && !current.is_empty() {
+                            self.run_search(ctx);
+                        }
+                        if let Some(first) = self.search_results.first().cloned() {
+                            self.search_results_state.select(Some(0));
+                            let _ = first;
+                        } else {
+                            self.search_results_state = ListState::default();
+                        }
                         ctx.render()?;
                     }
                     (crate::jellyfin::JellyfinResult::Views(views), JF_VIEWS) => {
@@ -2072,6 +2980,12 @@ struct JfPoster {
     /// (e.g. the series poster for a season without art); re-used by a
     /// failed-bytes redraw.
     fallback_id: Option<String>,
+    /// Pixel dimensions of the loaded artwork (header-only decode), used to
+    /// size the shelf to the image's aspect (round 66).
+    img_px: Option<(u32, u32)>,
+    /// `album_art.max_size_px` captured at construction, reused to compute
+    /// the artwork's display width at the shelf's fixed height.
+    max_size_px: crate::config::Size,
     /// Area where the overlay was last drawn (None = nothing drawn).
     drawn_area: Option<Rect>,
     /// Encoded image queued during render but not yet displayed: the
@@ -2114,6 +3028,8 @@ impl JfPoster {
             bytes: None,
             item_id: None,
             fallback_id: None,
+            img_px: None,
+            max_size_px: ctx.config.album_art.max_size_px,
             drawn_area: None,
             pending: None,
             pending_area: None,
@@ -2130,6 +3046,7 @@ impl JfPoster {
         self.pending_area = None;
         self.bytes = None;
         self.item_id = None;
+        self.img_px = None;
     }
     fn hide_at(&mut self, area: Rect, ctx: &Ctx) {
         let bg = ctx.config.theme.background_color.map(|c| c.into_crossterm());
@@ -2157,8 +3074,45 @@ impl JfPoster {
     }
     fn set_bytes(&mut self, item_id: String, bytes: Vec<u8>) {
         self.item_id = Some(item_id);
+        self.img_px = Self::image_dimensions(&bytes);
         self.bytes = Some(std::sync::Arc::new(bytes));
         self.drawn_area = None;
+    }
+    /// Header-only decode of the artwork's pixel size (no full decode —
+    /// cheap enough to run when the bytes arrive). `None` on any failure.
+    fn image_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+        use std::io::Cursor;
+        image::ImageReader::new(Cursor::new(bytes))
+            .with_guessed_format()
+            .ok()?
+            .into_dimensions()
+            .ok()
+    }
+    /// The artwork's width in terminal cells when displayed at `inner_h`
+    /// rows tall (the shelf's fixed inner height) — the shelf adds 2 border
+    /// columns plus a 1-char margin on each side (round 66). Mirrors
+    /// `create_aligned_area`'s height-limited fit for an unbounded-width
+    /// area, so the encoder fills the resulting inner area exactly. Falls
+    /// back to `POSTER_SHELF_W` when the image isn't loaded yet or the
+    /// terminal pixel metrics are unavailable.
+    fn natural_width_cells(&self, inner_h: u16) -> u16 {
+        let Some((iw, ih)) = self.img_px else { return POSTER_SHELF_W };
+        if iw == 0 || ih == 0 {
+            return POSTER_SHELF_W;
+        }
+        let Ok(ws) = crossterm::terminal::window_size() else {
+            return POSTER_SHELF_W;
+        };
+        if ws.width == 0 || ws.height == 0 || ws.rows == 0 || ws.columns == 0 {
+            return POSTER_SHELF_W;
+        }
+        let cell_w = ws.width as f64 / ws.columns as f64;
+        let cell_h = ws.height as f64 / ws.rows as f64;
+        let bounds_w = self.max_size_px.width as f64;
+        let bounds_h = ((inner_h as f64) * cell_h).min(self.max_size_px.height as f64);
+        let scale = (bounds_w / iw as f64).min(bounds_h / ih as f64);
+        let used_w_px = iw as f64 * scale;
+        ((used_w_px / cell_w).ceil() as u16).max(1)
     }
     /// Hide the overlay (tab switch, modal opened).
     fn hide(&mut self, ctx: &Ctx) {

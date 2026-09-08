@@ -215,8 +215,19 @@ impl InputBuffer {
                 InputResultEvent::Pop
             }
             Some(InputEvent::Back) => {
+                if self.cursor == 0 {
+                    // Round 63.1 (2): Left at the very start of the text
+                    // cannot move the cursor — signal the pane so search
+                    // bars can treat it as a Cancel-equivalent (staged
+                    // exit); other inputs keep ignoring it.
+                    return InputResultEvent::AtStart;
+                }
                 self.cursor = self.current_grapheme().offset;
-                InputResultEvent::NoChange
+                // Round 63.1 (2): a Left that DID move reports CursorLeft
+                // (search bars: the first Left navigates, the second
+                // consecutive Left exits). Text output is unchanged, so
+                // this is still a NoChange-equivalent for other consumers.
+                InputResultEvent::CursorLeft
             }
             Some(InputEvent::Forward) => {
                 let g = self.next_grapheme();
@@ -336,6 +347,56 @@ impl InputBuffer {
             )
     }
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::input::{InputEvent, InputResultEvent};
+
+    #[test]
+    fn back_at_start_reports_at_start() {
+        // Round 63.1 (2): Left with the cursor already at 0 must NOT be
+        // reported as a text-cursor move — search bars use it for the
+        // staged exit (Cancel-equivalent); plain inputs ignore it.
+        let mut empty = InputBuffer::new(None);
+        assert_eq!(
+            empty.handle_input(Some(InputEvent::Back)),
+            InputResultEvent::AtStart
+        );
+        let mut text = InputBuffer::new(Some("abc"));
+        text.handle_input(Some(InputEvent::Start)); // cursor -> 0
+        assert_eq!(
+            text.handle_input(Some(InputEvent::Back)),
+            InputResultEvent::AtStart
+        );
+    }
+
+    #[test]
+    fn back_moves_cursor_to_previous_grapheme() {
+        // A Back mid-text still moves the cursor; the report is CursorLeft
+        // so search bars can count Left presses (the second one exits).
+        let mut text = InputBuffer::new(Some("abc"));
+        assert_eq!(
+            text.handle_input(Some(InputEvent::Back)),
+            InputResultEvent::CursorLeft
+        );
+        assert_eq!(text.cursor, 2);
+        text.handle_input(Some(InputEvent::Back));
+        assert_eq!(text.cursor, 1);
+    }
+
+    #[test]
+    fn forward_reports_no_change() {
+        // Other movements keep NoChange: only Left distinguishes itself.
+        let mut text = InputBuffer::new(Some("abc"));
+        text.handle_input(Some(InputEvent::Start));
+        assert_eq!(
+            text.handle_input(Some(InputEvent::Forward)),
+            InputResultEvent::NoChange
+        );
+        assert_eq!(text.cursor, 1);
+    }
+}
+
 #[inline]
 fn snap_to_grapheme_start(value: &str, pos: usize) -> usize {
     value

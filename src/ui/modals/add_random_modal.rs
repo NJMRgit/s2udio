@@ -212,6 +212,8 @@ impl Modal for AddRandomModal<'_> {
             }
             InputResultEvent::NoChange => {}
             InputResultEvent::Cancel => {}
+            InputResultEvent::AtStart => {}
+            InputResultEvent::CursorLeft => {}
         }
         Ok(())
     }

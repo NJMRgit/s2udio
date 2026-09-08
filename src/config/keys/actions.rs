@@ -55,6 +55,14 @@ pub enum GlobalAction {
     /// Shift+Tab while the MPD tab is focused; a no-op anywhere else —
     /// Tab/E/Q cycle tabs as before, so the tab is always reachable).
     ToggleMpdMode,
+    /// Round 60: move to the next library tab (canonical order MPD •
+    /// Playlists • Downloads • Jellyfin • Radio, wrapping). Bound to
+    /// Shift+Right / Shift+E while a library tab is active.
+    NextLibraryTab,
+    /// Round 60: move to the previous library tab (same canonical order,
+    /// backwards, wrapping). Bound to Shift+Left / Shift+Q while a
+    /// library tab is active.
+    PreviousLibraryTab,
     #[strum(to_string = "SwitchToTab({0})")]
     SwitchToTab(TabName),
     Command {
@@ -104,6 +112,8 @@ pub enum GlobalActionFile {
     NextTab,
     PreviousTab,
     ToggleMpdMode,
+    NextLibraryTab,
+    PreviousLibraryTab,
     SwitchToTab(String),
     QueueTab,
     DirectoriesTab,
@@ -156,6 +166,8 @@ impl From<GlobalActionFile> for GlobalAction {
             GlobalActionFile::PreviousTab => GlobalAction::PreviousTab,
             GlobalActionFile::NextTab => GlobalAction::NextTab,
             GlobalActionFile::ToggleMpdMode => GlobalAction::ToggleMpdMode,
+            GlobalActionFile::NextLibraryTab => GlobalAction::NextLibraryTab,
+            GlobalActionFile::PreviousLibraryTab => GlobalAction::PreviousLibraryTab,
             GlobalActionFile::ToggleConsume => GlobalAction::ToggleConsume,
             GlobalActionFile::SwitchToTab(name) => GlobalAction::SwitchToTab(name.into()),
             GlobalActionFile::QueueTab => GlobalAction::SwitchToTab("Queue".into()),
@@ -219,6 +231,8 @@ impl From<GlobalAction> for GlobalActionFile {
             GlobalAction::NextTab => GlobalActionFile::NextTab,
             GlobalAction::PreviousTab => GlobalActionFile::PreviousTab,
             GlobalAction::ToggleMpdMode => GlobalActionFile::ToggleMpdMode,
+            GlobalAction::NextLibraryTab => GlobalActionFile::NextLibraryTab,
+            GlobalAction::PreviousLibraryTab => GlobalActionFile::PreviousLibraryTab,
             GlobalAction::SwitchToTab(tab) => GlobalActionFile::SwitchToTab(tab.to_string()),
             GlobalAction::Command { command, description } => {
                 GlobalActionFile::Command { command, description }
@@ -264,6 +278,12 @@ impl ToDescription for GlobalAction {
             GlobalAction::NextTab => "Switch to next tab".into(),
             GlobalAction::PreviousTab => "Switch to previous tab".into(),
             GlobalAction::ToggleMpdMode => "Toggle the MPD tab's Library/Search mode".into(),
+            GlobalAction::NextLibraryTab => {
+                "Cycle to the next library tab (E / Shift+E / Shift+Right)".into()
+            }
+            GlobalAction::PreviousLibraryTab => {
+                "Cycle to the previous library tab (Q / Shift+Q / Shift+Left)".into()
+            }
             GlobalAction::SwitchToTab(name) => Cow::Owned(format!("Switch directly to {name} tab")),
             GlobalAction::CommandMode => "Enter command mode".into(),
             GlobalAction::Command { description: None, .. } => "Execute a command".into(),

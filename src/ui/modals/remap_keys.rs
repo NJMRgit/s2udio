@@ -123,6 +123,10 @@ pub(crate) fn remap_description(action: &Actions) -> String {
             GlobalAction::NextTab => "Next tab",
             GlobalAction::PreviousTab => "Previous tab",
             GlobalAction::ToggleMpdMode => "Toggle Library/Search (MPD tab)",
+            GlobalAction::NextLibraryTab => "Next library tab (Shift+Right / Shift+E)",
+            GlobalAction::PreviousLibraryTab => {
+                "Previous library tab (Shift+Left / Shift+Q)"
+            }
             GlobalAction::SwitchToTab(name) => return format!("Go to {name}"),
             GlobalAction::Command { .. } => "Run command",
             GlobalAction::ExternalCommand { .. } => "External command",
@@ -247,6 +251,8 @@ fn global_catalog() -> Vec<GlobalAction> {
             D::NextTab => GlobalAction::NextTab,
             D::PreviousTab => GlobalAction::PreviousTab,
             D::ToggleMpdMode => GlobalAction::ToggleMpdMode,
+            D::NextLibraryTab => GlobalAction::NextLibraryTab,
+            D::PreviousLibraryTab => GlobalAction::PreviousLibraryTab,
             D::SwitchToTab => GlobalAction::SwitchToTab(TabName::from("Queue")),
             D::Command => GlobalAction::Command { command: String::new(), description: None },
             D::ExternalCommand => GlobalAction::ExternalCommand {

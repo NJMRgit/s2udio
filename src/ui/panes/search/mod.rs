@@ -3,9 +3,9 @@ use anyhow::Result;
 use enum_map::EnumMap;
 use itertools::Itertools;
 use ratatui::{
-    layout::{Constraint, Layout, Margin, Rect},
-    style::Stylize, text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState, Padding, Paragraph},
+    layout::{Constraint, Layout, Rect},
+    style::Stylize, text::Span,
+    widgets::{Block, Borders, List, ListItem, ListState},
 };
 use super::Pane;
 use crate::{
@@ -133,32 +133,44 @@ impl SearchPane {
         ctx: &Ctx,
     ) {
         let config = &ctx.config;
-        let column_right_padding: u16 = config.theme.scrollbar.is_some().into();
-        let title = self.songs_dir.filter_text(area.width, ctx);
-        let block = {
-            let mut b = Block::default()
-                .borders(Borders::ALL)
-                .border_style(config.as_border_style())
-                .title(" Results ");
-            if let Some(title) = title {
-                b = b.title(title);
-            }
-            b.padding(Padding::new(0, column_right_padding, 0, 0))
-        };
+        let filter = self.songs_dir.filter_text(area.width, ctx);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_set(config.as_border_set())
+            .border_style(config.as_border_style());
         let results_focused = matches!(self.phase, Phase::BrowseResults);
         let directory = &mut self.songs_dir;
+        let inner_block = block.inner(area);
+        // Round 60 (A2/A7): the Item Box template — title row (plus the
+        // active filter when one is typed), connected separator, list.
+        let filter_text: Option<String> = filter.map(|spans| {
+            spans.iter().map(|span| span.content.as_ref()).collect::<String>()
+        });
+        let header = match filter_text.as_deref() {
+            Some(filter) if !filter.is_empty() => format!("Results  [{filter}]"),
+            _ => "Results".to_owned(),
+        };
+        let content = crate::ui::item_box_header(frame, inner_block, &header, ctx);
+        // Round 60 (A6): the list area + the 4-cell scrollbar strip
+        // (glyph column with its one-cell left / two-cell right margins).
+        let (list_area, scrollbar_area) = {
+            if config.theme.scrollbar.is_some() {
+                crate::ui::scrollbar_strip(content)
+            } else {
+                (content, Rect::default())
+            }
+        };
         directory
             .state
-            .set_content_and_viewport_len(directory.items.len(), area.height.into());
+            .set_content_and_viewport_len(directory.items.len(), list_area.height.into());
         if !directory.items.is_empty() && directory.state.get_selected().is_none() {
             directory.state.select(Some(0), 0);
         }
-        let inner_block = block.inner(area);
-        self.column_areas[BrowserArea::Current] = inner_block;
-        self.column_areas[BrowserArea::Scrollbar] = area;
+        self.column_areas[BrowserArea::Current] = list_area;
+        self.column_areas[BrowserArea::Scrollbar] = scrollbar_area;
         let hover_idx = crate::ui::panes::hovered_item(
             ctx.mouse_pos(),
-            inner_block,
+            list_area,
             directory.state.inner.offset(),
             directory.items.len(),
             1,
@@ -178,19 +190,22 @@ impl SearchPane {
             )
             .style(config.as_list_name_style());
         frame.render_widget(block, area);
+        crate::ui::connect_box_divider(frame, area, area.y + 2, ctx);
         frame
             .render_stateful_widget(
                 current,
-                inner_block,
+                list_area,
                 directory.state.as_render_state_ref(),
             );
-        if let Some(scrollbar) = config.as_styled_scrollbar() {
-            frame
-                .render_stateful_widget(
-                    scrollbar,
-                    self.column_areas[BrowserArea::Scrollbar],
-                    directory.state.as_scrollbar_state_ref(),
-                );
+        if let Some(scrollbar) = config.as_styled_scrollbar()
+            && self.column_areas[BrowserArea::Scrollbar].width > 0
+        {
+            crate::ui::render_scrollbar_strip(
+                frame,
+                scrollbar,
+                self.column_areas[BrowserArea::Scrollbar],
+                directory.state.as_scrollbar_state_ref(),
+            );
         }
     }
     /// Trigger search if search should be done on any change. Does nothing when
@@ -371,7 +386,16 @@ impl SearchPane {
                     }
                     return Ok(());
                 }
-                DirectoriesActions::FolderCollapse => return Ok(()),
+                DirectoriesActions::FolderCollapse => {
+                    // Round 62 (S2): in the SEARCH-bar phase, Left arrives
+                    // as the directories `FolderCollapse` action (the
+                    // directories map binds `Left`, so it is claimed before
+                    // the common `Left` arm) — stage two of the staged
+                    // exit: leave the search page back to the MPD tab's
+                    // `● Library` view.
+                    self.exit_search_page(event, ctx)?;
+                    return Ok(());
+                }
                 _ => event.abandon(),
             }
         }
@@ -404,7 +428,12 @@ impl SearchPane {
                     ctx.render()?;
                 }
                 CommonAction::Right => {}
-                CommonAction::Left => {}
+                CommonAction::Left => {
+                    // Round 62 (S2): Left #2 from the search bar leaves the
+                    // search page back to the MPD tab's `● Library` view —
+                    // identical to the Esc stages.
+                    self.exit_search_page(event, ctx)?;
+                }
                 CommonAction::Top => {
                     self.inputs.first();
                     ctx.render()?;
@@ -422,7 +451,13 @@ impl SearchPane {
                 CommonAction::SelectUp => {}
                 CommonAction::InvertSelection => {}
                 CommonAction::Rename => {}
-                CommonAction::Close => {}
+                CommonAction::Close => {
+                    // Round 62 (S1): Esc #2 from the search bar leaves the
+                    // search page (back to the MPD Library view) and is
+                    // consumed so the app-level ShowSettings half does not
+                    // fire.
+                    self.exit_search_page(event, ctx)?;
+                }
                 CommonAction::Confirm => {
                     match self.inputs.activate_focused(ctx) {
                         ActionResult::Search => {
@@ -564,6 +599,21 @@ impl SearchPane {
         }
         Ok(())
     }
+    /// Round 62 (S1/S2): stage two of the search page's exit — leave the
+    /// search UI back to the MPD tab's `● Library` Folders view. Consumes
+    /// the key press so the app-level Esc half (ShowSettings) stays
+    /// blocked.
+    fn exit_search_page(
+        &mut self,
+        event: &mut ActionEvent,
+        ctx: &mut Ctx,
+    ) -> Result<()> {
+        ctx.app_event_sender
+            .send(crate::AppEvent::UiEvent(crate::ui::UiAppEvent::ExitMpdSearch))?;
+        event.consume();
+        ctx.render()?;
+        Ok(())
+    }
     fn handle_result_phase_action(
         &mut self,
         event: &mut ActionEvent,
@@ -640,8 +690,26 @@ impl SearchPane {
                     }
                 }
                 CommonAction::Left => {
+                    // Round 62 (S2): Left #1 from results goes back to the
+                    // search bar.
                     self.phase = Phase::Search;
                     ctx.render()?;
+                }
+                CommonAction::Close => {
+                    // Round 62 (S1): Esc #1 from results goes back to the
+                    // search bar exactly like Left. The search pane claims
+                    // and CONSUMES the key press so the app-level Esc half
+                    // (ShowSettings) stays blocked — today Esc #1 opened
+                    // the settings panel from the results list.
+                    if !self.songs_dir.marked().is_empty() {
+                        // Preserve the list convention: Esc first clears a
+                        // marked selection (the shared handler consumes it).
+                        self.handle_claimed_common_action(CommonAction::Close, event, ctx)?;
+                    } else {
+                        self.phase = Phase::Search;
+                        event.consume();
+                        ctx.render()?;
+                    }
                 }
                 CommonAction::Delete => {}
                 CommonAction::Confirm => {
@@ -947,14 +1015,16 @@ impl Pane for SearchPane {
                 Constraint::Percentage(70),
             ])
             .areas(area);
-        let [list_area, tips_area, info_area] = Layout::vertical([
-                Constraint::Percentage(60),
-                Constraint::Length(3),
+        // Round 60c (S3): the legend/tips strip is gone — the results
+        // list and the info box reclaim the space.
+        let [list_area, info_area] = Layout::vertical([
+                Constraint::Min(0),
                 Constraint::Percentage(33),
             ])
             .areas(right);
         let block = Block::default()
             .borders(Borders::ALL)
+            .border_set(ctx.config.as_border_set())
             .border_style(ctx.config.as_border_style())
             .title(" Search ");
         let inner = block.inner(search_area);
@@ -963,27 +1033,9 @@ impl Pane for SearchPane {
         frame.render_widget(block, search_area);
         self.column_areas[BrowserArea::Previous] = inner;
         self.render_song_column(frame, list_area, ctx);
-        let base = ctx.config.as_list_name_style();
-        let dim = ctx.config.as_list_text_style();
-        let tips = vec![
-            Line::from(vec![Span::styled("w/s · ↑/↓", base),
-            Span::styled("  filters · results", dim),]),
-            Line::from(vec![Span::styled("Enter", base),
-            Span::styled("  options menu · d/→ play", dim),]),
-            Line::from(vec![Span::styled("Shift+↑/↓", base),
-            Span::styled("  multi-select results", dim),]),
-        ];
-        frame
-            .render_widget(
-                Paragraph::new(tips).style(dim),
-                tips_area
-                    .inner(Margin {
-                        horizontal: 1,
-                        vertical: 0,
-                    }),
-            );
         let block = Block::default()
             .borders(Borders::ALL)
+            .border_set(ctx.config.as_border_set())
             .border_style(ctx.config.as_border_style())
             .title(" Info ");
         let inner = block.inner(info_area);
@@ -1283,6 +1335,12 @@ impl Pane for SearchPane {
         }
         Ok(())
     }
+    /// Round 63.1 (3): any release ends an armed scrollbar grab (the
+    /// routed release may have landed on another pane).
+    fn on_global_mouse_release(&mut self, _ctx: &Ctx) -> Result<()> {
+        self.songs_dir.state.scrollbar_drag.disarm();
+        Ok(())
+    }
     fn handle_insert_mode(
         &mut self,
         kind: InputResultEvent,
@@ -1297,6 +1355,8 @@ impl Pane for SearchPane {
                         self.maybe_search_on_change(ctx);
                     }
                     InputResultEvent::NoChange => {}
+                    InputResultEvent::AtStart => {}
+                    InputResultEvent::CursorLeft => {}
                     InputResultEvent::Cancel => {
                         self.maybe_search_on_change(ctx);
                     }
@@ -1314,6 +1374,8 @@ impl Pane for SearchPane {
                     }
                     InputResultEvent::Confirm => {}
                     InputResultEvent::NoChange => {}
+                    InputResultEvent::AtStart => {}
+                    InputResultEvent::CursorLeft => {}
                     InputResultEvent::Cancel => {
                         self.songs_dir.set_filter_active(false);
                         ctx.input.clear_buffer(self.songs_dir.filter_buffer_id);

@@ -74,7 +74,11 @@ impl Actions {
         matches!(
             self,
             Actions::Global(
-                GlobalAction::NextTab | GlobalAction::PreviousTab | GlobalAction::ToggleMpdMode
+                GlobalAction::NextTab
+                    | GlobalAction::PreviousTab
+                    | GlobalAction::ToggleMpdMode
+                    | GlobalAction::NextLibraryTab
+                    | GlobalAction::PreviousLibraryTab
             )
         )
     }

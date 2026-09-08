@@ -125,10 +125,10 @@ impl QueuePane {
             // content_length = max + 1 so the bottom position is reachable
             // (ratatui clamps positions to content_length - 1); the viewport
             // length keeps the thumb proportional to the visible rows.
-            StatefulWidget::render(
+            crate::ui::render_scrollbar_strip(
+                frame,
                 scrollbar,
                 self.areas[Areas::Scrollbar],
-                frame.buffer_mut(),
                 &mut ratatui::widgets::ScrollbarState::new(max + 1)
                     .position(position)
                     .viewport_content_length(self.areas[Areas::Table].height as usize),

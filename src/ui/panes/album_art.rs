@@ -66,7 +66,7 @@ impl AlbumArtPane {
     /// only when there is genuinely nothing to display or fetch. Host fix
     /// 2026-08-27: the round-48 version bailed out while collapsed, so the
     /// pane could never re-arm itself (see on_query_finished / on_event).
-    fn show_current_or_collapse(&mut self, ctx: &Ctx) -> Result<()> {
+    pub(crate) fn show_current_or_collapse(&mut self, ctx: &Ctx) -> Result<()> {
         // The art box is video-owned while mpv is the UI source (even when
         // the video paused MPD): show the video's thumbnail instead of
         // falling into the paused-song/selection paths (round 58).
@@ -98,7 +98,11 @@ impl AlbumArtPane {
             }
             return self.collapse(ctx);
         }
-        if ctx.status.state != State::Play {
+        // Round 62 (Q1): while MPD reports Play with NO current song (a
+        // just-cleared/re-added queue), follow the selected row's art just
+        // like the paused/stopped paths do — the box re-arms immediately
+        // instead of waiting for playback.
+        if ctx.status.state != State::Play || ctx.find_current_song_in_queue().is_none() {
             return self.check_selected_art(ctx);
         }
         if self.album_art.has_current() {
@@ -115,7 +119,16 @@ impl AlbumArtPane {
         if matches!(ctx.config.album_art.method, ImageMethod::None) {
             return None;
         }
-        let (_, current_song) = ctx.find_current_song_in_queue()?;
+        // Round 62 (Q1): a cleared + re-added queue leaves MPD still
+        // reporting `play` with NO current song, so the current-song
+        // lookup alone collapsed the box until playback started. Fall back
+        // to the SELECTED queue row's art when there is no current song —
+        // the selected media's cover shows immediately.
+        let (_, current_song) = ctx.find_current_song_in_queue().or_else(|| {
+            let id = ctx.queue_selected_id.get()?;
+            let song = ctx.queue.iter().find(|s| s.id == id)?;
+            Some((0, song))
+        })?;
         Self::fetch_art_query(ctx, current_song.file.clone())
     }
     /// Dispatch an album-art query for `song_uri` (replace_id dedupes
@@ -196,7 +209,9 @@ impl AlbumArtPane {
         // Round 58: a video owns the box while mpv is the UI source —
         // skip the selection-follow so a refetch cannot paint the paused
         // song's cover over the video thumbnail.
-        if ctx.status.state != State::Play && !crate::core::mpv::mpv_is_ui_source(ctx) {
+        if (ctx.status.state != State::Play || ctx.find_current_song_in_queue().is_none())
+            && !crate::core::mpv::mpv_is_ui_source(ctx)
+        {
             self.check_selected_art(ctx)?;
         }
         self.album_art.frame_rendered(buffer);
@@ -260,7 +275,10 @@ impl Pane for AlbumArtPane {
         // Paused/stopped (no video): the art box follows the queue
         // selection (checked every frame in flush_pending_display); the
         // playing-song paths below apply only while actually playing.
-        if ctx.status.state != State::Play {
+        // Round 62 (Q1): also follow the selection while MPD reports Play
+        // but has no current song (a cleared + re-added queue), so the
+        // selected row's art shows without waiting for playback.
+        if ctx.status.state != State::Play || ctx.find_current_song_in_queue().is_none() {
             return self.check_selected_art(ctx);
         }
         if let Some(yt) = Self::current_yt_info(ctx) {

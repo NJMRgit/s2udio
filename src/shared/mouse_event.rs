@@ -187,23 +187,22 @@ impl From<MouseEvent> for Position {
     }
 }
 /// check if a mouse event should interact with the scrollbar, considering drag
-/// start position
-fn is_scrollbar_interaction(event: MouseEvent, scrollbar_area: Rect) -> bool {
-    if scrollbar_area.height == 0 {
+/// start position. Round 60 (A6): the activation area is the whole
+/// scrollbar strip — the glyph column **plus its margins** (one cell left,
+/// two cells right of the glyph) — so a press anywhere in the strip grabs
+/// the thumb / jumps the track.
+fn is_scrollbar_interaction(event: MouseEvent, scrollbar_strip: Rect) -> bool {
+    if scrollbar_strip.height == 0 {
         return false;
     }
-    let scrollbar_x = scrollbar_area.right().saturating_sub(1);
     match event.kind {
-        MouseEventKind::LeftClick => {
-            event.x == scrollbar_x && scrollbar_area.contains(event.into())
-        }
+        MouseEventKind::LeftClick => scrollbar_strip.contains(event.into()),
         // A drag is a scrollbar drag when it *started* on the scrollbar
-        // column (Round 48: once a grab is armed the thumb follows the
+        // strip (Round 48: once a grab is armed the thumb follows the
         // pointer anywhere, so the current position is deliberately not
-        // required to stay on the column).
+        // required to stay on the strip).
         MouseEventKind::Drag { drag_start_position } => {
-            drag_start_position.x == scrollbar_x
-                && scrollbar_area.contains(drag_start_position)
+            scrollbar_strip.contains(drag_start_position)
         }
         _ => false,
     }
@@ -335,24 +334,29 @@ impl ScrollbarDrag {
                 let thumb_top = geometry.thumb_top();
                 if y >= thumb_top && y < thumb_top + geometry.thumb_size {
                     self.grab_offset = Some(y.saturating_sub(thumb_top));
+                    log::debug!(x:? = event.x, y:? = event.y, area:? = area; "scrollbar drag armed (thumb)");
                     None
                 } else {
                     // A track press also grabs the thumb (Round 48: the
                     // press-and-hold then follows the pointer anywhere).
                     self.grab_offset = Some(0);
+                    log::debug!(x:? = event.x, y:? = event.y, area:? = area; "scrollbar drag armed (track)");
                     Some(Self::fraction_for_y(y, &geometry))
                 }
             }
             MouseEventKind::Drag { drag_start_position } => {
                 // Once the grab is armed the thumb follows vertical mouse
                 // movement anywhere until the button is released (band-like
-                // capture; the pointer row clamps to the track). The drag
-                // still has to *start* on the scrollbar column: a release
-                // outside the pane can leave the grab armed, and a later
-                // drag from elsewhere must not inherit it.
-                if self.grab_offset.is_none()
-                    || drag_start_position.x != area.right().saturating_sub(1)
-                    || !area.contains(drag_start_position)
+                // capture; the pointer row clamps to the track). Round 63:
+                // any press in the WHOLE strip arms the grab (the glyph
+                // column AND its margin cells — the `x == right-1` gate
+                // only honored a drag started on the strip's far-right
+                // cell, so pressing the thumb at `strip.x + 1` never
+                // grabbed). The drag still has to *start* inside the
+                // strip: a release outside the pane can leave the grab
+                // armed, and a later drag from elsewhere must not inherit
+                // it.
+                if self.grab_offset.is_none() || !area.contains(drag_start_position)
                 {
                     return None;
                 }
@@ -376,9 +380,33 @@ impl ScrollbarDrag {
                 )
             }
             _ => {
+                if self.grab_offset.is_some() {
+                    log::debug!(x:? = event.x, y:? = event.y, kind:? = event.kind; "scrollbar drag disarmed (non-drag event)");
+                }
                 self.grab_offset = None;
                 None
             }
+        }
+    }
+    /// Whether a scrollbar drag is armed (a press inside the strip grabbed
+    /// the thumb and the button has not been released yet). Panes use this
+    /// to keep feeding `Drag` events to [`Self::handle`] even after the
+    /// pointer leaves the strip (Round 63: band-style capture).
+    pub fn is_active(&self) -> bool {
+        self.grab_offset.is_some()
+    }
+    /// Drop an armed grab without an event to feed (round 63.1): mouse
+    /// routing goes by pointer position, so a release that ends over
+    /// another pane never reaches this drag's `handle` and the grab would
+    /// stay armed — the next press/drag in the strip would scroll with a
+    /// stale offset. The global release broadcast calls this on every
+    /// pane after any left-button release (or the pointer leaving the
+    /// window). Double-disarm (the real release already reached `handle`)
+    /// is a no-op.
+    pub fn disarm(&mut self) {
+        if self.grab_offset.is_some() {
+            log::debug!("scrollbar drag disarmed (global release broadcast)");
+            self.grab_offset = None;
         }
     }
     /// The scroll fraction for a pointer row within the track, used for

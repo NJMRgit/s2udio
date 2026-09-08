@@ -150,6 +150,11 @@ pub(crate) enum WorkRequest {
         season_id: String,
         episode_id: String,
     },
+    /// Server-side search across the user's libraries (round 60 B2,
+    /// Jellyfin `SearchHints`).
+    FetchJellyfinSearch {
+        query: String,
+    },
     /// Chapter markers of a local file (via ffprobe).
     FetchFileChapters {
         file: String,

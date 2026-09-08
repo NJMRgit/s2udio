@@ -121,13 +121,22 @@ impl Pane for LogsPane {
         Ok(())
     }
 
+    /// Round 63.1 (3): any release ends an armed scrollbar grab (the
+    /// routed release may have landed on another pane).
+    fn on_global_mouse_release(&mut self, _ctx: &Ctx) -> Result<()> {
+        self.scrolling_state.scrollbar_drag.disarm();
+        Ok(())
+    }
+
     fn handle_mouse_event(&mut self, event: MouseEvent, ctx: &Ctx) -> Result<()> {
         // A click / drag on the scrollbar column scrolls it (the thumb
         // follows the pointer 1:1). The column is outside `logs_area`, so
         // it is handled before the area check below.
         if self.scrollbar_area.height > 0
             && matches!(event.kind, MouseEventKind::LeftClick | MouseEventKind::Drag { .. })
-            && self.scrollbar_area.contains(event.into())
+            && (self.scrollbar_area.contains(event.into())
+                || (matches!(event.kind, MouseEventKind::Drag { .. })
+                    && self.scrolling_state.scrollbar_drag.is_active()))
         {
             let content_len = self.scrolling_state.content_len().unwrap_or(0);
             let viewport_len =

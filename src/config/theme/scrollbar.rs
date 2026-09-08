@@ -28,8 +28,10 @@ pub struct ScrollbarConfigFile {
 impl Default for ScrollbarConfigFile {
     fn default() -> Self {
         Self {
+            // Round 60 (A6): the design's scrollbar glyphs — `↑` / `│` / `↓`
+            // with the darkened `│` (the thumb row) showing the position.
             symbols: vec![
-                "│".to_owned(), "█".to_owned(), "▲".to_owned(), "▼".to_owned()
+                "│".to_owned(), "│".to_owned(), "↑".to_owned(), "↓".to_owned()
             ],
             track_style: Some(StyleFile {
                 fg: None,

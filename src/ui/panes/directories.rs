@@ -319,6 +319,9 @@ pub struct DirectoriesPane {
     /// Click areas of the toggle row's two labels (Library, Search),
     /// refreshed on every render.
     toggle_areas: [Rect; 2],
+    /// Click area of the `↰ Back` button (round 60 B3), refreshed on every
+    /// render; zero when hidden.
+    back_area: Rect,
 }
 impl DirectoriesPane {
     pub fn new(ctx: &Ctx) -> Self {
@@ -341,6 +344,7 @@ impl DirectoriesPane {
             mode: MpdTabMode::Library,
             search: SearchPane::new(ctx),
             toggle_areas: [Rect::default(); 2],
+            back_area: Rect::default(),
         }
     }
     /// Switch the tab's mode (Library <-> Search), keeping the search
@@ -387,6 +391,10 @@ impl DirectoriesPane {
         for (idx, seg_area) in areas.into_iter().take(2).enumerate() {
             self.toggle_areas[idx] = seg_area;
         }
+        // Round 60 (B3): `↰ Back` at the right end of the toggle row,
+        // visible only while a subdirectory is shown.
+        let visible = self.mode == MpdTabMode::Library && self.selected.is_some();
+        self.back_area = crate::ui::draw_back_button(frame, area, visible, ctx);
     }
     /// Fetch the children of `path` ("" = root): the folders + songs shown
     /// in the right pane. Playlists are handled by the Playlists tab and
@@ -395,11 +403,15 @@ impl DirectoriesPane {
     /// outside the MPD library, so its listing comes from disk instead of
     /// MPD `lsinfo` (and is never cached — downloads appear/disappear).
     fn fetch_children(&mut self, path: &Path, ctx: &Ctx) {
-        if self.pending.contains(path) || self.loaded.contains_key(path) {
-            return;
-        }
+        // Round 64: the Downloads folder is NEVER cached — it is re-listed
+        // from disk on every fetch (its contents live outside the MPD
+        // library, so MPD cannot notify us; files appear/disappear while
+        // the browser sits on it).
         if is_downloads_path(path) {
             self.loaded.insert(path.clone(), list_downloads_dir());
+            return;
+        }
+        if self.pending.contains(path) || self.loaded.contains_key(path) {
             return;
         }
         self.pending.insert(path.clone());
@@ -440,26 +452,13 @@ impl DirectoriesPane {
     fn populate_items(&mut self) {
         self.item_list.select(None);
         self.marked.clear();
-        let mut items: Vec<DirOrSong> = match self.selected.as_ref() {
+        let items: Vec<DirOrSong> = match self.selected.as_ref() {
             Some(path) => self.loaded.get(path).cloned().unwrap_or_default(),
             None => self.loaded.get(&Path::new()).cloned().unwrap_or_default(),
         }
             .into_iter()
             .filter(is_visible_entry)
             .collect();
-        if self.selected.is_none() {
-            items
-                .insert(
-                    0,
-                    DirOrSong::Dir {
-                        name: "Downloads".to_owned(),
-                        full_path: crate::ui::modals::paste::DOWNLOADS_DIR_NAME
-                            .to_owned(),
-                        last_modified: chrono::Utc::now(),
-                        playlist: false,
-                    },
-                );
-        }
         self.items = items;
         if !self.items.is_empty() {
             self.item_list.select(Some(0));
@@ -520,31 +519,51 @@ impl DirectoriesPane {
     /// a tree row (folders).
     /// Context menu for a tree folder: add the whole subtree to the queue
     /// or to a playlist.
-    fn open_folder_menu(
-    &mut self,
-    path: &Path,
-    ctx: &Ctx,
-    anchor: Option<ratatui::layout::Position>,
-) -> Result<()> {
-        let path_str = path.to_string();
-        let folder_name = path
-            .as_slice()
-            .last()
-            .cloned()
+    /// Context menu for one or more folders (round 60 C2: a multi-selection
+    /// of folders is served the same whole-subtree actions as a single
+    /// folder, applied to every selected folder). Actions: Add to queue /
+    /// Replace queue with items, Create playlist, Add to playlist — all
+    /// recursive per folder, like the single-folder menu.
+    fn open_folders_menu(
+        &mut self,
+        paths: Vec<Path>,
+        ctx: &Ctx,
+        anchor: Option<ratatui::layout::Position>,
+    ) -> Result<()> {
+        let plural = paths.len() > 1;
+        let folder_name = paths
+            .first()
+            .and_then(|p| p.as_slice().last().cloned())
             .unwrap_or_else(|| "Library".to_owned());
+        // One `find` (Tag::File StartsWith) per folder path — the MPD
+        // filter list is ANDed, so each folder must be queried separately
+        // and the results concatenated.
         let find_songs = move |client: &mut Client<'_>| -> Result<Vec<Song>> {
-            Ok(
-                client
-                    .find(
-                        &[
-                            Filter::new_with_kind(
-                                Tag::File,
-                                &path_str,
-                                FilterKind::StartsWith,
-                            ),
-                        ],
-                    )?,
-            )
+            let path_strs: Vec<String> = paths.iter().map(|p| p.to_string()).collect();
+            let mut out = Vec::new();
+            for path_str in path_strs {
+                out.extend(
+                    client.find(&[Filter::new_with_kind(Tag::File, &path_str, FilterKind::StartsWith)])?,
+                );
+            }
+            Ok(out)
+        };
+        let add_queue_label =
+            if plural { "Add folders to queue" } else { "Add folder to queue" };
+        let replace_label = if plural {
+            "Replace queue with folders"
+        } else {
+            "Replace queue with folder"
+        };
+        let create_label = if plural {
+            "Create playlist from folders"
+        } else {
+            "Create playlist from folder"
+        };
+        let add_playlist_label = if plural {
+            "Add folders to playlist"
+        } else {
+            "Add folder to playlist"
         };
         let modal = MenuModal::new(ctx)
             .anchor(anchor)
@@ -554,7 +573,7 @@ impl DirectoriesPane {
                     let find = find_songs.clone();
                     section
                         .add_item(
-                            "Add folder to queue",
+                            add_queue_label,
                             move |ctx| {
                                 ctx.command(move |client| {
                                     let songs = find(client)?;
@@ -571,7 +590,7 @@ impl DirectoriesPane {
                     let find = find_songs.clone();
                     section
                         .add_item(
-                            "Replace queue with folder",
+                            replace_label,
                             move |ctx| {
                                 ctx.command(move |client| {
                                     let songs = find(client)?;
@@ -595,7 +614,7 @@ impl DirectoriesPane {
                     let initial = folder_name.clone();
                     section
                         .add_item(
-                            "Create playlist from folder",
+                            create_label,
                             move |ctx| {
                                 modal!(
                                     ctx, InputModal::new(ctx).title("Create new playlist")
@@ -612,7 +631,7 @@ impl DirectoriesPane {
                     let find = find_songs.clone();
                     section
                         .add_item(
-                            "Add folder to playlist",
+                            add_playlist_label,
                             move |ctx| {
                                 let radio_playlist = ctx.config.radio.playlist.clone();
                                 let (items, playlists) = ctx
@@ -641,6 +660,15 @@ impl DirectoriesPane {
             );
         crate::shared::macros::modal!(ctx, modal);
         Ok(())
+    }
+    /// Context menu for a highlighted folder (single path).
+    fn open_folder_menu(
+        &mut self,
+        path: &Path,
+        ctx: &Ctx,
+        anchor: Option<ratatui::layout::Position>,
+    ) -> Result<()> {
+        self.open_folders_menu(vec![path.clone()], ctx, anchor)
     }
     /// Context menu for a highlighted file: add it to the queue or to a
     /// playlist. When songs are marked, the menu acts on every marked
@@ -879,6 +907,13 @@ impl TreeBrowserCore for DirectoriesPane {
     fn set_tree_area(&mut self, area: Rect) {
         self.tree_inner = area;
     }
+    fn on_tree_hidden(&mut self) {
+        // Round 60 (C1): the stored tree rect must not linger once the tree
+        // pane is hidden (TUI <= 120 cols). A stale rect would swallow
+        // clicks over the items pane (they would hit the invisible tree's
+        // hit-test and act as "left-pane" control).
+        self.tree_inner = Rect::default();
+    }
     fn set_expanded_idx(&mut self, idx: usize, expanded: bool, ctx: &Ctx) -> Result<()> {
         let path = {
             let mut flat = Vec::new();
@@ -1011,6 +1046,23 @@ impl TreeBrowserCore for DirectoriesPane {
         ctx: &Ctx,
         anchor: Option<ratatui::layout::Position>,
     ) -> Result<()> {
+        // Round 60 (C2): a multi-selection of folders gets the whole-
+        // selection folder menu (Add to queue / Replace queue with the
+        // recursive contents of every selected folder), alongside the
+        // existing folder actions. Enter opens the same menu (on_confirm).
+        let marked_folders: Vec<Path> = self
+            .marked
+            .iter()
+            .filter_map(|idx| match self.items.get(idx) {
+                Some(DirOrSong::Dir { full_path, .. }) => Some(split_path(full_path)),
+                _ => None,
+            })
+            .collect();
+        if !marked_folders.is_empty()
+            && marked_folders.len() == self.marked.iter().count()
+        {
+            return self.open_folders_menu(marked_folders, ctx, anchor);
+        }
         let Some(item) = self.selected_item() else { return Ok(()) };
         if item.is_file() {
             self.open_song_menu(ctx, anchor)
@@ -1080,6 +1132,7 @@ impl TreeBrowserCore for DirectoriesPane {
         }
         let block = Block::default()
             .borders(Borders::ALL)
+            .border_set(ctx.config.as_border_set())
             .border_style(ctx.config.as_border_style())
             .title(" Info ");
         ratatui::widgets::Widget::render(
@@ -1120,35 +1173,21 @@ impl TreeBrowserCore for DirectoriesPane {
             None => " Library".to_owned(),
         }
     }
-    fn tips_lines(&self, ctx: &Ctx) -> Vec<Line<'static>> {
-        let base = ctx.config.as_list_name_style();
-        let dim = ctx.config.as_list_text_style();
-        vec![
-            Line::from(vec![Span::styled("w/s · ↑/↓", base),
-            Span::styled("  folders · items", dim),]),
-            Line::from(vec![Span::styled("d / a", base),
-            Span::styled("  open · back out", dim)]),
-            Line::from(vec![Span::styled("Enter", base), Span::styled("  context menu",
-            dim)]), Line::from(vec![Span::styled("d / →", base),
-            Span::styled("  open · play", dim)]),
-        ]
-    }
-    /// The info box takes about two thirds of the pane height (the tips
-    /// strip stays a fixed 3 rows); the item list gets the rest. Exact
-    /// lengths are computed so the rows always fill the area exactly.
-    fn layout_vertical(&self, right: Rect) -> (Rect, Rect, Rect) {
-        let tips_h = 3;
+    /// Round 60c (S3): the legend/tips strip is gone — the info box
+    /// takes about two thirds of the pane height (fractional heights
+    /// compute so the rows always fill the area exactly); the item list
+    /// gets the rest.
+    fn layout_vertical(&mut self, right: Rect) -> (Rect, Rect) {
         let info_h = self
             .tree_args
-            .info_box_height(right.height.saturating_sub(tips_h) * 2 / 3);
-        let files_h = right.height.saturating_sub(tips_h + info_h);
-        let [files_area, tips_area, info_area] = Layout::vertical([
+            .info_box_height(right.height * 2 / 3);
+        let files_h = right.height.saturating_sub(info_h);
+        let [files_area, info_area] = Layout::vertical([
                 Constraint::Length(files_h),
-                Constraint::Length(tips_h),
                 Constraint::Length(info_h),
             ])
             .areas(right);
-        (files_area, tips_area, info_area)
+        (files_area, info_area)
     }
     /// The configured tree-browser args drive the shared `split_tree`
     /// (tree min width / hide threshold).
@@ -1371,6 +1410,14 @@ impl Pane for DirectoriesPane {
         Ok(())
     }
     fn handle_mouse_event(&mut self, event: MouseEvent, ctx: &Ctx) -> Result<()> {
+        if self.back_area.width > 0
+            && matches!(
+                event.kind, MouseEventKind::LeftClick | MouseEventKind::DoubleClick
+            ) && self.back_area.contains(event.into())
+        {
+            self.items_band.cancel();
+            return self.select_parent(ctx);
+        }
         if matches!(
             event.kind, MouseEventKind::LeftClick | MouseEventKind::DoubleClick
         ) {
@@ -1401,6 +1448,12 @@ impl Pane for DirectoriesPane {
             MpdTabMode::Library => self.handle_tree_mouse_event(event, ctx),
             MpdTabMode::Search => self.search.handle_mouse_event(event, ctx),
         }
+    }
+    /// Round 63.1 (3): any release ends an armed scrollbar grab (the
+    /// routed release may have landed on another pane).
+    fn on_global_mouse_release(&mut self, _ctx: &Ctx) -> Result<()> {
+        self.item_scrollbar_drag.disarm();
+        Ok(())
     }
     fn handle_insert_mode(
         &mut self,
@@ -1460,23 +1513,10 @@ impl Pane for DirectoriesPane {
             TREE => {
                 let MpdQueryResult::Any(any) = data else { return Ok(()) };
                 if let Ok(dirs) = any.downcast::<Vec<String>>() {
+                    // Round 60 (amendment): the Downloads folder moved out
+                    // into its own tab (stream/torrent downloads); the MPD
+                    // tree lists the library only.
                     self.tree = DirTree::build(dirs.into_iter());
-                    self.tree
-                        .root
-                        .children
-                        .insert(
-                            0,
-                            TreeNode {
-                                name: crate::ui::modals::paste::DOWNLOADS_DIR_NAME
-                                    .to_owned(),
-                                path: vec![
-                                    crate ::ui::modals::paste::DOWNLOADS_DIR_NAME.to_owned()
-                                ],
-                                display: Some("Downloads".to_owned()),
-                                children: Vec::new(),
-                                expanded: false,
-                            },
-                        );
                     ctx.render()?;
                 }
             }

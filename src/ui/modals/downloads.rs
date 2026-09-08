@@ -21,6 +21,7 @@ use crate::{
     shared::{
         ext::rect::RectExt,
         id::{self, Id},
+        events::WorkRequest,
         keys::ActionEvent,
         mouse_event::{MouseEvent, MouseEventKind},
         mpd_client_ext::MpdClientExt,
@@ -339,11 +340,19 @@ impl DownloadsModal {
             return;
         };
         let active = job.status.active();
+        // Round 64: "Stream (mpv)" on an active row needs the job's own
+        // fields — clone it before the state borrow ends. Same flow as
+        // the paste picker's "Stream": the engine serves the
+        // already-downloaded pieces while the job continues.
+        let stream_job = job.clone();
         drop(state_ref);
         let remove_job_id = job_id.clone();
         let modal = MenuModal::new(ctx)
             .list_section(ctx, |mut section| {
                 if active {
+                    section.add_item("Stream (mpv)", move |ctx| {
+                        crate::ui::modals::paste::stream_daemon_job(ctx, &stream_job)
+                    });
                     section.add_item("Stop download", move |_| {
                         if let Err(err) =
                             crate::core::dlctl::write_stop_request(Some(&job_id), None, None)
@@ -406,8 +415,14 @@ impl DownloadsModal {
             // / AlreadyDownloaded rows can be removed from the list (the
             // files are kept). Add/Retry/Logs/Requeue unchanged.
             let actions = match &current.state {
-                DownloadState::Queued => vec![ContextAction::Cancel(*id)],
-                DownloadState::Downloading => vec![ContextAction::Cancel(*id)],
+                DownloadState::Queued => vec![
+                    ContextAction::Stream(*id),
+                    ContextAction::Cancel(*id),
+                ],
+                DownloadState::Downloading => vec![
+                    ContextAction::Stream(*id),
+                    ContextAction::Cancel(*id),
+                ],
                 DownloadState::Completed { logs, path } => vec![
                     ContextAction::Remove(*id),
                     ContextAction::Add(path.clone()),
@@ -437,6 +452,27 @@ impl DownloadsModal {
                             ContextAction::Cancel(id) => {
                                 section.add_item(action.to_string(), move |ctx| {
                                     ctx.ytdlp_manager.cancel_download(id);
+                                    Ok(())
+                                });
+                            }
+                            // Round 64: play a queued/downloading item
+                            // through mpv — resolve its source URL and
+                            // stream it (the download continues in the
+                            // background; same path as the paste popup's
+                            // play-now).
+                            ContextAction::Stream(id) => {
+                                section.add_item(action.to_string(), move |ctx| {
+                                    let Some(item) = ctx.ytdlp_manager.get(id) else {
+                                        return Ok(());
+                                    };
+                                    if let Err(err) = ctx.work_sender.send(
+                                        WorkRequest::ResolveYtStreams {
+                                            urls: vec![item.inner.to_url()],
+                                            action: crate::ui::modals::paste::YtAction::PlayVideo,
+                                        },
+                                    ) {
+                                        status_warn!("{err}");
+                                    }
                                     Ok(())
                                 });
                             }
@@ -511,6 +547,8 @@ impl DownloadsModal {
 enum ContextAction {
     #[strum(to_string = "Cancel download")]
     Cancel(DownloadId),
+    #[strum(to_string = "Stream (mpv)")]
+    Stream(DownloadId),
     #[strum(to_string = "Add to queue")]
     Add(PathBuf),
     #[strum(to_string = "Download")]

@@ -1,4 +1,5 @@
 pub mod chapters;
+pub mod bgutil;
 pub mod cmp;
 pub mod config_read;
 pub mod dependencies;

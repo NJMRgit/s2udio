@@ -8,13 +8,13 @@ use itertools::Itertools;
 use ratatui::{
     Frame, layout::{Constraint, Layout, Rect},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
+    widgets::{Block, Borders, List, ListItem, ListState},
 };
 use super::Pane;
 use crate::{
     MpdQueryResult,
     config::{
-        keys::{CommonAction, DirectoriesActions},
+        keys::{CommonAction, DirectoriesActions, GlobalAction},
         tabs::{PaneType, PaneTypeDiscriminants, TreeBrowserArgs},
     },
     ctx::Ctx,
@@ -185,6 +185,146 @@ pub struct PlaylistsPane {
     info_scrollbar_area: Rect,
     /// Drag state of the info box's scrollbar (thumb follows the pointer).
     info_scrollbar_drag: crate::shared::mouse_event::ScrollbarDrag,
+    /// Round 60 (B1): the active mode (Playlists browser or Search). The
+    /// search state lives for the session.
+    mode: PlaylistsTabMode,
+    /// Click areas of the toggle row's two labels (Playlists, Search).
+    toggle_areas: [Rect; 2],
+    /// Click area of the `↰ Back` button (round 60 B3), refreshed on every
+    /// render; zero when hidden.
+    back_area: Rect,
+    /// Buffer id of the search query input (session-lived).
+    search_buffer: crate::ui::input::BufferId,
+    /// Keyboard phase of the search mode: true = the `Search:` input row
+    /// is focused, false = the results list is focused.
+    search_input_focused: bool,
+    /// Consecutive Left presses at the search bar (round 63.1): the first
+    /// Left navigates the text cursor, the second consecutive Left exits
+    /// the search exactly like Esc #2. Reset by any other input result.
+    search_left_presses: u8,
+    /// Set once the per-session playlist-songs snapshot was requested.
+    search_songs_loaded: bool,
+    /// Every playlist's songs, fetched once per session (used by the
+    /// search; the cache makes re-searches instant).
+    search_playlists: Vec<SearchPlaylist>,
+    /// The current search results (playlist-name matches first, then
+    /// song-inside-playlist matches).
+    search_results: Dir<DirOrSong, ListState>,
+    /// Area of the search results list (mouse math).
+    search_results_area: Rect,
+    /// A playlist opened from search while the root list was still
+    /// loading: (name, library path), enacted once the root list lands.
+    pending_open: Option<(String, String)>,
+}
+const SEARCH_DATA: &str = "playlists_search_data";
+#[allow(dead_code)]
+const _SEARCH_ORDER: () = ();
+/// Whether a song matches the (lowercased) search query: the title, artist
+/// or album tag, or the file path contains it (case-insensitive).
+fn song_matches_query(song: &Song, query: &str) -> bool {
+    if song.file.to_lowercase().contains(query) {
+        return true;
+    }
+    fn tag_contains(tag: &crate::mpd::commands::metadata_tag::MetadataTag, query: &str) -> bool {
+        match tag {
+            crate::mpd::commands::metadata_tag::MetadataTag::Single(v) => {
+                v.to_lowercase().contains(query)
+            }
+            crate::mpd::commands::metadata_tag::MetadataTag::Multiple(items) => {
+                items.iter().any(|v| v.to_lowercase().contains(query))
+            }
+        }
+    }
+    ["title", "artist", "album"].iter().any(|key| {
+        song.metadata.get(*key).is_some_and(|tag| tag_contains(tag, query))
+    })
+}
+/// The rows of the search results: playlist-name matches render like the
+/// playlist list (♪ / ▶ / ♫ prefix + name), song matches render like
+/// playlist songs with a dim `· in <playlist>`-style suffix.
+fn search_result_items(
+    items: &[DirOrSong],
+    marked: &BTreeSet<usize>,
+    hovered: Option<usize>,
+    ctx: &Ctx,
+    kinds: &HashMap<String, PlaylistKind>,
+    sources: &HashMap<String, String>,
+) -> Vec<ListItem<'static>> {
+    items
+        .iter()
+        .enumerate()
+        .map(|(idx, item)| {
+            let config = &ctx.config;
+            let mut list_item = match item {
+                DirOrSong::Dir { name, full_path, playlist: true, .. } => {
+                    let library = !full_path.is_empty();
+                    let prefix = if library {
+                        "♫ "
+                    } else {
+                        kinds
+                            .get(name.as_str())
+                            .copied()
+                            .unwrap_or(PlaylistKind::Audio)
+                            .prefix()
+                    };
+                    let mut line = Line::from(
+                        vec![
+                            Span::from(prefix),
+                            Span::from(if name.is_empty() { "Untitled".to_owned() } else { name.clone() }),
+                        ],
+                    );
+                    line.push_span(Span::styled("  [playlist]", config.as_list_text_style()));
+                    ListItem::from(line)
+                }
+                DirOrSong::Song(song) => {
+                    let config2 = &ctx.config;
+                    let mut spans = vec![
+                        Span::styled(
+                            config2.theme.symbols.song.clone(),
+                            config2.theme.symbols.song_style.unwrap_or_default(),
+                        ),
+                        Span::from(" "),
+                    ];
+                    spans.extend(
+                        config2
+                            .theme
+                            .browser_song_format
+                            .0
+                            .iter()
+                            .map(|prop| {
+                                Span::from(
+                                    prop.as_string(
+                                        Some(song),
+                                        &config2.theme.format_tag_separator,
+                                        config2.theme.multiple_tag_resolution_strategy,
+                                        ctx,
+                                    )
+                                    .unwrap_or_default(),
+                                )
+                            }),
+                    );
+                    // The match source (round 60 B1): a dim `in <playlist>`
+                    // suffix so song-inside-playlist matches are explicit.
+                    if let Some(source) = sources.get(&song.file) {
+                        spans.push(Span::styled(
+                            format!("  · in {source}"),
+                            config2.as_list_text_style(),
+                        ));
+                    }
+                    ListItem::from(Line::from(spans))
+                }
+                DirOrSong::Dir { name, .. } => ListItem::from(
+                    Line::from(Span::raw(if name.is_empty() { "Untitled".to_owned() } else { name.clone() })),
+                ),
+            };
+            if marked.contains(&idx) {
+                list_item = list_item.style(config.theme.marked_item_style);
+            } else if hovered == Some(idx) {
+                list_item = list_item.style(config.theme.hovered_item_style);
+            }
+            list_item
+        })
+        .collect()
 }
 const INIT: &str = "init";
 const REINIT: &str = "reinit";
@@ -194,6 +334,26 @@ const PLAYLIST_INFO: &str = "preview";
 /// video) from its first entry; the prefix icons in the playlist list are
 /// drawn from it.
 const PLAYLIST_KINDS: &str = "playlist_kinds";
+/// The tab's mode (round 60 B1): the playlist browser, or search across
+/// playlist names + the songs inside playlists. Startup default:
+/// Playlists; the state (query + results) lives for the session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PlaylistsTabMode {
+    Playlists,
+    Search,
+}
+
+/// One playlist's search snapshot (every playlist the tab lists, with its
+/// songs fetched once per session): `full_path` is the library-relative
+/// path for read-only library playlist files (empty for stored
+/// playlists), `name` the display name.
+#[derive(Debug, Clone)]
+struct SearchPlaylist {
+    name: String,
+    full_path: String,
+    songs: Vec<Song>,
+}
+
 /// Whether a stored playlist holds audio or video content. Playlists are
 /// created audio-only or video-only, so a single video entry marks the
 /// whole playlist as video.
@@ -266,6 +426,17 @@ impl PlaylistsPane {
             tree_args: ctx.config.tree_browser_args(PaneTypeDiscriminants::Playlists),
             info_scrollbar_area: Rect::default(),
             info_scrollbar_drag: crate::shared::mouse_event::ScrollbarDrag::default(),
+            mode: PlaylistsTabMode::Playlists,
+            toggle_areas: [Rect::default(); 2],
+            back_area: Rect::default(),
+            search_buffer: crate::ui::input::BufferId::new(),
+            search_input_focused: true,
+            search_left_presses: 0,
+            search_songs_loaded: false,
+            search_playlists: Vec::new(),
+            search_results: Dir::new(Vec::new()),
+            search_results_area: Rect::default(),
+            pending_open: None,
         }
     }
     fn render_playlists(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) {
@@ -274,10 +445,11 @@ impl PlaylistsPane {
         let marked = self.stack.root().marked().clone();
         let block = Block::default()
             .borders(Borders::ALL)
-            .border_style(ctx.config.as_border_style())
-            .title(" Playlists ");
+            .border_set(ctx.config.as_border_set())
+            .border_style(ctx.config.as_border_style());
         let inner = block.inner(area);
-        let (list_area, scrollbar_area) = Self::split_scrollbar(inner, ctx);
+        let content = crate::ui::item_box_header(frame, inner, "Playlists", ctx);
+        let (list_area, scrollbar_area) = Self::split_scrollbar(content, ctx);
         let Dir { state, .. } = self.stack.root_mut();
         state.set_content_and_viewport_len(items_snapshot.len(), list_area.height.into());
         let hover_idx = crate::ui::panes::hovered_item(
@@ -311,26 +483,24 @@ impl PlaylistsPane {
         if let Some(scrollbar) = ctx.config.as_styled_scrollbar()
             && scrollbar_area.width > 0
         {
-            frame.render_stateful_widget(
+            crate::ui::render_scrollbar_strip(
+                frame,
                 scrollbar,
                 scrollbar_area,
                 state.as_scrollbar_state_ref(),
             );
         }
         ratatui::widgets::Widget::render(block, area, frame.buffer_mut());
+        crate::ui::connect_box_divider(frame, area, area.y + 2, ctx);
         self.playlists_area = list_area;
         self.playlists_scrollbar_area = scrollbar_area;
     }
-    /// Split `inner` into the list area and a 1-column scrollbar area when
-    /// the theme has a scrollbar (the same split the queue table uses).
+    /// Split `inner` into the list area and the 4-cell scrollbar strip
+    /// (glyph column + the one-cell left / two-cell right margins; the
+    /// whole strip is the click/drag activation area, round 60 A6).
     fn split_scrollbar(inner: Rect, ctx: &Ctx) -> (Rect, Rect) {
-        if ctx.config.theme.scrollbar.is_some() && inner.width > 1 {
-            let [list, scrollbar] = ratatui::layout::Layout::horizontal([
-                ratatui::layout::Constraint::Percentage(100),
-                ratatui::layout::Constraint::Length(1),
-            ])
-            .areas(inner);
-            (list, scrollbar)
+        if ctx.config.theme.scrollbar.is_some() {
+            crate::ui::scrollbar_strip(inner)
         } else {
             (inner, Rect::default())
         }
@@ -348,10 +518,13 @@ impl PlaylistsPane {
         };
         let block = Block::default()
             .borders(Borders::ALL)
-            .border_style(ctx.config.as_border_style())
-            .title(title);
+            .border_set(ctx.config.as_border_set())
+            .border_style(ctx.config.as_border_style());
         let inner = block.inner(area);
-        let (list_area, scrollbar_area) = Self::split_scrollbar(inner, ctx);
+        // Round 60 (A2/A7): the Item Box template — a plain title row (one
+        // character margin), a connected separator, then the list.
+        let content = crate::ui::item_box_header(frame, inner, title.trim(), ctx);
+        let (list_area, scrollbar_area) = Self::split_scrollbar(content, ctx);
         if at_root {
             let Dir { state, .. } = self.stack.root_mut();
             state
@@ -387,13 +560,15 @@ impl PlaylistsPane {
             if let Some(scrollbar) = ctx.config.as_styled_scrollbar()
                 && scrollbar_area.width > 0
             {
-                frame.render_stateful_widget(
+                crate::ui::render_scrollbar_strip(
+                    frame,
                     scrollbar,
                     scrollbar_area,
                     state.as_scrollbar_state_ref(),
                 );
             }
             ratatui::widgets::Widget::render(block, area, frame.buffer_mut());
+            crate::ui::connect_box_divider(frame, area, area.y + 2, ctx);
         } else {
             let Dir { state, .. } = self.stack.current_mut();
             state
@@ -429,13 +604,15 @@ impl PlaylistsPane {
             if let Some(scrollbar) = ctx.config.as_styled_scrollbar()
                 && scrollbar_area.width > 0
             {
-                frame.render_stateful_widget(
+                crate::ui::render_scrollbar_strip(
+                    frame,
                     scrollbar,
                     scrollbar_area,
                     state.as_scrollbar_state_ref(),
                 );
             }
             ratatui::widgets::Widget::render(block, area, frame.buffer_mut());
+            crate::ui::connect_box_divider(frame, area, area.y + 2, ctx);
         }
         self.songs_area = list_area;
         self.browser.areas[BrowserArea::Current] = list_area;
@@ -566,6 +743,7 @@ impl PlaylistsPane {
         }
         let block = Block::default()
             .borders(Borders::ALL)
+            .border_set(ctx.config.as_border_set())
             .border_style(ctx.config.as_border_style())
             .title(" Info ");
         let inner = block.inner(area);
@@ -573,12 +751,7 @@ impl PlaylistsPane {
         let (list_area, scrollbar_area) = if overflow
             && ctx.config.as_styled_scrollbar().is_some()
         {
-            let [a, b] = Layout::horizontal([
-                    Constraint::Percentage(100),
-                    Constraint::Length(1),
-                ])
-                .areas(inner);
-            (a, b)
+            crate::ui::scrollbar_strip(inner)
         } else {
             (inner, Rect::default())
         };
@@ -597,16 +770,107 @@ impl PlaylistsPane {
                 .info_items_len
                 .saturating_sub(list_area.height as usize);
             let position = self.info_state.offset().min(max_offset);
-            ratatui::widgets::StatefulWidget::render(
+            crate::ui::render_scrollbar_strip(
+                frame,
                 scrollbar,
                 scrollbar_area,
-                frame.buffer_mut(),
                 &mut ratatui::widgets::ScrollbarState::new(max_offset + 1)
                     .position(position)
                     .viewport_content_length(list_area.height as usize),
             );
         }
         self.info_scrollbar_area = scrollbar_area;
+    }
+    /// Mouse handling of the search mode: clicks on the `Search:` input
+    /// focus it, clicks on the results select/mark (ctrl additive, alt
+    /// ranges), double-click activates, right-click opens the options
+    /// menu, the wheel scrolls the results.
+    fn handle_search_mouse(&mut self, event: MouseEvent, ctx: &Ctx) -> Result<()> {
+        let position: ratatui::layout::Position = event.into();
+        // The input row: any click between the toggle row and the results
+        // list focuses the input.
+        if matches!(event.kind, MouseEventKind::LeftClick)
+            && self.search_results_area.y > 0
+            && self.toggle_areas[0].y > 0
+            && position.y > self.toggle_areas[0].y
+            && position.y < self.search_results_area.y
+        {
+            self.focus_search_input(ctx);
+            ctx.render()?;
+            return Ok(());
+        }
+        let area = self.search_results_area;
+        if !area.contains(position) {
+            return Ok(());
+        }
+        let row = usize::from(event.y.saturating_sub(area.y)) + self.search_results.state.offset();
+        match event.kind {
+            MouseEventKind::LeftClick
+                if event.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) =>
+            {
+                if let Some(idx) = self.search_results.state.get_at_rendered_row(row) {
+                    let dir = &mut self.search_results;
+                    dir.select_idx(idx, ctx.config.scrolloff);
+                    dir.state.toggle_mark(idx);
+                    dir.state.band.arm(idx, false);
+                    ctx.render()?;
+                }
+            }
+            MouseEventKind::LeftClick
+                if event.modifiers.contains(crossterm::event::KeyModifiers::ALT) =>
+            {
+                if let Some(idx) = self.search_results.state.get_at_rendered_row(row) {
+                    let dir = &mut self.search_results;
+                    dir.state.band.cancel();
+                    if dir.state.mark_anchor().is_none() {
+                        dir.state.set_mark_anchor(idx);
+                    }
+                    let anchor = dir.state.mark_anchor().unwrap_or(idx);
+                    if let Some((lo, hi)) = dir.state.take_range_mark() {
+                        for i in lo..=hi {
+                            dir.state.marked.remove(&i);
+                        }
+                    }
+                    if anchor != idx {
+                        dir.state.mark_range(anchor, idx);
+                        dir.state.set_range_mark(anchor, idx);
+                    }
+                    dir.select_idx(idx, ctx.config.scrolloff);
+                    ctx.render()?;
+                }
+            }
+            MouseEventKind::LeftClick => {
+                if let Some(idx) = self.search_results.state.get_at_rendered_row(row) {
+                    let click_on_different = !self.search_results.state.marked.is_empty()
+                        && Some(idx) != self.search_results.state.get_selected();
+                    self.search_results.state.band.arm(idx, click_on_different);
+                    self.search_results.select_idx(idx, ctx.config.scrolloff);
+                    self.search_results.state.set_mark_anchor(idx);
+                    self.search_results.state.clear_range_mark();
+                    self.release_search_input(ctx);
+                    ctx.render()?;
+                }
+            }
+            MouseEventKind::DoubleClick => {
+                self.search_results.state.band.cancel();
+                self.search_activate(ctx)?;
+            }
+            MouseEventKind::RightClick => {
+                self.search_results.state.band.cancel();
+                let Some(idx) = self.search_results.state.get_at_rendered_row(row) else {
+                    return Ok(());
+                };
+                self.search_results.select_idx(idx, ctx.config.scrolloff);
+                self.release_search_input(ctx);
+                return self.search_context_menu(ctx);
+            }
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                let dir = if matches!(event.kind, MouseEventKind::ScrollUp) { -1 } else { 1 };
+                self.search_move(dir, ctx)?;
+            }
+            _ => {}
+        }
+        Ok(())
     }
     /// Whether the songs pane has an armed/active rubber band (only
     /// meaningful inside a playlist: at the root the songs area shows the
@@ -1265,8 +1529,44 @@ fn playlist_menu_items(
     Ok(songs.into_iter().map(|song| Enqueue::File { path: song.file }).collect())
 }
 
-impl Pane for PlaylistsPane {
-    fn render(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) -> Result<()> {
+
+impl PlaylistsPane {
+    fn render_toggle(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) {
+        self.toggle_areas = [Rect::default(); 2];
+        self.back_area = Rect::default();
+        if area.height == 0 {
+            return;
+        }
+        let segments = [
+            crate::ui::widgets::sub_tab_bar::Segment {
+                label: "Playlists",
+                active: self.mode == PlaylistsTabMode::Playlists,
+            },
+            crate::ui::widgets::sub_tab_bar::Segment {
+                label: "Search",
+                active: self.mode == PlaylistsTabMode::Search,
+            },
+        ];
+        let x = area.x.saturating_add(1);
+        let bar = crate::ui::widgets::sub_tab_bar::SubTabBar::new(
+            &segments,
+            x,
+            area.y,
+            area.right().saturating_sub(1),
+        );
+        let areas = bar.render(frame, ctx);
+        for (idx, seg_area) in areas.into_iter().take(2).enumerate() {
+            self.toggle_areas[idx] = seg_area;
+        }
+        // Round 60 (B3): `↰ Back` at the right end of the row, visible
+        // only inside a playlist (hidden at the playlist-list root and in
+        // search mode).
+        let visible = self.mode == PlaylistsTabMode::Playlists
+            && !self.stack.path().is_empty();
+        self.back_area = crate::ui::draw_back_button(frame, area, visible, ctx);
+    }
+    /// Library mode: the playlist tree/list + songs + info layout.
+    fn render_library(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) -> Result<()> {
         let tree_w = self.tree_args.tree_width(area.width);
         let (playlists_area, right) = if tree_w == 0 {
             (Rect::default(), area)
@@ -1278,14 +1578,14 @@ impl Pane for PlaylistsPane {
                 .areas(area);
             (playlists_area, right)
         };
-        let tips_h = 3;
+        // Round 60c (S3): the 3-row legend strip is gone — the songs list
+        // and the info box reclaim the space.
         let info_h = self
             .tree_args
-            .info_box_height(right.height.saturating_sub(tips_h) * 2 / 3);
-        let songs_h = right.height.saturating_sub(tips_h + info_h);
-        let [songs_area, tips_area, info_area] = Layout::vertical([
+            .info_box_height(right.height * 2 / 3);
+        let songs_h = right.height.saturating_sub(info_h);
+        let [songs_area, info_area] = Layout::vertical([
                 Constraint::Length(songs_h),
-                Constraint::Length(tips_h),
                 Constraint::Length(info_h),
             ])
             .areas(right);
@@ -1294,26 +1594,673 @@ impl Pane for PlaylistsPane {
         self.render_playlists(frame, playlists_area, ctx);
         self.render_songs(frame, songs_area, ctx);
         self.render_info(frame, info_area, ctx);
-        let base = ctx.config.as_list_name_style();
-        let dim = ctx.config.as_list_text_style();
-        let tip_lines = vec![
-            Line::from(vec![Span::styled("w/s · ↑/↓", base),
-            Span::styled("  playlists · songs", dim),]),
-            Line::from(vec![Span::styled("d / a", base),
-            Span::styled("  open · back out", dim)]),
-            Line::from(vec![Span::styled("Enter · →", base),
-            Span::styled("  menu · play track", dim),]),
-        ];
-        frame
-            .render_widget(
-                Paragraph::new(tip_lines).style(dim),
-                tips_area
-                    .inner(ratatui::layout::Margin {
-                        horizontal: 1,
-                        vertical: 0,
-                    }),
-            );
         Ok(())
+    }
+
+    // ── search mode (round 60 B1) ────────────────────────────────────
+
+    /// Search mode: `Search:` input row, a connected separator, the
+    /// scrollable ` Results ` list and the info box (the Item Box / Info
+    /// Box templates). Results show the match source: plain playlist rows
+    /// for playlist-name matches, song rows with a dim `in <playlist>`
+    /// suffix for matches inside a playlist.
+    fn render_search(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) -> Result<()> {
+        self.ensure_search_songs(ctx);
+        // Round 60c (S1): ONE combined frame — the `Search:` input row on
+        // top, a connected `├───…───┤` divider, the results list filling
+        // the same box, and the `Results` label on the bottom edge
+        // (`╰─Results───…──╯`). The Info Box stays below.
+        let [frame_area, info_area] = Layout::vertical([
+                Constraint::Min(4),
+                Constraint::Percentage(33),
+            ])
+            .areas(area);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_set(ctx.config.as_border_set())
+            .border_style(ctx.config.as_border_style())
+            .title_bottom(ratatui::text::Line::from("─Results"));
+        let inner = block.inner(frame_area);
+        // Render the box first so the connected divider's `├`/`┤`
+        // junctions can overwrite the box's border cells at that row.
+        frame.render_widget(block, frame_area);
+        let query = ctx.input.value(self.search_buffer);
+        let content = crate::ui::render_search_frame_top(
+            frame,
+            inner,
+            &query,
+            self.search_input_focused,
+            ctx,
+        );
+        let (list_area, scrollbar_area) = if ctx.config.theme.scrollbar.is_some() {
+            crate::ui::scrollbar_strip(content)
+        } else {
+            (content, Rect::default())
+        };
+        self.search_results_area = list_area;
+        let sources = self.search_sources();
+        let dir = &mut self.search_results;
+        dir.state
+            .set_content_and_viewport_len(dir.items.len(), list_area.height.into());
+        let hover_idx = crate::ui::panes::hovered_item(
+            ctx.mouse_pos(),
+            list_area,
+            dir.state.offset(),
+            dir.items.len(),
+            1,
+        );
+        let items = search_result_items(
+            &dir.items,
+            &dir.state.marked,
+            hover_idx,
+            ctx,
+            &self.playlist_kinds,
+            &sources,
+        );
+        ratatui::widgets::StatefulWidget::render(
+            crate::ui::widgets::virtualized_list::VirtualizedList::new(items)
+                .highlight_style(
+                    if hover_idx == dir.state.get_selected() || !self.search_input_focused {
+                        ctx.config.theme.hovered_item_style
+                    } else {
+                        ctx.config.theme.current_item_style
+                    },
+                )
+                .style(ctx.config.as_list_name_style()),
+            list_area,
+            frame.buffer_mut(),
+            dir.state.as_render_state_ref(),
+        );
+        if let Some(scrollbar) = ctx.config.as_styled_scrollbar()
+            && scrollbar_area.width > 0
+        {
+            crate::ui::render_scrollbar_strip(
+                frame,
+                scrollbar,
+                scrollbar_area,
+                dir.state.as_scrollbar_state_ref(),
+            );
+        }
+
+        // The info box: the selected result's details.
+        self.render_search_info(frame, info_area, ctx);
+        Ok(())
+    }
+    /// The info box of the search mode: playlist details for a
+    /// playlist-name match, the song preview for a song-inside-playlist
+    /// match.
+    fn render_search_info(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) {
+        let mut items: Vec<ListItem> = Vec::new();
+        let key_style = ctx.config.theme.preview_label_style;
+        let group = ctx.config.theme.preview_metadata_group_style;
+        if let Some(selected) = self.search_results.selected().cloned() {
+            match selected {
+                DirOrSong::Dir { name, full_path, .. } => {
+                    let _matching_path = &full_path;
+                    items.push(ListItem::new(Line::styled(" --- [Playlist]", group)));
+                    items.push(
+                        ListItem::new(
+                            Line::from(
+                                vec![
+                                    Span::styled("Name", key_style), Span::raw(": "),
+                                    Span::raw(name.clone()),
+                                ],
+                            ),
+                        ),
+                    );
+                    items.push(
+                        ListItem::new(
+                            Line::from(
+                                vec![
+                                    Span::styled("Match", key_style), Span::raw(": "),
+                                    Span::styled("playlist name", group),
+                                ],
+                            ),
+                        ),
+                    );
+                    let count = self
+                        .search_playlists
+                        .iter()
+                        .find(|p| !p.full_path.is_empty() && p.name == name)
+                        .or_else(|| {
+                            self.search_playlists.iter().find(|p| p.name == name)
+                        })
+                        .map(|p| p.songs.len())
+                        .unwrap_or(0);
+                    items.push(
+                        ListItem::new(
+                            Line::from(
+                                vec![
+                                    Span::styled("Tracks", key_style), Span::raw(": "),
+                                    Span::raw(count.to_string()),
+                                ],
+                            ),
+                        ),
+                    );
+                }
+                DirOrSong::Song(song) => {
+                    for group in song.to_file_preview(ctx) {
+                        if let Some(name) = group.name {
+                            items.push(
+                                ListItem::new(
+                                    Line::styled(name, group.header_style.unwrap_or_default()),
+                                ),
+                            );
+                        }
+                        items.extend(group.items);
+                        items.push(ListItem::new(""));
+                    }
+                    let source = self.search_playlists.iter().find_map(|p| {
+                        p.songs.iter().any(|s| s.file == song.file).then_some(&p.name)
+                    });
+                    if let Some(playlist) = source {
+                        items.push(
+                            ListItem::new(Line::styled(" --- [Source]", group)),
+                        );
+                        items.push(
+                            ListItem::new(
+                                Line::from(
+                                    vec![
+                                        Span::styled("In playlist", key_style), Span::raw(": "),
+                                        Span::raw(playlist.clone()),
+                                    ],
+                                ),
+                            ),
+                        );
+                    }
+                }
+            }
+        }
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_set(ctx.config.as_border_set())
+            .border_style(ctx.config.as_border_style())
+            .title(" Info ");
+        let inner = block.inner(area);
+        let list = List::new(items).style(ctx.config.as_list_name_style());
+        ratatui::widgets::StatefulWidget::render(
+            list,
+            inner,
+            frame.buffer_mut(),
+            &mut self.info_state,
+        );
+        frame.render_widget(block, area);
+    }
+
+    /// Fetch every playlist's songs once per session (stored playlists via
+    /// MPD `listplaylistinfo`, library playlist files via the local
+    /// parser), then recompute the results.
+    fn ensure_search_songs(&mut self, ctx: &Ctx) {
+        if self.search_songs_loaded {
+            return;
+        }
+        self.search_songs_loaded = true;
+        let library_files: Vec<String> = self
+            .stack
+            .root()
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                DirOrSong::Dir { playlist: true, full_path, .. } if !full_path.is_empty() => {
+                    Some(full_path.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        ctx.query()
+            .id(SEARCH_DATA)
+            .replace_id(SEARCH_DATA)
+            .target(PaneType::Playlists {
+                tree: TreeBrowserArgs::default(),
+            })
+            .query(move |client| {
+                let mut plays: Vec<SearchPlaylist> = Vec::new();
+                let stored = client.list_playlists()?;
+                for pl in stored {
+                    if let Ok(songs) = client.list_playlist_info(&pl.name, None) {
+                        plays.push(SearchPlaylist {
+                            name: pl.name.clone(),
+                            full_path: String::new(),
+                            songs,
+                        });
+                    }
+                }
+                for lib in library_files {
+                    let songs = read_library_playlist_songs(&lib);
+                    {
+                        let stem = std::path::Path::new(&lib)
+                            .file_stem()
+                            .map(|s| s.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| lib.clone());
+                        plays.push(SearchPlaylist {
+                            name: stem,
+                            full_path: lib,
+                            songs,
+                        });
+                    }
+                }
+                Ok(MpdQueryResult::Any(Box::new(plays)))
+            });
+    }
+
+    /// Recompute the search results from the query (empty query = empty
+    /// results). Playlist-name matches come first, then song matches;
+    /// matching is case-insensitive over the name / song tags and path.
+    fn search_playlists_local(&mut self, ctx: &Ctx) -> Result<()> {
+        let query = ctx.input.value(self.search_buffer).trim().to_lowercase();
+        let mut items: Vec<DirOrSong> = Vec::new();
+        if !query.is_empty() {
+            let mut plays: Vec<SearchPlaylist> = self.search_playlists.clone();
+            plays.sort_by(|a, b| a.name.cmp(&b.name));
+            for p in &plays {
+                if p.name.to_lowercase().contains(&query) {
+                    items.push(DirOrSong::Dir {
+                        name: p.name.clone(),
+                        full_path: p.full_path.clone(),
+                        last_modified: chrono::Utc::now(),
+                        playlist: true,
+                    });
+                }
+            }
+            for p in &plays {
+                for song in &p.songs {
+                    if song_matches_query(song, &query) {
+                        items.push(DirOrSong::Song(song.clone()));
+                    }
+                }
+            }
+        }
+        self.search_results = Dir::new(items);
+        ctx.render()?;
+        Ok(())
+    }
+
+    /// Song file -> playlist name, for the `in <playlist>` result suffix.
+    fn search_sources(&self) -> HashMap<String, String> {
+        let mut out = HashMap::new();
+        for p in &self.search_playlists {
+            for song in &p.songs {
+                out.entry(song.file.clone()).or_insert_with(|| p.name.clone());
+            }
+        }
+        out
+    }
+    /// `d`/`→` (and double-click) on a result: a playlist-name match opens
+    /// the playlist (in Library mode), a song plays (replace queue +
+    /// autoplay, like the Library pane's `d`).
+    fn search_activate(&mut self, ctx: &Ctx) -> Result<()> {
+        let Some(selected) = self.search_results.selected().cloned() else {
+            return Ok(());
+        };
+        match selected {
+            DirOrSong::Dir { name, full_path, .. } => {
+                self.open_search_playlist(&name, &full_path, ctx)
+            }
+            DirOrSong::Song(song) => {
+                let file = song.file.clone();
+                ctx.command(move |client| {
+                    client.enqueue_multiple(
+                        vec![Enqueue::File { path: file }],
+                        None,
+                        None,
+                        true,
+                    )?;
+                    Ok(())
+                });
+                Ok(())
+            }
+        }
+    }
+
+    /// Switch to Library mode and open the playlist `name` (its songs
+    /// list), after ensuring the root list is loaded.
+    fn open_search_playlist(
+        &mut self,
+        name: &str,
+        full_path: &str,
+        ctx: &Ctx,
+    ) -> Result<()> {
+        self.mode = PlaylistsTabMode::Playlists;
+        if self.stack.path().is_empty() && self.stack.root().items.is_empty() {
+            self.pending_open = Some((name.to_owned(), full_path.to_owned()));
+            self.initialized = false;
+            self.before_show(ctx)?;
+            return Ok(());
+        }
+        self.select_and_open(name, full_path, ctx)
+    }
+
+    /// Select the playlist item at the root and enter it (the shared
+    /// songs-pane flow).
+    fn select_and_open(
+        &mut self,
+        name: &str,
+        full_path: &str,
+        ctx: &Ctx,
+    ) -> Result<()> {
+        let Some(idx) = self.stack.root().items.iter().position(|item| match item {
+            DirOrSong::Dir { playlist: true, name: n, full_path: p, .. } => {
+                n == name && p == full_path
+            }
+            _ => false,
+        }) else {
+            return Ok(());
+        };
+        let root = self.stack.root_mut();
+        root.select_idx(idx, ctx.config.scrolloff);
+        let _ = root;
+        self.open_library_playlist = if full_path.is_empty() {
+            None
+        } else {
+            Some(full_path.to_owned())
+        };
+        self.stack_mut().enter();
+        SongListCore::fetch_data_internal(self, ctx)?;
+        ctx.render()?;
+        Ok(())
+    }
+    /// Flip Playlists <-> Search (Shift+Tab / toggle click). The search
+    /// state (query, results, phase) survives the flip for the session.
+    fn toggle_mode(&mut self, ctx: &mut Ctx) -> Result<()> {
+        self.mode = match self.mode {
+            PlaylistsTabMode::Playlists => PlaylistsTabMode::Search,
+            PlaylistsTabMode::Search => PlaylistsTabMode::Playlists,
+        };
+        self.search_results.state.unmark_all();
+        if self.mode == PlaylistsTabMode::Search {
+            self.focus_search_input(ctx);
+            self.ensure_search_songs(ctx);
+        } else {
+            self.release_search_input(ctx);
+        }
+        ctx.render()?;
+        Ok(())
+    }
+    /// Round 62.1 (S1/S2 parity): leave the search page back to the
+    /// Playlists browser — clears the query + results and returns to
+    /// keyboard navigation.
+    fn exit_search(&mut self, ctx: &mut Ctx) -> Result<()> {
+        self.mode = PlaylistsTabMode::Playlists;
+        self.release_search_input(ctx);
+        self.search_results.state.unmark_all();
+        self.search_results.items = Vec::new();
+        ctx.input.clear_buffer(self.search_buffer);
+        ctx.render()?;
+        Ok(())
+    }
+    /// Focus the search input row: the buffer becomes the active
+    /// insert-mode buffer so printable keys type into the query (round
+    /// 60b D3 — the buffer was never activated before, so typing reached
+    /// no handler and the query stayed empty).
+    fn focus_search_input(&mut self, ctx: &Ctx) {
+        self.search_input_focused = true;
+        self.search_left_presses = 0;
+        ctx.input.insert_mode(self.search_buffer);
+    }
+    /// Leave the input (results / mode toggle / tab switch): drop insert
+    /// mode when this pane's buffer is the active one — the input manager
+    /// is global, so an unattended insert buffer would swallow keys meant
+    /// for other panes, tabs and modals.
+    fn release_search_input(&mut self, ctx: &Ctx) {
+        self.search_input_focused = false;
+        if ctx.input.is_active(self.search_buffer) {
+            ctx.input.normal_mode();
+        }
+    }
+    /// Search-mode keys (round 60 B1, interaction parity with the MPD
+    /// search): `d`/`→` move from the input into the results, `a`/`←`
+    /// return, Enter opens the options menu, Esc clears the marks.
+    fn handle_search_action(&mut self, event: &mut ActionEvent, ctx: &mut Ctx) -> Result<()> {
+        if let Some(action) = event.claim_directories() {
+            match action {
+                DirectoriesActions::FolderExpand | DirectoriesActions::PlayFile => {
+                    if self.search_input_focused && !self.search_results.items.is_empty() {
+                        self.release_search_input(ctx);
+                        ctx.render()?;
+                    } else if !self.search_input_focused {
+                        self.search_activate(ctx)?;
+                    }
+                    return Ok(());
+                }
+                DirectoriesActions::FolderCollapse => {
+                    if self.search_input_focused {
+                        // Round 62.1 (S2): Left #2 from the search bar
+                        // behaves exactly like Esc #2 — leave the search
+                        // page back to the Playlists browser.
+                        self.exit_search(ctx)?;
+                    } else {
+                        self.focus_search_input(ctx);
+                        ctx.render()?;
+                    }
+                    return Ok(());
+                }
+                DirectoriesActions::FolderUp | DirectoriesActions::FolderDown => {
+                    if self.search_input_focused {
+                        return Ok(());
+                    }
+                    let dir = if matches!(action, DirectoriesActions::FolderUp) {
+                        -1
+                    } else {
+                        1
+                    };
+                    return self.search_move(dir, ctx);
+                }
+            }
+        }
+        if let Some(action) = event.claim_common() {
+            match action {
+                CommonAction::Up | CommonAction::Down if !self.search_input_focused => {
+                    let dir = if matches!(action, CommonAction::Up) { -1 } else { 1 };
+                    return self.search_move(dir, ctx);
+                }
+                CommonAction::Right if !self.search_results.items.is_empty() => {
+                    self.release_search_input(ctx);
+                    ctx.render()?;
+                    return Ok(());
+                }
+                CommonAction::Left if !self.search_input_focused => {
+                    self.focus_search_input(ctx);
+                    ctx.render()?;
+                    return Ok(());
+                }
+                CommonAction::Confirm => {
+                    return self.search_context_menu(ctx);
+                }
+                CommonAction::ContextMenu => {
+                    return self.search_context_menu(ctx);
+                }
+                CommonAction::SelectAll => {
+                    if !self.search_results.items.is_empty() {
+                        self.search_results.state.mark_range(0, self.search_results.items.len() - 1);
+                        ctx.render()?;
+                    }
+                    return Ok(());
+                }
+                CommonAction::Close => {
+                    // Esc deselects the marks first (round 24-27 parity).
+                    if !self.search_results.state.marked.is_empty() {
+                        self.search_results.state.unmark_all();
+                        ctx.render()?;
+                        return Ok(());
+                    }
+                    if self.search_input_focused {
+                        // Round 62.1 (S2): Esc #2 from the search bar leaves
+                        // the search page back to the Playlists browser and
+                        // is consumed so the app-level ShowSettings half
+                        // does not fire.
+                        self.exit_search(ctx)?;
+                    } else {
+                        // Round 62.1 (S1): Esc #1 from results goes back to
+                        // the search bar — consumed, no Settings.
+                        self.focus_search_input(ctx);
+                        ctx.render()?;
+                    }
+                    event.consume();
+                    return Ok(());
+                }
+                _ => event.abandon(),
+            }
+        }
+        self.handle_common_action(event, ctx)?;
+        self.handle_global_action(event, ctx)?;
+        Ok(())
+    }
+    /// Move the search-results cursor (search mode).
+    fn search_move(&mut self, dir: i64, ctx: &Ctx) -> Result<()> {
+        let len = self.search_results.items.len();
+        if len == 0 {
+            return Ok(());
+        }
+        let state = &mut self.search_results.state;
+        if dir < 0 {
+            state.prev(ctx.config.scrolloff, false);
+        } else {
+            state.next(ctx.config.scrolloff, false);
+        }
+        ctx.render()?;
+        Ok(())
+    }
+    /// The search results' options menu (Enter / right-click): same
+    /// actions as the playlists-song menu, scoped to the marked results
+    /// (or the highlighted one).
+    fn search_context_menu(&mut self, ctx: &Ctx) -> Result<()> {
+        let Some(_) = self.search_results.selected() else { return Ok(()) };
+        let songs: Vec<Song> = {
+            let marked = self.search_results.state.marked.clone();
+            let items = &self.search_results.items;
+            if marked.is_empty() {
+                items
+                    .get(self.search_results.state.get_selected().unwrap_or(0))
+                    .and_then(|item| match item {
+                        DirOrSong::Song(song) => Some(vec![song.clone()]),
+                        _ => None,
+                    })
+                    .unwrap_or_default()
+            } else {
+                items
+                    .iter()
+                    .enumerate()
+                    .filter(|(idx, _)| marked.contains(idx))
+                    .filter_map(|(_, item)| match item {
+                        DirOrSong::Song(song) => Some(song.clone()),
+                        _ => None,
+                    })
+                    .collect()
+            }
+        };
+        let current_items: Vec<Enqueue> = songs
+            .iter()
+            .map(|s| Enqueue::File { path: s.file.clone() })
+            .collect();
+        let list_songs = move |_client: &mut Client<'_>| -> Result<Vec<Song>> {
+            Ok(songs.clone())
+        };
+        let modal = MenuModal::new(ctx)
+            .list_section(
+                ctx,
+                |mut section| {
+                    if !current_items.is_empty() {
+                        let cloned_items = current_items.clone();
+                        section
+                            .add_item(
+                                "Add to queue",
+                                move |ctx| {
+                                    ctx.command(move |client| {
+                                        client.enqueue_multiple(cloned_items, None, None, false)?;
+                                        Ok(())
+                                    });
+                                    Ok(())
+                                },
+                            );
+                        let cloned_items = current_items.clone();
+                        section
+                            .add_item(
+                                "Replace queue",
+                                move |ctx| {
+                                    ctx.command(move |client| {
+                                        client.enqueue_multiple(cloned_items, None, None, true)?;
+                                        Ok(())
+                                    });
+                                    Ok(())
+                                },
+                            );
+                    }
+                    let songs_in_item = list_songs.clone();
+                    section
+                        .add_item(
+                            "Create playlist",
+                            move |ctx| {
+                                modal!(
+                                    ctx, InputModal::new(ctx).title("Create new playlist")
+                                    .confirm_label("Save").input_label("Playlist name:")
+                                    .on_confirm(move | ctx, value | { let value = value
+                                    .to_owned(); let songs_in_item = songs_in_item.clone();
+                                    ctx.command(move | client | { let songs = songs_in_item
+                                    (client) ?; client.create_playlist(& value, songs
+                                    .into_iter().map(| s | s.file).collect(),) ?; Ok(())
+                                    }); Ok(()) })
+                                );
+                                Ok(())
+                            },
+                        );
+                    let songs_in_item = list_songs.clone();
+                    section
+                        .add_item(
+                            "Add to playlist",
+                            move |ctx| {
+                                let radio_playlist = ctx.config.radio.playlist.clone();
+                                let (items, playlists) = ctx
+                                    .query_sync(move |client| {
+                                        let songs = songs_in_item(client)?;
+                                        let playlists = client
+                                            .picker_playlists(&radio_playlist)?
+                                            .into_iter()
+                                            .map(|p| p.name)
+                                            .collect_vec();
+                                        Ok((songs, playlists))
+                                    })?;
+                                modal!(
+                                    ctx, SelectModal::builder().ctx(ctx).options(playlists)
+                                    .confirm_label("Add").title("Select a playlist")
+                                    .on_confirm(move | ctx, selected, _idx | { ctx.command(move
+                                    | client | { client.add_to_playlist_multiple(& selected,
+                                    items.into_iter().map(| s | s.file).collect_vec(),) ?;
+                                    Ok(()) }); Ok(()) }).build()
+                                );
+                                Ok(())
+                            },
+                        );
+                    Some(section)
+                },
+            )
+            .list_section(
+                ctx,
+                |section| {
+                    let section = section.item("Cancel", |_ctx| Ok(()));
+                    Some(section)
+                },
+            )
+            .build();
+        crate::shared::macros::modal!(ctx, modal);
+        Ok(())
+    }
+
+}
+impl Pane for PlaylistsPane {
+    fn render(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) -> Result<()> {
+        if area.height < 2 {
+            return Ok(());
+        }
+        let [toggle_area, content] = Layout::vertical([
+                Constraint::Length(1),
+                Constraint::Min(0),
+            ])
+            .areas(area);
+        self.render_toggle(frame, toggle_area, ctx);
+        match self.mode {
+            PlaylistsTabMode::Playlists => self.render_library(frame, content, ctx),
+            PlaylistsTabMode::Search => self.render_search(frame, content, ctx),
+        }
     }
     fn before_show(&mut self, ctx: &Ctx) -> Result<()> {
         let id = if self.initialized { REINIT } else { INIT };
@@ -1339,6 +2286,21 @@ impl Pane for PlaylistsPane {
                 })
             });
         self.initialized = true;
+        // Round 60b (D3): returning to a tab left in search mode with the
+        // input focused re-attaches the search buffer (on_hide released
+        // it while the tab was away).
+        if self.mode == PlaylistsTabMode::Search && self.search_input_focused {
+            ctx.input.insert_mode(self.search_buffer);
+        }
+        Ok(())
+    }
+    fn on_hide(&mut self, ctx: &Ctx) -> Result<()> {
+        // Round 60b (D3): leaving the tab must drop the search input's
+        // insert mode — the input manager is global and an unattended
+        // insert buffer would swallow keys meant for the other tab.
+        if ctx.input.is_active(self.search_buffer) {
+            ctx.input.normal_mode();
+        }
         Ok(())
     }
     fn on_event(
@@ -1384,6 +2346,35 @@ impl Pane for PlaylistsPane {
     }
     fn handle_mouse_event(&mut self, event: MouseEvent, ctx: &Ctx) -> Result<()> {
         let position = event.into();
+        if matches!(
+            event.kind, MouseEventKind::LeftClick | MouseEventKind::DoubleClick
+        ) {
+            // The mode toggle row (Playlists | Search).
+            for (idx, area) in self.toggle_areas.iter().enumerate() {
+                if area.contains(position) {
+                    let mode = if idx == 0 {
+                        PlaylistsTabMode::Playlists
+                    } else {
+                        PlaylistsTabMode::Search
+                    };
+                    if self.mode != mode {
+                        self.mode = mode;
+                        if mode == PlaylistsTabMode::Search {
+                            self.ensure_search_songs(ctx);
+                        }
+                        ctx.render()?;
+                    }
+                    return Ok(());
+                }
+            }
+            // Round 60 (B3): the `↰ Back` button.
+            if self.back_area.width > 0 && self.back_area.contains(position) {
+                return self.back_out(ctx);
+            }
+        }
+        if self.mode == PlaylistsTabMode::Search {
+            return self.handle_search_mouse(event, ctx);
+        }
         let at_root = self.stack.path().is_empty();
         // Band capture (Round 46): once a band is armed in the songs list,
         // drags and releases are accepted even when the pointer left the
@@ -1612,7 +2603,9 @@ impl Pane for PlaylistsPane {
         if self.info_scrollbar_area.height > 0
             && matches!(
                 event.kind, MouseEventKind::LeftClick | MouseEventKind::Drag { .. }
-            ) && self.info_scrollbar_area.contains(event.into())
+            ) && (self.info_scrollbar_area.contains(event.into())
+                || (matches!(event.kind, MouseEventKind::Drag { .. })
+                    && self.info_scrollbar_drag.is_active()))
         {
             let max = self.info_items_len.saturating_sub(self.info_area.height as usize);
             if max > 0 {
@@ -1663,10 +2656,74 @@ impl Pane for PlaylistsPane {
         kind: InputResultEvent,
         ctx: &mut Ctx,
     ) -> Result<()> {
+        if self.mode == PlaylistsTabMode::Search {
+            // Typing always edits the search query (round 60 B1); each
+            // change re-runs the local match against the session snapshot.
+            match kind {
+                InputResultEvent::Push => {
+                    self.search_left_presses = 0;
+                    self.search_playlists_local(ctx)?;
+                }
+                InputResultEvent::Pop => {
+                    self.search_left_presses = 0;
+                    self.search_playlists_local(ctx)?;
+                }
+                InputResultEvent::Confirm => {
+                    // Enter inside the input row moves the focus to the
+                    // results: the shared input manager drops insert mode
+                    // right after this handler, so an input that stays
+                    // "focused" would render its cursor but never receive
+                    // another keystroke (round 60b D3).
+                    self.search_left_presses = 0;
+                    self.release_search_input(ctx);
+                }
+                InputResultEvent::Cancel => {
+                    // Round 62.1 (S2): Esc inside the search bar is stage
+                    // two of the staged exit — leave the search page back
+                    // to the Playlists browser (clear query + results).
+                    self.exit_search(ctx)?;
+                }
+                InputResultEvent::AtStart => {
+                    // Round 63.1 (2): Left with the cursor already at the
+                    // input's start (empty query, or the cursor reached
+                    // position 0) is the exit press — the buffer no longer
+                    // swallows it as a text-cursor move.
+                    self.exit_search(ctx)?;
+                }
+                InputResultEvent::CursorLeft => {
+                    // Round 63.1 (2): the first Left at the bar navigates
+                    // the text cursor; the SECOND consecutive Left exits
+                    // exactly like Esc #2 (Left #2 parity with MPD).
+                    if self.search_left_presses > 0 {
+                        self.search_left_presses = 0;
+                        self.exit_search(ctx)?;
+                    } else {
+                        self.search_left_presses = 1;
+                    }
+                }
+                InputResultEvent::NoChange => {
+                    self.search_left_presses = 0;
+                }
+            }
+            ctx.render()?;
+            return Ok(());
+        }
         SongListCore::handle_insert_mode(self, kind, ctx)?;
         Ok(())
     }
     fn handle_action(&mut self, event: &mut ActionEvent, ctx: &mut Ctx) -> Result<()> {
+        if let Some(action) = event.claim_global() {
+            // Round 60 (B1): Shift+Tab toggles the mode while this tab is
+            // focused (the same claim as the MPD tab's Library/Search
+            // toggle — panes are only reached from their own tab).
+            if matches!(action, GlobalAction::ToggleMpdMode) {
+                return self.toggle_mode(ctx);
+            }
+            event.abandon();
+        }
+        if self.mode == PlaylistsTabMode::Search {
+            return self.handle_search_action(event, ctx);
+        }
         if let Some(action) = event.claim_common() {
             match action {
                 CommonAction::Up | CommonAction::Down => {
@@ -1751,7 +2808,17 @@ impl Pane for PlaylistsPane {
                     self.fetch_data(sel, ctx)?;
                 }
                 self.query_playlist_kinds(ctx);
+                if let Some((name, full_path)) = self.pending_open.take() {
+                    self.select_and_open(&name, &full_path, ctx)?;
+                    ctx.render()?;
+                }
                 ctx.render()?;
+            }
+            (SEARCH_DATA, MpdQueryResult::Any(any)) => {
+                if let Ok(plays) = any.downcast::<Vec<SearchPlaylist>>() {
+                    self.search_playlists = *plays;
+                    self.search_playlists_local(ctx)?;
+                }
             }
             (REINIT, MpdQueryResult::DirOrSong { data, .. }) if !is_visible => {
                 self.stack = DirStack::new(data);

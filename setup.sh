@@ -137,6 +137,7 @@ install_support_scripts() {
     [[ -f scripts/s2u-mpv-tracker ]] && { install -Dm755 scripts/s2u-mpv-tracker "$BIN_DIR/s2u-mpv-tracker"; ok "mpv tracker daemon -> $BIN_DIR/s2u-mpv-tracker"; } || warn "scripts/s2u-mpv-tracker missing in this checkout"
     [[ -f scripts/s2udio-mpris ]] && { install -Dm755 scripts/s2udio-mpris "$BIN_DIR/s2udio-mpris"; ok "mpv MPRIS bridge -> $BIN_DIR/s2udio-mpris"; } || warn "scripts/s2udio-mpris missing in this checkout"
     [[ -f scripts/s2u-mpdris2 ]] && { install -Dm755 scripts/s2u-mpdris2 "$BIN_DIR/s2u-mpdris2"; ok "mpDris2 stream-art shim -> $BIN_DIR/s2u-mpdris2"; } || warn "scripts/s2u-mpdris2 missing in this checkout"
+    [[ -f scripts/s2u-yt-bgutil-renew.sh ]] && { install -Dm755 scripts/s2u-yt-bgutil-renew.sh "$BIN_DIR/s2u-yt-bgutil-renew.sh"; ok "bgutil renew timer script -> $BIN_DIR/s2u-yt-bgutil-renew.sh"; } || warn "scripts/s2u-yt-bgutil-renew.sh missing in this checkout"
     install_cava_name_shim
 }
 
@@ -638,6 +639,7 @@ EOF
     sleep 2
     "$BIN_DIR/s2u-svc" is-active mpd && ok "mpd active (user service)" || warn "mpd not active yet"
     "$BIN_DIR/s2u-svc" is-active mpDris2 && ok "mpDris2 active (user service)" || warn "mpDris2 not active yet"
+    install_bgutil_renew
 }
 
 # launcher targets (apk/nix): no systemd — s2u-svc's launcher backend runs
@@ -652,7 +654,60 @@ services_step_launcher() {
     "$BIN_DIR/s2u-svc" is-active mpDris2 && ok "mpDris2 active (launcher)" || warn "mpDris2 not active"
 }
 
-# runit target (xbps/Void): per-user runsvdir under ~/.config/runit + sv(1)
+# Round 59: randomized pre-expiry restart timer for the s2u-yt bgutil
+# PO-token service (its minter has a 12 h lifetime and renewal is lazy
+# on-request only — a stale BotGuard handshake can wedge silently and
+# YouTube stops playing until the service is restarted). Install a
+# systemd-user timer that restarts the service 9–11 h after boot/after the
+# previous renewal (OnUnitActiveSec + RandomizedDelaySec → always inside
+# the 12 h window, never at a predictable wall-clock time). Skipped
+# cleanly when s2u-yt is not deployed or the backend isn't systemd-user.
+install_bgutil_renew() {
+    if [[ "$("$BIN_DIR/s2u-svc" backend 2>/dev/null || true)" != "systemd-user" ]]; then
+        warn "bgutil renew timer skipped (no systemd-user backend)"
+        return 0
+    fi
+    if ! systemctl --user list-unit-files 2>/dev/null | grep -q '^s2u-yt-bgutil.service'; then
+        warn "bgutil renew timer skipped (s2u-yt-bgutil.service not deployed — install s2u-yt first)"
+        return 0
+    fi
+    if [[ ! -f "$BIN_DIR/s2u-yt-bgutil-renew.sh" ]]; then
+        warn "bgutil renew timer skipped ($BIN_DIR/s2u-yt-bgutil-renew.sh missing)"
+        return 0
+    fi
+    mkdir -p "$HOME/.config/systemd/user"
+    cat > "$HOME/.config/systemd/user/s2u-yt-bgutil-renew.service" <<EOF
+[Unit]
+Description=Restart s2u-yt bgutil ahead of the 12h PO-token minter expiry
+
+[Service]
+Type=oneshot
+ExecStart=$BIN_DIR/s2u-yt-bgutil-renew.sh
+EOF
+    cat > "$HOME/.config/systemd/user/s2u-yt-bgutil-renew.timer" <<EOF
+[Unit]
+Description=Randomized pre-expiry restart of s2u-yt-bgutil (12h minter cliff)
+
+# Fire 9-11h after boot and after the previous restart: the minter expires
+# at 12h, so the restart always lands inside the renewal window (>=1h
+# margin) but at a random offset (never predictable).
+[Timer]
+OnBootSec=9h
+OnUnitActiveSec=9h
+RandomizedDelaySec=2h
+Unit=s2u-yt-bgutil-renew.service
+
+[Install]
+WantedBy=timers.target
+EOF
+    systemctl --user daemon-reload 2>/dev/null || true
+    if systemctl --user is-enabled s2u-yt-bgutil-renew.timer >/dev/null 2>&1; then
+        ok "s2u-yt-bgutil-renew.timer already enabled"
+    else
+        systemctl --user enable --now s2u-yt-bgutil-renew.timer 2>/dev/null             && ok "s2u-yt-bgutil-renew.timer enabled+started (randomized 9-11h renewal)"             || warn "failed to enable s2u-yt-bgutil-renew.timer (systemctl --user offline?)"
+    fi
+}
+
 # through s2u-svc's runit-user backend (plan §12 / Phase 3).
 services_step_runit() {
     info "7/8  MPD + mpDris2 user services (s2u-svc runit-user)"
@@ -940,6 +995,7 @@ EOF
     else
         warn "mpDris2.service not found - install mpdris2-git and enable it"
     fi
+    install_bgutil_renew
     # ---------------------------------------------------------------------------
     mpd_readiness_check "8/9  "
     pacman -Q mpv-full >/dev/null 2>&1 && SUMMARY_MPV_FULL=1

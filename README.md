@@ -14,13 +14,6 @@ a fully featured media center TUI built on rmpc that adds support for video via 
 
 Built with the help of Deepseek v4 Flash, pi, and prime-agent
 
-<img width="2065" height="924" alt="image" src="https://github.com/user-attachments/assets/9da9686c-52f3-4b3c-8ef7-cfffe20a7270" />
-<img width="1400" height="163" alt="image" src="https://github.com/user-attachments/assets/e4fc184f-61f7-4f23-8f32-0e15ba493362" />
-Left: S2udio ootb
-
-Right: RMPC ootb
-
-
 ## Added Features:
 - synchronized lyrics + fetch
 - Jellyfin!
@@ -40,29 +33,8 @@ Right: RMPC ootb
   3.12) so SVPflow/RIFE frame interpolation runs without crashing mpv
 - full mouse controls
 - sensible and intuitive key binds
-- automatically import library playlist files — m3u/pls/xspf support (toggled in settings > mpd)
+- library playlist files — Settings > MPD "show .m3u/.pls/.xspf playlists from the music library": the Playlists tab also lists playlist files found inside the MPD music library (nested album .m3u files included), ♫-marked, opened with the app's own m3u/pls/xspf parsers (Add to Queue / Replace Queue); read-only — the app never edits or deletes the library files
    
-
-## Showcase
-### Jellyfin
-https://github.com/user-attachments/assets/ecb84436-4ce9-45d0-9dbf-a34cc159e31d
-
-Jellyfin is configured in-app: Settings → Jellyfin → Server URL /
-Username / Password → Sign in (credentials are stored in
-`~/.config/s2udio/jellyfin.ron`; a pre-existing jellytui config is
-reused when the sidecar is absent). A fresh install ships the full
-canonical tab set — `Queue │ Playlists │ MPD • Jellyfin • Radio`.
-### Automatic theming (STTM only for now)
-[Screencast_20260809_202700.webm](https://github.com/user-attachments/assets/9ed0e9b8-ecac-4f69-90aa-e39b247a3aa6)
-### ctrl+click / alt+click / shift + up|down
-[Screencast_20260809_202813.webm](https://github.com/user-attachments/assets/f4e21da4-28a9-4487-9e5f-19bc564d46bd)
-### youtube audio streams with chapters
-https://github.com/user-attachments/assets/6b049334-d996-49bb-8629-c7fdfdea82d5
-### youtube video
-https://github.com/user-attachments/assets/016da10c-c401-4e01-92d5-db684c548f97
-
-
-
 ## Dependencies
 - yt-dlp
 - mpDris2
@@ -165,10 +137,13 @@ s2udio dl stop     stop the downloader daemon (partials stay)
 Committed torrent downloads ("Stream and download", the file picker's
 "Download & Play", "Download", "Download all") run in a detached
 `s2udio dl` daemon, one rqbit engine per job, so a download finishes
-even when the TUI exits mid-download; progress + per-job Stop live in
-the Downloads modal (state: `~/.cache/s2udio/downloads.json`). Plain
-streams keep the ephemeral in-TUI engines and stop their download when
-the stream ends.
+even when the TUI exits mid-download; the Downloads modal is one list
+of all downloads (torrent rows show `Source = Torrent`) with a context
+menu on every row — Stop while active, Remove from list when done
+(completed downloads persist until removed) — plus a one-shot
+completion notice per finished download (state:
+`~/.cache/s2udio/downloads.json`). Plain streams keep the ephemeral
+in-TUI engines and stop their download when the stream ends.
 
 - `rq start` spawns a detached daemon that owns the engine and the
   auth-injecting proxy; it reuses an engine the Settings panel started,
