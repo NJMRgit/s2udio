@@ -8,6 +8,7 @@ use anyhow::{Context, Result};
 use cava::CavaPane;
 use controls::ControlsPane;
 use directories::DirectoriesPane;
+use downloads::DownloadsPane;
 use either::Either;
 use header::HeaderPane;
 use jellyfin::JellyfinPane;
@@ -64,6 +65,7 @@ pub mod albums;
 pub mod cava;
 pub mod controls;
 pub mod directories;
+pub mod downloads;
 pub mod empty;
 #[cfg(debug_assertions)]
 pub mod frame_count;
@@ -109,6 +111,7 @@ pub enum Panes<'pane_ref> {
     #[cfg(debug_assertions)]
     Logs(&'pane_ref mut LogsPane),
     Directories(&'pane_ref mut DirectoriesPane),
+    Downloads(&'pane_ref mut DownloadsPane),
     Artists(&'pane_ref mut TagBrowserPane),
     AlbumArtists(&'pane_ref mut TagBrowserPane),
     Albums(&'pane_ref mut AlbumsPane),
@@ -143,6 +146,7 @@ pub struct PaneContainer {
     #[cfg(debug_assertions)]
     pub logs: LogsPane,
     pub directories: DirectoriesPane,
+    pub downloads: DownloadsPane,
     pub albums: AlbumsPane,
     pub artists: TagBrowserPane,
     pub album_artists: TagBrowserPane,
@@ -169,6 +173,7 @@ impl PaneContainer {
             #[cfg(debug_assertions)]
             logs: LogsPane::new(),
             directories: DirectoriesPane::new(ctx),
+            downloads: DownloadsPane::new(ctx),
             albums: AlbumsPane::new(ctx),
             artists: TagBrowserPane::new(Tag::Artist, PaneType::Artists, None, ctx),
             album_artists: TagBrowserPane::new(
@@ -242,6 +247,7 @@ impl PaneContainer {
             #[cfg(debug_assertions)]
             PaneType::Logs => Ok(Panes::Logs(&mut self.logs)),
             PaneType::Directories { .. } => Ok(Panes::Directories(&mut self.directories)),
+            PaneType::Downloads => Ok(Panes::Downloads(&mut self.downloads)),
             PaneType::Artists => Ok(Panes::Artists(&mut self.artists)),
             PaneType::AlbumArtists => Ok(Panes::AlbumArtists(&mut self.album_artists)),
             PaneType::Albums => Ok(Panes::Albums(&mut self.albums)),
@@ -312,7 +318,8 @@ macro_rules! pane_call {
         match & mut $screen { Panes::Queue(s) => s.$fn ($($param),+),
         Panes::QueueHeader(s) => s.$fn ($($param),+), #[cfg(debug_assertions)]
         Panes::Logs(s) => s.$fn ($($param),+), Panes::Directories(s) => s.$fn
-        ($($param),+), Panes::Artists(s) => s.$fn ($($param),+), Panes::AlbumArtists(s)
+        ($($param),+), Panes::Downloads(s) => s.$fn ($($param),+),
+        Panes::Artists(s) => s.$fn ($($param),+), Panes::AlbumArtists(s)
         => s.$fn ($($param),+), Panes::Albums(s) => s.$fn ($($param),+),
         Panes::Playlists(s) => s.$fn ($($param),+), Panes::Search(s) => s.$fn
         ($($param),+), Panes::Radio(s) => s.$fn ($($param),+), Panes::Jellyfin(s) => s
@@ -357,6 +364,16 @@ pub(crate) trait Pane {
     fn handle_mouse_event(&mut self, event: MouseEvent, ctx: &Ctx) -> Result<()> {
         Ok(())
     }
+    /// Round 63.1 (3): the left button was released somewhere in the app
+    /// (or the pointer left the window). Mouse routing goes by pointer
+    /// position, so a release that ends over another pane never reaches
+    /// the pane that armed a scrollbar drag — this broadcast runs after
+    /// the position-routed dispatch and lets every pane drop any armed
+    /// capture it still holds. Panes without captures keep the no-op
+    /// default.
+    fn on_global_mouse_release(&mut self, _ctx: &Ctx) -> Result<()> {
+        Ok(())
+    }
     fn on_query_finished(
         &mut self,
         id: &'static str,
@@ -377,6 +394,16 @@ pub(crate) mod browser {
     use itertools::Itertools;
     use ratatui::{style::Style, text::{Line, Span}};
     use crate::{ctx::Ctx, mpd::commands::Song, shared::mpd_query::PreviewGroup};
+    /// The `[Tags]` labels of the info box follow the design example's
+    /// capitalization (Date, Format): the MPD tag key with its first
+    /// character uppercased.
+    fn capitalize_tag_key(key: &str) -> String {
+        let mut chars = key.chars();
+        match chars.next() {
+            Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+            None => String::new(),
+        }
+    }
     impl Song {
         pub(crate) fn to_preview(
             &self,
@@ -385,117 +412,63 @@ pub(crate) mod browser {
             ctx: &Ctx,
         ) -> Vec<PreviewGroup> {
             let separator = Span::from(": ");
-            let start_of_line_spacer = Span::from(" ");
-            let mut info_group = PreviewGroup::new(
-                Some(" --- [Info]"),
-                Some(group_style),
-            );
-            let file = Line::from(
-                vec![
-                    start_of_line_spacer.clone(), Span::styled("File", key_style),
-                    separator.clone(), Span::from(self.file.clone()),
-                ],
-            );
-            info_group.push(file.into());
-            if let Some(file_name) = self.file_name() {
-                info_group
-                    .push(
-                        Line::from(
-                                vec![
-                                    start_of_line_spacer.clone(), Span::styled("Filename",
-                                    key_style), separator.clone(), Span::from(file_name
-                                    .into_owned()),
-                                ],
-                            )
-                            .into(),
-                    );
-            }
+            let spacer = Span::from(" ");
+            // Metadata first (no group header, per the design template):
+            // Title / Artist / Album / Duration.
+            let mut metadata_group = PreviewGroup::new(None, Some(group_style));
             if let Some(title) = self.metadata.get("title") {
-                title
-                    .for_each(|item| {
-                        info_group
-                            .push(
-                                Line::from(
-                                        vec![
-                                            start_of_line_spacer.clone(), Span::styled("Title",
-                                            key_style), separator.clone(), Span::from(item.to_owned()),
-                                        ],
-                                    )
-                                    .into(),
-                            );
-                    });
+                title.for_each(|item| {
+                    metadata_group.push(
+                        Line::from(vec![
+                            spacer.clone(),
+                            Span::styled("Title", key_style),
+                            separator.clone(),
+                            Span::from(item.to_owned()),
+                        ])
+                        .into(),
+                    );
+                });
             }
             if let Some(artist) = self.metadata.get("artist") {
-                artist
-                    .for_each(|item| {
-                        info_group
-                            .push(
-                                Line::from(
-                                        vec![
-                                            start_of_line_spacer.clone(), Span::styled("Artist",
-                                            key_style), separator.clone(), Span::from(item.to_owned()),
-                                        ],
-                                    )
-                                    .into(),
-                            );
-                    });
+                artist.for_each(|item| {
+                    metadata_group.push(
+                        Line::from(vec![
+                            spacer.clone(),
+                            Span::styled("Artist", key_style),
+                            separator.clone(),
+                            Span::from(item.to_owned()),
+                        ])
+                        .into(),
+                    );
+                });
             }
             if let Some(album) = self.metadata.get("album") {
-                album
-                    .for_each(|item| {
-                        info_group
-                            .push(
-                                Line::from(
-                                        vec![
-                                            start_of_line_spacer.clone(), Span::styled("Album",
-                                            key_style), separator.clone(), Span::from(item.to_owned()),
-                                        ],
-                                    )
-                                    .into(),
-                            );
-                    });
+                album.for_each(|item| {
+                    metadata_group.push(
+                        Line::from(vec![
+                            spacer.clone(),
+                            Span::styled("Album", key_style),
+                            separator.clone(),
+                            Span::from(item.to_owned()),
+                        ])
+                        .into(),
+                    );
+                });
             }
             if let Some(duration) = &self.duration {
-                info_group
-                    .push(
-                        Line::from(
-                                vec![
-                                    start_of_line_spacer.clone(), Span::styled("Duration",
-                                    key_style), separator.clone(), Span::from(ctx.config
-                                    .duration_format.format(duration.as_secs())),
-                                ],
-                            )
-                            .into(),
-                    );
-            }
-            info_group
-                .push(
-                    Line::from(
-                            vec![
-                                start_of_line_spacer.clone(), Span::styled("Last Modified",
-                                key_style), separator.clone(), Span::from(self.last_modified
-                                .to_string()),
-                            ],
-                        )
-                        .into(),
+                metadata_group.push(
+                    Line::from(vec![
+                        spacer.clone(),
+                        Span::styled("Duration", key_style),
+                        separator.clone(),
+                        Span::from(ctx.config.duration_format.format(duration.as_secs())),
+                    ])
+                    .into(),
                 );
-            if let Some(added) = &self.added {
-                info_group
-                    .push(
-                        Line::from(
-                                vec![
-                                    start_of_line_spacer.clone(), Span::styled("Added",
-                                    key_style), separator.clone(), Span::from(added
-                                    .to_string()),
-                                ],
-                            )
-                            .into(),
-                    );
             }
-            let mut tags_group = PreviewGroup::new(
-                Some(" --- [Tags]"),
-                Some(group_style),
-            );
+            // [Tags] second: every remaining MPD tag (Date, Format, Genre, …),
+            // labels capitalized like the design example (Date / Format).
+            let mut tags_group = PreviewGroup::new(Some(" [Tags] "), Some(group_style));
             for (k, v) in self
                 .metadata
                 .iter()
@@ -505,22 +478,69 @@ pub(crate) mod browser {
                 .sorted_by_key(|(key, _)| *key)
             {
                 v.for_each(|item| {
-                    tags_group
-                        .push(
-                            Line::from(
-                                    vec![
-                                        start_of_line_spacer.clone(), Span::styled(k.clone(),
-                                        key_style), separator.clone(), Span::from(item.to_owned()),
-                                    ],
-                                )
-                                .into(),
-                        );
+                    tags_group.push(
+                        Line::from(vec![
+                            spacer.clone(),
+                            Span::styled(capitalize_tag_key(k), key_style),
+                            separator.clone(),
+                            Span::from(item.to_owned()),
+                        ])
+                        .into(),
+                    );
                 });
             }
+            // [File] last: Location (the file's directory) and Name (the
+            // file name), plus the file-level timestamps.
+            let mut file_group = PreviewGroup::new(Some(" [File] "), Some(group_style));
+            if let Some(location) = std::path::Path::new(&self.file).parent() {
+                file_group.push(
+                    Line::from(vec![
+                        spacer.clone(),
+                        Span::styled("Location", key_style),
+                        separator.clone(),
+                        Span::from(location.to_string_lossy().into_owned()),
+                    ])
+                    .into(),
+                );
+            }
+            if let Some(name) = std::path::Path::new(&self.file).file_name() {
+                file_group.push(
+                    Line::from(vec![
+                        spacer.clone(),
+                        Span::styled("Name", key_style),
+                        separator.clone(),
+                        Span::from(name.to_string_lossy().into_owned()),
+                    ])
+                    .into(),
+                );
+            }
+            file_group.push(
+                Line::from(vec![
+                    spacer.clone(),
+                    Span::styled("Last Modified", key_style),
+                    separator.clone(),
+                    Span::from(self.last_modified.to_string()),
+                ])
+                .into(),
+            );
+            if let Some(added) = &self.added {
+                file_group.push(
+                    Line::from(vec![
+                        spacer.clone(),
+                        Span::styled("Added", key_style),
+                        separator.clone(),
+                        Span::from(added.to_string()),
+                    ])
+                    .into(),
+                );
+            }
             let mut result = Vec::new();
+            result.push(metadata_group);
+            result.push(tags_group);
+            result.push(file_group);
             if let Some(yt) = ctx.yt_info.borrow().get(&self.file) {
                 let mut yt_group = PreviewGroup::new(
-                    Some(" --- [YouTube]"),
+                    Some(" [YouTube] "),
                     Some(group_style),
                 );
                 if !yt.title.is_empty() {
@@ -528,7 +548,7 @@ pub(crate) mod browser {
                         .push(
                             Line::from(
                                     vec![
-                                        start_of_line_spacer.clone(), Span::styled("Title",
+                                        spacer.clone(), Span::styled("Title",
                                         key_style), separator.clone(), Span::from(yt.title.clone()),
                                     ],
                                 )
@@ -543,7 +563,7 @@ pub(crate) mod browser {
                             Span::raw(" ")
                         };
                         let mut row_spans = vec![
-                            start_of_line_spacer.clone(), label, separator.clone()
+                            spacer.clone(), label, separator.clone()
                         ];
                         let (spans, _) = crate::ui::panes::lyrics::linkify_line(
                             line,
@@ -555,11 +575,10 @@ pub(crate) mod browser {
                 }
                 result.push(yt_group);
             }
-            result.extend([info_group, tags_group]);
             let stickers = ctx.song_stickers_if_supported(&self.file);
             if let Some(stickers) = stickers && !stickers.is_empty() {
                 let mut stickers_group = PreviewGroup::new(
-                    Some(" --- [Stickers]"),
+                    Some(" [Stickers] "),
                     Some(group_style),
                 );
                 for (k, v) in stickers.iter().sorted_by_key(|(key, _)| *key) {
@@ -567,7 +586,7 @@ pub(crate) mod browser {
                         .push(
                             Line::from(
                                     vec![
-                                        start_of_line_spacer.clone(), Span::styled(k.clone(),
+                                        spacer.clone(), Span::styled(k.clone(),
                                         key_style), separator.clone(), Span::from(v.to_owned()),
                                     ],
                                 )
@@ -1563,8 +1582,26 @@ impl SizedPaneOrSplit {
                     if ctx.is_pane_hidden(&pane.pane) {
                         continue;
                     }
+                    // Round 60 (A7): the browser panes draw their own
+                    // region boxes (tree/items/info), so their config
+                    // border is suppressed — a pane must not draw a
+                    // border inside an outer border (no nested boxes).
+                    // Round 60c (S2): the TABS pane draws its own box
+                    // (junctions/centering per the mock), so its config
+                    // border is suppressed unconditionally.
+                    let borders = if Self::pane_draws_own_boxes(&pane.pane)
+                        && (pane.borders == Borders::ALL
+                            || matches!(
+                                pane.pane,
+                                PaneType::Tabs | PaneType::Controls
+                            ))
+                    {
+                        Borders::NONE
+                    } else {
+                        pane.borders
+                    };
                     let mut block = Block::default()
-                        .borders(pane.borders)
+                        .borders(borders)
                         .border_set((&pane.border_symbols).into());
                     let bg_color = pane.background_color;
                     if pane.border_title.is_empty() {
@@ -1638,7 +1675,31 @@ impl SizedPaneOrSplit {
                                 if let Some(min) = pane.collapse_below && split_size < min {
                                     return Constraint::Length(0);
                                 }
-                                let size = if pane.window_sizes.is_empty() {
+                                let size = if matches!(
+                                    &pane.pane,
+                                    SizedPaneOrSplit::Pane(p) if matches!(p.pane, PaneType::Tabs),
+                                ) {
+                                    // Round 60c (S2): the tabs pane draws
+                                    // its own complete box (top border +
+                                    // row 1 + divider + libraries row +
+                                    // bottom border) and its config border
+                                    // is suppressed, so the pane height IS
+                                    // the box: 3 rows compact (Queue tab
+                                    // active: border + labels + border) and
+                                    // 5 rows expanded (library tab active:
+                                    // border + labels + divider + centered
+                                    // libraries + border). Independent of
+                                    // the configured pane borders.
+                                    crate::config::theme::PercentOrLength::Length(
+                                        if ctx.active_tab.as_str().eq_ignore_ascii_case(
+                                            crate::config::tabs::QUEUE_TAB_NAME,
+                                        ) {
+                                            3
+                                        } else {
+                                            5
+                                        },
+                                    )
+                                } else if pane.window_sizes.is_empty() {
                                     pane.size
                                 } else {
                                     Self::window_size_at(root_height, &pane.window_sizes)
@@ -1727,11 +1788,26 @@ impl SizedPaneOrSplit {
     /// hidden individually; a split counts as hidden when every pane inside
     /// it is hidden too (e.g. album art + lyrics both disabled), so the
     /// whole split collapses and the rest of the layout fills the space.
+    ///
+    /// Round 63 (2): `Empty` margin panes never count as hidden — a split
+    /// whose only non-empty children are all hidden collapses (the queue
+    /// body in Radio mode: the Empty margins + hidden Queue/QueueHeader
+    /// boxes must not keep rendering a hollow box with the "N songs /
+    /// total time" title), while a split made ONLY of Empty panes stays
+    /// visible (the queue page's pure-margin toggle strip).
     fn is_sub_pane_hidden(pane: &SizedPaneOrSplit, ctx: &Ctx) -> bool {
         match pane {
             SizedPaneOrSplit::Pane(p) => ctx.is_pane_hidden(&p.pane),
             SizedPaneOrSplit::Split { panes, .. } => {
-                panes.iter().all(|sub| Self::is_sub_pane_hidden(&sub.pane, ctx))
+                let non_empty: Vec<&SizedPaneOrSplit> = panes
+                    .iter()
+                    .map(|sub| &sub.pane)
+                    .filter(|p| !matches!(p, SizedPaneOrSplit::Pane(p) if p.pane == PaneType::Empty))
+                    .collect();
+                match non_empty.as_slice() {
+                    [] => false,
+                    rest => rest.iter().all(|sub| Self::is_sub_pane_hidden(sub, ctx)),
+                }
             }
         }
     }
@@ -1752,6 +1828,27 @@ impl SizedPaneOrSplit {
             }
             _ => None,
         }
+    }
+    /// Panes that render their own region boxes (tree + items + info) and
+    /// must not be framed by the config's outer border (round 60 A7 — no
+    /// nested boxes). Their `borders: ALL` config entry is a no-op; the
+    /// pane's own region boxes provide the borders instead.
+    fn pane_draws_own_boxes(pane: &PaneType) -> bool {
+        matches!(
+            pane,
+            PaneType::Directories { .. }
+                | PaneType::Downloads
+                | PaneType::Playlists { .. }
+                | PaneType::Jellyfin { .. }
+                | PaneType::Radio { .. }
+                | PaneType::Search
+                | PaneType::Artists
+                | PaneType::Albums
+                | PaneType::AlbumArtists
+                | PaneType::Browser { .. }
+                | PaneType::Tabs
+                | PaneType::Controls
+        )
     }
     /// The minimum total height a sub-pane needs to show its content:
     /// [`MIN_PANE_CONTENT_HEIGHT`] rows plus the rows its borders take from

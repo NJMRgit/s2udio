@@ -1444,6 +1444,31 @@ fn stream_via_daemon(ctx: &Ctx, item: &PastedItem, key: &str, indices: Vec<usize
     Ok(())
 }
 
+/// Round 64: stream a currently-downloading daemon job from the Downloads
+/// modal (same flow as the paste picker's "Stream" — the engine serves
+/// the already-downloaded pieces while the job continues). The request
+/// carries the job's own fields (`file_indices` empty = the single best
+/// playable file) and does NOT extend the job's kept-file list.
+pub(crate) fn stream_daemon_job(ctx: &Ctx, job: &crate::core::dlctl::DlJob) -> Result<()> {
+    let request_id = crate::core::dlctl::new_request_id();
+    let request = crate::core::dlctl::DlJobRequest::Stream {
+        id: request_id.clone(),
+        infohash: job.infohash.clone(),
+        source_key: job.source_key.clone(),
+        torrent_item: job.torrent_item.clone(),
+        torrent_name: Some(job.torrent_name.clone()),
+        file_indices: Vec::new(),
+    };
+    crate::core::dlctl::write_request(&request)
+        .map_err(|err| anyhow::anyhow!("{err}"))?;
+    ensure_daemon_started(ctx);
+    let _ = ctx
+        .app_event_sender
+        .send(crate::AppEvent::DlStatePoll);
+    open_dl_wait(ctx, request_id);
+    Ok(())
+}
+
 /// Play a downloader-daemon response (round 54, §2.3): build the mpv
 /// entries from the response's stream URLs (userinfo auth), insert the
 /// synthetic yt-info entries (title = file name, channel = torrent name —

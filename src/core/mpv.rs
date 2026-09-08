@@ -644,6 +644,71 @@ pub fn mpv_append_load(socket: &Path, url: &str) {
         .to_string();
     let _ = mpv_exchange(socket, &command, 1);
 }
+/// Write `entries` to a temporary `.m3u` carrying their titles (`#EXTINF`).
+///
+/// Round 68 (host-validated 2026-09-08): mpv v0.41 mis-associates
+/// interleaved `--force-media-title=<title> <url>` args — the LAST title
+/// lands on an early playlist entry and every other entry gets none (only
+/// single-file launches showed the right name). A `.m3u` with `#EXTINF`
+/// titles is the reliable carrier for both fresh launches and runtime
+/// playlist switches: every entry keeps its correct name in mpv's OSD /
+/// playlist.
+pub fn write_mpv_m3u(entries: &[MpvPlaylistEntry]) -> PathBuf {
+    // A private subdirectory keeps the launch directory clean: mpv v0.41
+    // appends ANY sibling .m3u files found next to the playlist file as
+    // untitled extra entries (verified), so a shared /tmp would pollute
+    // every launch with the previous sessions' playlist files. The stale
+    // files of older instances are removed here so a fresh launch sees
+    // exactly one .m3u.
+    let dir = std::env::temp_dir().join("s2u-mpv");
+    let _ = std::fs::create_dir_all(&dir);
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with("s2u-mpv-playlist-") && name.ends_with(".m3u") {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+    let path = dir.join(format!("s2u-mpv-playlist-{}.m3u", std::process::id()));
+    let mut out = String::from("#EXTM3U\n");
+    for entry in entries {
+        if !entry.title.is_empty() {
+            let seconds = entry.duration.map(|d| d.round() as u64).unwrap_or(0);
+            // The title follows the first comma (EXTINF syntax); strip
+            // line breaks so one entry cannot span multiple lines.
+            let title = entry.title.replace(['\r', '\n'], " ");
+            out.push_str(&format!("#EXTINF:{seconds},{title}\n"));
+        }
+        out.push_str(&entry.url);
+        out.push('\n');
+    }
+    if let Err(err) = std::fs::write(&path, out) {
+        log::warn!(path:?, error:? = err; "Failed to write the mpv playlist .m3u");
+    }
+    path
+}
+/// Replace the running mpv's whole playlist with a titled `.m3u` written by
+/// [`write_mpv_m3u`]: `loadfile <m3u> replace` expands the file into its
+/// entries, each carrying its `#EXTINF` title.
+///
+/// URL-only replaces/append cannot do this on mpv v0.41: per-file options
+/// over IPC are rejected (`invalid parameter`) and a `loadfile … replace`
+/// without a title inherits the stale title of the entry it replaces —
+/// that left the OSD on the wrong episode name after a mid-play switch.
+pub fn mpv_load_playlist(socket: &Path, m3u: &Path) {
+    // `loadlist`, not `loadfile`: loadfile treats the .m3u as a single
+    // media file and, once the session's playlist originated from an .m3u,
+    // keeps the old playlist-file as a stale untitled entry (verified);
+    // `loadlist <file> replace` swaps the whole playlist for the file's
+    // titled entries, position 0 = first entry.
+    let command = serde_json::json!(
+        { "command" : ["loadlist", m3u.to_string_lossy(), "replace"] }
+    )
+        .to_string();
+    let _ = mpv_exchange(socket, &command, 1);
+}
 /// Switch the running mpv instance to another entry of its current
 /// playlist (a same-season episode switch; the playlist stays intact so
 /// `playlist-pos` keeps tracking correctly).
@@ -668,10 +733,18 @@ pub fn pause_mpv() {
     let Some(socket) = mpv_socket() else { return };
     let _ = mpv_exchange(&socket, r#"{"command":["set_property","pause",true]}"#, 1);
 }
-/// Launch `mpv` on a single URL/path (see [`run_mpv_many`]).
-pub fn run_mpv(ctx: &Ctx, url: &str) {
-    run_mpv_many(ctx, vec![url.to_owned()]);
+/// Launch `mpv` on a single URL with a display title (round 64: Jellyfin
+/// single plays used to pass only the URL, so mpv's window showed the raw
+/// `stream?static=true&api_key=…` — the title now comes along as
+/// `--force-media-title`).
+pub fn run_mpv_titled(ctx: &Ctx, url: &str, title: &str) {
+    run_mpv_playlist(
+        ctx,
+        vec![MpvPlaylistEntry::new(title.to_owned(), url.to_owned(), None)],
+        None,
+    );
 }
+
 /// Play `entries` in mpv. When a video is already playing, the running
 /// instance is switched to the new entry (loadfile replace + the recorded
 /// playlist + the session state) instead of launching a second mpv; only
@@ -691,11 +764,12 @@ pub fn play_video_entries(ctx: &Ctx, entries: Vec<MpvPlaylistEntry>) {
             run_mpv_playlist(ctx, entries, None);
             return;
         }
-        mpv_playlist_clear(&socket);
-        mpv_loadfile(&socket, &first.url);
-        for entry in entries.iter().skip(1) {
-            mpv_append_load(&socket, &entry.url);
-        }
+        // Round 68: switch mpv onto a titled .m3u of the whole list.
+        // URL-only appends carry no titles once mpv v0.41 is loaded, and a
+        // replace without a title inherits the old current entry's (stale)
+        // name — the OSD then shows the wrong episode after a switch.
+        let m3u = write_mpv_m3u(&entries);
+        mpv_load_playlist(&socket, &m3u);
     } else {
         *ctx.mpv.pending_loadfile.borrow_mut() = Some(
             entries.iter().map(|e| e.url.clone()).collect::<Vec<_>>(),
@@ -710,6 +784,71 @@ pub fn play_video_entries(ctx: &Ctx, entries: Vec<MpvPlaylistEntry>) {
             crate::AppEvent::UiEvent(crate::ui::UiAppEvent::MpvItemChanged {
                 item_id,
                 title: first.title,
+            }),
+        );
+}
+/// Play `entries` starting at `start_index` while KEEPING the whole list.
+///
+/// Round 69 (user feedback): selecting an episode from the Queue page used
+/// to re-queue `entries[start_index..]`, dropping everything before it —
+/// the season then lost its earlier episodes and later selections indexed
+/// a shrunken list (the "plays the Nth of the remaining queue" drift).
+/// A selection now only POSITIONS playback inside the full list: a running
+/// mpv that already holds exactly this list is switched in place
+/// (`playlist-pos`), otherwise the list is loaded through a titled .m3u
+/// (`loadlist replace`) and then positioned at `start_index`. Nothing is
+/// cleared in either case.
+pub fn play_video_entries_at(
+    ctx: &Ctx,
+    entries: Vec<MpvPlaylistEntry>,
+    start_index: usize,
+) {
+    let target = entries.get(start_index).cloned().unwrap_or_default();
+    if !ctx.mpv.active {
+        run_mpv_playlist(ctx, entries.clone(), Some(start_index));
+        return;
+    }
+    if let Some(socket) = ctx.mpv.socket.clone() {
+        if read_mpv_state(&socket).is_none() {
+            log::warn!(
+                socket:?; "mpv socket is dead; launching a fresh mpv for the new video"
+            );
+            run_mpv_playlist(ctx, entries.clone(), Some(start_index));
+            return;
+        }
+        let recorded: Vec<String> = ctx
+            .mpv
+            .playlist
+            .borrow()
+            .iter()
+            .map(|e| e.url.clone())
+            .collect();
+        let target_urls: Vec<String> = entries.iter().map(|e| e.url.clone()).collect();
+        if recorded == target_urls && start_index < recorded.len() {
+            // Same list is already in mpv: just move playback to the
+            // selected entry, the rest of the list stays intact.
+            mpv_set_playlist_pos(&socket, start_index);
+        } else {
+            let m3u = write_mpv_m3u(&entries);
+            mpv_load_playlist(&socket, &m3u);
+            if start_index < entries.len() {
+                mpv_set_playlist_pos(&socket, start_index);
+            }
+        }
+    } else {
+        run_mpv_playlist(ctx, entries.clone(), Some(start_index));
+    }
+    *ctx.mpv.playlist.borrow_mut() = entries;
+    ctx.mpv.playlist_pos.set(Some(start_index.min(
+        ctx.mpv.playlist.borrow().len().saturating_sub(1),
+    )));
+    let item_id = crate::jellyfin::item_id_from_url(&target.url).unwrap_or_default();
+    let _ = ctx
+        .app_event_sender
+        .send(
+            crate::AppEvent::UiEvent(crate::ui::UiAppEvent::MpvItemChanged {
+                item_id,
+                title: target.title,
             }),
         );
 }
@@ -850,25 +989,6 @@ pub(crate) unsafe fn detach_child(cmd: &mut std::process::Command) {
         });
     }
 }
-/// Launch `mpv` on one or more URLs/paths, fully detached from the terminal
-/// (no output into the TUI, own session so a terminal close does not kill
-/// it). Used for Jellyfin/online video playback; mpv plays the items in
-/// sequence. The playlist is recorded on the session so the Queue tab's
-/// Video view can show it.
-pub fn run_mpv_many(ctx: &Ctx, urls: Vec<String>) {
-    let entries: Vec<MpvPlaylistEntry> = urls
-        .into_iter()
-        .map(|url| MpvPlaylistEntry::new(display_title(&url), url, None))
-        .collect();
-    run_mpv_playlist(ctx, entries, None);
-}
-/// A display title for a raw URL/path (the file name, or the URL when
-/// nothing else can be derived).
-fn display_title(url: &str) -> String {
-    let name = url.rsplit('/').next().unwrap_or(url);
-    let name = name.split('?').next().unwrap_or(name);
-    if name.is_empty() { url.to_owned() } else { name.to_owned() }
-}
 /// Launch `mpv` on a playlist of entries (titles + URLs), starting at
 /// `start_index` when given. Fully detached from the terminal; mpv plays
 /// the items in sequence. The playlist is recorded on the session (shown in
@@ -896,6 +1016,13 @@ pub fn run_mpv_playlist(
         .iter()
         .map(|e| e.url.clone())
         .collect();
+    // Round 68 (host-validated): the round-64 `--force-media-title`
+    // approach only worked for single-file plays — with several
+    // interleaved `--force-media-title=<t> <url>` pairs mpv v0.41 puts the
+    // LAST title on an early entry and gives the rest none. Hand mpv a
+    // `.m3u` carrying the entry titles (`#EXTINF`) instead: every playlist
+    // entry keeps its correct name in the window / OSD.
+    let m3u = write_mpv_m3u(&ctx.mpv.playlist.borrow());
     let was_playing = ctx.status.state == State::Play;
     use crate::mpd::commands::volume::Bound as _;
     let volume = *ctx.status.volume.value();
@@ -930,8 +1057,11 @@ pub fn run_mpv_playlist(
                 cmd.arg(format!("--slang={lang}"));
             }
         }
-        cmd.arg("--");
-        cmd.args(&urls);
+        // The .m3u carries the entry titles (and the per-entry URLs); a
+        // single playlist-file argument replaces the interleaved
+        // `--force-media-title` pairs. `--` is no longer needed: the URLs
+        // live inside the playlist file, not on the command line.
+        cmd.arg(&m3u);
         cmd.stdin(std::process::Stdio::null());
         cmd.stdout(std::process::Stdio::null());
         cmd.stderr(
@@ -952,7 +1082,7 @@ pub fn run_mpv_playlist(
         let start_url = urls.get(start_index.unwrap_or(0)).cloned().unwrap_or_default();
         let _ = event_sender
             .send(AppEvent::MpvSessionStarted {
-                url: start_url,
+                url: start_url.clone(),
             });
         if was_playing {
             log::debug!("Pausing MPD while mpv plays");
@@ -970,6 +1100,29 @@ pub fn run_mpv_playlist(
         let status = child.wait();
         MPV_RUNNING.store(false, std::sync::atomic::Ordering::Relaxed);
         log::debug!(status:?; "mpv exited");
+        // Round 59: mpv exiting non-zero on a YouTube link usually means
+        // yt-dlp could not resolve a playable stream (the bgutil PO-token
+        // minter's 12 h cliff — see shared::bgutil). Heal the service once
+        // so the NEXT playback attempt gets a fresh minter.
+        let failed = status
+            .as_ref()
+            .map(|s| !s.success())
+            .unwrap_or(true);
+        if failed && crate::shared::bgutil::is_youtube_url(&start_url) {
+            match crate::shared::bgutil::maybe_heal() {
+                crate::shared::bgutil::HealOutcome::Restarted => {
+                    crate::shared::macros::status_info!(
+                        "YouTube stream failed — bgutil token service was stale, restarted it; try again"
+                    );
+                }
+                crate::shared::bgutil::HealOutcome::Failed => {
+                    crate::shared::macros::status_warn!(
+                        "YouTube stream failed and the bgutil token service restart failed"
+                    );
+                }
+                _ => {}
+            }
+        }
         let _ = event_sender.send(AppEvent::MpvSessionEnded);
     });
 }

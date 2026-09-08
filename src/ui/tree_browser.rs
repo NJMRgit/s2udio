@@ -4,7 +4,7 @@ use ratatui::{
     layout::{Constraint, Layout, Position, Rect},
     style::Style,
     text::{Line, Span},
-    widgets::{Block, Borders, ListItem, ListState, Paragraph},
+    widgets::{Block, Borders, ListItem, ListState},
 };
 
 use crate::{
@@ -155,12 +155,6 @@ pub(in crate::ui) trait TreeBrowserCore: Pane {
             ctx.config.theme.current_item_style
         }
     }
-    /// Keybinding hints, one line each, for the tips strip.
-    fn tips_lines(&self, ctx: &Ctx) -> Vec<Line<'static>>;
-    /// The tips strip area (radio insets it by one column).
-    fn tips_area(&self, area: Rect) -> Rect {
-        area
-    }
     /// The tree-browser layout args (tree min width / hide threshold;
     /// the info-box cap is read by the panes that use the capped formula).
     /// Default: today's constants (50 / 120 / Some(15)); the browser
@@ -183,15 +177,17 @@ pub(in crate::ui) trait TreeBrowserCore: Pane {
             (tree, right)
         }
     }
-    /// Split the right side into (items, tips, info).
-    fn layout_vertical(&self, right: Rect) -> (Rect, Rect, Rect) {
-        let [items, tips, info] = Layout::vertical([
-            Constraint::Percentage(60),
-            Constraint::Length(3),
+    /// Round 60c (S3): split the right side into (items, info) — the
+    /// legend/tips strip is gone, the lists and info boxes reclaim it.
+    /// `&mut self` so panes can record layout state (round 64: the
+    /// Jellyfin poster shelf carved out of the items list's bottom).
+    fn layout_vertical(&mut self, right: Rect) -> (Rect, Rect) {
+        let [items, info] = Layout::vertical([
+            Constraint::Min(0),
             Constraint::Percentage(33),
         ])
         .areas(right);
-        (items, tips, info)
+        (items, info)
     }
 
     // ── defaulted behavior hooks ───────────────────────────────────────
@@ -410,14 +406,13 @@ pub(in crate::ui) trait TreeBrowserCore: Pane {
     /// `split_tree`/`layout_vertical` hooks).
     fn render_tree_browser(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) -> Result<()> {
         let (tree_area, right) = self.split_tree(area);
-        let (items_area, tips_area, info_area) = self.layout_vertical(right);
+        let (items_area, info_area) = self.layout_vertical(right);
         if tree_area.width > 0 {
             self.render_tree(frame, tree_area, ctx);
         } else {
             self.on_tree_hidden();
         }
         self.render_items(frame, items_area, ctx);
-        self.render_tips(frame, tips_area, ctx);
         self.render_info(frame, info_area, ctx);
         Ok(())
     }
@@ -428,14 +423,17 @@ pub(in crate::ui) trait TreeBrowserCore: Pane {
         let rows = self.tree_rows();
         let block = Block::default()
             .borders(Borders::ALL)
-            .border_style(ctx.config.as_border_style())
-            .title(self.tree_title());
+            .border_set(ctx.config.as_border_set())
+            .border_style(ctx.config.as_border_style());
         let inner = block.inner(area);
-        self.set_tree_area(inner);
+        // Round 60 (A2/A7): the Item Box template (title row, connected
+        // separator, scrollable list).
+        let content = crate::ui::item_box_header(frame, inner, self.tree_title(), ctx);
+        self.set_tree_area(content);
 
         let hover_idx = crate::ui::panes::hovered_item(
             ctx.mouse_pos(),
-            inner,
+            content,
             self.tree_list().offset(),
             rows.len(),
             1,
@@ -466,11 +464,12 @@ pub(in crate::ui) trait TreeBrowserCore: Pane {
             crate::ui::widgets::virtualized_list::VirtualizedList::new(items)
                 .highlight_style(self.tree_highlight(hover_idx, ctx))
                 .style(ctx.config.as_list_name_style()),
-            inner,
+            content,
             frame.buffer_mut(),
             self.tree_list_mut(),
         );
         ratatui::widgets::Widget::render(block, area, frame.buffer_mut());
+        crate::ui::connect_box_divider(frame, area, area.y + 2, ctx);
     }
 
     /// The right items list: bordered list of the pane's rows, hover
@@ -478,27 +477,18 @@ pub(in crate::ui) trait TreeBrowserCore: Pane {
     fn render_items(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) {
         let block = Block::default()
             .borders(Borders::ALL)
-            .border_style(ctx.config.as_border_style())
-            // `items_title` is the title as it appears left of the count,
-            // pre-padded per pane (" Library", " Items ", " Stations ") —
-            // the shared format only appends "(n)" so each pane keeps its
-            // own pre-Phase-2 spacing (Phase 2.1 parity close-out).
-            .title(format!("{}({}) ", self.items_title(), self.items_len()));
+            .border_set(ctx.config.as_border_set())
+            .border_style(ctx.config.as_border_style());
         let inner = block.inner(area);
-        // Round 48: the items list gets a 1-column scrollbar (the same
-        // split the queue table uses); the drag handler recomputes this
-        // column from `items_area()`.
-        let (list_area, scrollbar_area) = if ctx.config.theme.scrollbar.is_some()
-            && inner.width > 1
-        {
-            let [list, scrollbar] = ratatui::layout::Layout::horizontal([
-                ratatui::layout::Constraint::Percentage(100),
-                ratatui::layout::Constraint::Length(1),
-            ])
-            .areas(inner);
-            (list, scrollbar)
+        // Round 60 (A2/A7): the Item Box template — a plain title row (
+        // one-char margin), a connected separator line, then the
+        // scrollable list; no nested box, no border title.
+        let title = format!("{}({}) ", self.items_title(), self.items_len());
+        let content = crate::ui::item_box_header(frame, inner, title.trim(), ctx);
+        let (list_area, scrollbar_area) = if ctx.config.theme.scrollbar.is_some() {
+            crate::ui::scrollbar_strip(content)
         } else {
-            (inner, Rect::default())
+            (content, Rect::default())
         };
         self.set_items_area(list_area);
 
@@ -534,17 +524,18 @@ pub(in crate::ui) trait TreeBrowserCore: Pane {
                 max_offset.saturating_add(1).max(1),
             )
             .position(position);
-            frame.render_stateful_widget(scrollbar, scrollbar_area, &mut scrollbar_state);
+            crate::ui::render_scrollbar_strip(
+                frame,
+                scrollbar,
+                scrollbar_area,
+                &mut scrollbar_state,
+            );
         }
         ratatui::widgets::Widget::render(block, area, frame.buffer_mut());
+        crate::ui::connect_box_divider(frame, area, area.y + 2, ctx);
     }
 
     /// The keybinding hints strip between the items list and the info box.
-    fn render_tips(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) {
-        let dim = ctx.config.as_list_text_style();
-        frame.render_widget(Paragraph::new(self.tips_lines(ctx)).style(dim), self.tips_area(area));
-    }
-
     /// Drop the temporary play entry once playback has moved on.
     fn cleanup_temp_play(&mut self, ctx: &Ctx) {
         if let Some(temp) = self.temp_play_id()
@@ -646,10 +637,12 @@ pub(in crate::ui) trait TreeBrowserCore: Pane {
             && matches!(event.kind, MouseEventKind::LeftClick | MouseEventKind::Drag { .. })
         {
             let area = self.items_area();
+            // The full 4-cell strip (glyph + margins) is the activation
+            // area (round 60 A6).
             let scrollbar_area = Rect {
                 x: area.right(),
                 y: area.y,
-                width: 1,
+                width: 4,
                 height: area.height,
             };
             if area.width > 0 && self.handle_items_scrollbar(event, scrollbar_area, ctx)?

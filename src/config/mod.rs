@@ -421,15 +421,21 @@ impl Config {
             .unwrap_or_default()
     }
     /// Whether a tab should be hidden from the tab bar and tab cycling. The
-    /// Radio/Jellyfin tabs can be disabled from the Settings panel; they stay
-    /// in the config so they can be re-enabled without losing their
-    /// definitions.
+    /// Jellyfin tab can be disabled from the Settings panel; it stays in the
+    /// config so it can be re-enabled without losing its definition.
     ///
     /// Round 28: the Search tab folded into the MPD tab (a Library/Search
     /// toggle inside it), so any leftover config entry named "Search" is
     /// hidden too — the tab bar never shows it again.
+    ///
+    /// Round 62 (Q4): Radio is no longer a tab at all — it left the
+    /// Libraries group and lives on the Queue page as a sub-page. Any
+    /// leftover "Radio" tab entry (including old `show_radio_tab: true`
+    /// settings) is ALWAYS hidden so it can never reappear in the navbar;
+    /// the settings toggle was dropped (the field stays for config parse
+    /// compatibility and is ignored).
     pub fn is_tab_hidden(&self, tab: &TabName) -> bool {
-        (!self.ui.show_radio_tab && tab.as_str().eq_ignore_ascii_case("Radio"))
+        tab.as_str().eq_ignore_ascii_case("Radio")
             || (!self.ui.show_jellyfin_tab
                 && tab.as_str().eq_ignore_ascii_case("Jellyfin"))
             || tab.as_str().eq_ignore_ascii_case("Search")

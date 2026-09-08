@@ -5,7 +5,7 @@ use itertools::Itertools;
 use ratatui::{
     Frame, layout::Flex, prelude::{Constraint, Layout, Rect},
     style::Style, text::{Line, Span},
-    widgets::{Block, Borders, ListState, Row, TableState},
+    widgets::{Block, ListState, Row, TableState},
 };
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
@@ -78,7 +78,7 @@ pub struct QueuePane {
     /// `LeftRelease`.
     video_band: crate::ui::band::BandState,
     /// Click areas of the Audio / Video / Chapters toggle.
-    pub(crate) toggle_areas: [Rect; 3],
+    pub(crate) toggle_areas: [Rect; 4],
 }
 #[derive(Debug, Enum)]
 enum Areas {
@@ -231,21 +231,28 @@ impl QueuePane {
                 }
             }
             crate::ctx::QueueTabMode::Audio => {}
+            crate::ctx::QueueTabMode::Radio => {
+                // No list state to reset — the radio browser pane renders
+                // the whole body in Radio mode (Round 62 Q2).
+            }
         }
     }
     /// Cycle the list view: Audio -> Video -> Chapters -> Audio (Chapters
     /// only when the track has markers).
     fn cycle_tab(&mut self, ctx: &Ctx) {
+        // Round 62 (Q2): Audio -> Video -> Chapters (when the track has
+        // markers) -> Radio -> Audio, matching the toggle's visual order.
         let next = match ctx.queue_tab.get() {
             crate::ctx::QueueTabMode::Audio => crate::ctx::QueueTabMode::Video,
             crate::ctx::QueueTabMode::Video => {
                 if Self::chapters_available(ctx) {
                     crate::ctx::QueueTabMode::Chapters
                 } else {
-                    crate::ctx::QueueTabMode::Audio
+                    crate::ctx::QueueTabMode::Radio
                 }
             }
-            crate::ctx::QueueTabMode::Chapters => crate::ctx::QueueTabMode::Audio,
+            crate::ctx::QueueTabMode::Chapters => crate::ctx::QueueTabMode::Radio,
+            crate::ctx::QueueTabMode::Radio => crate::ctx::QueueTabMode::Audio,
         };
         Self::set_tab(self, ctx, next);
     }
@@ -268,7 +275,7 @@ impl QueuePane {
             video_scrollbar_drag: crate::shared::mouse_event::ScrollbarDrag::default(),
             chapters_scrollbar_drag: crate::shared::mouse_event::ScrollbarDrag::default(),
             video_band: crate::ui::band::BandState::default(),
-            toggle_areas: [Rect::default(); 3],
+            toggle_areas: [Rect::default(); 4],
         }
     }
     pub fn init(ctx: &Ctx) -> (Vec<Constraint>, Vec<Property<SongProperty>>) {
@@ -331,15 +338,20 @@ impl QueuePane {
     /// keybind cycles). The ●/○ glyphs are both single-width so the row
     /// never shifts between modes. Audio and Video always show; Chapters
     /// appears when the current track has markers.
+    /// The `● Audio ⭘ Video ⭘ Radio` (＋ `Chapters` when the track has
+    /// markers) toggle row. Round 62 (Q3) moved it to the TOP of the queue
+    /// page, directly under the navbar — the layout reserves a 1-row strip
+    /// there and this paints the row onto it (`tab_area` is the Queue
+    /// tab's content area, so its top row is the strip). Clicking a
+    /// segment switches the mode (`c` keybind cycles the same order).
     pub(crate) fn render_toggle_on_border(
         &mut self,
         frame: &mut Frame,
-        _pane_borders: Borders,
-        block_area: Rect,
+        tab_area: Rect,
         ctx: &Ctx,
     ) {
-        self.toggle_areas = [Rect::default(); 3];
-        if block_area.height == 0 || block_area.y < 2 {
+        self.toggle_areas = [Rect::default(); 4];
+        if tab_area.height == 0 {
             return;
         }
         if ctx.queue_tab.get() == crate::ctx::QueueTabMode::Chapters
@@ -347,22 +359,17 @@ impl QueuePane {
         {
             ctx.queue_tab.set(crate::ctx::QueueTabMode::Audio);
         }
-        let corner_x = block_area.x.saturating_sub(2);
-        let border_y = {
-            let buf = frame.buffer_mut();
-            (1..block_area.y)
-                .rev()
-                .find(|&row| is_box_corner_glyph(buf[(corner_x, row)].symbol()))
-        };
-        let Some(border_y) = border_y else { return };
-        let y = border_y.saturating_sub(1);
         let active = ctx.queue_tab.get();
         let chapters_visible = Self::chapters_available(ctx);
+        // Audio and Video always show; Chapters is conditional on the
+        // track having markers; Radio always shows (round 62 Q2).
         let mut segments = vec![
             crate ::ui::widgets::sub_tab_bar::Segment { label : "Audio", active : active
             == crate ::ctx::QueueTabMode::Audio, }, crate
             ::ui::widgets::sub_tab_bar::Segment { label : "Video", active : active ==
-            crate ::ctx::QueueTabMode::Video, },
+            crate ::ctx::QueueTabMode::Video, }, crate
+            ::ui::widgets::sub_tab_bar::Segment { label : "Radio", active : active ==
+            crate ::ctx::QueueTabMode::Radio, },
         ];
         if chapters_visible {
             segments
@@ -371,15 +378,17 @@ impl QueuePane {
                     active: active == crate::ctx::QueueTabMode::Chapters,
                 });
         }
-        let right = block_area.right().saturating_sub(1);
+        let right = tab_area.right().saturating_sub(1);
         let bar = crate::ui::widgets::sub_tab_bar::SubTabBar::new(
             &segments,
-            corner_x + 1,
-            y,
+            tab_area.x.saturating_add(1),
+            tab_area.y,
             right,
         );
         for (idx, area) in bar.render(frame, ctx).into_iter().enumerate() {
-            self.toggle_areas[idx] = area;
+            if idx < self.toggle_areas.len() {
+                self.toggle_areas[idx] = area;
+            }
         }
     }
 }
@@ -397,6 +406,10 @@ impl Pane for QueuePane {
             crate::ctx::QueueTabMode::Chapters if Self::chapters_available(ctx) => {
                 return self.render_chapters(frame, ctx);
             }
+            // Round 62 (Q2): in Radio mode the queue pane is hidden by the
+            // mode-aware layout (the radio browser renders in its place);
+            // this arm is defensive in case it is ever rendered anyway.
+            crate::ctx::QueueTabMode::Radio => return Ok(()),
             _ => {}
         }
         let filter_text = self.queue.filter_text(self.areas[Areas::Table].width, ctx);
@@ -531,12 +544,12 @@ impl Pane for QueuePane {
         if let Some(scrollbar) = config.as_styled_scrollbar()
             && self.areas[Areas::Scrollbar].width > 0
         {
-            frame
-                .render_stateful_widget(
-                    scrollbar,
-                    self.areas[Areas::Scrollbar],
-                    self.queue.state.as_scrollbar_state_ref(),
-                );
+            crate::ui::render_scrollbar_strip(
+                frame,
+                scrollbar,
+                self.areas[Areas::Scrollbar],
+                self.queue.state.as_scrollbar_state_ref(),
+            );
         }
         if let Some(filter_text) = filter_text
             && self.areas[Areas::FilterArea].height > 0
@@ -558,12 +571,13 @@ impl Pane for QueuePane {
     }
     fn calculate_areas(&mut self, area: Rect, ctx: &Ctx) -> Result<()> {
         let Ctx { config, .. } = ctx;
-        let scrollbar_area_width: u16 = config.theme.scrollbar.is_some().into();
-        let [table_area, scrollbar_area] = Layout::horizontal([
-                Constraint::Percentage(100),
-                Constraint::Length(scrollbar_area_width),
-            ])
-            .areas(area);
+        let (table_area, scrollbar_area) = if config.theme.scrollbar.is_some()
+            && area.width > 4
+        {
+            crate::ui::scrollbar_strip(area)
+        } else {
+            (area, Rect::default())
+        };
         let mut table_area = if self.queue.filter_active {
             self.areas[Areas::FilterArea] = Rect::new(
                 table_area.x,
@@ -712,18 +726,29 @@ impl Pane for QueuePane {
         if matches!(event.kind, MouseEventKind::LeftClick | MouseEventKind::DoubleClick)
             && self.toggle_areas.iter().any(|area| area.contains(position))
         {
-            let mode = if self.toggle_areas[1].contains(position) {
-                crate::ctx::QueueTabMode::Video
-            } else if self.toggle_areas[2].contains(position) {
-                crate::ctx::QueueTabMode::Chapters
-            } else {
-                crate::ctx::QueueTabMode::Audio
-            };
-            self.queue.state.band.cancel();
-            self.video_band.cancel();
-            Self::set_tab(self, ctx, mode);
-            ctx.render()?;
-            return Ok(());
+            // Segment order (round 62 Q2): 0 Audio, 1 Video, 2 Chapters
+            // (only when the track has markers) else Radio, 3 Radio.
+            let chapters_visible = Self::chapters_available(ctx);
+            let mode = self
+                .toggle_areas
+                .iter()
+                .enumerate()
+                .find(|(_, area)| area.contains(position))
+                .and_then(|(idx, _)| match idx {
+                    0 => Some(crate::ctx::QueueTabMode::Audio),
+                    1 => Some(crate::ctx::QueueTabMode::Video),
+                    2 if chapters_visible => Some(crate::ctx::QueueTabMode::Chapters),
+                    2 => Some(crate::ctx::QueueTabMode::Radio),
+                    3 => Some(crate::ctx::QueueTabMode::Radio),
+                    _ => None,
+                });
+            if let Some(mode) = mode {
+                self.queue.state.band.cancel();
+                self.video_band.cancel();
+                Self::set_tab(self, ctx, mode);
+                ctx.render()?;
+                return Ok(());
+            }
         }
         if Self::chapters_available(ctx)
             && ctx.queue_tab.get() == crate::ctx::QueueTabMode::Chapters
@@ -920,11 +945,20 @@ impl Pane for QueuePane {
                         self.queue.state.inner.offset(),
                     )
                 }
+                // Round 62 (Q2): the queue pane is hidden in Radio mode, so
+                // its scrollbar never gets events (kept for exhaustiveness).
+                crate::ctx::QueueTabMode::Radio => {
+                    (0, self.areas[Areas::Table].height as usize, 0)
+                }
             };
             let drag = match mode {
                 crate::ctx::QueueTabMode::Video => &mut self.video_scrollbar_drag,
                 crate::ctx::QueueTabMode::Chapters => &mut self.chapters_scrollbar_drag,
                 crate::ctx::QueueTabMode::Audio => &mut self.queue.state.scrollbar_drag,
+                // Round 62 (Q2): the queue pane is hidden in Radio mode, so
+                // its scrollbar never gets events; the arm is only for
+                // exhaustiveness.
+                crate::ctx::QueueTabMode::Radio => &mut self.queue.state.scrollbar_drag,
             };
             if let Some(perc) = drag
                 .handle(
@@ -945,6 +979,9 @@ impl Pane for QueuePane {
                     crate::ctx::QueueTabMode::Audio => {
                         self.queue.state.scroll_to(perc, ctx.config.scrolloff);
                     }
+                    // Round 62 (Q2): unreachable (queue pane hidden in
+                    // Radio mode); kept for exhaustiveness.
+                    crate::ctx::QueueTabMode::Radio => {}
                 }
                 ctx.render()?;
                 return Ok(());
@@ -1194,6 +1231,16 @@ impl Pane for QueuePane {
         }
         Ok(())
     }
+    /// Round 63.1 (3): a release anywhere in the app ends every armed
+    /// scrollbar grab — a release that ended over another pane never
+    /// reached this pane's `handle_mouse_event`, so without this the grab
+    /// would survive and hijack the next strip drag with a stale offset.
+    fn on_global_mouse_release(&mut self, _ctx: &Ctx) -> Result<()> {
+        self.queue.state.scrollbar_drag.disarm();
+        self.video_scrollbar_drag.disarm();
+        self.chapters_scrollbar_drag.disarm();
+        Ok(())
+    }
     fn handle_insert_mode(
         &mut self,
         kind: InputResultEvent,
@@ -1215,6 +1262,8 @@ impl Pane for QueuePane {
                 ctx.input.clear_buffer(self.queue.filter_buffer_id);
             }
             InputResultEvent::NoChange => {}
+            InputResultEvent::AtStart => {}
+            InputResultEvent::CursorLeft => {}
         }
         ctx.render()?;
         Ok(())
@@ -1777,11 +1826,6 @@ fn stream_column_line(
         text = out;
     }
     Some(Line::from(Span::styled(text, prop.style.unwrap_or_default())))
-}
-/// Whether a cell holds a box's top-left corner glyph (any of the ratatui
-/// border sets), used to locate the box the queue/chapters toggle sits above.
-fn is_box_corner_glyph(symbol: &str) -> bool {
-    matches!(symbol, "╭" | "┌" | "╒" | "╔" | "╓" | "╥")
 }
 #[derive(Default)]
 struct QueueRow {

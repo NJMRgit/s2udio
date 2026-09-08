@@ -1141,12 +1141,7 @@ impl LyricsPane {
         let (list_area, scrollbar_area) = if overflow
             && ctx.config.as_styled_scrollbar().is_some()
         {
-            let [a, b] = Layout::horizontal([
-                    Constraint::Percentage(100),
-                    Constraint::Length(1),
-                ])
-                .areas(area);
-            (a, b)
+            crate::ui::scrollbar_strip(area)
         } else {
             (area, Rect::default())
         };
@@ -1164,10 +1159,10 @@ impl LyricsPane {
                 .info_items_len
                 .saturating_sub(list_area.height as usize);
             let position = self.info_state.offset().min(max_offset);
-            StatefulWidget::render(
+            crate::ui::render_scrollbar_strip(
+                frame,
                 scrollbar,
                 scrollbar_area,
-                frame.buffer_mut(),
                 &mut ratatui::widgets::ScrollbarState::new(max_offset + 1)
                     .position(position)
                     .viewport_content_length(list_area.height as usize),
@@ -1419,12 +1414,7 @@ impl LyricsPane {
         let (list_area, scrollbar_area) = if body.len() > body_area.height as usize
             && ctx.config.as_styled_scrollbar().is_some()
         {
-            let [a, b] = Layout::horizontal([
-                    Constraint::Percentage(100),
-                    Constraint::Length(1),
-                ])
-                .areas(body_area);
-            (a, b)
+            crate::ui::scrollbar_strip(body_area)
         } else {
             (body_area, Rect::default())
         };
@@ -1466,10 +1456,10 @@ impl LyricsPane {
                 .info_items_len
                 .saturating_sub(list_area.height as usize);
             let position = self.info_state.offset().min(max_offset);
-            StatefulWidget::render(
+            crate::ui::render_scrollbar_strip(
+                frame,
                 scrollbar,
                 scrollbar_area,
-                frame.buffer_mut(),
                 &mut ratatui::widgets::ScrollbarState::new(max_offset + 1)
                     .position(position)
                     .viewport_content_length(list_area.height as usize),
@@ -1859,7 +1849,9 @@ impl Pane for LyricsPane {
             && self.info_scrollbar_area.height > 0
             && matches!(
                 event.kind, MouseEventKind::LeftClick | MouseEventKind::Drag { .. }
-            ) && self.info_scrollbar_area.contains(event.into())
+            ) && (self.info_scrollbar_area.contains(event.into())
+                || (matches!(event.kind, MouseEventKind::Drag { .. })
+                    && self.info_scrollbar_drag.is_active()))
         {
             let max = self.info_items_len.saturating_sub(self.info_area.height as usize);
             if max > 0 {

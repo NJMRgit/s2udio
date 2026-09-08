@@ -80,13 +80,22 @@ impl QueuePane {
                 let mut section = section;
                 if let Some(play_idx) = selected_idx {
                     section = section.item("Play from here", move |ctx| {
+                        // Round 69 (user feedback): "Play from here" is the
+                        // only play action in the video context menu and it
+                        // used to re-queue `entries[play_idx..]` — dropping
+                        // the episodes before the selection and shifting the
+                        // queue under later selections. It now positions
+                        // playback at the selected episode inside the WHOLE
+                        // list: the season keeps every episode and the queue
+                        // just progresses from the selection.
                         let entries: Vec<crate::core::mpv::MpvPlaylistEntry> = if jellyfin {
-                            ctx.mpv.playlist.borrow().iter().skip(play_idx).cloned().collect()
+                            ctx.mpv.playlist.borrow().clone()
                         } else {
-                            ctx.video_playlist.borrow().iter().skip(play_idx).cloned().collect()
+                            ctx.video_playlist.borrow().clone()
                         };
                         if !entries.is_empty() {
-                            crate::core::mpv::play_video_entries(ctx, entries);
+                            let idx = play_idx.min(entries.len() - 1);
+                            crate::core::mpv::play_video_entries_at(ctx, entries, idx);
                         }
                         Ok(())
                     });

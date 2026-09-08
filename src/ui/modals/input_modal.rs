@@ -176,6 +176,8 @@ impl<'a, C: FnOnce(&Ctx, &str) -> Result<()> + 'a> Modal for InputModal<'a, C> {
             }
             InputResultEvent::NoChange => {}
             InputResultEvent::Cancel => {}
+            InputResultEvent::AtStart => {}
+            InputResultEvent::CursorLeft => {}
         }
         ctx.render()?;
         Ok(())

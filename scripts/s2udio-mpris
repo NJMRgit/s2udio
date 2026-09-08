@@ -30,6 +30,15 @@ PLAYER = "org.mpris.MediaPlayer2.Player"
 
 _last_sig = None  # (title, artist, art, playing) fingerprint of the last emission
 _last_position = None
+_last_touch = time.time()
+
+# Round 68 (host-validated 2026-09-08): the bridge otherwise emits nothing
+# during steady playback (no fingerprint change, no >2 s position jump), so
+# the desktop widget freezes on the last advertised state until the user
+# pauses/resumes (play/pause flips the fingerprint). A Seeked on every 1 s
+# advance plus a periodic PropertiesChanged while playing keep the media
+# controls live (title, timeline, seek bar).
+HEARTBEAT_S = 15
 
 
 def read_state():
@@ -331,7 +340,7 @@ _missed = 0
 
 def on_tick(obj):
     """Emit MPRIS change signals and exit when s2udio is gone."""
-    global _last_sig, _last_position, _missed
+    global _last_sig, _last_position, _missed, _last_touch
     try:
         age = time.time() - os.path.getmtime(STATE)
     except OSError:
@@ -348,6 +357,7 @@ def on_tick(obj):
             sys.exit(0)
         return True
     _missed = 0
+    now = time.time()
 
     st = read_state() or {}
     sig = (
@@ -367,9 +377,27 @@ def on_tick(obj):
         )
         obj.PropertiesChanged(PLAYER, changed, [])
     position = int((st.get("position") or 0) * 1_000_000)
-    if _last_position is not None and abs(position - _last_position) > 2_000_000:
+    # Round 68: Seeked on every >= 1 s advance (was > 2 s), so the
+    # timeline follows normal playback, not just jumps.
+    if _last_position is not None and abs(position - _last_position) >= 1_000_000:
         obj.Seeked(dbus.Int64(position))
     _last_position = position
+    # Periodic refresh while playing: forces clients to re-read the
+    # metadata/status even when nothing changed, so a missed signal cannot
+    # leave the widget on stale playback info.
+    if st.get("playing") and now - _last_touch >= HEARTBEAT_S:
+        _last_touch = now
+        obj.PropertiesChanged(
+            PLAYER,
+            dbus.Dictionary(
+                {
+                    "Metadata": dbus.Dictionary(obj.Metadata(), signature="sv"),
+                    "PlaybackStatus": obj.PlaybackStatus(),
+                },
+                signature="sv",
+            ),
+            [],
+        )
     return True
 
 

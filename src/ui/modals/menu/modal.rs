@@ -136,6 +136,8 @@ impl Modal for MenuModal<'_> {
                     ctx.input.clear_buffer(self.filter_buffer_id);
                 }
                 InputResultEvent::NoChange => {}
+                InputResultEvent::AtStart => {}
+                InputResultEvent::CursorLeft => {}
             }
         } else {
             match kind {
@@ -150,6 +152,8 @@ impl Modal for MenuModal<'_> {
                     self.sections[self.current_section_idx].unfocus(ctx);
                 }
                 InputResultEvent::NoChange => {}
+                InputResultEvent::AtStart => {}
+                InputResultEvent::CursorLeft => {}
             }
         }
         ctx.render()?;

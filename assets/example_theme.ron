@@ -90,30 +90,16 @@
                 collapse_below: 56,
             ),
             (
-                size: "5",
+                // Round 60c (S4): the Playback Center fills the whole box —
+                // top border, info row, `├─┬─┬─┤` divider, transport row,
+                // `├─┬─┴─…─┤` divider, NORMAL row and bottom border — 7 rows.
+                // Round 61 (P2): the legacy input_mode + progress_bar tail
+                // split is REMOVED — the badge and seekbar live inside the
+                // Controls box's NORMAL row, nothing renders below the box.
+                size: "7",
                 borders: "ALL",
                 border_symbols: Rounded,
                 pane: Pane(Controls),
-            ),
-            (
-                size: "3",
-                pane: Split(
-                    direction: Horizontal,
-                    panes: [
-                        (
-                            size: "12",
-                            borders: "ALL",
-                            border_symbols: Inherited(parent: Rounded, top_right: "┬", bottom_right: "┴"),
-                            pane: Component("input_mode")
-                        ),
-                        (
-                            size: "100%",
-                            borders: "TOP | BOTTOM | RIGHT",
-                            border_symbols: Rounded,
-                            pane: Component("progress_bar"),
-                        ),
-                    ]
-                ),
             ),
         ],
     ),

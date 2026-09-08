@@ -140,8 +140,8 @@ fn basic_rows() -> Vec<(String, String, Cow<'static, str>)> {
         ("Enter".to_owned(), "Confirm".to_owned(), "open the context menu / open a region".into()),
         ("Space".to_owned(), "Play/Pause".to_owned(), "play or pause playback".into()),
         ("Tab".to_owned(), "NextTab".to_owned(), "switch to the next tab".into()),
-        ("Shift+E".to_owned(), "NextTab".to_owned(), "switch to the next tab".into()),
-        ("Shift+Q".to_owned(), "PreviousTab".to_owned(), "switch to the previous tab".into()),
+        ("E / Shift+E".to_owned(), "NextLibraryTab".to_owned(), "cycle to the next library tab".into()),
+        ("Q / Shift+Q".to_owned(), "PreviousLibraryTab".to_owned(), "cycle to the previous library tab".into()),
         (
             "Esc".to_owned(),
             "Close / Settings".to_owned(),

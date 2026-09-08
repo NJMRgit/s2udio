@@ -1333,6 +1333,7 @@ impl TreeBrowserCore for RadioPane {
         }
         let block = Block::default()
             .borders(Borders::ALL)
+            .border_set(ctx.config.as_border_set())
             .border_style(ctx.config.as_border_style())
             .title(" Info ");
         let inner = block.inner(area);
@@ -1360,24 +1361,6 @@ impl TreeBrowserCore for RadioPane {
             Some(RegionKind::State { state, .. }) => format!(" {state} "),
             None => " Stations ".to_owned(),
         }
-    }
-    fn tips_lines(&self, ctx: &Ctx) -> Vec<Line<'static>> {
-        let base = ctx.config.as_list_name_style();
-        let dim = ctx.config.as_list_text_style();
-        vec![
-            Line::from(vec![Span::styled("w/s · ↑/↓", base),
-            Span::styled("  move list", dim)]), Line::from(vec![Span::styled("d / →",
-            base), Span::styled("  open region · play station", dim),]),
-            Line::from(vec![Span::styled("a / ←", base), Span::styled("  back out",
-            dim), Span::styled("Enter", base), Span::styled("  context menu", dim),]),
-        ]
-    }
-    /// The radio tips strip is inset by one column.
-    fn tips_area(&self, area: Rect) -> Rect {
-        area.inner(ratatui::layout::Margin {
-            horizontal: 1,
-            vertical: 0,
-        })
     }
     /// The configured tree-browser args (plumbing for uniformity; the
     /// regions tree keeps its 30% share below).
@@ -1431,6 +1414,15 @@ impl TreeBrowserCore for RadioPane {
 }
 impl Pane for RadioPane {
     fn render(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) -> Result<()> {
+        // Round 62 (Q2): the pane now also renders inside the Queue page's
+        // Radio sub-page, where mode switches (toggle / `c`) never go
+        // through a tab change — so `before_show` (which dispatches the
+        // favourites + directory fetches) would never run before the first
+        // Queue-page render. Lazy-init on the first render fills the
+        // browser the same way a tab entry does.
+        if !self.initialized {
+            self.before_show(ctx)?;
+        }
         self.render_tree_browser(frame, area, ctx)
     }
     fn before_show(&mut self, ctx: &Ctx) -> Result<()> {

@@ -33,6 +33,16 @@ use crate::{
     },
     shared::id::{self, Id},
 };
+/// The tab-bar groups (round 60): the Queue tab is its own group; every
+/// other visible tab is a "library" tab. The canonical row order of the
+/// libraries matches the user's design sketch (Music = the MPD tab;
+/// Jellyfin before Downloads). Round 62 (Q4): Radio LEFT the Libraries
+/// group entirely — it lives on the Queue page as a sub-page now, so the
+/// canonical row is MPD • Playlists • Jellyfin • Downloads.
+pub const QUEUE_TAB_NAME: &str = "Queue";
+pub const LIBRARY_TABS_CANONICAL: [&str; 4] =
+    ["MPD", "Playlists", "Jellyfin", "Downloads"];
+
 #[derive(Debug, Into, Deref, Display)]
 pub struct TabName(pub std::sync::Arc<String>);
 impl From<String> for TabName {
@@ -116,6 +126,11 @@ pub enum PaneTypeFile {
     #[cfg(debug_assertions)]
     Logs,
     Directories { #[serde(default)] tree: TreeBrowserArgs },
+    /// Round 60 (amendment): the Downloads tab lists the saved stream /
+    /// torrent downloads (`~/Downloads/s2udio-downloads`), typed by media
+    /// kind; playback runs through mpv (the files live outside the MPD
+    /// library).
+    Downloads,
     Artists,
     Albums,
     AlbumArtists,
@@ -157,6 +172,11 @@ enum PaneTypeFileArgs {
     #[cfg(debug_assertions)]
     Logs,
     Directories { #[serde(default)] tree: TreeBrowserArgs },
+    /// Round 60 (amendment): the Downloads tab lists the saved stream /
+    /// torrent downloads (`~/Downloads/s2udio-downloads`), typed by media
+    /// kind; playback runs through mpv (the files live outside the MPD
+    /// library).
+    Downloads,
     Artists,
     Albums,
     AlbumArtists,
@@ -193,6 +213,7 @@ impl From<PaneTypeFileArgs> for PaneTypeFile {
             #[cfg(debug_assertions)]
             PaneTypeFileArgs::Logs => PaneTypeFile::Logs,
             PaneTypeFileArgs::Directories { tree } => PaneTypeFile::Directories { tree },
+            PaneTypeFileArgs::Downloads => PaneTypeFile::Downloads,
             PaneTypeFileArgs::Artists => PaneTypeFile::Artists,
             PaneTypeFileArgs::Albums => PaneTypeFile::Albums,
             PaneTypeFileArgs::AlbumArtists => PaneTypeFile::AlbumArtists,
@@ -284,6 +305,7 @@ impl PaneTypeFile {
                         tree: TreeBrowserArgs::default(),
                     }
                 }
+                "Downloads" => PaneTypeFile::Downloads,
                 "Search" => PaneTypeFile::Search,
                 "Radio" => {
                     PaneTypeFile::Radio {
@@ -343,6 +365,8 @@ pub enum PaneType {
     #[cfg(debug_assertions)]
     Logs,
     Directories { tree: TreeBrowserArgs },
+    /// Downloads tab (round 60 amendment) — see [`PaneTypeFile::Downloads`].
+    Downloads,
     Artists,
     AlbumArtists,
     Albums,
@@ -417,6 +441,7 @@ impl TryFrom<PaneTypeFile> for PaneType {
                 #[cfg(debug_assertions)]
                 PaneTypeFile::Logs => PaneType::Logs,
                 PaneTypeFile::Directories { tree } => PaneType::Directories { tree },
+                PaneTypeFile::Downloads => PaneType::Downloads,
                 PaneTypeFile::Artists => PaneType::Artists,
                 PaneTypeFile::AlbumArtists => PaneType::AlbumArtists,
                 PaneTypeFile::Albums => PaneType::Albums,
@@ -1121,6 +1146,16 @@ impl Default for TabsFile {
                 BorderSymbolsFile::Rounded, pane :
                 PaneOrSplitFile::Pane(PaneTypeFile::Playlists { tree :
                 TreeBrowserArgs::default(), }), }], }, },
+                TabFile { name : "Downloads".to_string(), border_type : BorderTypeFile::None, pane :
+                PaneOrSplitFile::Split { borders : BordersFile::NONE, direction :
+                DirectionFile::Vertical, panes : vec![SubPaneFile { collapse_below :
+                None, shrink_below : None, window_sizes : Vec::new(), size : "100%"
+                .to_string(), background_color : None, borders : BordersFile::ALL,
+                border_style : None, border_active_style : None, border_title :
+                Vec::new(), border_title_position : BorderTitlePosition::Top,
+                border_title_alignment : Alignment::Left, border_symbols :
+                BorderSymbolsFile::Rounded, pane :
+                PaneOrSplitFile::Pane(PaneTypeFile::Downloads,), }], }, },
             ],
         )
     }

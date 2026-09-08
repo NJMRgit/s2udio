@@ -2,13 +2,25 @@ use crossterm::event::{KeyCode, KeyModifiers};
 
 use crate::config::keys::Key;
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum InputResultEvent {
     Push,
     Pop,
     Confirm,
     NoChange,
     Cancel,
+    /// The cursor is already at the buffer's start when a `Back` (Left)
+    /// movement arrives (round 63.1): the move cannot happen, so the pane
+    /// may treat the key as a request to leave (search staged exit) or
+    /// ignore it. Distinct from `CursorLeft`, which follows a `Back` that
+    /// DID move the cursor.
+    AtStart,
+    /// A `Back` (Left) movement that moved the cursor to the previous
+    /// grapheme (round 63.1): search bars count consecutive occasions to
+    /// let the SECOND Left at the bar exit exactly like Esc #2 — the
+    /// insert-mode text cursor must stay usable for the first press.
+    /// Every other consumer ignores it exactly like `NoChange`.
+    CursorLeft,
 }
 
 #[derive(Debug, Clone, Copy)]

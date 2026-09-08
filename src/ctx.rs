@@ -22,13 +22,16 @@ use crate::{
     },
     ui::{StatusMessage, input::InputManager},
 };
-/// The sub-tab shown in the Queue tab's list area: the MPD queue (Audio),
-/// the mpv video playlist (Video), or the current track's chapters.
+/// The sub-page shown in the Queue tab's body: the MPD queue (Audio),
+/// the mpv video playlist (Video), the current track's chapters, or the
+/// radio browser (Round 62 Q2 — Radio left the Libraries group and lives
+/// here as a sub-page now).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QueueTabMode {
     Audio,
     Video,
     Chapters,
+    Radio,
 }
 pub const FETCH_SONG_STICKERS: &str = "fetch_song_stickers";
 pub const LIKE_STICKER: &str = "like";
@@ -678,6 +681,29 @@ impl Ctx {
     /// always on the Jellyfin tab, plus the album art pane collapses
     /// entirely when there is no art to display (Round 48).
     pub(crate) fn is_pane_hidden(&self, pane: &crate::config::tabs::PaneType) -> bool {
+        // Round 62 (Q2): while the Queue page is in Radio mode, the queue
+        // body swaps to the radio browser — the queue panes (AlbumArt,
+        // Lyrics, QueueHeader, Queue list) collapse and the Radio pane
+        // takes the whole body; in every other mode the Radio pane is
+        // hidden. Only applies while the Queue tab is active.
+        if self.active_tab.as_str().eq_ignore_ascii_case(crate::config::tabs::QUEUE_TAB_NAME) {
+            let queue_body = matches!(
+                pane,
+                crate::config::tabs::PaneType::AlbumArt
+                    | crate::config::tabs::PaneType::Lyrics
+                    | crate::config::tabs::PaneType::QueueHeader()
+                    | crate::config::tabs::PaneType::Queue
+                    | crate::config::tabs::PaneType::Radio { .. }
+            );
+            if queue_body {
+                let radio_mode = self.queue_tab.get() == QueueTabMode::Radio;
+                return if radio_mode {
+                    !matches!(pane, crate::config::tabs::PaneType::Radio { .. })
+                } else {
+                    matches!(pane, crate::config::tabs::PaneType::Radio { .. })
+                };
+            }
+        }
         if matches!(pane, crate ::config::tabs::PaneType::Cava)
             && self.cava_hidden_on(self.active_tab.as_str())
         {
@@ -690,11 +716,12 @@ impl Ctx {
         }
         self.config.is_pane_hidden(pane)
     }
-    /// Whether the cava visualizer is hidden on `tab`: always on the
-    /// Jellyfin tab (video browsing doesn't feed it), and on every tab while
+    /// Whether the cava visualizer is hidden on `tab`: Round 62 (Q5) the
+    /// cava area shows ONLY on the Queue page — MPD / Playlists /
+    /// Downloads / Jellyfin (any library tab) hide it, plus every tab while
     /// a video plays in mpv (MPD is paused, the bars would go flat).
     pub(crate) fn cava_hidden_on(&self, tab: &str) -> bool {
-        tab.eq_ignore_ascii_case("Jellyfin") || self.mpv.active
+        !tab.eq_ignore_ascii_case(crate::config::tabs::QUEUE_TAB_NAME) || self.mpv.active
     }
     pub(crate) fn find_current_lyrics_path(&self) -> Option<PathBuf> {
         use crate::shared::lrc::colocated_lrc_path;

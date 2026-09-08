@@ -278,6 +278,20 @@ fn handle_work_request(
                 data,
             })
         }
+        WorkRequest::FetchJellyfinSearch { query } => {
+            let data = jellyfin_handle(
+                    jellyfin_config_file,
+                    |jf| {
+                        jf.search_hints(&query)
+                            .map(|items| JellyfinResult::SearchHints { items })
+                    },
+                )
+                .unwrap_or_else(|err| JellyfinResult::Error(err.to_string()));
+            Ok(WorkDone::JellyfinFetched {
+                id: crate::ui::panes::jellyfin::JF_SEARCH,
+                data,
+            })
+        }
         WorkRequest::FetchJellyfinFolder { parent_id } => {
             let data = jellyfin_handle(
                     jellyfin_config_file,

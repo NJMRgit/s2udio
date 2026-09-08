@@ -39,10 +39,47 @@ pub fn resolve_audio_urls(urls: &[String]) -> (Vec<YtStreamInfo>, Vec<String>) {
     let bin = std::env::var("S2UDIO_YTDLP_BIN").unwrap_or_else(|_| "yt-dlp".to_owned());
     let mut resolved: Vec<YtStreamInfo> = Vec::new();
     let mut failures = Vec::new();
+    // Round 59: before resolving any YouTube-style link, heal a stale
+    // bgutil PO-token service (its 12 h minter cliff leaves yt-dlp unable
+    // to mint tokens and every YouTube video "won't play" until the
+    // service is restarted). The heal is cooldown-guarded and a fresh
+    // service is never touched.
+    if urls.iter().any(|u| crate::shared::bgutil::is_youtube_url(u)) {
+        match crate::shared::bgutil::maybe_heal() {
+            crate::shared::bgutil::HealOutcome::Restarted => {
+                log::info!("bgutil restarted before YouTube resolution (12h minter renewal)");
+            }
+            crate::shared::bgutil::HealOutcome::Failed => {
+                log::warn!("bgutil was stale but the restart failed; YouTube may not resolve");
+            }
+            _ => {}
+        }
+    }
     for url in urls {
         match resolve_one(&bin, url) {
             Ok(mut entries) => resolved.append(&mut entries),
-            Err(err) => failures.push(format!("{url}: {err}")),
+            Err(err) => {
+                // Round 59 self-heal: a failed YouTube resolution with a
+                // stale bgutil is exactly the 12 h minter cliff — restart
+                // once and retry the URL a single time.
+                if crate::shared::bgutil::is_youtube_url(url)
+                    && crate::shared::bgutil::maybe_heal()
+                        == crate::shared::bgutil::HealOutcome::Restarted
+                {
+                    log::info!("bgutil restarted after a YouTube resolution failure; retrying once");
+                    match resolve_one(&bin, url) {
+                        Ok(mut entries) => {
+                            resolved.append(&mut entries);
+                            continue;
+                        }
+                        Err(retry_err) => {
+                            failures.push(format!("{url}: {retry_err} (after bgutil renewal)"));
+                            continue;
+                        }
+                    }
+                }
+                failures.push(format!("{url}: {err}"));
+            }
         }
     }
     (resolved, failures)

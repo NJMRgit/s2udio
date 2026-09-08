@@ -9,7 +9,7 @@ use modals::{
 use panes::{PaneContainer, Panes, pane_call};
 use ratatui::{
     Frame,
-    layout::{Alignment, Position, Rect},
+    layout::{Alignment, Constraint, Layout, Position, Rect},
     style::{Color, Style},
     widgets::{Block, Clear},
 };
@@ -83,6 +83,10 @@ pub struct Ui {
     tabs: HashMap<TabName, TabScreen>,
     layout: SizedPaneOrSplit,
     area: Rect,
+    /// Round 60: the library tab the user last browsed, so Tab/E/Q flip
+    /// between the Queue group and "Libraries" without losing the page
+    /// (starts at the first canonical library tab).
+    last_library_tab: Option<TabName>,
     resizing: bool,
     overlays_hidden: bool,
     cava_hidden: bool,
@@ -94,6 +98,10 @@ pub struct Ui {
     /// frame flush: the event loop clears the terminal and repaints fully
     /// so the erased area cannot stay blank.
     album_art_refresh_pending: bool,
+    /// Round 63.1b: whether the album-art pane was visible on the previous
+    /// frame (the hidden→visible transition needs a manual re-arm — a mode
+    /// flip like Radio→Audio never fires `before_show`).
+    album_art_was_visible: bool,
     /// Runtime show/hide toggles from the Settings panel; re-applied to the
     /// config on every config reload so they survive within the session.
     ui_settings: UiSettings,
@@ -120,12 +128,14 @@ impl Ui {
             layout: ctx.config.theme.layout.clone(),
             modals: Vec::default(),
             area: Rect::default(),
+            last_library_tab: None,
             tabs: Self::init_tabs(ctx)?,
             resizing: false,
             overlays_hidden: false,
             cava_hidden: false,
             cava_refresh_pending: false,
             album_art_refresh_pending: false,
+            album_art_was_visible: false,
             ui_settings: ctx.config.ui,
         })
     }
@@ -177,15 +187,36 @@ impl Ui {
             ctx,
         )?;
         if entering_cava_hidden {
-            self.panes.cava.on_hide(ctx)?;
-            // The cava row collapsed: clear the whole window and repaint
-            // so the visualizer's overlay leaves no stale cells.
-            self.request_cava_refresh();
+            // Round 64 (feedback #3): the library->library switch still ran
+            // cava.on_hide() even though the visualizer was ALREADY hidden
+            // (it only ever shows on the Queue tab). on_hide → pause_and_clear
+            // → clear_area writes blanks DIRECTLY to the terminal over the
+            // pane's stale area (last Queue-render rect, the bottom content
+            // band), bypassing the frame buffer — and since MPD/Playlists/
+            // Jellyfin pages draw identical border glyphs at those rows, the
+            // next frame's diff never re-sends them: the bottom border stays
+            // missing (Downloads differs at those rows, hence fine). So hide
+            // cava ONLY when leaving a tab where it was actually visible.
+            if !leaving_cava_hidden {
+                self.panes.cava.on_hide(ctx)?;
+                // The cava row collapsed: the full-window clear + repaint is
+                // needed ONLY when the visualizer's overlay was actually on
+                // screen (leaving the Queue tab / a video-playing tab).
+                // Library->library switches left cava already hidden, yet
+                // requested a full clear every time — the blank flicker when
+                // entering the Jellyfin tab (round 63.1).
+                self.request_cava_refresh();
+            }
         } else if leaving_cava_hidden && !self.cava_hidden {
             self.panes.cava.before_show(ctx)?;
         }
 
         ctx.active_tab = new_tab.clone();
+        // Round 60: remember the library tab the user is browsing, so the
+        // Queue <-> Libraries group flip (Tab/E/Q) returns to it.
+        if ctx.config.is_library_tab(&new_tab) {
+            self.last_library_tab = Some(new_tab.clone());
+        }
         // Leaving the Queue tab hands the keyboard back to the new tab's
         // panes: drop the seekbar's control.
         seekbar::clear(ctx);
@@ -213,13 +244,54 @@ impl Ui {
         )
     }
 
+    /// The Queue tab (the first nav-bar group), when one is configured and
+    /// visible.
+    fn queue_tab(&self, ctx: &Ctx) -> Option<TabName> {
+        ctx.config
+            .tabs
+            .names
+            .iter()
+            .find(|name| {
+                name.as_str().eq_ignore_ascii_case(crate::config::tabs::QUEUE_TAB_NAME)
+                    && !ctx.config.is_tab_hidden(name)
+            })
+            .cloned()
+    }
+
+    /// The library the Libraries group lands on: the last-browsed library
+    /// tab while it is still visible, else the first canonical one.
+    fn library_tab_target(&mut self, ctx: &Ctx) -> Option<TabName> {
+        let libs = ctx.config.library_tabs_ordered();
+        self.last_library_tab
+            .as_ref()
+            .filter(|tab| libs.contains(tab))
+            .cloned()
+            .or_else(|| libs.into_iter().next())
+    }
+
+    /// The adjacent library tab in canonical order (wrapping). Returns
+    /// None while the Queue tab is active or with fewer than two visible
+    /// libraries.
+    fn cycle_library(&self, ctx: &Ctx, dir: i64) -> Option<TabName> {
+        let libs = ctx.config.library_tabs_ordered();
+        if libs.len() < 2 || !ctx.config.is_library_tab(&ctx.active_tab) {
+            return None;
+        }
+        let idx = libs.iter().position(|tab| *tab == ctx.active_tab).unwrap_or(0);
+        let next = (idx as i64 + dir).rem_euclid(libs.len() as i64) as usize;
+        Some(libs[next].clone())
+    }
+
     pub fn render(&mut self, frame: &mut Frame, ctx: &mut Ctx) -> Result<()> {
         self.area = frame.area();
 
-        // The controls/info and seekbar rows need this many rows (5 + 3).
-        // Below that there is nothing useful to render, so show an error
-        // until the terminal is resized large enough.
-        const MIN_CONTENT_HEIGHT: u16 = 8;
+        // Round 61 (P1/P2): the playback center is ONE 7-row box (top
+        // border + info + divider + transport + divider + NORMAL/seekbar
+        // + bottom border) — the legacy 3-row input_mode/progress_bar
+        // tail bar is gone, so 7 rows is the floor. Below that there is
+        // nothing useful to render, so show an error until the terminal
+        // is resized large enough.
+        const MIN_CONTENT_HEIGHT: u16 = 7;
         // The terminal window must be at least this wide in pixels. Only
         // terminals that report real pixel sizes via TIOCGWINSZ (kitty et
         // al.) are measured; when pixels are not reported the check is
@@ -271,7 +343,7 @@ impl Ui {
                 )
             } else {
                 format!(
-                    "Terminal too small: need at least {MIN_CONTENT_HEIGHT} rows to show controls and seekbar"
+                    "Terminal too small: need at least {MIN_CONTENT_HEIGHT} rows to show the playback center"
                 )
             };
             let style =
@@ -373,6 +445,53 @@ impl Ui {
         Ok(())
     }
 
+    /// Round 64: post-render divider junction pass. Framework-drawn boxes
+    /// draw their `│` sides over the pane-drawn divider ends, so after the
+    /// whole tab (pane renders + box renders) is in the buffer, scan the
+    /// divider row's ─ run and re-write the `├`/`┤` junctions onto the box
+    /// borders. Works from the FINAL buffer, so ordering with the
+    /// surrounding box render no longer matters.
+    pub(crate) fn connect_divider_scan(frame: &mut Frame, y: u16, ctx: &Ctx) {
+        let buf = frame.buffer_mut();
+        let area = buf.area();
+        if y < area.y || y >= area.bottom() || area.width < 4 {
+            return;
+        }
+        let x0 = area.x;
+        let x1 = area.right().saturating_sub(1);
+        let mut l: Option<u16> = None;
+        let mut r: Option<u16> = None;
+        for x in x0..=x1 {
+            if buf[(x, y)].symbol() == "─" {
+                if l.is_none() {
+                    l = Some(x);
+                }
+                r = Some(x);
+            }
+        }
+        let (Some(l), Some(r)) = (l, r) else { return };
+        if r.saturating_sub(l) < 2 {
+            return;
+        }
+        let style = ctx.config.as_border_style();
+        // Left junction: on the cell left of the run when that is the box
+        // side (│/corner), else on the run's first cell (the run already
+        // covers the border column).
+        let left_neighbor = if l > x0 { buf[(l - 1, y)].symbol() } else { "" };
+        if matches!(left_neighbor, "│" | "╭" | "├" | "╮" | "┌") {
+            buf[(l - 1, y)].set_symbol("├").set_style(style);
+        } else if left_neighbor.is_empty() || left_neighbor == "─" {
+            buf[(l, y)].set_symbol("├").set_style(style);
+        }
+        // Right junction, mirrored.
+        let right_neighbor = if r < x1 { buf[(r + 1, y)].symbol() } else { "" };
+        if matches!(right_neighbor, "│" | "╯" | "┤" | "╮" | "┐") {
+            buf[(r + 1, y)].set_symbol("┤").set_style(style);
+        } else if right_neighbor.is_empty() || right_neighbor == "─" {
+            buf[(r, y)].set_symbol("┤").set_style(style);
+        }
+    }
+
     pub fn handle_mouse_event(&mut self, event: MouseEvent, ctx: &mut Ctx) -> Result<()> {
         // Track the pointer for the mouseover effects. Terminals report the
         // pointer leaving the window as a move to (65535, 65535): treat any
@@ -388,6 +507,29 @@ impl Ui {
         } else {
             ctx.set_mouse_pos(None);
             ctx.set_modal_mouse_pos(pos);
+        }
+
+        // Round 63.1 (3): the scrollbar drag captures (queue + info boxes
+        // + downloads + tree pages) are routed by pointer position, so a
+        // release that ends over another pane (or outside the window — the
+        // pointer left the terminal, or focus was lost) never reaches the
+        // arming pane and the grab would stay armed; the next strip press
+        // would then scroll with a stale offset. Any physical release ends
+        // every armed capture here, no matter where it landed. Panes'
+        // own release handling (bands) is untouched: it runs later on the
+        // routed pane, and this only disarms scrollbar grabs.
+        let gesture_ended = matches!(event.kind, MouseEventKind::LeftRelease)
+            || (outside && matches!(event.kind, MouseEventKind::Moved));
+        if gesture_ended {
+            let mut pane_types: Vec<crate::config::tabs::PaneType> = Vec::new();
+            if let Some(tab) = self.tabs.get(&ctx.active_tab) {
+                pane_types.extend(tab.panes.panes_iter().map(|p| p.pane.clone()));
+            }
+            pane_types.extend(self.layout.panes_iter().map(|p| p.pane.clone()));
+            for pane_type in pane_types {
+                let mut pane_instance = self.panes.get_mut(&pane_type, ctx)?;
+                pane_call!(pane_instance, on_global_mouse_release(ctx))?;
+            }
         }
 
         // A pure pointer move carries no interaction: update the hover
@@ -837,12 +979,38 @@ impl Ui {
                     });
                 }
                 GlobalAction::NextTab => {
-                    self.change_tab(ctx.config.next_screen(&ctx.active_tab), ctx)?;
+                    let target = if ctx.config.is_library_tab(&ctx.active_tab) {
+                        self.queue_tab(ctx).unwrap_or_else(|| ctx.active_tab.clone())
+                    } else {
+                        self.library_tab_target(ctx).unwrap_or_else(|| ctx.active_tab.clone())
+                    };
+                    self.change_tab(target, ctx)?;
                     ctx.render()?;
                 }
                 GlobalAction::PreviousTab => {
-                    self.change_tab(ctx.config.prev_screen(&ctx.active_tab), ctx)?;
+                    let target = if ctx.config.is_library_tab(&ctx.active_tab) {
+                        self.queue_tab(ctx).unwrap_or_else(|| ctx.active_tab.clone())
+                    } else {
+                        self.library_tab_target(ctx).unwrap_or_else(|| ctx.active_tab.clone())
+                    };
+                    self.change_tab(target, ctx)?;
                     ctx.render()?;
+                }
+                // Round 60: Shift+E / Shift+Q / Shift+Right / Shift+Left
+                // cycle through the libraries while a library tab is
+                // active (no-op on the Queue tab or with a single
+                // library).
+                GlobalAction::NextLibraryTab => {
+                    if let Some(target) = self.cycle_library(ctx, 1) {
+                        self.change_tab(target, ctx)?;
+                        ctx.render()?;
+                    }
+                }
+                GlobalAction::PreviousLibraryTab => {
+                    if let Some(target) = self.cycle_library(ctx, -1) {
+                        self.change_tab(target, ctx)?;
+                        ctx.render()?;
+                    }
                 }
                 // Round 28b: Shift+Tab toggles the MPD tab's Library/Search
                 // mode — the Directories pane claims it while focused;
@@ -1149,6 +1317,25 @@ impl Ui {
                 self.change_tab(tab_name, ctx)?;
                 ctx.render()?;
             }
+            UiAppEvent::SwitchToLibraries => {
+                if let Some(tab) = self.library_tab_target(ctx) {
+                    self.change_tab(tab, ctx)?;
+                    ctx.render()?;
+                }
+            }
+            UiAppEvent::ExitMpdSearch => {
+                if ctx.active_tab.as_str().eq_ignore_ascii_case("MPD") {
+                    let directories_type =
+                        PaneType::Directories { tree: TreeBrowserArgs::default() };
+                    let pane = self.panes.get_mut(&directories_type, ctx)?;
+                    if let Panes::Directories(directories) = pane {
+                        directories.set_mode(
+                            crate::ui::panes::directories::MpdTabMode::Library,
+                            ctx,
+                        )?;
+                    }
+                }
+            }
             UiAppEvent::ApplySettings(staged) => {
                 let mut config = ctx.config.as_ref().clone();
 
@@ -1269,24 +1456,10 @@ impl Ui {
                     }
                 }
 
-                // If the Radio tab was just disabled and it was the active
-                // tab, switch away so the UI does not land on a hidden tab.
-                if !ctx.config.ui.show_radio_tab
-                    && ctx.active_tab.as_str().eq_ignore_ascii_case("Radio")
-                {
-                    let fallback = ctx
-                        .config
-                        .tabs
-                        .names
-                        .iter()
-                        .find(|name| !ctx.config.is_tab_hidden(name))
-                        .cloned()
-                        .or_else(|| ctx.config.tabs.names.first().cloned());
-                    if let Some(fallback) = fallback {
-                        self.change_tab(fallback, ctx)?;
-                    }
-                }
-                // Same for the Jellyfin tab.
+                // Round 62 (Q4): there is no Radio tab anymore (it is always
+                // hidden and reachable only from the Queue page), so no
+                // Radio-disabled switch-away exists. Same for the Jellyfin
+                // tab.
                 if !ctx.config.ui.show_jellyfin_tab
                     && ctx.active_tab.as_str().eq_ignore_ascii_case("Jellyfin")
                 {
@@ -1444,6 +1617,18 @@ impl Ui {
                 tab.panes.panes_iter().any(|pane| pane.pane == PaneType::AlbumArt)
             }) || self.layout.panes_iter().any(|pane| pane.pane == PaneType::AlbumArt);
         if visible && !ctx.is_pane_hidden(&PaneType::AlbumArt) {
+            // Round 63.1b (host fix): a hidden→visible transition (the
+            // Radio-page mode flip hides the queue body, then re-shows it)
+            // never fires `before_show` (that only runs at startup/tab
+            // events), so the re-shown pane stays blank and `is_showing`
+            // stays false. Re-arm on the first visible frame: draw the
+            // cached art synchronously, or refetch it (show_current_
+            // or_collapse handles playing/paused/video cases exactly like
+            // `before_show`).
+            if !self.album_art_was_visible {
+                self.panes.album_art.show_current_or_collapse(ctx)?;
+            }
+            self.album_art_was_visible = true;
             self.panes.album_art.flush_pending_display(buffer, ctx)?;
         } else {
             // The backend erase (clear_area) writes background cells over
@@ -1457,6 +1642,7 @@ impl Ui {
             if was_showing {
                 self.album_art_refresh_pending = true;
             }
+            self.album_art_was_visible = false;
         }
         Ok(())
     }
@@ -1642,6 +1828,7 @@ impl Ui {
                 Panes::Queue(p) => p.on_event(&mut event, visible, ctx),
                 Panes::QueueHeader(p) => p.on_event(&mut event, visible, ctx),
                 Panes::Directories(p) => p.on_event(&mut event, visible, ctx),
+                Panes::Downloads(p) => p.on_event(&mut event, visible, ctx),
                 Panes::Albums(p) => p.on_event(&mut event, visible, ctx),
                 Panes::Artists(p) => p.on_event(&mut event, visible, ctx),
                 Panes::Playlists(p) => p.on_event(&mut event, visible, ctx),
@@ -1692,6 +1879,7 @@ impl Ui {
                     Panes::Queue(p) => p.on_query_finished(id, data, visible, ctx),
                     Panes::QueueHeader(p) => p.on_query_finished(id, data, visible, ctx),
                     Panes::Directories(p) => p.on_query_finished(id, data, visible, ctx),
+                    Panes::Downloads(p) => p.on_query_finished(id, data, visible, ctx),
                     Panes::Albums(p) => p.on_query_finished(id, data, visible, ctx),
                     Panes::Artists(p) => p.on_query_finished(id, data, visible, ctx),
                     Panes::Playlists(p) => p.on_query_finished(id, data, visible, ctx),
@@ -1749,6 +1937,14 @@ pub enum UiAppEvent {
     PopModal(Id),
     PopConfigErrorModal,
     ChangeTab(TabName),
+    /// Round 60: the `Libraries` group label was clicked in the nav bar —
+    /// switch to the libraries group (the last browsed library tab, else
+    /// the first canonical one).
+    SwitchToLibraries,
+    /// Round 62 (S1/S2): the search pane's staged exit finished — Esc/Left
+    /// #2 in the MPD tab's search bar leaves the search page and returns to
+    /// the `● Library` Folders view.
+    ExitMpdSearch,
     /// The Settings panel was closed with Save: apply the staged UI
     /// toggles, cava overrides, appearance colors and key remaps, then
     /// re-init the layout.
@@ -1846,25 +2042,266 @@ impl Level {
     }
 }
 
-impl Config {
-    fn next_screen(&self, current_screen: &TabName) -> TabName {
-        let visible: Vec<&TabName> =
-            self.tabs.names.iter().filter(|name| !self.is_tab_hidden(name)).collect();
-        if visible.is_empty() {
-            return current_screen.clone();
+/// The `↰ Back` mouse-navigation button (round 60 B3): drawn at the right
+/// end of a tab's toggle/content row, only while the current view can be
+/// left (inside a folder/playlist/collection — the pane decides via
+/// `visible`). Clicking it runs the same back-out as `a`/`←`. Returns the
+/// button's click rect (a zero rect when hidden or when the row is too
+/// narrow for the toggles next to it).
+pub(crate) fn draw_back_button(
+    frame: &mut Frame,
+    row: Rect,
+    visible: bool,
+    ctx: &Ctx,
+) -> Rect {
+    const LABEL: &str = "↰ Back";
+    let Rect { .. } = row;
+    if !visible || row.width < 8 {
+        return Rect::default();
+    }
+    let label_w = unicode_width::UnicodeWidthStr::width(LABEL) as u16;
+    // One-character right margin inside the box; one space before the label
+    // separates it from the mode toggles.
+    let x = row.right().saturating_sub(label_w + 2);
+    let area = Rect {
+        x,
+        y: row.y,
+        width: label_w + 1,
+        height: 1,
+    };
+    let base = ctx.config.as_list_name_style();
+    let style = if ctx.mouse_pos().is_some_and(|p| area.contains(p)) {
+        crate::config::hover_style(base)
+    } else {
+        base
+    };
+    frame.render_widget(ratatui::widgets::Paragraph::new(LABEL).style(style), area);
+    area
+}
+
+/// The Item Box header (round 60 A2/A7): inside the pane's own region
+/// box, the first row carries the section title (one-character margin),
+/// the second row is a full-width separator that connects to the box's
+/// side borders (the box's block redraws the `│` ends over the outermost
+/// cells), and the content starts below. Returns the content rect.
+pub(crate) fn item_box_header(
+    frame: &mut Frame,
+    inner: Rect,
+    title: &str,
+    ctx: &Ctx,
+) -> Rect {
+    let buf = frame.buffer_mut();
+    let style = ctx.config.as_list_name_style();
+    for (offset, ch) in title.char_indices() {
+        let col = inner.x + 1 + offset as u16;
+        if col >= inner.right() {
+            break;
         }
-        let idx = visible.iter().position(|t| *t == current_screen).unwrap_or(0);
-        visible[(idx + 1) % visible.len()].clone()
+        buf[(col, inner.y)].set_symbol(&ch.to_string()).set_style(style);
+    }
+    if inner.height >= 2 {
+        let sep_y = inner.y + 1;
+        let sep_style = ctx.config.as_border_style();
+        for col in inner.x.saturating_sub(1)..inner.right() {
+            if col < inner.right() {
+                buf[(col, sep_y)].set_symbol("─").set_style(sep_style);
+            }
+        }
+    }
+    Rect {
+        x: inner.x,
+        y: inner.y + 2,
+        width: inner.width,
+        height: inner.height.saturating_sub(2),
+    }
+}
+
+/// Round 64 (user feedback "missing ├ ┤"): the Item Box's separator row
+/// must connect to the box sides. The block's `│` borders are drawn over
+/// the separator's ends, so the junctions are written AFTER the block
+/// render; `outer` is the rect the block was rendered into and `sep_y`
+/// the block-coordinate divider row (outer.y + 2 for ALL-borders blocks).
+pub(crate) fn connect_box_divider(frame: &mut Frame, outer: Rect, sep_y: u16, ctx: &Ctx) {
+    let buf = frame.buffer_mut();
+    let style = ctx.config.as_border_style();
+    if sep_y < outer.y + outer.height && outer.width >= 3 {
+        buf[(outer.x, sep_y)].set_symbol("├").set_style(style);
+        buf[(outer.right().saturating_sub(1), sep_y)].set_symbol("┤").set_style(style);
+    }
+}
+
+/// Round 60c (S1): the search frame's top rows — the ONE combined search
+/// box (Playlists + Jellyfin searches). The first content row is the
+/// `Search:` input label (`Search: <q>▎`, no separate `Search` title box),
+/// the second row is a CONNECTED divider (`├───…───┤`, joining the box's
+/// side borders with `├`/`┤` — not the Item Box's bare `─` between the
+/// `│` ends), and the caller renders the results list into the returned
+/// content rect. The box's bottom edge carries the `Results` label via
+/// the block's bottom title (`╰─Results───…──╯`). The caller renders the
+/// block first, so the junction glyphs stick at the border cells.
+pub(crate) fn render_search_frame_top(
+    frame: &mut Frame,
+    inner: Rect,
+    query: &str,
+    focused: bool,
+    ctx: &Ctx,
+) -> Rect {
+    let buf = frame.buffer_mut();
+    let input_style = if focused {
+        ctx.config.theme.hovered_item_style
+    } else {
+        ctx.config.as_list_name_style()
+    };
+    let label = "Search:";
+    let label_w = unicode_width::UnicodeWidthStr::width(label) as u16;
+    for (offset, ch) in label.char_indices() {
+        let col = inner.x + 1 + offset as u16;
+        if col < inner.right() {
+            buf[(col, inner.y)]
+                .set_symbol(&ch.to_string())
+                .set_style(input_style);
+        }
+    }
+    let mut x = inner.x + 1 + label_w + 1;
+    for ch in query.chars() {
+        if x >= inner.right().saturating_sub(1) {
+            break;
+        }
+        buf[(x, inner.y)].set_symbol(&ch.to_string());
+        x += 1;
+    }
+    if focused && x < inner.right() {
+        buf[(x, inner.y)]
+            .set_symbol("▎")
+            .set_style(ctx.config.theme.hovered_item_style);
+    }
+    if inner.height >= 2 {
+        let sep_y = inner.y + 1;
+        let sep_style = ctx.config.as_border_style();
+        buf[(inner.x.saturating_sub(1), sep_y)]
+            .set_symbol("├")
+            .set_style(sep_style);
+        for col in inner.x..inner.right() {
+            buf[(col, sep_y)].set_symbol("─").set_style(sep_style);
+        }
+        buf[(inner.right(), sep_y)].set_symbol("┤").set_style(sep_style);
+    }
+    Rect {
+        x: inner.x,
+        y: inner.y + 2,
+        width: inner.width,
+        height: inner.height.saturating_sub(2),
+    }
+}
+
+/// Round-60 scrollbar layout (A6): a scrollable box's last four cells are
+/// the scrollbar strip — one margin cell, the glyph column, then the
+/// two-cell right margin (`[content ][sp][│][sp][sp]|`) — and the whole
+/// strip is the click/drag activation area. Returns the (list, strip)
+/// split of `inner`; a zero strip when there is no room (or no room for
+/// margins).
+pub(crate) fn scrollbar_strip(inner: Rect) -> (Rect, Rect) {
+    if inner.width > 4 {
+        let [list, strip] = Layout::horizontal([
+            Constraint::Length(inner.width.saturating_sub(4)),
+            Constraint::Length(4),
+        ])
+        .areas(inner);
+        (list, strip)
+    } else {
+        (inner, Rect::default())
+    }
+}
+
+/// Render a styled scrollbar into a 4-cell strip: the glyph column sits at
+/// `strip.x + 1`, the margin cells are blanked every frame (stale text
+/// from full-width content must not leak into the gutter), and the
+/// begin/end arrows + darkened `│` thumb map to the strip's top/bottom
+/// rows via the widget's own geometry.
+pub(crate) fn render_scrollbar_strip(
+    frame: &mut Frame,
+    scrollbar: ratatui::widgets::Scrollbar<'_>,
+    strip: Rect,
+    state: &mut ratatui::widgets::ScrollbarState,
+) {
+    if strip.width == 0 {
+        return;
+    }
+    let buf = frame.buffer_mut();
+    for y in strip.y..strip.bottom() {
+        for x in [strip.x, strip.x + 2, strip.x + 3] {
+            if x < strip.right() {
+                buf[(x, y)].set_symbol(" ");
+            }
+        }
+    }
+    let glyph = Rect {
+        x: strip.x + 1,
+        y: strip.y,
+        width: 1,
+        height: strip.height,
+    };
+    frame.render_stateful_widget(scrollbar, glyph, state);
+}
+
+/// The tab-bar grouping helpers (round 60): the Queue tab is its own
+/// group; every other visible tab is a "library" tab. Tab/E/Q flip
+/// between the two groups; Shift+E/Q and Shift+Right/Left cycle through
+/// the libraries in the canonical order.
+impl Config {
+    /// Whether `tab` belongs to the Libraries group (any visible tab other
+    /// than the Queue tab).
+    pub(crate) fn is_library_tab(&self, tab: &TabName) -> bool {
+        !tab.as_str().eq_ignore_ascii_case(crate::config::tabs::QUEUE_TAB_NAME)
     }
 
-    fn prev_screen(&self, current_screen: &TabName) -> TabName {
+    /// The visible library tabs in canonical order (MPD • Playlists •
+    /// Downloads • Jellyfin • Radio), with any extra configured tabs
+    /// appended after them so custom names stay reachable. The Queue tab
+    /// is the bar's other group and NEVER appears in the libraries row
+    /// (round 60c S2 — it belongs to row 1 only).
+    pub(crate) fn library_tabs_ordered(&self) -> Vec<TabName> {
         let visible: Vec<&TabName> =
             self.tabs.names.iter().filter(|name| !self.is_tab_hidden(name)).collect();
-        if visible.is_empty() {
-            return current_screen.clone();
+        let canonical = crate::config::tabs::LIBRARY_TABS_CANONICAL;
+        let queue = crate::config::tabs::QUEUE_TAB_NAME;
+        let mut ordered: Vec<TabName> = Vec::new();
+        for name in canonical {
+            if let Some(tab) = visible
+                .iter()
+                .find(|t| t.as_str().eq_ignore_ascii_case(name))
+            {
+                if !ordered.iter().any(|t| t == *tab) {
+                    ordered.push((*tab).clone());
+                }
+            }
         }
-        let idx = visible.iter().position(|t| *t == current_screen).unwrap_or(0);
-        visible[(if idx == 0 { visible.len() - 1 } else { idx - 1 }) % visible.len()].clone()
+        for tab in visible {
+            if tab.as_str().eq_ignore_ascii_case(queue) {
+                continue;
+            }
+            // Round 62 (Q4): Radio is never a library tab anymore — it left
+            // the group and lives on the Queue page. A leftover configured
+            // "Radio" tab stays out of the libraries row (and `is_tab_hidden`
+            // keeps it out of tab cycling entirely).
+            if tab.as_str().eq_ignore_ascii_case("Radio") {
+                continue;
+            }
+            if !ordered.iter().any(|t| t == tab) {
+                ordered.push((*tab).clone());
+            }
+        }
+        ordered
+    }
+
+    /// The border symbols for the region boxes the panes draw on their
+    /// own (round 60 A7 — `pane_draws_own_boxes` suppresses the config
+    /// border, so the Item/Info/search boxes must apply the symbols
+    /// explicitly). The design is rounded-only (round 60b D2 fixed the
+    /// square-corner regression: `Block::default().borders(ALL)` uses
+    /// ratatui's square default).
+    fn as_border_set(&self) -> ratatui::symbols::border::Set<'_> {
+        ratatui::symbols::border::ROUNDED
     }
 
     fn as_border_style(&self) -> ratatui::style::Style {

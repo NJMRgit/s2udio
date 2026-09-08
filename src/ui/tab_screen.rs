@@ -74,7 +74,7 @@ impl TabScreen {
             .for_each_pane_custom_data(
                 area,
                 root_height,
-                frame,
+                &mut *frame,
                 &mut |pane, area, block, block_area, bg_color, frame| {
                     let pane_data = self
                         .pane_data
@@ -102,15 +102,6 @@ impl TabScreen {
                     let mut pane_instance = pane_container.get_mut(&pane.pane, ctx)?;
                     pane_call!(pane_instance, render(frame, area, ctx))?;
                     frame.render_widget(block, block_area);
-                    if let Panes::Queue(queue_pane) = &mut pane_instance {
-                        queue_pane
-                            .render_toggle_on_border(
-                                frame,
-                                pane.borders,
-                                block_area,
-                                ctx,
-                            );
-                    }
                     Ok(())
                 },
                 &mut |block, block_area, background_color, frame| {
@@ -126,6 +117,55 @@ impl TabScreen {
                 },
                 ctx,
             )?;
+
+        // Round 64: the framework boxes draw their `│` sides over the
+        // pane-drawn divider ends (Lyrics footer divider, Queue table
+        // header divider). With every pane + box in the buffer now, scan
+        // the divider rows and reconnect ├/┤ junctions onto the box
+        // borders.
+        for pane in self.panes.panes_iter() {
+            let row = match pane.pane {
+                PaneType::Lyrics => {
+                    self.pane_data.get(&pane.id).map(|d| d.block_area.bottom().saturating_sub(3))
+                }
+                PaneType::QueueHeader() => {
+                    self.pane_data.get(&pane.id).map(|d| d.block_area.y.saturating_add(1))
+                }
+                _ => None,
+            };
+            if let Some(y) = row {
+                crate::ui::Ui::connect_divider_scan(frame, y, ctx);
+            }
+        }
+        // Round 63.1 (host fix): the layout walk skips hidden panes, but
+        // their pane_data kept the stale full-size area from the last
+        // visible render. With stale areas overlapping the visible panes,
+        // mouse and keyboard routing (handle_mouse_event's area lookup,
+        // handle_action's focused-pane data) hits hidden panes — the
+        // Radio-mode misrouting ("keyboard controls the queue page") and
+        // the click-throughs that read as freezes. Zero hidden panes'
+        // areas so only visible panes can be targeted.
+        for pane in self.panes.panes_iter() {
+            if ctx.is_pane_hidden(&pane.pane) {
+                if let Some(data) = self.pane_data.get_mut(&pane.id) {
+                    data.area = Rect::default();
+                    data.block_area = Rect::default();
+                }
+            }
+        }
+
+        // Round 62 (Q3/Q2): the queue page's Audio/Video/Radio/Chapters
+        // toggle row is painted at the TOP of the tab (the layout's 1-row
+        // strip directly under the navbar). Done AFTER the pane loop so it
+        // renders even while the queue pane itself is hidden — Radio mode
+        // swaps the whole body to the radio browser but the toggle must
+        // stay clickable to get back out.
+        let is_queue_tab = self.panes.panes_iter().any(|p| p.pane == PaneType::Queue);
+        if is_queue_tab {
+            if let Panes::Queue(queue_pane) = pane_container.get_mut(&PaneType::Queue, ctx)? {
+                queue_pane.render_toggle_on_border(frame, area, ctx);
+            }
+        }
         Ok(())
     }
     pub(in crate::ui) fn handle_insert_mode(
@@ -151,12 +191,31 @@ impl TabScreen {
         event: &mut ActionEvent,
         ctx: &mut Ctx,
     ) -> Result<()> {
-        let Some(focused_pane_data) = self.pane_data.get(&self.focused) else {
-            log::warn!(
-                focused:? = self.focused, pane_areas:? = self.pane_data;
-                "Tried to find focused pane area but it does not exist"
-            );
-            return Ok(());
+        let focused_pane_data = match self.pane_data.get(&self.focused) {
+            // Round 63.1 (host fix): a focused pane with an EMPTY area is a
+            // hidden pane (the render pass zeroes hidden panes' areas) —
+            // route to the largest visible pane and make the fallback
+            // sticky, so keys never land on a hidden pane (Radio mode).
+            Some(data) if data.area.width > 0 && data.area.height > 0 => data,
+            Some(_) | None => {
+                // Round 62 (Q2)+63.1: the focused pane may be hidden while
+                // the Queue page is in Radio mode (the queue pane collapses
+                // to make room for the radio browser). Route to the visible
+                // pane with the largest area — the radio browser.
+                let Some((id, data)) = self.pane_data.iter()
+                    .filter(|(_, d)| d.area.width > 0 && d.area.height > 0)
+                    .max_by_key(|(_, d)| {
+                        (u32::from(d.area.width) * u32::from(d.area.height), d.active)
+                    }) else {
+                    log::warn!(
+                        focused:? = self.focused, pane_areas:? = self.pane_data;
+                        "Tried to find focused pane area but it does not exist"
+                    );
+                    return Ok(());
+                };
+                self.focused = *id;
+                data
+            }
         };
         let focused_area = focused_pane_data.area;
         match event.claim_common() {
@@ -233,6 +292,24 @@ impl TabScreen {
                 };
                 let mut pane = panes.get_mut(&focused.pane, ctx)?;
                 pane_call!(pane, handle_action(event, ctx))?;
+                // Round 63.1 (host fix): keys owned by the Queue pane
+                // (`c` Audio/Video/Chapters/Radio cycling, `<S-Tab>`
+                // ToggleChapters) must work in every sub-mode — including
+                // Radio, where the Queue pane is hidden and the Radio pane
+                // has the focus. If the focused pane left the event
+                // unconsumed and this tab contains a Queue pane, give the
+                // Queue pane a second chance (it is a no-op for keys that
+                // are not its own).
+                if !event.is_consumed()
+                    && focused.pane != PaneType::Queue
+                    && self.panes.panes_iter().any(|p| p.pane == PaneType::Queue)
+                {
+                    if let Panes::Queue(queue_pane) =
+                        panes.get_mut(&PaneType::Queue, ctx)?
+                    {
+                        queue_pane.handle_action(event, ctx)?;
+                    }
+                }
             }
         }
         Ok(())
