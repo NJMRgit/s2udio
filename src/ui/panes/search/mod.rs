@@ -1136,9 +1136,11 @@ impl Pane for SearchPane {
                     }
                 }
             }
-            MouseEventKind::LeftClick if self
-                .column_areas[BrowserArea::Current]
-                .contains(event.into()) => {
+            MouseEventKind::LeftClick | MouseEventKind::DoubleClick
+                if self.column_areas[BrowserArea::Current].contains(event.into())
+                    && (matches!(event.kind, MouseEventKind::LeftClick)
+                        || event.modifiers.contains(crossterm::event::KeyModifiers::CONTROL)) =>
+            {
                 if matches!(self.phase, Phase::Search) {
                     if ctx.input.is_insert_mode() {
                         ctx.input.normal_mode();
@@ -1158,12 +1160,19 @@ impl Pane for SearchPane {
                 {
                     if event.modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
                     {
+                        // Ctrl+click toggles the row: mark it if it was
+                        // not marked, unmark it if it was.
+                        let was_marked = self.songs_dir.state.marked.contains(&idx);
                         if self.songs_dir.state.marked.is_empty() {
                             if let Some(sel) = self.songs_dir.state.get_selected() {
                                 self.songs_dir.state.mark(sel);
                             }
                         }
-                        self.songs_dir.state.mark(idx);
+                        if was_marked {
+                            self.songs_dir.state.unmark(idx);
+                        } else {
+                            self.songs_dir.state.mark(idx);
+                        }
                         // Arm the band so a ctrl+drag from here adds a range.
                         self.songs_dir.state.band.arm(idx, false);
                         self.songs_dir.select_idx(idx, ctx.config.scrolloff);

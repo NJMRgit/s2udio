@@ -746,6 +746,12 @@ pub(in crate::ui) trait TreeBrowserCore: Pane {
             / usize::from(self.item_row_height())
             + self.items_list().offset();
         match event.kind {
+            MouseEventKind::LeftClick | MouseEventKind::DoubleClick
+                if row < self.items_len()
+                    && event.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) =>
+            {
+                self.handle_items_left_click(row, &event, ctx)?;
+            }
             MouseEventKind::LeftClick => {
                 self.handle_items_left_click(row, &event, ctx)?;
             }
