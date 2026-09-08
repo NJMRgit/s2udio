@@ -57,11 +57,8 @@
           # The runtime assets the support scripts / config seed need.
           postInstall = ''
             mkdir -p $out/share/s2udio
-            install -Dm755 scripts/s2u-mpv-tracker $out/bin/s2u-mpv-tracker
-            install -Dm755 scripts/s2udio-mpris    $out/bin/s2udio-mpris
-            install -Dm755 scripts/s2u-mpdris2     $out/bin/s2u-mpdris2
+            install -Dm755 scripts/s2u-helper $out/bin/s2u-helper
             install -Dm755 scripts/rmpc-fetch-lyrics $out/bin/rmpc-fetch-lyrics
-            install -Dm755 scripts/s2u-svc         $out/bin/s2u-svc
             install -Dm644 assets/example_config.ron $out/share/s2udio/example_config.ron
             install -Dm644 assets/example_theme.ron  $out/share/s2udio/example_theme.ron
             # the app is launched as `s2udio` (setup.sh renames s2u -> s2udio)
