@@ -99,8 +99,9 @@ pub static MPV_RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::Atomi
     false,
 );
 /// Pick up a live mpv session left behind by a previous s2udio instance
-/// (mpv survives the app's exit; the standalone `s2u-mpv-tracker` daemon
-/// keeps the MPRIS state file fresh while the app is closed).
+/// (mpv survives the app's exit; the standalone `s2u-helper tracker`
+/// caretaker daemon keeps the MPRIS state file fresh while the app is
+/// closed).
 ///
 /// Returns true when a session was found: `ctx.mpv` is populated from mpv's
 /// live state (position/duration/pause/volume) plus the session hints in
@@ -1126,13 +1127,15 @@ pub fn run_mpv_playlist(
         let _ = event_sender.send(AppEvent::MpvSessionEnded);
     });
 }
-/// Spawn the `s2u-mpv-tracker` daemon (fire and forget): it keeps the MPRIS
-/// state file and Jellyfin playback tracking alive when s2udio closes while
-/// a video plays. Detached like mpv so it survives the terminal close; its
-/// single-instance pid guard makes repeated spawns harmless.
+/// Spawn the tracker caretaker daemon (`s2u-helper tracker`, fire and
+/// forget): it keeps the MPRIS state file and Jellyfin playback tracking
+/// alive when s2udio closes while a video plays. Detached like mpv so it
+/// survives the terminal close; its single-instance pid guard makes
+/// repeated spawns harmless.
 fn spawn_tracker() {
     if let Err(err) = {
-        let mut tracker = std::process::Command::new("s2u-mpv-tracker");
+        let mut tracker = std::process::Command::new("s2u-helper");
+        tracker.arg("tracker");
         if let Some(cache) = crate::shared::paths::s2udio_cache_dir() {
             tracker.env("S2U_CACHE_DIR", cache);
         }

@@ -100,16 +100,19 @@ overwrites existing configs.
 - **mpv-full stays Arch-only**: the video pipeline is tuned for Arch's
   `mpv-full` (AUR, recommended on Arch); every other backend installs plain
   `mpv` and prints an informational note.
-- **Services**: MPD + mpDris2 are enabled/started through `scripts/s2u-svc`
-  (the init abstraction — systemd-user on Fedora/Debian/Ubuntu, runit-user on
-  Void, plain launcher on Alpine/NixOS). The tracker's video/MPD MPRIS
-  mutual exclusion also routes through s2u-svc, so it works on every backend.
+- **Services**: MPD + mpDris2 are enabled/started through `scripts/s2u-helper
+  svc` (the init abstraction — systemd-user on Fedora/Debian/Ubuntu,
+  runit-user on Void, plain launcher on Alpine/NixOS). The tracker's
+  video/MPD MPRIS mutual exclusion also routes through it, so it works on
+  every backend. All support programs (tracker caretaker, mpv MPRIS bridge,
+  mpDris2 shim, svc, bgutil renewal) run from the one `s2u-helper`
+  executable.
 
 **Known cosmetic limitation**: the installer's summary prints
 `mpd: inactive / mpDris2: inactive` on non-systemd backends (Alpine, Void,
 NixOS) even though the services are actually up — the summary's status check
 uses `systemctl --user`, which only exists on systemd targets. Verify with
-`~/.local/bin/s2u-svc is-active mpd` instead.
+`~/.local/bin/s2u-helper svc is-active mpd` instead.
 
 ## Settings & Config
 Configuration is stored at ~/.config/s2udio and separate from rmpc

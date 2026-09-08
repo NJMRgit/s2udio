@@ -180,7 +180,8 @@ fn main_task<B: Backend + std::io::Write>(
         // (A session started by an older build may have no tracker; the
         // pid lock makes a duplicate spawn exit immediately.)
         if let Err(err) = {
-            let mut tracker = std::process::Command::new("s2u-mpv-tracker");
+            let mut tracker = std::process::Command::new("s2u-helper");
+            tracker.arg("tracker");
             tracker
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())

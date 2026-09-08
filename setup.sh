@@ -22,10 +22,10 @@
 #   * mpv (Arch only)            mpv-full (recommended) or standard mpv;
 #                                other backends install plain mpv
 #   * builds + installs binary   -> ~/.local/bin/s2udio (nix: the flake package)
-#   * support scripts            lyrics fetcher, mpv tracker daemon (which
-#                                starts the bundled s2udio-mpris bridge),
-#                                the s2u-mpdris2 shim (official mpDris2 +
-#                                stream art)
+#   * support scripts            lyrics fetcher + the consolidated
+#                                s2u-helper executable (tracker caretaker /
+#                                s2udio-mpris bridge / s2u-mpdris2 shim /
+#                                s2u-svc / bgutil-renew subcommands)
 #   * seeds config/theme         -> ~/.config/s2udio/ (if absent)
 #   * cava (PipeWire input)      (official cava; s2udio drives it through
 #                                PipeWire only — no MPD fifo output)
@@ -134,15 +134,15 @@ version_ge() {
 install_support_scripts() {
     info "4/8  Support scripts"
     [[ -f scripts/rmpc-fetch-lyrics ]] && { install -Dm755 scripts/rmpc-fetch-lyrics "$BIN_DIR/rmpc-fetch-lyrics"; ok "lyrics fetcher -> $BIN_DIR/rmpc-fetch-lyrics"; } || warn "scripts/rmpc-fetch-lyrics missing in this checkout"
-    [[ -f scripts/s2u-mpv-tracker ]] && { install -Dm755 scripts/s2u-mpv-tracker "$BIN_DIR/s2u-mpv-tracker"; ok "mpv tracker daemon -> $BIN_DIR/s2u-mpv-tracker"; } || warn "scripts/s2u-mpv-tracker missing in this checkout"
-    [[ -f scripts/s2udio-mpris ]] && { install -Dm755 scripts/s2udio-mpris "$BIN_DIR/s2udio-mpris"; ok "mpv MPRIS bridge -> $BIN_DIR/s2udio-mpris"; } || warn "scripts/s2udio-mpris missing in this checkout"
-    [[ -f scripts/s2u-mpdris2 ]] && { install -Dm755 scripts/s2u-mpdris2 "$BIN_DIR/s2u-mpdris2"; ok "mpDris2 stream-art shim -> $BIN_DIR/s2u-mpdris2"; } || warn "scripts/s2u-mpdris2 missing in this checkout"
-    [[ -f scripts/s2u-yt-bgutil-renew.sh ]] && { install -Dm755 scripts/s2u-yt-bgutil-renew.sh "$BIN_DIR/s2u-yt-bgutil-renew.sh"; ok "bgutil renew timer script -> $BIN_DIR/s2u-yt-bgutil-renew.sh"; } || warn "scripts/s2u-yt-bgutil-renew.sh missing in this checkout"
+    # Round 70: all five helper programs (tracker, mpris bridge, mpdris2
+    # shim, s2u-svc, bgutil-renew) consolidated into ONE executable
+    # scripts/s2u-helper; subcommands: tracker|mpris|mpdris2|svc|bgutil-renew.
+    [[ -f scripts/s2u-helper ]] && { install -Dm755 scripts/s2u-helper "$BIN_DIR/s2u-helper"; ok "s2u-helper (tracker/mpris/mpdris2/svc/bgutil-renew) -> $BIN_DIR/s2u-helper"; } || warn "scripts/s2u-helper missing in this checkout"
     install_cava_name_shim
 }
 
-install_s2u_svc() { # every backend installs it (the tracker's mpDris2 stop/start routes through s2u-svc)
-    [[ -f scripts/s2u-svc ]] && { install -Dm755 scripts/s2u-svc "$BIN_DIR/s2u-svc"; ok "s2u-svc -> $BIN_DIR/s2u-svc"; } || warn "scripts/s2u-svc missing in this checkout"
+install_s2u_svc() { # round 70: the svc backend lives inside scripts/s2u-helper — nothing extra to install
+    [[ -f scripts/s2u-helper ]] && ok "s2u-helper present (svc backend included)" || warn "scripts/s2u-helper missing in this checkout"
 }
 
 install_cava_name_shim() { # round 29: rename cava's PipeWire node (optional)
@@ -595,7 +595,7 @@ EOF
     cat > "$HOME/.config/systemd/user/mpDris2.service.d/s2udio.conf" <<EOF
 [Service]
 ExecStart=
-ExecStart=$BIN_DIR/s2u-mpdris2 --use-journal
+ExecStart=$BIN_DIR/s2u-helper mpdris2 --use-journal
 EOF
     # The packaged mpDris2 unit on Debian/Ubuntu carries
     # ConditionUser=!@system (no MPRIS bridge for root/system users) — right
@@ -611,7 +611,7 @@ EOF
 Description=MPRIS bridge for MPD (s2udio s2u-mpdris2 shim)
 After=mpd.service
 [Service]
-ExecStart=$BIN_DIR/s2u-mpdris2 --use-journal
+ExecStart=$BIN_DIR/s2u-helper mpdris2 --use-journal
 Restart=on-failure
 [Install]
 WantedBy=default.target
@@ -624,7 +624,7 @@ EOF
 Description=MPRIS bridge for MPD (s2udio s2u-mpdris2 shim)
 After=mpd.service
 [Service]
-ExecStart=$BIN_DIR/s2u-mpdris2 --use-journal
+ExecStart=$BIN_DIR/s2u-helper mpdris2 --use-journal
 Restart=on-failure
 [Install]
 WantedBy=default.target
@@ -632,13 +632,13 @@ EOF
         ok "mpDris2.service (user) written (no packaged user unit on this distro)"
     fi
     systemctl --user daemon-reload 2>/dev/null || true
-    "$BIN_DIR/s2u-svc" enable mpd || true
-    "$BIN_DIR/s2u-svc" start mpd || true
-    "$BIN_DIR/s2u-svc" enable mpDris2 || true
-    "$BIN_DIR/s2u-svc" start mpDris2 || true
+    "$BIN_DIR/s2u-helper" svc enable mpd || true
+    "$BIN_DIR/s2u-helper" svc start mpd || true
+    "$BIN_DIR/s2u-helper" svc enable mpDris2 || true
+    "$BIN_DIR/s2u-helper" svc start mpDris2 || true
     sleep 2
-    "$BIN_DIR/s2u-svc" is-active mpd && ok "mpd active (user service)" || warn "mpd not active yet"
-    "$BIN_DIR/s2u-svc" is-active mpDris2 && ok "mpDris2 active (user service)" || warn "mpDris2 not active yet"
+    "$BIN_DIR/s2u-helper" svc is-active mpd && ok "mpd active (user service)" || warn "mpd not active yet"
+    "$BIN_DIR/s2u-helper" svc is-active mpDris2 && ok "mpDris2 active (user service)" || warn "mpDris2 not active yet"
     install_bgutil_renew
 }
 
@@ -646,12 +646,12 @@ EOF
 # mpd + the s2u-mpdris2 shim as plain user processes (plan §6.1).
 services_step_launcher() {
     info "7/8  MPD + mpDris2 user services (s2u-svc launcher backend)"
-    "$BIN_DIR/s2u-svc" start mpd || true
+    "$BIN_DIR/s2u-helper" svc start mpd || true
     sleep 2
-    "$BIN_DIR/s2u-svc" is-active mpd && ok "mpd active (launcher)" || warn "mpd not active"
-    "$BIN_DIR/s2u-svc" start mpDris2 || true
+    "$BIN_DIR/s2u-helper" svc is-active mpd && ok "mpd active (launcher)" || warn "mpd not active"
+    "$BIN_DIR/s2u-helper" svc start mpDris2 || true
     sleep 2
-    "$BIN_DIR/s2u-svc" is-active mpDris2 && ok "mpDris2 active (launcher)" || warn "mpDris2 not active"
+    "$BIN_DIR/s2u-helper" svc is-active mpDris2 && ok "mpDris2 active (launcher)" || warn "mpDris2 not active"
 }
 
 # Round 59: randomized pre-expiry restart timer for the s2u-yt bgutil
@@ -663,7 +663,7 @@ services_step_launcher() {
 # the 12 h window, never at a predictable wall-clock time). Skipped
 # cleanly when s2u-yt is not deployed or the backend isn't systemd-user.
 install_bgutil_renew() {
-    if [[ "$("$BIN_DIR/s2u-svc" backend 2>/dev/null || true)" != "systemd-user" ]]; then
+    if [[ "$("$BIN_DIR/s2u-helper" svc backend 2>/dev/null || true)" != "systemd-user" ]]; then
         warn "bgutil renew timer skipped (no systemd-user backend)"
         return 0
     fi
@@ -671,8 +671,8 @@ install_bgutil_renew() {
         warn "bgutil renew timer skipped (s2u-yt-bgutil.service not deployed — install s2u-yt first)"
         return 0
     fi
-    if [[ ! -f "$BIN_DIR/s2u-yt-bgutil-renew.sh" ]]; then
-        warn "bgutil renew timer skipped ($BIN_DIR/s2u-yt-bgutil-renew.sh missing)"
+    if [[ ! -x "$BIN_DIR/s2u-helper" ]]; then
+        warn "bgutil renew timer skipped ($BIN_DIR/s2u-helper missing)"
         return 0
     fi
     mkdir -p "$HOME/.config/systemd/user"
@@ -682,7 +682,7 @@ Description=Restart s2u-yt bgutil ahead of the 12h PO-token minter expiry
 
 [Service]
 Type=oneshot
-ExecStart=$BIN_DIR/s2u-yt-bgutil-renew.sh
+ExecStart=$BIN_DIR/s2u-helper bgutil-renew
 EOF
     cat > "$HOME/.config/systemd/user/s2u-yt-bgutil-renew.timer" <<EOF
 [Unit]
@@ -715,8 +715,8 @@ services_step_runit() {
     # runit-supervised mpd cannot bind port 6600. On a re-run the dirs
     # already exist and s2u-svc stops via sv instead; both paths leave a
     # clean slate for runsvdir to take over.
-    "$BIN_DIR/s2u-svc" stop mpd 2>/dev/null || true
-    "$BIN_DIR/s2u-svc" stop mpDris2 2>/dev/null || true
+    "$BIN_DIR/s2u-helper" svc stop mpd 2>/dev/null || true
+    "$BIN_DIR/s2u-helper" svc stop mpDris2 2>/dev/null || true
     mkdir -p "$HOME/.config/runit/mpd" "$HOME/.config/runit/mpDris2"
     cat > "$HOME/.config/runit/mpd/run" <<EOF
 #!/bin/sh
@@ -724,7 +724,7 @@ exec /usr/bin/mpd --no-daemon $MPD_CONF
 EOF
     cat > "$HOME/.config/runit/mpDris2/run" <<EOF
 #!/bin/sh
-exec $BIN_DIR/s2u-mpdris2 --use-journal
+exec $BIN_DIR/s2u-helper mpdris2 --use-journal
 EOF
     chmod +x "$HOME/.config/runit/mpd/run" "$HOME/.config/runit/mpDris2/run"
     if ! pgrep -f "runsvdir $HOME/.config/runit" >/dev/null 2>&1; then
@@ -735,12 +735,12 @@ EOF
             sleep 0.5
         done
     fi
-    "$BIN_DIR/s2u-svc" start mpd || true
+    "$BIN_DIR/s2u-helper" svc start mpd || true
     sleep 2
-    "$BIN_DIR/s2u-svc" is-active mpd && ok "mpd active (runit-user)" || warn "mpd not active"
-    "$BIN_DIR/s2u-svc" start mpDris2 || true
+    "$BIN_DIR/s2u-helper" svc is-active mpd && ok "mpd active (runit-user)" || warn "mpd not active"
+    "$BIN_DIR/s2u-helper" svc start mpDris2 || true
     sleep 2
-    "$BIN_DIR/s2u-svc" is-active mpDris2 && ok "mpDris2 active (runit-user)" || warn "mpDris2 not active"
+    "$BIN_DIR/s2u-helper" svc is-active mpDris2 && ok "mpDris2 active (runit-user)" || warn "mpDris2 not active"
 }
 
 # apk/nix: no distro mpDris2 (Alpine) or an unshimmable compiled ELF (nixpkgs)
@@ -980,10 +980,10 @@ EOF
 # mpDris2 changes layout.
 [Service]
 ExecStart=
-ExecStart=$BIN_DIR/s2u-mpdris2 --use-journal
+ExecStart=$BIN_DIR/s2u-helper mpdris2 --use-journal
 EOF
     systemctl --user daemon-reload 2>/dev/null || true
-    ok "mpDris2.service -> $BIN_DIR/s2u-mpdris2 (official mpDris2 + stream-art shim)"
+    ok "mpDris2.service -> $BIN_DIR/s2u-helper mpdris2 (official mpDris2 + stream-art shim)"
     if [[ -f "$BIN_DIR/mpDris2" ]]; then
         rm -f "$BIN_DIR/mpDris2"
         ok "removed stale patched mpDris2 copy ($BIN_DIR/mpDris2)"
