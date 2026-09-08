@@ -46,6 +46,11 @@ impl MarkState {
     pub fn add(&mut self, idx: usize) {
         self.marked.insert(idx);
     }
+    /// Remove `idx` from the marked set (ctrl+click on a marked row
+    /// unmarks it).
+    pub fn remove(&mut self, idx: usize) {
+        self.marked.remove(&idx);
+    }
     /// Mark every index in `0..len` (the whole list, ctrl+a).
     pub fn mark_all(&mut self, len: usize) {
         if len == 0 {

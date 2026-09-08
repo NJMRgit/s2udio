@@ -2503,19 +2503,26 @@ impl Pane for PlaylistsPane {
                     );
                     return self.open_song_menu(ctx, Some(position));
                 }
-                MouseEventKind::LeftClick if event
+                MouseEventKind::LeftClick | MouseEventKind::DoubleClick if event
                     .modifiers
                     .contains(crossterm::event::KeyModifiers::CONTROL) => {
                     let row = usize::from(event.y.saturating_sub(self.songs_area.y));
                     self.select_song_at(
                         row,
                         |dir, idx| {
+                            // Ctrl+click toggles the row: mark it if it
+                            // was not marked, unmark it if it was.
+                            let was_marked = dir.state.marked.contains(&idx);
                             if dir.state.marked.is_empty() {
                                 if let Some(sel) = dir.state.get_selected() {
                                     dir.state.mark(sel);
                                 }
                             }
-                            dir.state.mark(idx);
+                            if was_marked {
+                                dir.state.unmark(idx);
+                            } else {
+                                dir.state.mark(idx);
+                            }
                             // Arm the band so a ctrl+drag from here adds a
                             // range (ctrl semantics keep existing marks).
                             dir.state.band.arm(idx, false);

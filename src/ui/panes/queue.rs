@@ -800,7 +800,11 @@ impl Pane for QueuePane {
             let table = self.areas[Areas::Table];
             if table.contains(position) {
                 match event.kind {
-                    MouseEventKind::DoubleClick => {
+                    MouseEventKind::DoubleClick
+                        if !event
+                            .modifiers
+                            .contains(crossterm::event::KeyModifiers::CONTROL) =>
+                    {
                         self.video_band.cancel();
                         let row = usize::from(position.y.saturating_sub(table.y));
                         let idx = self.video_state.offset() + row;
@@ -811,18 +815,25 @@ impl Pane for QueuePane {
                             return Ok(());
                         }
                     }
-                    MouseEventKind::LeftClick if event
+                    MouseEventKind::LeftClick | MouseEventKind::DoubleClick if event
                         .modifiers
                         .contains(crossterm::event::KeyModifiers::CONTROL) => {
                         let row = usize::from(position.y.saturating_sub(table.y));
                         let idx = self.video_state.offset() + row;
                         if idx < self.video_items_len {
+                            // Ctrl+click toggles the row: mark it if it
+                            // was not marked, unmark it if it was.
+                            let was_marked = self.video_marked.contains(idx);
                             if self.video_marked.is_empty() {
                                 if let Some(sel) = self.video_state.selected() {
                                     self.video_marked.add(sel);
                                 }
                             }
-                            self.video_marked.add(idx);
+                            if was_marked {
+                                self.video_marked.remove(idx);
+                            } else {
+                                self.video_marked.add(idx);
+                            }
                             // Arm the band so a ctrl+drag from here adds a
                             // range (ctrl semantics keep existing marks).
                             self.video_band.arm(idx, false);
@@ -1010,19 +1021,28 @@ impl Pane for QueuePane {
             return Ok(());
         }
         match event.kind {
-            MouseEventKind::LeftClick if self.areas[Areas::Table].contains(event.into())
-                && event.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) => {
+            MouseEventKind::LeftClick | MouseEventKind::DoubleClick
+                if self.areas[Areas::Table].contains(event.into())
+                    && event.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) =>
+            {
                 let clicked_row: usize = event
                     .y
                     .saturating_sub(self.areas[Areas::Table].y)
                     .into();
                 if let Some(idx) = self.queue.state.get_at_rendered_row(clicked_row) {
+                    // Ctrl+click toggles the row: mark it if it was not
+                    // marked, unmark it if it was.
+                    let was_marked = self.queue.state.marked.contains(&idx);
                     if self.queue.state.marked.is_empty() {
                         if let Some(sel) = self.queue.state.get_selected() {
                             self.queue.state.mark(sel);
                         }
                     }
-                    self.queue.state.mark(idx);
+                    if was_marked {
+                        self.queue.state.unmark(idx);
+                    } else {
+                        self.queue.state.mark(idx);
+                    }
                     // Arm the band so a ctrl+drag from here adds a range.
                     self.queue.state.band.arm(idx, false);
                     self.queue.select_idx(idx, ctx.config.scrolloff);

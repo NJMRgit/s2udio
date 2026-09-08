@@ -1289,12 +1289,19 @@ impl TreeBrowserCore for DirectoriesPane {
             return Ok(());
         }
         if event.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) {
+            // Ctrl+click toggles the row: mark it if it was not marked,
+            // unmark it if it was.
+            let was_marked = self.marked.contains(row);
             if self.marked.is_empty() {
                 if let Some(sel) = self.item_list.selected() {
                     self.marked.add(sel);
                 }
             }
-            self.marked.add(row);
+            if was_marked {
+                self.marked.remove(row);
+            } else {
+                self.marked.add(row);
+            }
             // Arm the band so a ctrl+drag from here adds a range.
             self.items_band.arm(row, false);
             self.item_list.select(Some(row));
