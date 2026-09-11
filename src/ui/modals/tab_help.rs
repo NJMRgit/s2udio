@@ -136,18 +136,31 @@ fn basic_rows() -> Vec<(String, String, Cow<'static, str>)> {
         ("w / ↑".to_owned(), "Up".to_owned(), "move up".into()),
         ("s / ↓".to_owned(), "Down".to_owned(), "move down".into()),
         ("d / →".to_owned(), "Play".to_owned(), "play the highlighted track / station".into()),
-        ("Shift+W/S / Shift+↑↓".to_owned(), "Select".to_owned(), "select a range of rows".into()),
+        ("Shift+↑↓".to_owned(), "Select".to_owned(), "select a range of rows".into()),
         ("Enter".to_owned(), "Confirm".to_owned(), "open the context menu / open a region".into()),
         ("Space".to_owned(), "Play/Pause".to_owned(), "play or pause playback".into()),
         ("Tab".to_owned(), "NextTab".to_owned(), "switch to the next tab".into()),
-        ("E / Shift+E".to_owned(), "NextLibraryTab".to_owned(), "cycle to the next library tab".into()),
-        ("Q / Shift+Q".to_owned(), "PreviousLibraryTab".to_owned(), "cycle to the previous library tab".into()),
+        (
+            "c".to_owned(),
+            "NextLibraryTab".to_owned(),
+            "cycle to the next library tab (Shift+Right too; on the Queue tab c cycles the queue list)".into(),
+        ),
+        (
+            "Shift+← / Shift+→".to_owned(),
+            "PreviousLibraryTab".to_owned(),
+            "cycle to the previous / next library tab".into(),
+        ),
+        (
+            "Shift+S".to_owned(),
+            "LibrarySearch".to_owned(),
+            "open this library's search page with the query input focused".into(),
+        ),
         (
             "Esc".to_owned(),
             "Close / Settings".to_owned(),
             "close a menu, otherwise open settings".into(),
         ),
-        ("q".to_owned(), "Quit".to_owned(), "exit rmpc".into()),
+        ("Q".to_owned(), "Quit".to_owned(), "exit rmpc".into()),
     ]
 }
 
