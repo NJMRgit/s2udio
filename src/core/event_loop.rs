@@ -1,11 +1,16 @@
 use std::{
     collections::HashSet,
+    io::Write,
     ops::Sub,
     path::PathBuf,
     sync::{Arc, LazyLock},
     time::{Duration, Instant},
 };
 
+use crossterm::{
+    queue,
+    terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate},
+};
 use crossbeam::channel::{Receiver, RecvTimeoutError, Sender};
 use ratatui::{Terminal, layout::Rect, prelude::Backend};
 
@@ -28,12 +33,61 @@ use crate::{
             EXTERNAL_COMMAND, GLOBAL_QUEUE_UPDATE, GLOBAL_STATUS_UPDATE, GLOBAL_STICKERS_UPDATE,
             GLOBAL_VOLUME_UPDATE, MpdQueryResult, run_status_update,
         },
+        terminal::TERMINAL,
     },
     ui::{
         KeyHandleResult, StatusMessage, Ui, UiAppEvent, UiEvent,
         modals::{downloads::DownloadsModal, info_modal::InfoModal, select_modal::SelectModal},
     },
 };
+
+/// Round 73.1: RAII bracket for a DEC 2026 synchronized update.
+///
+/// Everything written between `begin()` and the guard's drop stays in the
+/// terminal's update buffer instead of reaching the glass, so the physical
+/// clear that the cava-row-drop / album-art-erase repair needs (only a
+/// physical clear makes "screen blank" and "diff baseline blank" agree — see
+/// the render loop below) never becomes visible. Terminals that do not
+/// implement DEC 2026 ignore both escape sequences and simply show the clear,
+/// which is exactly the pre-round-71.2 behaviour.
+///
+/// The `EndSynchronizedUpdate` is not optional: a terminal that does support
+/// DEC 2026 keeps the previous frame on the glass until it arrives, so `Drop`
+/// emits it on every path, error paths included. Dropping the guard is the
+/// only way to end the bracket.
+struct SynchronizedUpdate;
+
+impl SynchronizedUpdate {
+    /// Emits `BeginSynchronizedUpdate` and flushes it, so the bracket is on
+    /// the wire before the clear that follows: nothing may be rendered
+    /// between the two. The writer lock is released before returning (the
+    /// ratatui backend re-locks it for every write in between).
+    fn begin() -> std::io::Result<Self> {
+        let tty = TERMINAL.writer();
+        let mut writer = tty.lock();
+        if let Err(err) = queue!(writer, BeginSynchronizedUpdate).and_then(|()| writer.flush()) {
+            // The begin may have reached the terminal (queue! wrote it into
+            // the buffer) even though the flush failed: a terminal that did
+            // receive it would stay in the synchronized mode and never show
+            // another frame, so end it again before reporting the failure.
+            // Best effort only — the write path is already broken here.
+            let _ = queue!(writer, EndSynchronizedUpdate).and_then(|()| writer.flush());
+            return Err(err);
+        }
+        Ok(Self)
+    }
+}
+
+impl Drop for SynchronizedUpdate {
+    fn drop(&mut self) {
+        let tty = TERMINAL.writer();
+        let mut writer = tty.lock();
+        if let Err(err) = queue!(writer, EndSynchronizedUpdate).and_then(|()| writer.flush())
+        {
+            log::error!(err:?; "Failed to end the synchronized update");
+        }
+    }
+}
 
 static ON_RESIZE_SCHEDULE_ID: LazyLock<Id> = LazyLock::new(id::new);
 
@@ -1917,26 +1971,45 @@ fn main_task<B: Backend + std::io::Write>(
             // straight to the terminal (outside the frame buffer) and its
             // band would otherwise leave stale cells behind.
             //
-            // This used to be `terminal.clear()`, which blanked the physical
-            // screen first — a visible whole-screen flash on every queue ->
-            // library switch (the "Jellyfin entry flicker" of round 63.1c).
-            // Invalidating the diff baseline instead (`swap_buffers` resets
-            // the inactive buffer) makes the next frame rewrite every cell
-            // that carries content, while the terminal keeps showing the
-            // previous frame until those cells arrive: same repair, no blank
-            // in between. The cava pane still erases its own band
-            // (`cava.clear`) before this, so the bars themselves are gone
-            // too; a config/tabs change keeps the physical clear below, where
-            // the whole layout can change.
+            // Round 73.1: that repair is a physical clear again, bracketed by
+            // a DEC 2026 synchronized update so it stays invisible.
+            // `swap_buffers()` (round 71.2) could not do it: between frames
+            // the *inactive* buffer holds the frame that is on the glass, so
+            // the swap threw that record away and left both buffers empty
+            // while the terminal kept the old frame — the next diff then had
+            // nothing to compare against and every cell the new frame leaves
+            // blank (a blank cell equals `Cell::EMPTY`, so no buffer trick can
+            // ever write it) kept the previous tab's glyph: the queue ->
+            // library switch residue. `terminal.clear()` blanks the physical
+            // screen and the diff baseline together, so blank cells are blank
+            // on both sides, and the synchronized update hides the blank
+            // interval from the user (round 71.2's goal). Terminals without
+            // DEC 2026 ignore the bracket and get the pre-71.2 clear +
+            // repaint. The cava pane still erases its own band (`cava.clear`)
+            // before this, and a config/tabs change keeps its own physical
+            // clear below, where the whole layout can change.
+            //
+            // The guard stays alive until after the terminal-side overlays
+            // below: clear, frame and images have to reach the glass in one
+            // step, otherwise the user sees the blank, image-less state this
+            // bracket exists to hide.
+            let mut synchronized_update = None;
             if ui.take_cava_refresh() || ui.take_album_art_refresh() {
-                log::debug!("Full repaint (cava-row drop / album-art erase repair), no blank screen");
-                terminal.swap_buffers();
+                log::debug!("Full repaint (cava-row drop / album-art erase repair) in a synchronized update");
+                synchronized_update = SynchronizedUpdate::begin()
+                    .inspect_err(|err| log::error!(err:?; "Failed to begin the synchronized update"))
+                    .ok();
+                if let Err(err) = terminal.clear() {
+                    log::error!(error:? = err; "Failed to clear terminal after hiding cava");
+                }
                 resize_render_passes = 2;
-                // Round 58: the Jellyfin poster only re-draws when its area
-                // changes, so a dropped cava row (which can move the poster's
-                // shelf) still gets an explicit re-place — targeted at the
-                // poster only (a global Displayed dispatch caused an
-                // album-art re-show/hide feedback loop, reverted).
+                // Round 58: the clear deleted every kitty overlay. The
+                // Jellyfin poster only re-draws when its area changes, so it
+                // must be told to re-place on the next frame — targeted at
+                // the poster only (a global Displayed dispatch caused an
+                // album-art re-show/hide feedback loop, reverted). It runs
+                // inside the bracket, so the re-placed poster and the frame
+                // drawn over it land in the same terminal update.
                 if let Err(err) = ui.refresh_overlays_after_clear(&ctx) {
                     log::error!(error:? = err; "Failed to refresh the Jellyfin poster after a full repaint");
                 }
@@ -1966,6 +2039,12 @@ fn main_task<B: Backend + std::io::Write>(
             if let Err(err) = ui.flush_pending_overlays(&ctx) {
                 log::error!(error:? = err; "Failed to flush pending overlays");
             }
+            // Round 73.1: the frame, its clear and its images are on the wire
+            // — end the repair's synchronized update (a dropped `None` when
+            // the repair did not fire) so the terminal shows the finished
+            // frame. Closed before cava can be started: the bar thread writes
+            // its own synchronized update and must not nest in this one.
+            drop(synchronized_update);
             // The cava bars are a terminal-side overlay too: a Start that
             // was deferred (so the bars never paint before the UI) fires
             // only once the flushed frame is on screen.
