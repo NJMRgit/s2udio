@@ -1842,6 +1842,30 @@ fn enqueue_items(
     }
     Ok(())
 }
+/// Round 74 (74-1): remember the start offsets carried by the pasted links
+/// for the streams that are about to be played through MPD.
+///
+/// MPD rejects a seek on a stream that is not playing yet, so the offset
+/// cannot ride along with `playid`/`add`. It is armed here — keyed by the
+/// stream URL, which is exactly the song file MPD reports for the entry —
+/// and applied by the event loop on a later status update (see
+/// `apply_pending_start_seek` in `core/event_loop.rs`). Arming rather than
+/// seeking immediately also covers an entry that is only *queued* now: the
+/// offset is still waiting when the song finally starts.
+///
+/// `ReplaceAndPlay` (an expired stream URL re-resolved mid-playback) is
+/// deliberately not armed: that entry is already playing somewhere past the
+/// original offset, and jumping it back to the pasted timestamp would be a
+/// regression.
+fn arm_start_offsets(ctx: &Ctx, info: &[crate::shared::ytdlp::YtStreamInfo]) {
+    let mut pending = ctx.pending_start_seek.borrow_mut();
+    for item in info {
+        if let Some(secs) = item.start_secs.filter(|secs| *secs > 0.0) {
+            log::debug!(url = item.url.as_str(), seconds = secs; "Arming the pasted link's start offset");
+            pending.insert(item.url.clone(), (secs, 0, None));
+        }
+    }
+}
 /// Apply the resolved YouTube streams: play the first one as a temporary
 /// entry, or add them to the queue (order preserved).
 pub fn apply_resolved_streams(
@@ -1886,6 +1910,7 @@ pub fn apply_resolved_streams(
     let count = urls.len();
     match action {
         YtAction::Play => {
+            arm_start_offsets(ctx, &info);
             let url = urls[0].clone();
             ctx.query()
                 .id(PASTE_PLAY)
@@ -1912,6 +1937,7 @@ pub fn apply_resolved_streams(
                     let mut entry = MpvPlaylistEntry::new(item.title.clone(), url, None);
                     entry.original_url = (!item.original_url.is_empty())
                         .then(|| item.original_url.clone());
+                    entry.start_secs = item.start_secs;
                     entry
                 })
                 .collect();
@@ -1926,6 +1952,7 @@ pub fn apply_resolved_streams(
             crate::core::mpv::play_video_entries(ctx, entries);
         }
         YtAction::AddAfterCurrentAndPlay => {
+            arm_start_offsets(ctx, &info);
             let has_current = ctx.find_current_song_in_queue().is_some();
             let autoplay_idx = ctx
                 .find_current_song_in_queue()
@@ -1944,6 +1971,7 @@ pub fn apply_resolved_streams(
             status_info!("Added {count} item(s) to the queue and started playback");
         }
         YtAction::Append => {
+            arm_start_offsets(ctx, &info);
             ctx.command(move |client| {
                 for url in &urls {
                     client.add(url, None)?;
@@ -1999,6 +2027,7 @@ pub fn apply_resolved_streams(
                     let mut entry = MpvPlaylistEntry::new(item.title.clone(), url, None);
                     entry.original_url = (!item.original_url.is_empty())
                         .then(|| item.original_url.clone());
+                    entry.start_secs = item.start_secs;
                     entry
                 })
                 .collect();

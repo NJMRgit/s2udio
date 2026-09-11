@@ -519,7 +519,7 @@ fn main_task<B: Backend + std::io::Write>(
                     ctx.mpv.position = 0.0;
                     ctx.mpv.duration = 0.0;
                     ctx.mpv.paused = false;
-                    ctx.mpv.pending_seek = None;
+                    ctx.mpv.pending_seek.set(None);
                     *ctx.mpv.pending_loadfile.borrow_mut() = None;
                     mpv_stale_ticks = 0;
                     // Don't report progress for the first 10 seconds so a
@@ -876,6 +876,15 @@ fn main_task<B: Backend + std::io::Write>(
                         crate::core::mpv::mpv_seek(&socket, seconds);
                         ctx.mpv.position = seconds;
                     }
+                    // Round 74 (74-3): a pasted link's start offset for the
+                    // entry mpv is on (a live switch cannot take `--start=`).
+                    crate::core::mpv::apply_entry_start_seek(
+                        &ctx,
+                        &socket,
+                        position,
+                        duration,
+                        playlist_pos,
+                    );
                     // A playlist switch requested before the socket was up
                     // (a video added while the session was still starting):
                     // load it now, first entry replacing, the rest appended.
@@ -1262,7 +1271,7 @@ fn main_task<B: Backend + std::io::Write>(
                                     } else {
                                         // Socket not up yet; the poll applies
                                         // it once reachable.
-                                        ctx.mpv.pending_seek = Some(seconds);
+                                        ctx.mpv.pending_seek.set(Some(seconds));
                                     }
                                 }
                                 render_wanted = true;
@@ -1613,6 +1622,12 @@ fn main_task<B: Backend + std::io::Write>(
                                 log::debug!("MPD playback started; pausing mpv");
                                 crate::core::mpv::pause_mpv();
                             }
+
+                            // Round 74 (74-1): a pasted YouTube-style link
+                            // that carried a timestamp (`?t=90`) — apply the
+                            // armed offset now that the status reports the
+                            // stream playing.
+                            apply_pending_start_seek(&ctx);
 
                             // The mpv video / MPD audio UI-source switch
                             // (music starts or stops while the video is
@@ -2264,6 +2279,80 @@ fn complete_stream_download(
         ReplaceAction::VideoPlaylist { .. } => {}
     }
     status_info!("Saved {} file(s) to s2udio-downloads", files.len());
+}
+
+/// Round 74 (74-1): status updates to spend on a pasted link's start offset
+/// before giving up on a stream that never becomes seekable. At ~1 s per
+/// status update this budget is a ~20 s window.
+const MAX_START_SEEK_ATTEMPTS: u8 = 20;
+
+/// Round 74 (74-1): minimum gap between start-offset seeks for the same song.
+/// `status_update_interval_ms` may be as low as 16 ms, and MPD's `elapsed`
+/// only reflects a seek a little after it lands — without this the retry
+/// would issue ~20 seeks into the first fraction of a second.
+const START_SEEK_RETRY_INTERVAL: Duration = Duration::from_millis(500);
+
+/// Round 74 (74-1): apply the start offset of a pasted link (`?t=90`) once
+/// its stream is actually playing.
+///
+/// MPD cannot seek a stream before it plays, and the offset cannot ride
+/// along with `add`/`playid`, so `apply_resolved_streams` arms it on
+/// `Ctx::pending_start_seek` (keyed by the stream URL — the song file MPD
+/// reports) and this runs on every status update:
+///
+/// - every update while the song is short of the offset sets it. Repeat
+///   attempts are harmless — the same position is set again — and are what
+///   makes a seek that MPD was not ready for yet (a stream whose decoder is
+///   still opening, one with no duration yet) land on a later update.
+///   Measured against MPD 0.24 with a googlevideo stream: `seekcur` is
+///   accepted even in the same command batch as `play`, so in practice the
+///   first update applies it.
+/// - the entry is dropped once `elapsed` reaches the offset (the seek
+///   landed, or the user seeked past it), or after the attempt budget.
+fn apply_pending_start_seek(ctx: &Ctx) {
+    if ctx.status.state != State::Play {
+        return;
+    }
+    let Some((_, song)) = ctx.find_current_song_in_queue() else {
+        return;
+    };
+    let file = song.file.clone();
+    let elapsed = ctx.status.elapsed.as_secs_f64();
+
+    let secs = {
+        let mut pending = ctx.pending_start_seek.borrow_mut();
+        let Some(&(secs, attempts, last_attempt)) = pending.get(&file) else {
+            return;
+        };
+        if elapsed >= secs {
+            // Already there: the offset was reached (the seek landed, or the
+            // user seeked past it). Nothing left to do.
+            log::debug!(file = file.as_str(); "Start offset reached; clearing the pending seek");
+            pending.remove(&file);
+            return;
+        }
+        if attempts >= MAX_START_SEEK_ATTEMPTS {
+            log::warn!(file = file.as_str(), seconds = secs; "Giving up on the pasted link's start offset");
+            pending.remove(&file);
+            return;
+        }
+        // A fast status cadence would otherwise repeat the seek many times
+        // per second while MPD catches up; 500 ms apart is enough to cover a
+        // stream that was not seekable on the first try.
+        if last_attempt.is_some_and(|at| at.elapsed() < START_SEEK_RETRY_INTERVAL) {
+            return;
+        }
+        pending.insert(file.clone(), (secs, attempts + 1, Some(Instant::now())));
+        secs
+    };
+
+    let seek_to = secs.round().clamp(0.0, f64::from(u32::MAX)) as u32;
+    log::debug!(file = file.as_str(), seconds = secs; "Applying the pasted link's start offset");
+    ctx.command(move |client| {
+        use crate::mpd::mpd_client::ValueChange;
+        client.seek_current(ValueChange::Set(seek_to))?;
+        Ok(())
+    });
 }
 
 /// Re-apply the persisted MPD replay gain mode (Settings > MPD, round 53)

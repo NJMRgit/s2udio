@@ -185,6 +185,15 @@ pub struct Ctx {
     /// itself has no metadata, so the controls, album art and info box look
     /// the info up when the playing song matches).
     pub(crate) yt_info: RefCell<HashMap<String, crate::shared::ytdlp::YtStreamInfo>>,
+    /// Round 74 (74-1): song file -> (start offset in seconds, seeks issued,
+    /// when the last one was issued) for a YouTube-style stream whose pasted
+    /// link carried a timestamp (`?t=90`). MPD cannot seek a stream that is
+    /// not playing yet, so the offset is armed when the stream is played and
+    /// applied by the event loop on a status update (see
+    /// `apply_pending_start_seek`); the timestamp rate-limits the re-seeks a
+    /// fast status cadence would otherwise repeat.
+    pub(crate) pending_start_seek:
+        RefCell<HashMap<String, (f64, u8, Option<std::time::Instant>)>>,
     /// Song file -> chapter markers (YouTube videos, Jellyfin items, local
     /// files with embedded chapters). Shown in the Queue tab via the
     /// Queue / Chapters toggle.
@@ -402,6 +411,7 @@ impl Ctx {
             cached_queue_time_total,
             mpv: crate::core::mpv::MpvSession::default(),
             yt_info: RefCell::new(yt_info),
+            pending_start_seek: RefCell::new(HashMap::new()),
             chapters: RefCell::new(HashMap::new()),
             queue_tab: Cell::new(QueueTabMode::Audio),
             video_playlist: RefCell::new(Vec::new()),
