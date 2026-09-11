@@ -5,18 +5,24 @@
 #   1. stops and removes the systemd user service
 #   2. restores the previous ~/.local/bin/yt-dlp (from .yt-dlp.s2u-yt.bak)
 #   3. removes the package's data root (~/.local/share/s2u-yt)
+#   4. removes the VR-OAuth login (~/.config/s2u-yt/vr-oauth.json)
 #
-# Usage: ./uninstall.sh [--keep-data]   (--keep-data leaves the downloaded
-#        binaries and venv in place for a quick re-install)
+# Usage: ./uninstall.sh [--keep-data]   (--keep-data leaves the provisioned
+#        server, node_modules, plugins and venv in place for a quick re-install)
+#
+# Env overrides (mirror install.sh): S2U_BIN_DIR, S2U_UNIT, S2U_SYSTEMD=0 to
+# never touch systemd, S2U_VR_CONF_DIR for the VR-OAuth login location.
 set -euo pipefail
 
 NAME="s2u-yt"
 DATA_ROOT="${XDG_DATA_HOME:-$HOME/.local/share}/$NAME"
 MANIFEST="$DATA_ROOT/state/manifest"
-UNIT="$HOME/.config/systemd/user/$NAME-bgutil.service"
-BIN_DIR="$HOME/.local/bin"
+UNIT="${S2U_UNIT:-$HOME/.config/systemd/user/$NAME-bgutil.service}"
+BIN_DIR="${S2U_BIN_DIR:-$HOME/.local/bin}"
 BACKUP="$BIN_DIR/.yt-dlp.$NAME.bak"
 WRAPPER="$DATA_ROOT/bin/yt-dlp"
+VR_CONF_DIR="${S2U_VR_CONF_DIR:-$HOME/.config/s2u-yt}"
+SYSTEMD="${S2U_SYSTEMD:-1}"
 KEEP_DATA=0
 
 log() { printf '\033[1;34m[%s]\033[0m %s\n' "$NAME" "$*"; }
@@ -26,13 +32,17 @@ warn() { printf '\033[1;33m[%s]\033[0m warning: %s\n' "$NAME" "$*" >&2; }
 
 # 1. systemd unit
 if [ -f "$UNIT" ]; then
-    if command -v systemctl >/dev/null 2>&1; then
+    if [ "$SYSTEMD" = 1 ] && command -v systemctl >/dev/null 2>&1; then
         systemctl --user disable --now "$NAME-bgutil.service" >/dev/null 2>&1 \
             || warn "could not stop service (it may not be running)"
     fi
     rm -f "$UNIT"
-    command -v systemctl >/dev/null 2>&1 && systemctl --user daemon-reload >/dev/null 2>&1 || true
+    if [ "$SYSTEMD" = 1 ] && command -v systemctl >/dev/null 2>&1; then
+        systemctl --user daemon-reload >/dev/null 2>&1 || true
+    fi
     log "removed service unit: $UNIT"
+else
+    warn "no service unit at $UNIT"
 fi
 
 # 2. wrapper
@@ -55,6 +65,17 @@ if [ "$KEEP_DATA" -eq 0 ]; then
     log "removed data root: $DATA_ROOT"
 else
     log "kept data root: $DATA_ROOT (--keep-data)"
+fi
+
+# 4. VR-OAuth login (a credential file the package's token helper created;
+#    keep it with --keep-data)
+if [ -f "$VR_CONF_DIR/vr-oauth.json" ]; then
+    if [ "$KEEP_DATA" -eq 1 ]; then
+        log "kept VR-OAuth login: $VR_CONF_DIR/vr-oauth.json (--keep-data)"
+    else
+        rm -f "$VR_CONF_DIR/vr-oauth.json" "$VR_CONF_DIR/vr-pending.json"
+        log "removed VR-OAuth login: $VR_CONF_DIR/vr-oauth.json"
+    fi
 fi
 
 log "done."

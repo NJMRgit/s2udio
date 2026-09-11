@@ -308,8 +308,18 @@ fn classify(token: &str) -> Option<PastedItem> {
         }
         return None;
     }
-    if let Ok(_content) = token.parse::<YtDlpContent>() {
-        return Some(PastedItem::Yt(token.to_owned()));
+    // The extractors are known-host URLs, so accept them with or without a
+    // scheme: links copied out of a chat line, a status bar or a plain-text
+    // list often arrive as `youtu.be/ID` / `youtube.com/watch?v=ID`
+    // (2026-09-10 — those pasted as nothing before). A local path never
+    // parses as one of these hosts, so this cannot swallow file pastes.
+    let candidate = if token.contains("://") {
+        token.to_owned()
+    } else {
+        format!("https://{token}")
+    };
+    if candidate.parse::<YtDlpContent>().is_ok() {
+        return Some(PastedItem::Yt(candidate));
     }
     if token.starts_with("http://") || token.starts_with("https://") {
         if is_torrent_extension(token) {
@@ -2456,3 +2466,4 @@ pub fn handle_paste(ctx: &Ctx, text: &str) -> bool {
     show_paste_modal(ctx, items);
     true
 }
+

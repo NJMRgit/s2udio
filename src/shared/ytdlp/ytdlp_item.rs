@@ -107,6 +107,15 @@ impl YtDlpHost {
     }
 }
 
+/// Hosts that serve YouTube content: `youtube.com` plus the mobile /
+/// music / nocookie flavours (`www.` is stripped before this is called).
+fn is_youtube_host(host: &str) -> bool {
+    matches!(
+        host,
+        "youtube.com" | "m.youtube.com" | "music.youtube.com" | "youtube-nocookie.com"
+    )
+}
+
 impl FromStr for YtDlpContent {
     type Err = YtDlpParseError;
 
@@ -117,16 +126,29 @@ impl FromStr for YtDlpContent {
             return Err(YtDlpParseError::NoHost { url: s.to_string() });
         };
 
-        match host.strip_prefix("www.").unwrap_or(host) {
-            "youtube.com" => {
+        let bare_host = host.strip_prefix("www.").unwrap_or(host);
+
+        match bare_host {
+            // 2026-09-10: every YouTube host flavour (mobile share links,
+            // YouTube Music, the nocookie embed domain), not just
+            // `www.youtube.com` — pasting those used to do nothing.
+            _ if is_youtube_host(bare_host) => {
                 let segments = url
                     .path_segments()
                     .ok_or_else(|| YtDlpParseError::invalid_yt(s, "cannot-be-a-base"))?
                     .collect_vec();
 
-                let is_watch_url = segments.contains(&"watch");
                 let is_playlist_url = segments.contains(&"playlist")
                     || url.query_pairs().any(|(key, _)| key == "list");
+                // 2026-09-10: the video id does not always live in `?v=`;
+                // Shorts / live / embed / legacy `/v/` links carry it in the
+                // path.
+                let path_video_id = segments
+                    .iter()
+                    .position(|seg| matches!(*seg, "shorts" | "live" | "embed" | "v"))
+                    .and_then(|idx| segments.get(idx + 1))
+                    .copied()
+                    .filter(|id| !id.is_empty());
 
                 if is_playlist_url {
                     url.query_pairs()
@@ -134,18 +156,17 @@ impl FromStr for YtDlpContent {
                         .map(|(_, v)| YtDlpPlaylist { id: v.to_string(), kind: YtDlpHost::Youtube })
                         .ok_or_else(|| YtDlpParseError::invalid_yt(s, "no playlist id found"))
                         .map(YtDlpContent::Playlist)
-                } else if is_watch_url {
+                } else {
                     url.query_pairs()
                         .find(|(k, _)| k == "v")
-                        .map(|(_, v)| YtDlpItem {
-                            id: v.to_string(),
-                            filename: v.to_string(),
+                        .map(|(_, v)| v.to_string())
+                        .or_else(|| path_video_id.map(str::to_owned))
+                        .map(|id| YtDlpContent::Single(YtDlpItem {
+                            id: id.clone(),
+                            filename: id,
                             kind: YtDlpHost::Youtube,
-                        })
+                        }))
                         .ok_or_else(|| YtDlpParseError::invalid_yt(s, "no video id found"))
-                        .map(YtDlpContent::Single)
-                } else {
-                    return Err(YtDlpParseError::invalid_yt(s, "unrecognized youtube url format"));
                 }
             }
             "youtu.be" => url

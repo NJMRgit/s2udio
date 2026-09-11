@@ -4,24 +4,28 @@
 # so anything you already have (cookies, js runtimes, ...) keeps working and this
 # file wins on any conflict.
 #
-# Client strategy — NO pinned player_client (2026-08-22):
+# Client strategy (v2026-09-10 — the wrapper, not this file, picks the client):
 #
-# YouTube's SABR/range enforcement (2026-08) broke the previous pin
-# (`android_vr,web_safari`): android_vr URLs came back answering **403 to
-# plain GETs and open-ended `Range: bytes=0-`** — exactly what mpv/ffmpeg
-# and MPD send — while `yt-dlp -J` still exited 0, so the wrapper's
-# authenticated fallback never fired. Verified live 2026-08-22 with
-# yt-dlp 2026.08.19: with NO client pin, the default client order reaches
-# the new anonymous **VISIONOS** client, whose URLs answer **200 to plain
-# GETs** (and 206 to open ranges, after a 302 redirect) — mpv, ffprobe
-# and MPD all play them.
+#   P1  anonymous, NO pinned client — the wrapper strips the cookie options
+#       from your config for this pass; yt-dlp's default order applies.
+#   P2  authenticated retry (your cookies), DASH-manifest URLs; the wrapper
+#       probes the resolved media URLs (curl -L -r 0-1023) and only then hands
+#       the output to the consumer.
+#   P2b optional: android_vr + OAuth Bearer — enabled automatically once
+#       ~/.config/s2u-yt/vr-oauth.json exists (README "VR OAuth"). Full-quality
+#       DASH without the googlevideo 403 flapping.
+#   P3  web_safari (HLS, max 1080p60) — safety net when the probe sees 403s.
 #
-# Do NOT re-pin `player_client` here without re-verifying end-to-end:
-# every pinned combination tested (web/mweb/web_safari variants) steered
-# selection onto range-restricted audio formats (403s), and an
-# authenticated session alone lands on WEB_EMBEDDED_PLAYER (fully 403).
+# Do NOT pin `player_client` here: a pin in this file would apply to every
+# phase (and to the HLS fallback's own --extractor-args), which is what broke
+# the 2026-08-22 setup. The per-phase client is chosen by the wrapper.
 #
-# PO tokens: still minted by the bgutil provider (systemd --user unit
-# s2u-yt-bgutil.service); keep it running (status.sh checks it). If the
-# anonymous pass ever fails, the wrapper's phase-2 authenticated retry
-# (user cookies) still applies.
+# The wrapper also strips the deprecated `--youtube-skip-dash-manifest` flag
+# from consumer args: with it, yt-dlp returns player-response URLs that fail
+# googlevideo's redirect validation (302 -> 403), while DASH-manifest URLs
+# answer 206 to the same request. Verified 2026-09-09/10 (A/B 3/3, wrapper
+# runs 6/6).
+#
+# PO tokens: minted by the bgutil provider — a NATIVE node server on
+# 127.0.0.1:4416 (systemd --user unit s2u-yt-bgutil.service). Keep it running;
+# status.sh checks the port, the unit's version and a live stream URL.
