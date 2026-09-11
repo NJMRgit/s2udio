@@ -5,13 +5,12 @@
 #   1. stops and removes the systemd user service
 #   2. restores the previous ~/.local/bin/yt-dlp (from .yt-dlp.s2u-yt.bak)
 #   3. removes the package's data root (~/.local/share/s2u-yt)
-#   4. removes the VR-OAuth login (~/.config/s2u-yt/vr-oauth.json)
 #
 # Usage: ./uninstall.sh [--keep-data]   (--keep-data leaves the provisioned
 #        server, node_modules, plugins and venv in place for a quick re-install)
 #
 # Env overrides (mirror install.sh): S2U_BIN_DIR, S2U_UNIT, S2U_SYSTEMD=0 to
-# never touch systemd, S2U_VR_CONF_DIR for the VR-OAuth login location.
+# never touch systemd.
 set -euo pipefail
 
 NAME="s2u-yt"
@@ -21,7 +20,6 @@ UNIT="${S2U_UNIT:-$HOME/.config/systemd/user/$NAME-bgutil.service}"
 BIN_DIR="${S2U_BIN_DIR:-$HOME/.local/bin}"
 BACKUP="$BIN_DIR/.yt-dlp.$NAME.bak"
 WRAPPER="$DATA_ROOT/bin/yt-dlp"
-VR_CONF_DIR="${S2U_VR_CONF_DIR:-$HOME/.config/s2u-yt}"
 SYSTEMD="${S2U_SYSTEMD:-1}"
 KEEP_DATA=0
 
@@ -65,17 +63,6 @@ if [ "$KEEP_DATA" -eq 0 ]; then
     log "removed data root: $DATA_ROOT"
 else
     log "kept data root: $DATA_ROOT (--keep-data)"
-fi
-
-# 4. VR-OAuth login (a credential file the package's token helper created;
-#    keep it with --keep-data)
-if [ -f "$VR_CONF_DIR/vr-oauth.json" ]; then
-    if [ "$KEEP_DATA" -eq 1 ]; then
-        log "kept VR-OAuth login: $VR_CONF_DIR/vr-oauth.json (--keep-data)"
-    else
-        rm -f "$VR_CONF_DIR/vr-oauth.json" "$VR_CONF_DIR/vr-pending.json"
-        log "removed VR-OAuth login: $VR_CONF_DIR/vr-oauth.json"
-    fi
 fi
 
 log "done."

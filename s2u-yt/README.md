@@ -29,8 +29,7 @@ s2u-yt/
 ├── conf/config                      # the only yt-dlp config delta (no player_client pin — the wrapper chooses)
 ├── bin/yt-dlp-wrap.sh               # wrapper template rendered into the data root by install.sh
 ├── bin/s2u-yt-probe.py              # media-URL probe used by wrapper phases 2/2b
-├── bin/vr-oauth-token.sh            # optional Android-VR OAuth login/refresh (see "VR OAuth")
-├── plugins/bgutil-ytdlp-pot-provider/…   # yt-dlp plugins: bgutil 2.x + the VR-OAuth client patch
+├── plugins/bgutil-ytdlp-pot-provider/…   # yt-dlp plugins: the bgutil 2.x PO-token provider
 └── README.md
 ```
 
@@ -43,7 +42,6 @@ manifest). The only changes made outside it:
 | `~/.local/bin/yt-dlp` | replaced by a wrapper (`--plugin-dirs` + `--config-locations`); the previous binary is preserved at `~/.local/bin/.yt-dlp.s2u-yt.bak` | yes |
 | `~/.config/systemd/user/s2u-yt-bgutil.service` | runs the token server on `127.0.0.1:4416` | yes |
 | `~/.config/yt-dlp/config` | **untouched** — your cookies/runtime settings still apply (the wrapper passes your config first, the package config second; for the anonymous pass it strips only the cookie options) | n/a |
-| `~/.config/s2u-yt/vr-oauth.json` | only if you opt into VR OAuth (see below) | yes |
 
 ## Requirements
 
@@ -92,7 +90,6 @@ the first result whose media URLs it could actually fetch:
 |---|---|---|
 | **P1** anonymous | no pin; cookie options stripped from your config | JSON on success (a failed pass is discarded — its leading `null` corrupts consumers) |
 | **P2** authenticated | no pin; **your cookies** | probed; on HTTP 403 the ladder continues |
-| **P2b** VR OAuth (optional) | `android_vr` + `Authorization: Bearer …` | probed; only when `~/.config/s2u-yt/vr-oauth.json` exists |
 | **P3** HLS safety net | `web_safari` (HLS, ≤1080p60) | always playable, lower quality |
 
 Details that matter:
@@ -105,49 +102,39 @@ Details that matter:
   against the best video and audio URL; a 403 means mpv would fail, so the
   wrapper keeps going instead of handing back a dead URL.
 - Decisions are logged (cheaply) to `/tmp/s2u-yt-wrapper.log`
-  (`PHASE2_PROBE403`, `VR_OAUTH_OK`, `FALLBACK_HLS`, `DROP deprecated …`).
+  (`PHASE2_PROBE403`, `FALLBACK_HLS`, `DROP deprecated …`).
 - YouTube's behaviour still **flaps window-to-window** (an open window means
   DASH/206, a closed one means 403s). The ladder means playback keeps working
   instead of failing; which phase answered is visible in the log.
 
-## Optional full-quality auth (VR OAuth)
+## When YouTube answers SABR-only
 
-YouTube applies its bot check to anonymous InnerTube requests from this IP, so
-even an open window can be reduced to the 1080p HLS fallback. Signing in as the
-**Android VR** client (`ANDROID_VR`) with a Google OAuth token gives the
-authenticated VR player response: full-quality DASH (4K/2160p where the video
-has it) and no `LOGIN_REQUIRED`.
+YouTube is rolling out **SABR** — server-side adaptive bitrate. The player
+response still lists the full ladder (2160p/1440p/1080p …) but the adaptive
+formats come back **without URLs**; only `serverAbrStreamingUrl` is offered, and
+using it means speaking YouTube's own streaming protocol. Anything that plays
+through per-format URLs — yt-dlp, mpv, MPD — cannot, so such a client is left
+with the muxed 360p stream. yt-dlp tracks it as
+[#12482](https://github.com/yt-dlp/yt-dlp/issues/12482) (`core:downloader`; its
+SABR downloader is the upstream fix), and mpv/ffmpeg have no SABR support of
+their own ([mpv #16645](https://github.com/mpv-player/mpv/issues/16645)).
 
-```bash
-~/.local/share/s2u-yt/bin/vr-oauth-token.sh init     # prints https://yt.be/activate + a code
-~/.local/share/s2u-yt/bin/vr-oauth-token.sh status   # configured? token cached/expired?
-~/.local/share/s2u-yt/bin/vr-oauth-token.sh reinit   # start over (new account/code)
-```
+**What this package does about it:** nothing client-side, by design. Measured on
+2026-09-10 with the window open (the anonymous client resolving 4K fine):
 
-`init` runs Google's OAuth 2.0 **device authorization grant** with the YouTube
-VR app's public client credentials (the same route SmartTube / ReVanced's
-"Android VR (Auth)" use): open <https://yt.be/activate>, enter the code, sign
-in. It stores only the refresh + access token in
-`~/.config/s2u-yt/vr-oauth.json` (`chmod 600`), and refreshes the access token
-automatically (on demand, when < 5 min remain). The wrapper then gains phase
-P2b — no other configuration needed.
+| attempt | result |
+|---|---|
+| anonymous default client (VISIONOS) | 188 formats with URLs, `401` → **206** (the working path) |
+| cookies-authenticated default order | 117 formats with URLs, `401`/`315` → **403** |
+| `mweb` + PO token (upstream's suggested workaround) | 162 formats with URLs *carrying `pot=`*, `401`/`315` → **403** |
+| authenticated `android_vr` (VR-OAuth route, removed) | SABR-only: 1 playable format, 360p |
 
-> **Read this before enabling:** this bypasses YouTube's client restrictions and
-> **violates Google's/YouTube's ToS**. Use a **throwaway Google account**; do not
-> reuse your main account. The refresh token grants account access — keep the
-> file private (`chmod 600`), never commit/export it. The client id/secret are
-> the public ones embedded in SmartTube/ReVanced for years, but Google can
-> rotate or block the route at any time; if that happens `vr-oauth-token.sh
-> reinit` (or simply deleting `vr-oauth.json`) returns you to the anonymous
-> ladder. `uninstall.sh` removes the token file.
-
-Related environment note: s2udio resolves through the `yt-dlp` on `PATH`,
-overridable with the **`S2UDIO_YTDLP_BIN`** environment variable (useful to test
-an alternative binary, e.g. a fresh pipx build, without touching the wrapper).
-Also, if the token'd `android_vr` player call ever demands a GVS PO token on
-this IP, the bgutil provider can supply one via
-`--extractor-args "youtube:po_token=android_vr.gvs+<pot>"`; the bundled plugin
-already supports that context. Not needed as of 2026-09-10.
+So neither the cookie pass nor `mweb` yields fetchable URLs here, and the ladder
+keeps them only as probed attempts that fall through to the **HLS safety net**
+(≤1080p60, always playable). That is why there is no `mweb` phase: it would cost
+an extra resolve and change nothing. When YouTube migrates the remaining clients
+too, or upstream lands its SABR downloader, the wrapper's fallback list is where
+a fix plugs in.
 
 ## Verify / status
 
@@ -207,7 +194,7 @@ Tips:
 - **Still HTTP 403 after install**: the tokens "make traffic look legitimate"
   but are not guaranteed to clear a hard IP block. Confirm breadth with
   `yt-dlp --extractor-args "youtube:player_client=web_embedded" -J <url>`, then
-  consider the VR-OAuth route above, a different egress (VPN/proxy —
+  consider a different egress (VPN/proxy —
   `--proxy` in your yt-dlp config applies to mpv/s2udio too), or waiting for
   the flag to decay.
 - **`PO Token Providers: none`**: the plugin dir isn't being loaded — check
@@ -220,10 +207,12 @@ Tips:
   `~/.local/share/s2u-yt/server/build/main.js`.
 - **"Requested format is not available"** for `-f 251`: harmless — YouTube now
   names formats `251-0`/`251-drc`; s2udio/mpv use default selection.
-- **SABR-only warning**: YouTube keeps migrating clients to the SABR streaming
-  protocol and periodically kills a client fingerprint. When that happens the
-  ladder degrades (HLS) rather than failing; the fixes are a yt-dlp upgrade
-  and/or a `BGUTIL_TAG` bump.
+- **SABR-only warning**: YouTube answers some clients with formats that carry
+  no URL at all (`WARNING: … client https formats have been skipped as they are
+  missing a URL … SABR-only streaming experiment`). That is expected for the
+  clients YouTube has migrated — see *When YouTube answers SABR-only* above for
+  the measurements. The ladder absorbs it (the HLS safety net still plays); the
+  maintenance moves are a yt-dlp upgrade and/or a `BGUTIL_TAG` bump.
 - **Maintenance**: YouTube actively breaks providers. Keep this package's
   `BGUTIL_TAG`, yt-dlp itself and (if used) the VR token current; re-running
   `./install.sh` re-provisions everything.
@@ -235,7 +224,6 @@ s2udio / mpv / CLI ─▶ yt-dlp (wrapper: plugin-dirs + per-phase config-locati
                           │
                           ├─ P1 anon  (cookies stripped, unpinned)
                           ├─ P2 auth  (your cookies) ──▶ probe ─ 403? ─┐
-                          ├─ P2b android_vr + Bearer (if VR OAuth) ◀───┘
                           ├─ P3 web_safari HLS  (≤1080p60 safety net)
                           └─▶ plugins ─▶ bgutil server 127.0.0.1:4416 (native node 2.x)
                                             └─▶ mints GVS PO token
