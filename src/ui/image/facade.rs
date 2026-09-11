@@ -359,6 +359,15 @@ impl AlbumArtFacade {
         }
         Ok(())
     }
+    /// Drop the held image data without touching the terminal: the source
+    /// resolved to "nothing to show", so a later re-show must not re-place
+    /// a stale image. Callers erase separately through [`Self::hide`].
+    pub fn forget(&mut self) {
+        self.current_album_art = None;
+        self.request_queue.clear();
+        self.last_drawn = None;
+        self.region_dirty = false;
+    }
     pub fn hide(&mut self, ctx: &Ctx) -> Result<()> {
         self.last_drawn = None;
         self.region_dirty = false;
