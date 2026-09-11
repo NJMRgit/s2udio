@@ -60,6 +60,11 @@ impl AlbumArtPane {
     /// with data, the next song, resume).
     fn collapse(&mut self, ctx: &Ctx) -> Result<()> {
         ctx.album_art_collapsed.set(true);
+        // Round 75: drop the held bytes too. The re-show path re-places
+        // whatever the facade still holds, and a selection whose art could
+        // not be resolved must not come back showing the previous
+        // selection's cover.
+        self.album_art.forget();
         self.album_art.hide(ctx)
     }
     /// Show the already-known current art, or try to fetch it; collapse
@@ -177,10 +182,28 @@ impl AlbumArtPane {
             .and_then(|id| ctx.queue.iter().find(|song| song.id == id))
     }
     /// Paused/stopped: the box follows the queue selection. Refetches only
-    /// when the selection's file changes; a cleared selection collapses.
+    /// when the selection's file changes, re-places the art it already
+    /// holds when the pane comes back on screen without the selection
+    /// having changed, and collapses on a cleared selection.
     fn check_selected_art(&mut self, ctx: &Ctx) -> Result<()> {
         let file = Self::selected_queue_song(ctx).map(|song| song.file.clone());
+        if file == self.paused_art_file && self.album_art.is_showing() {
+            return Ok(());
+        }
         if file == self.paused_art_file {
+            // Round 75: the selection did not change, but the image is no
+            // longer on the glass — an off-tab hide (`on_hide`) erased it
+            // when the pane left and the facade kept the bytes. Re-place
+            // what we hold instead of waiting for the selection or the
+            // playback state to change: queue -> library -> queue used to
+            // come back blank until a track was played or re-selected
+            // (reported 2026-09-11). `is_showing` flips in `show`, so this
+            // runs once per hide, not once per frame.
+            if self.album_art.has_current() {
+                ctx.album_art_collapsed.set(false);
+                return self.album_art.show_current(ctx);
+            }
+            // Resolved earlier as "no art for this selection": stay as is.
             return Ok(());
         }
         self.paused_art_file = file.clone();

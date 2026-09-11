@@ -1677,7 +1677,28 @@ fn main_task<B: Backend + std::io::Write>(
                                     // the guard (dropping it cancels).
                                 }
                                 State::Stop => {
-                                    song_changed = true;
+                                    // Round 75: only the *transition* into
+                                    // Stop is a song change. MPD keeps
+                                    // reporting Stop on every status/idle
+                                    // update while the player is stopped (a
+                                    // whole-library rescan, an lrcgen pass,
+                                    // a Jellyfin progress report, ...), and
+                                    // the unconditional flag re-ran the
+                                    // entire SongChanged fan-out on each
+                                    // one: `on_song_change` (the lyrics
+                                    // fetch), chapters, MPRIS metadata and
+                                    // the album-art refresh. Off the Queue
+                                    // tab that refresh re-showed the art
+                                    // that the very next frame erased
+                                    // again, forcing a full terminal clear
+                                    // + repaint: the top-left flicker
+                                    // reported while a Jellyfin video
+                                    // played (2026-09-11) — and the reason
+                                    // `rmpc-fetch-lyrics` ran every few
+                                    // seconds with nothing playing.
+                                    if previous_state != State::Stop {
+                                        song_changed = true;
+                                    }
                                     ctx.song_played = None;
                                     _update_loop_guard = None;
                                 }
@@ -2009,8 +2030,10 @@ fn main_task<B: Backend + std::io::Write>(
             // step, otherwise the user sees the blank, image-less state this
             // bracket exists to hide.
             let mut synchronized_update = None;
-            if ui.take_cava_refresh() || ui.take_album_art_refresh() {
-                log::debug!("Full repaint (cava-row drop / album-art erase repair) in a synchronized update");
+            let cava_refresh = ui.take_cava_refresh();
+            let album_art_refresh = ui.take_album_art_refresh();
+            if cava_refresh || album_art_refresh {
+                log::debug!(cava_refresh, album_art_refresh; "Full repaint (cava-row drop / album-art erase repair) in a synchronized update");
                 synchronized_update = SynchronizedUpdate::begin()
                     .inspect_err(|err| log::error!(err:?; "Failed to begin the synchronized update"))
                     .ok();
