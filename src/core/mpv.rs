@@ -5,7 +5,7 @@
 use std::{
     io::{BufRead, Write},
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, Instant},
 };
 use serde::{Deserialize, Serialize};
 use crate::ctx::Ctx;
@@ -27,6 +27,12 @@ pub struct MpvPlaylistEntry {
     /// no resolved origin.
     #[serde(default)]
     pub original_url: Option<String>,
+    /// Round 74 (74-3): start offset in seconds carried by the pasted link
+    /// this entry was resolved from (`?t=90`). Applied when mpv opens the
+    /// entry: `--start=` on a fresh launch, a seek for a session mpv is
+    /// already running. `None` for every other source.
+    #[serde(default)]
+    pub start_secs: Option<f64>,
 }
 impl MpvPlaylistEntry {
     pub fn new(
@@ -39,6 +45,7 @@ impl MpvPlaylistEntry {
             url: url.into(),
             duration,
             original_url: None,
+            start_secs: None,
         }
     }
     /// The identity key for yt-info / chapters / thumbnail lookups: the
@@ -73,8 +80,17 @@ pub struct MpvSession {
     /// read; the volume bar falls back to the MPD volume meanwhile.
     pub volume: Option<u8>,
     /// Resume seek requested before the mpv IPC socket was reachable;
-    /// applied by the poll once the socket is live.
-    pub pending_seek: Option<f64>,
+    /// applied by the poll once the socket is live. A `Cell` so the
+    /// `&Ctx` paths that arm it can write it — same as `playlist_pos`.
+    pub pending_seek: std::cell::Cell<Option<f64>>,
+    /// Round 74 (74-3): start offset still to apply to the entry mpv is on
+    /// now — `(playlist position, attempts, when the last one was made)`.
+    /// A session that is already running cannot take `--start=` (a launch
+    /// argument), and arming `pending_seek` does not work either: the
+    /// `MpvItemChanged` event the same action sends clears it before the
+    /// poll runs. So the poll applies the offset itself, while the position
+    /// is still short of it (see `apply_entry_start_seek`).
+    pub start_seek: std::cell::Cell<Option<(usize, u8, Option<std::time::Instant>)>>,
     /// A playlist switch requested before the mpv IPC socket was reachable
     /// (a video added while the session was still starting): the URLs are
     /// loaded (first replaces, the rest append) by the poll once the
@@ -198,7 +214,7 @@ fn detect_mpv_session_at(ctx: &mut Ctx, socket: std::path::PathBuf) -> bool {
     ctx.mpv.position = position;
     ctx.mpv.paused = paused;
     ctx.mpv.volume = volume;
-    ctx.mpv.pending_seek = None;
+    ctx.mpv.pending_seek.set(None);
     log::info!(
         title:? = ctx.mpv.title, item_id:? = ctx.mpv.item_id, position:? = ctx.mpv
         .position, duration:? = ctx.mpv.duration; "Reattached to a running mpv session"
@@ -771,6 +787,12 @@ pub fn play_video_entries(ctx: &Ctx, entries: Vec<MpvPlaylistEntry>) {
         // name — the OSD then shows the wrong episode after a switch.
         let m3u = write_mpv_m3u(&entries);
         mpv_load_playlist(&socket, &m3u);
+        // Round 74 (74-3): a pasted link's start offset for the entry mpv
+        // just switched to is applied by the poll (see
+        // `apply_entry_start_seek`): a live session cannot take `--start=`,
+        // and `pending_seek` is cleared by the `MpvItemChanged` event this
+        // function sends a few lines below.
+        ctx.mpv.start_seek.set(None);
     } else {
         *ctx.mpv.pending_loadfile.borrow_mut() = Some(
             entries.iter().map(|e| e.url.clone()).collect::<Vec<_>>(),
@@ -788,6 +810,94 @@ pub fn play_video_entries(ctx: &Ctx, entries: Vec<MpvPlaylistEntry>) {
             }),
         );
 }
+
+/// Round 74 (74-3): attempts the mpv poll makes to place a pasted link's
+/// start offset. mpv drops a seek aimed at an entry it has not finished
+/// loading, so the poll retries; ~500 ms apart this is a ~10 s window, which
+/// also bounds how long the retry can fight a *user* seek backwards past the
+/// offset.
+const MAX_START_SEEK_ATTEMPTS: u8 = 20;
+
+/// Round 74 (74-3): minimum gap between those attempts (a poll tick is
+/// 100 ms while a session is active).
+const START_SEEK_RETRY_INTERVAL: Duration = Duration::from_millis(500);
+
+/// Round 74 (74-3): apply the start offset a pasted link carried (`?t=90`)
+/// to the entry mpv is playing now.
+///
+/// `--start=` covers a fresh launch, but not a session that is already
+/// running: `play_video_entries` switches such a session with
+/// `loadlist … replace`, and neither `pending_seek` (cleared by the
+/// `MpvItemChanged` event the same action sends) nor an immediate seek (mpv
+/// drops it while the entry is still loading) can do it. The offset stays on
+/// the playlist entry, so the poll applies it here:
+///
+/// - only while the entry mpv is on is the one that wants an offset, and its
+///   position is still short of it — the state is read from the playlist,
+///   so an entry that is merely *queued* is left alone;
+/// - rate-limited and attempt-bounded, so a seek mpv was not ready for is
+///   retried, but a stream that never reaches the offset (or a user who
+///   seeked backwards) is not fought indefinitely;
+/// - an offset at or past the entry's known duration is dropped: nothing to
+///   seek to.
+pub fn apply_entry_start_seek(
+    ctx: &Ctx,
+    socket: &Path,
+    position: f64,
+    duration: f64,
+    playlist_pos: Option<usize>,
+) {
+    let Some(pos) = playlist_pos else { return };
+    let Some(secs) = ctx
+        .mpv
+        .playlist
+        .borrow()
+        .get(pos)
+        .and_then(|entry| entry.start_secs)
+        .filter(|secs| *secs > 0.0)
+    else {
+        return;
+    };
+    if position >= secs {
+        // There already: the seek landed (or the user got there first). A
+        // launch that was given `--start=` reads its position here and is
+        // done without a single redundant seek.
+        ctx.mpv.start_seek.set(None);
+        return;
+    }
+    if position <= 0.0 {
+        // mpv reports no position while it is still opening an entry (and a
+        // seek sent then is dropped). Wait until playback has actually
+        // started: that is what keeps a fresh launch — whose `--start=`
+        // already placed it — from being seeked again while it loads.
+        return;
+    }
+    if duration > 0.0 && secs >= duration {
+        // Past the end of the video: no position to start at. Drop it, or
+        // the retry would seek to the end of the file on every tick.
+        log::debug!(seconds = secs, duration = duration; "Dropping a start offset past the end of the video");
+        ctx.mpv.start_seek.set(None);
+        return;
+    }
+
+    let (attempts, last) = match ctx.mpv.start_seek.get() {
+        // A different entry started: this is a fresh offset, and the attempt
+        // budget starts over.
+        Some((pos_now, attempts, last)) if pos_now == pos => (attempts, last),
+        _ => (0, None),
+    };
+    if attempts >= MAX_START_SEEK_ATTEMPTS {
+        ctx.mpv.start_seek.set(None);
+        return;
+    }
+    if last.is_some_and(|at| at.elapsed() < START_SEEK_RETRY_INTERVAL) {
+        return;
+    }
+    ctx.mpv.start_seek.set(Some((pos, attempts + 1, Some(Instant::now()))));
+    log::debug!(seconds = secs, attempts = attempts + 1; "Applying the pasted link's start offset in mpv");
+    mpv_seek(socket, secs);
+}
+
 /// Play `entries` starting at `start_index` while KEEPING the whole list.
 ///
 /// Round 69 (user feedback): selecting an episode from the Queue page used
@@ -1024,6 +1134,16 @@ pub fn run_mpv_playlist(
     // `.m3u` carrying the entry titles (`#EXTINF`) instead: every playlist
     // entry keeps its correct name in the window / OSD.
     let m3u = write_mpv_m3u(&ctx.mpv.playlist.borrow());
+    // Round 74 (74-3): a pasted link that carried a start offset (`?t=90`)
+    // must open at that position; `--start=` applies to the entry mpv opens
+    // first, i.e. the one `--playlist-start` jumps to.
+    let start_secs = ctx
+        .mpv
+        .playlist
+        .borrow()
+        .get(start_index.unwrap_or(0))
+        .and_then(|entry| entry.start_secs)
+        .filter(|secs| *secs > 0.0);
     let was_playing = ctx.status.state == State::Play;
     use crate::mpd::commands::volume::Bound as _;
     let volume = *ctx.status.volume.value();
@@ -1043,6 +1163,9 @@ pub fn run_mpv_playlist(
         cmd.arg(format!("--volume={volume}"));
         if let Some(start) = start_index {
             cmd.arg(format!("--playlist-start={start}"));
+        }
+        if let Some(secs) = start_secs {
+            cmd.arg(format!("--start={secs}"));
         }
         if let Some(alang) = audio_lang.alang() {
             cmd.arg(format!("--alang={alang}"));

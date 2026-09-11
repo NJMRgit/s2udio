@@ -1,6 +1,8 @@
 use std::process::Command;
 use anyhow::Context;
 use serde::Deserialize;
+
+use super::ytdlp_item::parse_start_offset;
 /// Everything the app shows for a YouTube-style link resolved to a direct
 /// audio stream: the stream URL (fed to MPD), the video title (now-playing
 /// info), the thumbnail (album art) and the description (info box). Also
@@ -26,6 +28,14 @@ pub struct YtStreamInfo {
     /// Chapter markers: the video's embedded chapters, or — when the video
     /// has none — timestamp lines parsed from its description.
     pub chapters: Vec<crate::shared::chapters::Chapter>,
+    /// Round 74 (74-1): the start offset the pasted link carried (`?t=90`,
+    /// `?start=90`, `#t=1m30s`), in seconds. yt-dlp resolves the stream URL
+    /// but drops the offset, so the player applies it: MPD seeks once the
+    /// stream is playing, mpv is launched with `--start=`. `#[serde(default)]`
+    /// keeps the existing `<cache_dir>/yt-info.json` loadable (the field is
+    /// absent in entries written before this round).
+    #[serde(default)]
+    pub start_secs: Option<f64>,
 }
 /// Resolve a YouTube/Soundcloud/NicoVideo URL to its direct audio stream
 /// URL(s) with yt-dlp, along with each video's title, thumbnail and
@@ -156,7 +166,7 @@ fn resolve_one(bin: &str, input_url: &str) -> anyhow::Result<Vec<YtStreamInfo>> 
             .unwrap_or_default(), channel : parsed.channel.or(parsed.uploader).filter(| c
             | ! c.is_empty()), subscribers : parsed.channel_follower_count, thumbnail :
             parsed.thumbnail.filter(| t | ! t.is_empty()), description, duration : parsed
-            .duration, chapters, }
+            .duration, chapters, start_secs : parse_start_offset(input_url), }
         ],
     )
 }

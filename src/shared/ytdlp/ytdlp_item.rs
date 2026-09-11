@@ -238,3 +238,90 @@ impl FromStr for YtDlpContent {
         }
     }
 }
+
+/// Round 74 (74-1): the start offset a shared link carries, in seconds.
+///
+/// A link copied from the YouTube player's "Copy video URL at current time"
+/// (or typed by hand) carries the position in `?t=`, `?start=` or the
+/// `#t=` fragment; `?time_continue=` shows up on some embeds. All four are
+/// accepted, on every supported host (the other hosts simply never send
+/// them, so the parse is a no-op there).
+///
+/// `YtDlpContent::from_str` deliberately drops the whole query — it only
+/// wants the video id — and yt-dlp ignores the offset when it resolves a
+/// stream URL, so nothing downstream could know where to start. The player
+/// has to apply the offset itself: MPD seeks once the stream is playing,
+/// mpv gets `--start=`. This function is the single place that reads it.
+pub fn parse_start_offset(url: &str) -> Option<f64> {
+    let url = url.trim();
+    let (without_fragment, fragment) = match url.split_once('#') {
+        Some((head, fragment)) => (head, Some(fragment)),
+        None => (url, None),
+    };
+
+    // `#t=1m30s` — the fragment form. Checked first: a URL may carry both
+    // (YouTube's own share links put the offset in the fragment when the
+    // player rewrites the address bar).
+    if let Some(offset) = fragment
+        .and_then(|fragment| fragment.strip_prefix("t="))
+        .and_then(parse_time_value)
+    {
+        return Some(offset);
+    }
+
+    let (_, query) = without_fragment.split_once('?')?;
+    for pair in query.split('&') {
+        let Some((key, value)) = pair.split_once('=') else {
+            continue;
+        };
+        if matches!(
+            key.to_ascii_lowercase().as_str(),
+            "t" | "start" | "time_continue"
+        ) && let Some(offset) = parse_time_value(value)
+        {
+            return Some(offset);
+        }
+    }
+
+    None
+}
+
+/// Round 74 (74-1): a YouTube time value into seconds — `90`, `90.5`,
+/// `45s`, `1m30s`, `2m`, `1h2m3s`, and the shorthand players accept without
+/// the trailing unit (`1h30`, `2m30`). Anything else (a stray `t=foo` on a
+/// non-YouTube link) yields `None` so the caller applies no offset.
+fn parse_time_value(raw: &str) -> Option<f64> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+
+    // Collapse the `h`/`m`/`s` groups into seconds; each group's digits are
+    // accumulated until its unit letter arrives.
+    let mut total = 0.0f64;
+    let mut digits = String::new();
+    for ch in raw.chars() {
+        if ch.is_ascii_digit() || ch == '.' {
+            digits.push(ch);
+            continue;
+        }
+        let value: f64 = digits.parse().ok()?;
+        digits.clear();
+        match ch.to_ascii_lowercase() {
+            'h' => total += value * 3600.0,
+            'm' => total += value * 60.0,
+            's' => total += value,
+            _ => return None,
+        }
+    }
+    // A trailing group without its unit is seconds (`t=1m30`); with no unit
+    // at all the whole value was already one group (`t=90`) or the string
+    // was empty of digits.
+    if !digits.is_empty() {
+        total += digits.parse::<f64>().ok()?;
+    }
+
+    // `0`/`t=0s` is not an offset (nothing to seek to); non-positive or
+    // non-finite values are rejected the same way.
+    (total.is_finite() && total > 0.0).then_some(total)
+}

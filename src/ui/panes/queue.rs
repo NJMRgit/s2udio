@@ -363,13 +363,19 @@ impl QueuePane {
         let chapters_visible = Self::chapters_available(ctx);
         // Audio and Video always show; Chapters is conditional on the
         // track having markers; Radio always shows (round 62 Q2).
+        //
+        // Round 74 (74-2): the painted order IS the toggle_areas index order
+        // the click handler (see `handle_mouse_event`) and the `c` cycle
+        // use, so Chapters has to sit BEFORE Radio. It used to be appended
+        // after Radio, which put the "Chapters" label in the fourth click
+        // area and the "Radio" label in the third: clicking Radio selected
+        // Chapters and clicking Chapters opened Radio (the labels and the
+        // hit areas were off by one whenever the track had markers).
         let mut segments = vec![
             crate ::ui::widgets::sub_tab_bar::Segment { label : "Audio", active : active
             == crate ::ctx::QueueTabMode::Audio, }, crate
             ::ui::widgets::sub_tab_bar::Segment { label : "Video", active : active ==
-            crate ::ctx::QueueTabMode::Video, }, crate
-            ::ui::widgets::sub_tab_bar::Segment { label : "Radio", active : active ==
-            crate ::ctx::QueueTabMode::Radio, },
+            crate ::ctx::QueueTabMode::Video, },
         ];
         if chapters_visible {
             segments
@@ -378,6 +384,10 @@ impl QueuePane {
                     active: active == crate::ctx::QueueTabMode::Chapters,
                 });
         }
+        segments.push(crate::ui::widgets::sub_tab_bar::Segment {
+            label: "Radio",
+            active: active == crate::ctx::QueueTabMode::Radio,
+        });
         let right = tab_area.right().saturating_sub(1);
         let bar = crate::ui::widgets::sub_tab_bar::SubTabBar::new(
             &segments,

@@ -1503,7 +1503,7 @@ impl Ui {
                 ctx.mpv.item_id = (!item_id.is_empty()).then_some(item_id.clone());
                 ctx.mpv.item = None;
                 ctx.mpv.title = title;
-                ctx.mpv.pending_seek = None;
+                ctx.mpv.pending_seek.set(None);
                 ctx.mpv.art_path = None;
                 // A new video must never show the previous one's poster in
                 // the media controls until its own art is fetched.
