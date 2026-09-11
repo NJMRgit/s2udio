@@ -996,10 +996,11 @@ impl Ui {
                     self.change_tab(target, ctx)?;
                     ctx.render()?;
                 }
-                // Round 60: Shift+E / Shift+Q / Shift+Right / Shift+Left
-                // cycle through the libraries while a library tab is
-                // active (no-op on the Queue tab or with a single
-                // library).
+                // Round 60: Shift+Right / Shift+Left cycle through the
+                // libraries while a library tab is active (no-op on the
+                // Queue tab or with a single library). Round 73.2 revision
+                // B: `c` is bound to the same "next" action on library tabs
+                // — `w`/`s` are movement, `q` is unbound and `Q` is Quit.
                 GlobalAction::NextLibraryTab => {
                     if let Some(target) = self.cycle_library(ctx, 1) {
                         self.change_tab(target, ctx)?;
@@ -1014,8 +1015,17 @@ impl Ui {
                 }
                 // Round 28b: Shift+Tab toggles the MPD tab's Library/Search
                 // mode — the Directories pane claims it while focused;
-                // anywhere else it is a no-op (Tab/E/Q cycle tabs).
+                // anywhere else it is a no-op (Tab/c/Shift+arrows cycle tabs).
+                // Round 73.2: the flip no longer focuses the search input
+                // (that is `S`); Playlists/Jellyfin release it explicitly.
                 GlobalAction::ToggleMpdMode => {}
+                // Round 73.2: `S` (Shift+S) jumps to the active library
+                // tab's Search page with its query input focused — the
+                // MPD/Playlists/Jellyfin panes claim it while focused.
+                // Reaching this arm means the tab has no search page
+                // (Queue, Downloads, Local, Artists, Albums), so it is a
+                // deliberate no-op.
+                GlobalAction::LibrarySearch => {}
                 GlobalAction::SwitchToTab(name) => {
                     if ctx.config.tabs.names.contains(name) && !ctx.config.is_tab_hidden(name) {
                         self.change_tab(name.clone(), ctx)?;

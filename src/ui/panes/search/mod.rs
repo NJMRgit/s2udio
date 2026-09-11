@@ -80,6 +80,17 @@ impl SearchPane {
             column_areas: EnumMap::default(),
         }
     }
+    /// Round 73.2: the target of the search-jump key (`S`, Shift+S) —
+    /// select the "Any tag" filter row and put the caret in it. The tag rows are the first rows of
+    /// the panel, so index 0 is the config's first tag ("Any Tag" with the
+    /// shipped default config; a reordered `search.tags` list picks that
+    /// list's first tag instead). The filters and the results are the
+    /// session's and are left untouched; only the phase is forced back to
+    /// the filter panel, because the caret must be visible.
+    pub(crate) fn focus_any_tag_input(&mut self, ctx: &Ctx) {
+        self.phase = Phase::Search;
+        self.inputs.focus_first_tag(ctx);
+    }
     fn items<'a>(
         &'a self,
         all: bool,

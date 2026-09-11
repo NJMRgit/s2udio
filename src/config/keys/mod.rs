@@ -59,20 +59,38 @@ impl Default for KeyConfigFile {
             (s().char(' '), G::TogglePause),
             (s().tab(), G::NextTab),
             (s().tab().shift(), G::ToggleMpdMode),
-            // Round 62 (N1): the key system cannot tell Shift+E from bare E
-            // (both normalize to `Key{ Char('E'), SHIFT }`), so the E/Q
-            // bindings THEMSELVES are the library cyclers — bare E/Q and
-            // Shift+E/Q all cycle the libraries (wrapping, no-op while the
-            // Queue tab is active), exactly like Shift+Right/Left. Tab
-            // stays the only Queue <-> Libraries flipper. The separate
-            // `<S-E>`/`<S-Q>` entries are gone (the same key would pile
-            // duplicate actions into one trie node).
-            (s().char('E'), G::NextLibraryTab),
-            (s().char('Q'), G::PreviousLibraryTab),
+            // Round 73.2 revision B (user request, 2026-09-11): `c` is the
+            // only letter that cycles libraries (Shift+Right/Left stay as
+            // the alternates); `q`/`w`/`E`/`Q` are NOT library cyclers any
+            // more. `w`/`s` went back to plain movement (see the navigation
+            // and directories maps) and `q` is deliberately UNBOUND — the
+            // key system cannot tell Shift+Q from bare Q (both normalize to
+            // `Key{ Char('Q'), SHIFT }`), so `Q` is the quit key and binding
+            // bare `q` to anything would make quitting ambiguous... `q` is
+            // simply left free for the user (`keybinds.ron`).
+            // `c` also carries the queue map's ToggleChapters (both actions
+            // land in the one trie node): on the Queue tab the tab's own
+            // pane claims the queue half first, so Audio/Video/Chapters/
+            // Radio cycling is unchanged, and `cycle_library` is a no-op
+            // while the Queue tab is active — the two meanings never fire
+            // together.
+            (s().char('c'), G::NextLibraryTab),
             (s().right().shift(), G::NextLibraryTab),
             (s().left().shift(), G::PreviousLibraryTab),
             (s().char('>'), G::NextTrack),
-            (s().char('q'), G::Quit),
+            // Round 73.2: `Q` (Shift+Q) is the ONLY quit key. No Ctrl+Q:
+            // in insert mode it is not a control arm in
+            // `InputEvent::from_key_event`, so it would type a literal "q"
+            // into the focused search/filter input instead of quitting.
+            (s().char('Q'), G::Quit),
+            // Round 73.2 revision B: `S` (Shift+S) jumps to the active
+            // library tab's Search page with the query input focused
+            // (claimed by the MPD/Playlists/Jellyfin panes; a no-op on tabs
+            // without a search page). Lowercase `s` is movement again, and
+            // `S` deliberately takes the slot that used to be
+            // SelectDown — range selection now lives on Shift+Up/Shift+Down
+            // only, and `W`/`S` are NOT re-added as a pair (asymmetric).
+            (s().char('S'), G::LibrarySearch),
             (s().esc(), G::ShowSettings),
             // Round 55.5: Ctrl+D opens the downloads modal (no conflicts
             // with the defaults above; navigation keeps <C-a>/<C-s>/<C-c>).
@@ -81,12 +99,15 @@ impl Default for KeyConfigFile {
         let navigation = HashMap::from([
             (s().esc(), C::Close),
             (s().cr(), C::Confirm),
+            // Round 73.2 revision B: the `w`/`s` movement twins are back
+            // (they briefly cycled libraries in revision A). `W`/`S` are NOT
+            // re-added: `S` is the search jump now and `Shift+Up/Down` carry
+            // range selection. The letter actions below are NOT movement and
+            // stay as they are: they edit the lyrics pane.
             (s().char('w'), C::Up),
             (s().up(), C::Up),
             (s().char('s'), C::Down),
             (s().down(), C::Down),
-            (s().char('W'), C::SelectUp),
-            (s().char('S'), C::SelectDown),
             (s().char('a').ctrl(), C::SelectAll),
             (s().up().shift(), C::SelectUp),
             (s().down().shift(), C::SelectDown),
@@ -111,6 +132,11 @@ impl Default for KeyConfigFile {
             (s().char('c'), Q::ToggleChapters),
             (s().tab().shift(), Q::ToggleChapters),
         ]);
+        // Round 73.2 revision B: the wasd directory keys are back, exactly
+        // as before the round — `w`/`s` move the tree highlight, `a`
+        // collapses, `d` expands, plus the arrow twins `<-`
+        // (FolderCollapse) and `->` (PlayFile, which the tree browser
+        // treats like FolderExpand on a folder row).
         let directories = HashMap::from([
             (s().char('w'), D::FolderUp),
             (s().char('s'), D::FolderDown),

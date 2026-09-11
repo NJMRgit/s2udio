@@ -196,7 +196,9 @@ pub struct PlaylistsPane {
     /// Buffer id of the search query input (session-lived).
     search_buffer: crate::ui::input::BufferId,
     /// Keyboard phase of the search mode: true = the `Search:` input row
-    /// is focused, false = the results list is focused.
+    /// is focused, false = the results list is focused. Round 73.2: starts
+    /// false and is only set by the `S` jump — Shift+Tab / the toggle click
+    /// no longer focus the input.
     search_input_focused: bool,
     /// Consecutive Left presses at the search bar (round 63.1): the first
     /// Left navigates the text cursor, the second consecutive Left exits
@@ -430,7 +432,9 @@ impl PlaylistsPane {
             toggle_areas: [Rect::default(); 2],
             back_area: Rect::default(),
             search_buffer: crate::ui::input::BufferId::new(),
-            search_input_focused: true,
+            // Round 73.2: the search page opens unfocused (Shift+Tab no
+            // longer grabs the input; `s` does).
+            search_input_focused: false,
             search_left_presses: 0,
             search_songs_loaded: false,
             search_playlists: Vec::new(),
@@ -1961,17 +1965,37 @@ impl PlaylistsPane {
     }
     /// Flip Playlists <-> Search (Shift+Tab / toggle click). The search
     /// state (query, results, phase) survives the flip for the session.
+    ///
+    /// Round 73.2: the flip no longer focuses the query input (the `s` key
+    /// does that) — it always RELEASES it instead. Releasing is required,
+    /// not just optional: `search_input_focused` drives this pane's
+    /// keyboard phase (Up/Down move the results only while the input is
+    /// NOT focused), so a flip that left the flag true without insert mode
+    /// would freeze the results list.
     fn toggle_mode(&mut self, ctx: &mut Ctx) -> Result<()> {
         self.mode = match self.mode {
             PlaylistsTabMode::Playlists => PlaylistsTabMode::Search,
             PlaylistsTabMode::Search => PlaylistsTabMode::Playlists,
         };
         self.search_results.state.unmark_all();
+        self.release_search_input(ctx);
         if self.mode == PlaylistsTabMode::Search {
-            self.focus_search_input(ctx);
             self.ensure_search_songs(ctx);
-        } else {
-            self.release_search_input(ctx);
+        }
+        ctx.render()?;
+        Ok(())
+    }
+    /// Round 73.2 (revision B: `S`): the target of the search key — show the
+    /// search page with the query input focused (the caret in the field).
+    /// The mode is SET, not toggled, so the key always lands on Search;
+    /// nothing is cleared, so the session query and its results are still
+    /// there when the page returns.
+    fn jump_to_search(&mut self, ctx: &mut Ctx) -> Result<()> {
+        let entered = self.mode != PlaylistsTabMode::Search;
+        self.mode = PlaylistsTabMode::Search;
+        self.focus_search_input(ctx);
+        if entered {
+            self.ensure_search_songs(ctx);
         }
         ctx.render()?;
         Ok(())
@@ -2288,7 +2312,9 @@ impl Pane for PlaylistsPane {
         self.initialized = true;
         // Round 60b (D3): returning to a tab left in search mode with the
         // input focused re-attaches the search buffer (on_hide released
-        // it while the tab was away).
+        // it while the tab was away). Round 73.2: the flag is only set by
+        // the `S` jump, so this re-attaches the caret the user asked for
+        // and nothing else.
         if self.mode == PlaylistsTabMode::Search && self.search_input_focused {
             ctx.input.insert_mode(self.search_buffer);
         }
@@ -2725,6 +2751,12 @@ impl Pane for PlaylistsPane {
             // toggle — panes are only reached from their own tab).
             if matches!(action, GlobalAction::ToggleMpdMode) {
                 return self.toggle_mode(ctx);
+            }
+            // Round 73.2 (revision B: `S`): jump to the search page with the
+            // input focused. Claimed here (before the mode dispatch), so it
+            // works from both the Playlists browser and the search page.
+            if matches!(action, GlobalAction::LibrarySearch) {
+                return self.jump_to_search(ctx);
             }
             event.abandon();
         }

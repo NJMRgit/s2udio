@@ -59,36 +59,48 @@
         socks_proxy: None,
     ),
     keybinds: (
+        // Round 73.2 revision B (user request, 2026-09-11): wasd movement is
+        // back (`w`/`s` navigation, `w`/`s`/`a`/`d` in the folder tree),
+        // `c` cycles to the next library tab, `S` (Shift+S) jumps to the
+        // library's search page with the input focused, `Q` (Shift+Q) is
+        // the only quit key and `q` is deliberately UNBOUND. `W`/`S` are
+        // NOT SelectUp/SelectDown any more (S is the search jump; range
+        // selection is Shift+Up/Down). NOTE: a config file with
+        // `clear: true` (e.g. ~/.config/s2udio/config.ron) does NOT fall
+        // back to this block — those users must migrate their own keybinds.
         global: {
             " ":          TogglePause,
             "<Tab>":      NextTab,
             "<S-Tab>":    ToggleMpdMode,
             ">":          NextTrack,
+            // Round 73.2: `Q` is Shift+Q = Quit (the key system cannot tell
+            // Shift+Q from bare Q); bare `q` is left free.
             "Q":          Quit,
+            // `c` cycles to the next library tab on library tabs and keeps
+            // the queue map's ToggleChapters on the Queue tab (the tab's own
+            // pane claims the queue half first).
+            "c":          NextLibraryTab,
+            "<S-Right>":  NextLibraryTab,
+            "<S-Left>":   PreviousLibraryTab,
+            // Round 73.2 revision B: `S` opens this library's search page
+            // with the query input focused (no-op on tabs without a search
+            // page).
+            "S":          LibrarySearch,
             "<Esc>":      ShowSettings,
             // Round 55.5: Ctrl+D opens the downloads modal.
             "<C-d>":      ShowDownloads,
-            // Round 62 (N1): the key system cannot tell Shift+E from bare E
-            // (both normalize to `Char('E') + SHIFT`), so the E/Q bindings
-            // THEMSELVES cycle the libraries (wrapping, no-op from the
-            // Queue tab) — bare E/Q and Shift+E/Q all do it, mirroring
-            // Shift+Right/Left. Tab stays the only Queue<->Libraries
-            // flipper; the separate <S-e>/<S-q> entries are gone.
-            "E":          NextLibraryTab,
-            "Q":          PreviousLibraryTab,
-            "<S-Right>":  NextLibraryTab,
-            "<S-Left>":   PreviousLibraryTab,
         },
 
         navigation: {
             "<Esc>":      Close,
             "<CR>":       Confirm,
+            // wasd movement. Round 73.2 revision B: `w`/`s` are back; `W`/`S`
+            // stay unbound (S is the search jump). The lyrics letter actions
+            // below are NOT movement and stay.
             "w":          Up,
             "<Up>":       Up,
             "s":          Down,
             "<Down>":     Down,
-            "W":          SelectUp,
-            "S":          SelectDown,
             "<S-Up>":     SelectUp,
             "<S-Down>":   SelectDown,
             "<C-a>":      SelectAll,
@@ -115,10 +127,26 @@
         },
 
         directories: {
+            // Round 73.2 revision B: the wasd directory keys are back
+            // (tree highlight move + collapse/expand), plus the arrow twins
+            // `<-` (FolderCollapse) and `->` (PlayFile — the tree browser
+            // treats it like FolderExpand on a folder row).
             "w":          FolderUp,
             "s":          FolderDown,
+            "a":          FolderCollapse,
             "d":          FolderExpand,
             "<Right>":    PlayFile,
+            "<Left>":     FolderCollapse,
+        },
+
+        // The queue sub-page cycler. Round 73.2: this section MUST list `c`
+        // explicitly — the config merge drops every overridden key sequence
+        // from the other maps, so the global `c` (next library tab)
+        // would otherwise delete the queue's `c` and the Audio / Video /
+        // Chapters / Radio cycling with it.
+        queue: {
+            "c":          ToggleChapters,
+            "<S-Tab>":    ToggleChapters,
         },
     ),
     tabs: [

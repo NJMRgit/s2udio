@@ -1477,6 +1477,17 @@ impl Pane for DirectoriesPane {
             if matches!(action, GlobalAction::ToggleMpdMode) {
                 return self.toggle_mode(ctx);
             }
+            // Round 73.2 (revision B: `S`): jump to this tab's search page
+            // with the caret in the "Any tag" filter row. `set_mode` (not
+            // `toggle_mode`), so the key always lands on Search and never
+            // flips back; the session's filters and results are kept — only
+            // the field selection and the caret move.
+            if matches!(action, GlobalAction::LibrarySearch) {
+                self.set_mode(MpdTabMode::Search, ctx)?;
+                self.search.focus_any_tag_input(ctx);
+                ctx.render()?;
+                return Ok(());
+            }
             event.abandon();
         }
         match self.mode {

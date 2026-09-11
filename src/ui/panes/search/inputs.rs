@@ -368,6 +368,14 @@ impl InputGroups {
             ctx.input.insert_mode(input.buffer_id);
         }
     }
+    /// Round 73.2: select the first filter row (the config's first tag row —
+    /// "Any Tag" by default) and hand it the keyboard caret (the `S` jump). The tag rows
+    /// are pushed before every other row, so index 0 is always a textbox
+    /// and `first()` cannot land on a Separator.
+    pub fn focus_first_tag(&mut self, ctx: &Ctx) {
+        self.first();
+        self.enter_insert_mode(ctx);
+    }
     pub fn next_non_wrapping(&mut self) {
         self.focused_idx = (self.focused_idx + 1).min(self.inputs.len() - 1);
         if matches!(self.focused(), InputType::Separator) {
