@@ -68,8 +68,8 @@ impl Actions {
     /// Actions that must fire once per key press even when the key is held
     /// down: the terminal auto-repeat (Repeat events under the kitty
     /// keyboard protocol) must not re-trigger them. Tab navigation is the
-    /// only single-step action family today — holding Tab / Shift+Q /
-    /// Shift+E moves exactly one tab.
+    /// only single-step action family today — holding Tab / `c` /
+    /// Shift+Left / Shift+Right / Shift+Tab moves exactly one tab.
     pub fn steps_once(&self) -> bool {
         matches!(
             self,

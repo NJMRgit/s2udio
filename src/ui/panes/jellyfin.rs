@@ -313,7 +313,7 @@ impl JellyfinPane {
             back_area: Rect::default(),
             search_buffer: crate::ui::input::BufferId::new(),
             // Round 73.2: the search page opens unfocused (Shift+Tab no
-            // longer grabs the input; `s` does).
+            // longer grabs the input; `S` does).
             search_input_focused: false,
             search_left_presses: 0,
             search_pending: false,
@@ -2008,7 +2008,7 @@ impl JellyfinPane {
     /// Flip Libraries <-> Search (Shift+Tab / toggle click). The search
     /// state stays for the session.
     ///
-    /// Round 73.2: the flip no longer focuses the query input (the `s` key
+    /// Round 73.2: the flip no longer focuses the query input (the `S` key
     /// does that) — it always RELEASES it instead. Releasing is required,
     /// not just optional: `search_input_focused` drives this pane's
     /// keyboard phase (Up/Down move the results only while the input is
