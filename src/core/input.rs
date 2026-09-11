@@ -20,7 +20,21 @@ fn read_clipboard_and_paste(event_tx: Sender<AppEvent>, primary: bool) {
     std::thread::Builder::new()
         .name("clipboard".to_owned())
         .spawn(move || {
-            let text = read_clipboard(primary);
+            let mut text = read_clipboard(primary);
+            // Middle-click pastes the primary selection — but a link is
+            // usually *copied* (Ctrl+C fills the clipboard, not the primary
+            // selection) and selecting a hyperlink grabs its label ("this
+            // page"), not its URL. When the primary selection holds nothing
+            // pasteable, use the clipboard instead, so a middle click works
+            // for a link the user just copied.
+            if primary {
+                let pasteable = text
+                    .as_deref()
+                    .is_some_and(|t| !crate::ui::modals::paste::parse_paste(t).is_empty());
+                if !pasteable {
+                    text = read_clipboard(false);
+                }
+            }
             if let Some(text) = text
                 && !text.trim().is_empty()
             {

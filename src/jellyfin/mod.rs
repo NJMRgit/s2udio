@@ -10,6 +10,36 @@
 //! decodes like a radio stream.
 use std::{path::Path, time::Duration};
 use anyhow::{Context, Result};
+/// Client identification sent to the Emby/Jellyfin API.
+///
+/// Jellyfin 12 (2026-09) no longer parses the legacy `X-Emby-*` headers, so
+/// every request carries the standard `Authorization: MediaBrowser Client=…,
+/// Device=…, DeviceId=…, Version=…` header. The legacy `X-Emby-Token` /
+/// `X-Emby-Authorization` headers are sent alongside it, because **older
+/// servers (Jellyfin 10.x/11.x, Emby) only look at those** — one binary
+/// therefore works against both. Jellyfin 12 ignores the extra legacy header.
+const CLIENT_NAME: &str = "s2udio";
+const CLIENT_VERSION: &str = "0.1";
+/// Stable device identity for the token-bearing API calls, so the server's
+/// device list does not grow a new entry per session.
+const DEVICE_NAME: &str = "desktop";
+const DEVICE_ID: &str = "s2u-desktop";
+/// Login identity — unchanged from what the Settings panel has always sent.
+const LOGIN_DEVICE_NAME: &str = "settings";
+const LOGIN_DEVICE_ID: &str = "s2u-settings";
+
+/// The `MediaBrowser …` authorization value (with a token when one is known).
+fn media_browser_auth(device: &str, device_id: &str, token: Option<&str>) -> String {
+    let mut value = format!(
+        "MediaBrowser Client=\"{CLIENT_NAME}\", Device=\"{device}\", DeviceId=\"{device_id}\", Version=\"{CLIENT_VERSION}\""
+    );
+    if let Some(token) = token {
+        value.push_str(", Token=\"");
+        value.push_str(token);
+        value.push('"');
+    }
+    value
+}
 /// Server credentials + base URL, loaded from jellytui's config.
 #[derive(Debug, Clone)]
 pub struct Jellyfin {
@@ -182,13 +212,20 @@ impl Jellyfin {
         password: &str,
     ) -> Result<(String, String)> {
         let url = format!("{}/Users/AuthenticateByName", base.trim_end_matches('/'));
-        let body = serde_json::json!({ "Username" : username, "Pw" : password });
+        let body = serde_json::json!({
+            "Username" : username,
+            "Pw" : password,
+            // Jellyfin 12 requires the client's app name in the login body
+            // (a missing `App` is a 500 ArgumentNullException there); older
+            // servers simply ignore the extra field.
+            "App" : CLIENT_NAME,
+        });
+        let auth = media_browser_auth(LOGIN_DEVICE_NAME, LOGIN_DEVICE_ID, None);
         let response = match Self::agent()
             .post(&url)
-            .set(
-                "X-Emby-Authorization",
-                "MediaBrowser Client=\"s2udio\", Device=\"settings\", DeviceId=\"s2u-settings\", Version=\"0.1\"",
-            )
+            .set("Authorization", &auth)
+            // legacy header for servers that predate the standard one
+            .set("X-Emby-Authorization", &auth)
             .send_json(body)
         {
             Ok(response) => response,
@@ -228,6 +265,11 @@ impl Jellyfin {
         let url = format!("{}{}", self.base, path);
         Self::agent()
             .get(&url)
+            .set(
+                "Authorization",
+                &media_browser_auth(DEVICE_NAME, DEVICE_ID, Some(&self.token)),
+            )
+            // legacy header for servers that predate the standard one
             .set("X-Emby-Token", &self.token)
             .call()
             .with_context(|| format!("Cannot fetch {url}"))?
@@ -418,6 +460,11 @@ impl Jellyfin {
         );
         let response = Self::agent()
             .get(&url)
+            .set(
+                "Authorization",
+                &media_browser_auth(DEVICE_NAME, DEVICE_ID, Some(&self.token)),
+            )
+            // legacy header for servers that predate the standard one
             .set("X-Emby-Token", &self.token)
             .call()
             .with_context(|| format!("Cannot fetch {url}"))?;
@@ -441,6 +488,11 @@ impl Jellyfin {
         );
         Self::agent()
             .post(&url)
+            .set(
+                "Authorization",
+                &media_browser_auth(DEVICE_NAME, DEVICE_ID, Some(&self.token)),
+            )
+            // legacy header for servers that predate the standard one
             .set("X-Emby-Token", &self.token)
             .send_json(body)
             .context("Cannot report playback progress")?;
@@ -459,6 +511,11 @@ impl Jellyfin {
         );
         Self::agent()
             .post(&url)
+            .set(
+                "Authorization",
+                &media_browser_auth(DEVICE_NAME, DEVICE_ID, Some(&self.token)),
+            )
+            // legacy header for servers that predate the standard one
             .set("X-Emby-Token", &self.token)
             .send_json(body)
             .context("Cannot report playback stop")?;

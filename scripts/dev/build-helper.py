@@ -91,13 +91,33 @@ if __name__ == "__main__":
 """
 
 
+def _embedded_sources():
+    """Round 70 consolidated the five programs INTO scripts/s2u-helper; when
+    the standalone source files are absent (current layout), regenerate from
+    the embedded copies — the single file of truth — instead of failing."""
+    ns = {"__name__": "not_main"}
+    with open(OUT, encoding="utf-8") as f:
+        exec(compile(f.read(), OUT, "exec"), ns)
+    return ns["_SOURCES"]
+
+
 def main():
     sources = {}
+    embedded = None
     for sub, file in PROGRAMS:
         path = os.path.join(SCRIPTS, file)
-        with open(path, encoding="utf-8") as f:
-            text = f.read()
-        if sub == "tracker":
+        try:
+            with open(path, encoding="utf-8") as f:
+                text = f.read()
+            from_embedded = False
+        except OSError:
+            if embedded is None:
+                embedded = _embedded_sources()
+            text = embedded[sub]
+            from_embedded = True
+        if sub == "tracker" and not from_embedded:
+            # Rewires apply only when regenerating from the standalone
+            # source; the embedded copy already carries them.
             for old, new in TRACKER_REWIRES:
                 assert old in text, "rewire target missing in %s: %r" % (sub, old)
                 text = text.replace(old, new)

@@ -1912,22 +1912,33 @@ fn main_task<B: Backend + std::io::Write>(
                 continue;
             }
             // The cava row was removed (video playback on the Queue tab, or
-            // entering the Jellyfin tab): clear the whole window and draw
-            // twice so the visualizer's terminal-side overlay leaves no
-            // stale cells.
+            // entering a tab where the visualizer is hidden): the frame must
+            // be repainted in full, because the visualizer paints its bars
+            // straight to the terminal (outside the frame buffer) and its
+            // band would otherwise leave stale cells behind.
+            //
+            // This used to be `terminal.clear()`, which blanked the physical
+            // screen first — a visible whole-screen flash on every queue ->
+            // library switch (the "Jellyfin entry flicker" of round 63.1c).
+            // Invalidating the diff baseline instead (`swap_buffers` resets
+            // the inactive buffer) makes the next frame rewrite every cell
+            // that carries content, while the terminal keeps showing the
+            // previous frame until those cells arrive: same repair, no blank
+            // in between. The cava pane still erases its own band
+            // (`cava.clear`) before this, so the bars themselves are gone
+            // too; a config/tabs change keeps the physical clear below, where
+            // the whole layout can change.
             if ui.take_cava_refresh() || ui.take_album_art_refresh() {
-                log::debug!("Full terminal clear (cava-row drop / album-art erase repair)");
-                if let Err(err) = terminal.clear() {
-                    log::error!(error:? = err; "Failed to clear terminal after hiding cava");
-                }
+                log::debug!("Full repaint (cava-row drop / album-art erase repair), no blank screen");
+                terminal.swap_buffers();
                 resize_render_passes = 2;
-                // Round 58: the clear deleted every kitty overlay. The
-                // Jellyfin poster only re-draws when its area changes, so
-                // it must be told to re-place on the next frame — targeted
-                // at the poster only (a global Displayed dispatch caused
-                // an album-art re-show/hide feedback loop, reverted).
+                // Round 58: the Jellyfin poster only re-draws when its area
+                // changes, so a dropped cava row (which can move the poster's
+                // shelf) still gets an explicit re-place — targeted at the
+                // poster only (a global Displayed dispatch caused an
+                // album-art re-show/hide feedback loop, reverted).
                 if let Err(err) = ui.refresh_overlays_after_clear(&ctx) {
-                    log::error!(error:? = err; "Failed to refresh the Jellyfin poster after a full redraw");
+                    log::error!(error:? = err; "Failed to refresh the Jellyfin poster after a full repaint");
                 }
             }
             let completed_frame = terminal
