@@ -11,10 +11,10 @@
 #   P2  authenticated retry (your cookies), DASH-manifest URLs; the wrapper
 #       probes the resolved media URLs (curl -L -r 0-1023) and only then hands
 #       the output to the consumer.
-#   P2b optional: android_vr + OAuth Bearer — enabled automatically once
-#       ~/.config/s2u-yt/vr-oauth.json exists (README "VR OAuth"). Full-quality
-#       DASH without the googlevideo 403 flapping.
-#   P3  web_safari (HLS, max 1080p60) — safety net when the probe sees 403s.
+#   P3  web_safari (HLS, max 1080p60) — safety net when the passes above fail
+#       or their probe sees 403s. See the SABR note below (yt-dlp #12482): some
+#       clients — including the cookie-authenticated ones and `mweb` — now
+#       return formats whose URLs are 403-dead, so HLS is the reliable floor.
 #
 # Do NOT pin `player_client` here: a pin in this file would apply to every
 # phase (and to the HLS fallback's own --extractor-args), which is what broke

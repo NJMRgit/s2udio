@@ -12,8 +12,8 @@
 # install.sh downloads the release source tarball, `npm ci`s the locked
 # dependencies and `npx tsc`s it into $DATA_ROOT/server/build/main.js, then
 # installs a systemd --user unit that runs it on 127.0.0.1:4416. The yt-dlp
-# plugin + wrapper (DASH-manifest fix, URL probe, VR-OAuth phase, HLS safety
-# net) make up the rest of the stack — see README.md.
+# plugin + wrapper (DASH-manifest fix, URL probe, HLS safety net) make up the
+# rest of the stack — see README.md.
 #
 # Everything this package owns lives under $DATA_ROOT
 # (~/.local/share/s2u-yt by default). The only changes made outside it:
@@ -235,9 +235,9 @@ install_plugins() {
 }
 
 install_bin() {
-    # Helper scripts: the media-URL probe (wrapper phase checks) and the
-    # VR-OAuth token helper.  bin/yt-dlp-wrap.sh is the wrapper template and
-    # is consumed by install_wrapper, not copied here.
+    # Helper scripts: the media-URL probe (wrapper phase checks).
+    # bin/yt-dlp-wrap.sh is the wrapper template and is consumed by
+    # install_wrapper, not copied here.
     local src="$(dirname "$0")/bin"
     if [ "$DRY" -eq 1 ]; then
         log "would install helpers from $src -> $DATA_ROOT/bin"
@@ -245,7 +245,7 @@ install_bin() {
     fi
     mkdir -p "$DATA_ROOT/bin"
     local f
-    for f in s2u-yt-probe.py vr-oauth-token.sh; do
+    for f in s2u-yt-probe.py; do
         if [ -f "$src/$f" ]; then
             run cp "$src/$f" "$DATA_ROOT/bin/$f"
             run chmod +x "$DATA_ROOT/bin/$f"
@@ -253,7 +253,13 @@ install_bin() {
             warn "package file missing: $src/$f"
         fi
     done
-    log "helpers installed: $DATA_ROOT/bin/{s2u-yt-probe.py,vr-oauth-token.sh}"
+    # Retire helpers earlier releases installed (the VR-OAuth token helper
+    # went away with that route).
+    if [ -e "$DATA_ROOT/bin/vr-oauth-token.sh" ]; then
+        run rm -f "$DATA_ROOT/bin/vr-oauth-token.sh"
+        log "removed obsolete helper: $DATA_ROOT/bin/vr-oauth-token.sh"
+    fi
+    log "helpers installed: $DATA_ROOT/bin/s2u-yt-probe.py"
 }
 
 install_conf() {
@@ -514,4 +520,4 @@ fi
 verify "$REAL"
 log "done. Play the video in s2udio (or: mpv '$TEST_URL')."
 log "Status: ./status.sh   Uninstall: ./uninstall.sh"
-log "Optional full-quality route: $DATA_ROOT/bin/vr-oauth-token.sh init   (see README 'VR OAuth')"
+log "Fallback ladder: anonymous -> cookies -> mweb + PO token -> HLS (see README)"

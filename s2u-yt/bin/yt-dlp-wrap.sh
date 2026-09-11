@@ -6,8 +6,6 @@
 #       discarded on failure (a failed pass still prints a leading "null",
 #       which corrupts the stdout JSON parsers of s2udio / mpv / CLI users).
 #   P2  authenticated (your cookies) — output probed; on 403 falls through.
-#   P2b VR OAuth (optional) — android_vr + OAuth Bearer, only when
-#       ~/.config/s2u-yt/vr-oauth.json exists (see README "VR OAuth").
 #   P3  web_safari HLS safety net (max 1080p60).
 #
 # v2026-09-10: drops the deprecated `--youtube-skip-dash-manifest` flag from
@@ -19,8 +17,6 @@ USER_CONF="$HOME/.config/yt-dlp/config"
 CONF="$ROOT/conf/config"
 PLUGINS="$ROOT/plugins"
 PROBE="$ROOT/bin/s2u-yt-probe.py"
-VR_BIN="$ROOT/bin/vr-oauth-token.sh"
-VR_TOKEN="$HOME/.config/s2u-yt/vr-oauth.json"
 LOG="/tmp/s2u-yt-wrapper.log"
 YTDLP="@REAL_YTDLP@"
 
@@ -76,37 +72,6 @@ if [ -f "$USER_CONF" ]; then
         log "PHASE2_FAIL exit=$status args=$*"
     fi
     rm -f "$TMP2"
-
-    # ---- P2b: VR OAuth (android_vr + Bearer) — only when configured ----
-    if [ -f "$VR_TOKEN" ] && [ -x "$VR_BIN" ]; then
-        ACCESS="$("$VR_BIN" --token 2>/dev/null || true)"
-        if [ -n "$ACCESS" ]; then
-            # no cookies in this pass: android_vr + the bearer only
-            TMP3="$(mktemp "${TMPDIR:-/tmp}/s2u-yt.XXXXXX")"
-            S2U_VR_ACCESS_TOKEN="$ACCESS" "$YTDLP" --ignore-config --config-locations "$ANON_CONF" --config-locations "$CONF" --plugin-dirs "$PLUGINS" --extractor-args "youtube:player_client=android_vr" "${NEW_ARGS[@]}" >"$TMP3"
-            status=$?
-            if [ "$status" -eq 0 ]; then
-                if grep -q googlevideo "$TMP3"; then
-                    "$PROBE" "$TMP3" 2>/dev/null; rc=$?
-                    if [ "$rc" -ne 1 ]; then
-                        log "VR_OAUTH_OK client=android_vr args=$*"
-                        cat "$TMP3"; rm -f "$TMP3"; exit 0
-                    fi
-                    log "VR_OAUTH_PROBE403 args=$*"
-                else
-                    log "VR_OAUTH_OK client=android_vr args=$*"
-                    cat "$TMP3"; rm -f "$TMP3"; exit 0
-                fi
-            else
-                log "VR_OAUTH_FAIL exit=$status args=$*"
-            fi
-            rm -f "$TMP3"
-        else
-            log "VR_OAUTH_SKIP no-access-token args=$*"
-        fi
-    else
-        log "VR_OAUTH_SKIP not-configured args=$*"
-    fi
 
     # ---- P3: HLS safety net ----
     log "FALLBACK_HLS args=$*"

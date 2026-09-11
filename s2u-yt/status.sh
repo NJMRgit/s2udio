@@ -8,7 +8,6 @@
 #      venv present (wpc mode)
 #   3. yt-dlp sees the PO token provider plugin
 #   4. live stream test: resolved googlevideo URL returns HTTP 200 (not 403)
-#   5. optional VR-OAuth route: configured / not configured
 #
 # Usage: ./status.sh [--test-url URL]
 set -euo pipefail
@@ -18,7 +17,6 @@ DATA_ROOT="${XDG_DATA_HOME:-$HOME/.local/share}/$NAME"
 MANIFEST="$DATA_ROOT/state/manifest"
 WRAPPER="$DATA_ROOT/bin/yt-dlp"
 BIN_DIR="${S2U_BIN_DIR:-$HOME/.local/bin}"
-VR_TOKEN="$HOME/.config/s2u-yt/vr-oauth.json"
 PORT="${PORT:-4416}"
 HOST="${HOST:-127.0.0.1}"
 TEST_URL="${TEST_URL:-https://www.youtube.com/watch?v=xz8tmSUddf8}"
@@ -111,17 +109,6 @@ if [ "$status" = "200" ]; then
     ok "stream URL returns HTTP 200 (playback should work)"
 else
     bad "stream URL returned HTTP $status — see README 'Troubleshooting'"
-fi
-
-# 5. optional VR-OAuth route
-if [ -f "$VR_TOKEN" ]; then
-    if "$DATA_ROOT/bin/vr-oauth-token.sh" status >/dev/null 2>&1; then
-        ok "VR OAuth configured ($VR_TOKEN) — android_vr + Bearer phase enabled"
-    else
-        info "VR OAuth token file present but not usable — re-run: $DATA_ROOT/bin/vr-oauth-token.sh reinit"
-    fi
-else
-    info "VR OAuth not configured (optional full-quality route; see README 'VR OAuth')"
 fi
 
 echo "== done =="
