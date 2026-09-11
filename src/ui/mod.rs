@@ -83,7 +83,7 @@ pub struct Ui {
     tabs: HashMap<TabName, TabScreen>,
     layout: SizedPaneOrSplit,
     area: Rect,
-    /// Round 60: the library tab the user last browsed, so Tab/E/Q flip
+    /// Round 60: the library tab the user last browsed, so Tab and `c` flip
     /// between the Queue group and "Libraries" without losing the page
     /// (starts at the first canonical library tab).
     last_library_tab: Option<TabName>,
@@ -213,7 +213,7 @@ impl Ui {
 
         ctx.active_tab = new_tab.clone();
         // Round 60: remember the library tab the user is browsing, so the
-        // Queue <-> Libraries group flip (Tab/E/Q) returns to it.
+        // Queue <-> Libraries group flip (Tab / `c`) returns to it.
         if ctx.config.is_library_tab(&new_tab) {
             self.last_library_tab = Some(new_tab.clone());
         }
@@ -2255,9 +2255,10 @@ pub(crate) fn render_scrollbar_strip(
 }
 
 /// The tab-bar grouping helpers (round 60): the Queue tab is its own
-/// group; every other visible tab is a "library" tab. Tab/E/Q flip
-/// between the two groups; Shift+E/Q and Shift+Right/Left cycle through
-/// the libraries in the canonical order.
+/// group; every other visible tab is a "library" tab. Tab and `c` flip
+/// between the two groups; Shift+Right/Left cycle through the libraries
+/// in the canonical order (`c` only advances, and is a no-op while the
+/// Queue tab is active).
 impl Config {
     /// Whether `tab` belongs to the Libraries group (any visible tab other
     /// than the Queue tab).
