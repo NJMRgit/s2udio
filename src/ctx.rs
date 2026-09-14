@@ -329,6 +329,11 @@ pub struct Ctx {
     pub(crate) paste_modal_items: RefCell<
         Option<Vec<crate::ui::modals::paste::PastedItem>>,
     >,
+    /// The pasted links whose stream info was already requested so the paste
+    /// popup's download options can list their chapters (round 78). Guards the
+    /// one background fetch per link — a failed resolve must not be retried on
+    /// every popup refresh. Cleared when the popup closes.
+    pub(crate) paste_chapter_warm: RefCell<HashSet<String>>,
     /// The open paste popup's modal id (so a nested flow — e.g. the
     /// "Select files…" picker — can close it once playback starts;
     /// `PopModal` drops the modal without running its close hook, so the
@@ -435,6 +440,7 @@ impl Ctx {
             torrent_scan_progress: RefCell::new(HashMap::new()),
             paste_modal_items: RefCell::new(None),
             paste_modal_id: Cell::new(None),
+            paste_chapter_warm: RefCell::new(HashSet::new()),
         };
         if let Some((_, song)) = ctx.find_current_song_in_queue() {
             if let Some(entry) = ctx.yt_info.borrow().get(&song.file) {

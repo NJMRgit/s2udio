@@ -1605,6 +1605,21 @@ impl Ui {
         Ok(())
     }
 
+    /// The Queue tab follows MPD playback after an mpv video session handed
+    /// over (music started and paused the video): the Video list inherited from
+    /// the video session is empty, so the tab switches to Chapters (markers
+    /// present) or the audio queue. Called once at the handover — never per
+    /// frame, so a mode the user picked with `c`/a click stays as chosen.
+    pub fn follow_mpd_playback(&mut self, ctx: &Ctx) -> Result<()> {
+        if crate::core::mpv::mpv_is_ui_source(ctx) {
+            return Ok(());
+        }
+        if let Panes::Queue(queue) = self.panes.get_mut(&PaneType::Queue, ctx)? {
+            queue.follow_mpd_playback(ctx);
+        }
+        Ok(())
+    }
+
     /// Draw any album art queued by the last `ImageResized` event, or heal
     /// the last drawn image when the frame's diff rewrote its placeholder
     /// cells. Called by the event loop *after* the frame's buffer flush
@@ -1709,14 +1724,39 @@ impl Ui {
     /// art pane is actually visible — `show_default` draws synchronously
     /// and must never paint over another tab.
     pub fn refresh_album_art(&mut self, ctx: &Ctx) -> Result<()> {
-        let visible =
-            self.tabs.get(&ctx.active_tab).is_some_and(|tab| {
-                tab.panes.panes_iter().any(|pane| pane.pane == PaneType::AlbumArt)
-            }) || self.layout.panes_iter().any(|pane| pane.pane == PaneType::AlbumArt);
-        if !visible || ctx.is_pane_hidden(&PaneType::AlbumArt) {
+        if !self.album_art_on_active_tab(ctx) || ctx.is_pane_hidden(&PaneType::AlbumArt) {
             return Ok(());
         }
         self.panes.album_art.before_show(ctx)
+    }
+
+    /// Re-arm the album-art box when an event changed *which* song is current
+    /// but did not run the `SongChanged` fan-out. The queue refresh that
+    /// makes a just-started stream visible is that event: the status update
+    /// carrying the change ran against the stale queue, so
+    /// `find_current_song_in_queue` found nothing and the whole fan-out —
+    /// chapters, MPRIS metadata, the album art — was skipped (the queue
+    /// update re-runs the first two; the art was missing, reported
+    /// 2026-09-11).
+    ///
+    /// Unlike [`Self::refresh_album_art`] this runs while the pane is
+    /// **collapsed**, which is exactly the state a stream's box is left in;
+    /// the pane's `before_show` decides afresh whether there is art (a
+    /// resolved stream's thumbnail, the song's embedded cover) or nothing.
+    pub fn rearm_album_art(&mut self, ctx: &Ctx) -> Result<()> {
+        if !self.album_art_on_active_tab(ctx) {
+            return Ok(());
+        }
+        self.panes.album_art.before_show(ctx)
+    }
+
+    /// Whether the album-art pane belongs to the active tab's layout (the
+    /// pane is a terminal-side overlay, so every draw/hide decision is gated
+    /// on this).
+    fn album_art_on_active_tab(&self, ctx: &Ctx) -> bool {
+        self.tabs.get(&ctx.active_tab).is_some_and(|tab| {
+            tab.panes.panes_iter().any(|pane| pane.pane == PaneType::AlbumArt)
+        }) || self.layout.panes_iter().any(|pane| pane.pane == PaneType::AlbumArt)
     }
 
     /// Hide the cava overlay (a video is playing and the tab's layout drops

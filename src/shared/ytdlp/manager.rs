@@ -44,8 +44,23 @@ pub struct StreamDownloadSpec {
     /// Split the media into one file per chapter (named after the chapter
     /// title) instead of one file with chapters.
     pub split_chapters: bool,
+    /// Empty = download the whole media. Non-empty = download exactly these
+    /// chapter ranges, one file each (one yt-dlp run per range); `split_chapters`
+    /// is then ignored.
+    pub sections: Vec<ChapterSection>,
     /// What to do with the produced files when the download finishes.
     pub on_complete: ReplaceAction,
+}
+
+/// One chapter range that should become its own output file.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChapterSection {
+    /// Range start in seconds.
+    pub start_secs: f64,
+    /// Range end in seconds.
+    pub end_secs: f64,
+    /// Chapter title; used for the output file name (the downloader sanitizes it).
+    pub title: String,
 }
 
 /// The replace-the-stream behavior of a stream download.

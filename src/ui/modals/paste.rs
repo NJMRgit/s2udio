@@ -24,10 +24,12 @@ use crate::{
         events::WorkRequest,
         macros::{modal, status_error, status_info, status_warn},
         mpd_client_ext::{Enqueue, MpdClientExt as _},
-        ytdlp::YtDlpContent,
+        ytdlp::{ChapterSection, ReplaceAction, YtDlpContent, YtStreamInfo},
     },
     ui::modals::{
-        input_modal::InputModal, menu::modal::MenuModal, select_modal::SelectModal,
+        input_modal::InputModal,
+        menu::{ListSection, modal::MenuModal},
+        select_modal::SelectModal,
     },
 };
 /// Result id of the paste "play" query (routed through the Radio pane, which
@@ -583,10 +585,126 @@ pub fn show_paste_modal(ctx: &Ctx, items: Vec<PastedItem>) {
 /// (Re)build the paste popup. `refresh_paste_modal` calls this when a
 /// torrent scan completes so the `[Torrent]` section swaps its Loading row
 /// for the play actions the scan enables.
+/// The page link of a pasted item when yt-dlp can fetch it (only those can be
+/// downloaded); local files and plain stream URLs cannot.
+fn youtube_link_of(item: &PastedItem) -> Option<String> {
+    match item {
+        PastedItem::Yt(url) => Some(url.clone()),
+        _ => None,
+    }
+}
+/// The cached stream info of a pasted link (`apply_resolved_streams` stores it
+/// under both the resolved stream URL and the original link).
+fn stream_info_for(ctx: &Ctx, url: &str) -> Option<YtStreamInfo> {
+    let info = ctx.yt_info.borrow();
+    info.get(url)
+        .cloned()
+        .or_else(|| info.values().find(|entry| entry.original_url == url).cloned())
+}
+/// Ask the work thread for the stream info of pasted links that have none yet
+/// (round 78): the download options need their chapter list, and nothing else
+/// fetches it before the link is played. The open popup refreshes when the
+/// resolve lands, and every link is asked for at most once
+/// (`ctx.paste_chapter_warm`), so a failing resolve cannot loop.
+fn warm_chapters(ctx: &Ctx, downloads: &[PastedItem]) {
+    let urls: Vec<String> = downloads
+        .iter()
+        .filter_map(|item| youtube_link_of(item))
+        .filter(|url| stream_info_for(ctx, url).is_none())
+        .filter(|url| !ctx.paste_chapter_warm.borrow().contains(url))
+        .collect();
+    if urls.is_empty() {
+        return;
+    }
+    {
+        let mut warm = ctx.paste_chapter_warm.borrow_mut();
+        for url in &urls {
+            warm.insert(url.clone());
+        }
+    }
+    log::debug!(urls:?; "Fetching the pasted links' stream info for the download options");
+    let _ = ctx
+        .work_sender
+        .send(WorkRequest::ResolveYtStreams {
+            urls,
+            action: YtAction::Refresh,
+        });
+}
+/// The `Download` row's child list (round 78): audio or video, each with the
+/// single-file / all-chapters / chapter-picker choices.
+fn download_submenu(ctx: &Ctx, url: String, info: Option<YtStreamInfo>) -> ListSection {
+    let mut sub = ListSection::new(ctx.config.theme.current_item_style);
+    let audio = download_kind_menu(ctx, url.clone(), info.clone(), true);
+    let video = download_kind_menu(ctx, url, info, false);
+    sub.add_submenu_item("Audio", audio);
+    sub.add_submenu_item("Video", video);
+    sub.add_item("Cancel", |_ctx| Ok(()));
+    sub
+}
+/// One download kind's options: `Single File`, `All Chapters` (one file per
+/// chapter) and `Chapter(s)` (pick the chapters to save) — the chapter rows
+/// appear once the link's stream info is known.
+fn download_kind_menu(
+    ctx: &Ctx,
+    url: String,
+    info: Option<YtStreamInfo>,
+    audio_only: bool,
+) -> ListSection {
+    let mut sub = ListSection::new(ctx.config.theme.current_item_style);
+    let chapters = info
+        .as_ref()
+        .map(|info| info.chapters.clone())
+        .unwrap_or_default();
+    let known = info.is_some();
+    let has_chapters = chapters.len() > 1;
+    let single_url = url.clone();
+    sub.add_item("Single File", move |ctx| {
+        queue_stream_download(ctx, &single_url, audio_only, false, ReplaceAction::None);
+        Ok(())
+    });
+    if has_chapters {
+        let all_url = url.clone();
+        sub.add_item("All Chapters", move |ctx| {
+            queue_stream_download(ctx, &all_url, audio_only, true, ReplaceAction::None);
+            Ok(())
+        });
+        let mut picker = ListSection::new(ctx.config.theme.current_item_style);
+        for chapter in &chapters {
+            picker.add_check_item(chapter.title.clone(), false);
+        }
+        picker.add_check_buttons("Download", "Cancel");
+        let picker_url = url;
+        let picker_chapters = chapters;
+        picker.check_list(move |ctx, selected| {
+            let sections: Vec<ChapterSection> = selected
+                .iter()
+                .filter_map(|idx| picker_chapters.get(*idx))
+                .map(|chapter| ChapterSection {
+                    start_secs: chapter.start_secs,
+                    end_secs: chapter.end_secs,
+                    title: chapter.title.clone(),
+                })
+                .collect();
+            queue_stream_download_sections(ctx, &picker_url, audio_only, sections);
+            Ok(())
+        });
+        sub.add_submenu_item("Chapter(s)", picker);
+    } else if !known {
+        sub.header("Resolving chapters…");
+    }
+    sub
+}
 fn paste_menu(ctx: &Ctx, items: Vec<PastedItem>) -> MenuModal<'static> {
     let count = items.len();
     let title = if count == 1 {
-        format!(" Paste: {} ", items[0].label())
+        match &items[0] {
+            // A pasted link is a web stream: its raw URL (query string,
+            // timestamps, tracking parameters) makes a poor title.
+            PastedItem::Url(_) | PastedItem::VideoUrl(_) | PastedItem::Yt(_) => {
+                " Web Stream ".to_owned()
+            }
+            item => format!(" Paste: {} ", item.label()),
+        }
     } else {
         format!(" Paste: {} items ", count)
     };
@@ -610,6 +728,42 @@ fn paste_menu(ctx: &Ctx, items: Vec<PastedItem>) -> MenuModal<'static> {
         })
         .cloned()
         .collect();
+    // Round 78: the consolidated queue rows act by item kind — a pasted web
+    // stream counts as audio (`Play > Video` watches it in mpv instead) and a
+    // local video file goes to the video playlist.
+    let queue_audio: Vec<PastedItem> = items
+        .iter()
+        .filter(|item| {
+            matches!(item, PastedItem::File(_) | PastedItem::Url(_) | PastedItem::Yt(_))
+        })
+        .cloned()
+        .collect();
+    let queue_video: Vec<PastedItem> = items
+        .iter()
+        .filter(|item| {
+            matches!(item, PastedItem::VideoFile(_) | PastedItem::VideoUrl(_))
+        })
+        .cloned()
+        .collect();
+    // The `Download` row's items: the pasted web streams yt-dlp can fetch.
+    // Only offered for a single link — the audio/video and chapter choice is
+    // per link.
+    let downloads: Vec<PastedItem> = items
+        .iter()
+        .filter(|item| matches!(item, PastedItem::Yt(_)))
+        .cloned()
+        .collect();
+    let download_url = (downloads.len() == 1)
+        .then(|| youtube_link_of(&downloads[0]))
+        .flatten();
+    let download_info = download_url
+        .as_deref()
+        .and_then(|url| stream_info_for(ctx, url));
+    // A pasted link's chapters are only known once it has been resolved (they
+    // are fetched when a link is played otherwise): ask for them in the
+    // background so the download options can list them. The popup refreshes
+    // in place when the info lands (`YtAction::Refresh`).
+    warm_chapters(ctx, &downloads);
     let torrents: Vec<PastedItem> = items
         .iter()
         .filter(|item| matches!(item, PastedItem::Torrent(_) | PastedItem::Magnet(_)))
@@ -622,33 +776,63 @@ fn paste_menu(ctx: &Ctx, items: Vec<PastedItem>) -> MenuModal<'static> {
         .list_section(
             ctx,
             |mut section| {
-                if !audio.is_empty() {
-                    section.header("[Audio]");
-                    if audio.len() == 1 {
-                        let item = audio[0].clone();
-                        section = section.item("Play", move |ctx| play_item(ctx, &item));
+                // Play: the audio stream through MPD, or the video through
+                // mpv — a submenu, because a pasted web stream is both.
+                let single_audio = (audio.len() == 1).then(|| audio[0].clone());
+                let single_video = (video.len() == 1).then(|| video[0].clone());
+                if single_audio.is_some() || single_video.is_some() {
+                    let mut play = ListSection::new(ctx.config.theme.current_item_style);
+                    if let Some(item) = single_audio {
+                        play.add_item("Audio", move |ctx| play_item(ctx, &item));
                     }
-                    let all = audio.clone();
-                    section = section
-                        .item(
-                            "Add to queue and play",
-                            move |ctx| enqueue_items(ctx, &all, true, true),
-                        );
-                    let append = audio.clone();
-                    section = section
-                        .item(
-                            "Append to queue",
-                            move |ctx| enqueue_items(ctx, &append, false, false),
-                        );
-                    let (audio_direct, audio_yt) = playlist_audio_uris(&audio);
+                    if let Some(item) = single_video {
+                        play.add_item("Video", move |ctx| {
+                            play_video_now(ctx, std::slice::from_ref(&item));
+                            Ok(())
+                        });
+                    }
+                    section.add_submenu_item("Play", play);
+                }
+                if !queue_audio.is_empty() || !queue_video.is_empty() {
+                    let play_audio = queue_audio.clone();
+                    let play_video = queue_video.clone();
+                    section = section.item(
+                        "Add to queue and play",
+                        move |ctx| {
+                            if !play_video.is_empty() {
+                                queue_videos(ctx, &play_video, true, true);
+                            }
+                            if !play_audio.is_empty() {
+                                enqueue_items(ctx, &play_audio, true, true)?;
+                            }
+                            Ok(())
+                        },
+                    );
+                    let append_audio = queue_audio.clone();
+                    let append_video = queue_video.clone();
+                    section = section.item(
+                        "Add to queue",
+                        move |ctx| {
+                            if !append_video.is_empty() {
+                                queue_videos(ctx, &append_video, false, false);
+                            }
+                            if !append_audio.is_empty() {
+                                enqueue_items(ctx, &append_audio, false, false)?;
+                            }
+                            Ok(())
+                        },
+                    );
+                    let (audio_direct, audio_yt) = playlist_audio_uris(&queue_audio);
+                    let video_uris = video_playlist_uris(&queue_video);
                     let audio_direct_pick = audio_direct.clone();
                     let audio_yt_pick = audio_yt.clone();
+                    let video_uris_pick = video_uris.clone();
                     section = section
                         .item(
                             "Add to playlist",
                             move |ctx| {
                                 let radio_playlist = ctx.config.radio.playlist.clone();
-                                let (direct, yt, playlists) = ctx
+                                let (direct, yt, videos, playlists) = ctx
                                     .query_sync(move |client| {
                                         let playlists = client
                                             .picker_playlists(&radio_playlist)?
@@ -658,6 +842,7 @@ fn paste_menu(ctx: &Ctx, items: Vec<PastedItem>) -> MenuModal<'static> {
                                         Ok((
                                             audio_direct_pick.clone(),
                                             audio_yt_pick.clone(),
+                                            video_uris_pick.clone(),
                                             playlists,
                                         ))
                                     })?;
@@ -669,14 +854,17 @@ fn paste_menu(ctx: &Ctx, items: Vec<PastedItem>) -> MenuModal<'static> {
                                     ctx, SelectModal::builder().ctx(ctx).options(playlists)
                                     .confirm_label("Add").title("Select a playlist")
                                     .on_confirm(move | ctx, selected, _idx | {
-                                    add_audio_items_to_playlist(ctx, & direct, & yt, &
-                                    selected); Ok(()) }).build()
+                                    add_audio_items_to_playlist(ctx, & direct, & yt, & selected); if !
+                                    videos.is_empty() { let videos = videos.clone(); ctx.command(move
+                                    | client | { client.add_to_playlist_multiple(& selected, videos) ?
+                                    ; Ok(()) }); } Ok(()) }).build()
                                 );
                                 Ok(())
                             },
                         );
                     let audio_direct_create = audio_direct.clone();
                     let audio_yt_create = audio_yt.clone();
+                    let video_create = video_uris.clone();
                     section = section
                         .item(
                             "Create Playlist",
@@ -684,99 +872,27 @@ fn paste_menu(ctx: &Ctx, items: Vec<PastedItem>) -> MenuModal<'static> {
                                 modal!(
                                     ctx, InputModal::new(ctx).title("Create playlist")
                                     .confirm_label("Save").input_label("Playlist name:")
-                                    .on_confirm(move | ctx, value | { let value = value
-                                    .to_owned(); let create_with = audio_direct_create.clone();
-                                    let create_name = value.clone(); ctx.command(move | client |
-                                    { client.create_playlist(& create_name, create_with) ?;
-                                    Ok(()) }); if ! audio_yt_create.is_empty() { let action = if
-                                    audio_direct_create.is_empty() {
+                                    .on_confirm(move | ctx, value | { let value = value.to_owned();
+                                    let mut create_with = audio_direct_create.clone(); create_with
+                                    .extend(video_create.clone()); let create_name = value.clone();
+                                    ctx.command(move | client | { client.create_playlist(&
+                                    create_name, create_with) ?; Ok(()) }); if ! audio_yt_create
+                                    .is_empty() { let action = if audio_direct_create.is_empty() {
                                     YtAction::CreatePlaylist(value) } else {
-                                    YtAction::AddToPlaylist(value) }; let _ = ctx.work_sender
-                                    .send(WorkRequest::ResolveYtStreams { urls : audio_yt_create
-                                    .clone(), action, }); } Ok(()) })
+                                    YtAction::AddToPlaylist(value) }; let _ = ctx.work_sender.send(
+                                    WorkRequest::ResolveYtStreams { urls : audio_yt_create.clone(),
+                                    action, }); } Ok(()) })
                                 );
                                 Ok(())
                             },
                         );
                 }
-                if !video.is_empty() {
-                    section.header("[Video]");
-                    let vids = video.clone();
-                    section = section
-                        .item(
-                            "Play",
-                            move |ctx| {
-                                play_video_now(ctx, &vids);
-                                Ok(())
-                            },
-                        );
-                    let vids = video.clone();
-                    section = section
-                        .item(
-                            "Add to queue and play",
-                            move |ctx| {
-                                queue_videos(ctx, &vids, true, true);
-                                Ok(())
-                            },
-                        );
-                    let vids = video.clone();
-                    section = section
-                        .item(
-                            "Append to queue",
-                            move |ctx| {
-                                queue_videos(ctx, &vids, false, false);
-                                Ok(())
-                            },
-                        );
-                    let vids = video.clone();
-                    section = section
-                        .item(
-                            "Add to playlist",
-                            move |ctx| {
-                                let uris = video_playlist_uris(&vids);
-                                let radio_playlist = ctx.config.radio.playlist.clone();
-                                let playlists = ctx
-                                    .query_sync(move |client| {
-                                        Ok(
-                                            client
-                                                .picker_playlists(&radio_playlist)?
-                                                .into_iter()
-                                                .map(|p| p.name)
-                                                .collect::<Vec<_>>(),
-                                        )
-                                    })?;
-                                if playlists.is_empty() {
-                                    status_warn!("No playlists yet — use 'Create Playlist'");
-                                    return Ok(());
-                                }
-                                modal!(
-                                    ctx, SelectModal::builder().ctx(ctx).options(playlists)
-                                    .confirm_label("Add").title("Select a playlist")
-                                    .on_confirm(move | ctx, selected, _idx | { let uris = uris
-                                    .clone(); ctx.command(move | client | { client
-                                    .add_to_playlist_multiple(& selected, uris) ?; Ok(()) });
-                                    Ok(()) }).build()
-                                );
-                                Ok(())
-                            },
-                        );
-                    let vids = video.clone();
-                    section = section
-                        .item(
-                            "Create Playlist",
-                            move |ctx| {
-                                let uris = video_playlist_uris(&vids);
-                                modal!(
-                                    ctx, InputModal::new(ctx).title("Create playlist")
-                                    .confirm_label("Save").input_label("Playlist name:")
-                                    .on_confirm(move | ctx, value | { let value = value
-                                    .to_owned(); let uris = uris.clone(); ctx.command(move |
-                                    client | { client.create_playlist(& value, uris) ?; Ok(())
-                                    }); Ok(()) })
-                                );
-                                Ok(())
-                            },
-                        );
+                // Download the pasted web stream (round 78): the save-as
+                // options the controls pane's Download button offers, now
+                // reachable from the paste popup itself.
+                if let Some(url) = download_url.clone() {
+                    let download = download_submenu(ctx, url, download_info.clone());
+                    section.add_submenu_item("Download", download);
                 }
                 if !torrents.is_empty() {
                     section.header("[Torrent]");
@@ -927,6 +1043,7 @@ fn paste_menu(ctx: &Ctx, items: Vec<PastedItem>) -> MenuModal<'static> {
                     .set_on_close(|ctx| {
                         ctx.paste_modal_items.borrow_mut().take();
                         ctx.paste_modal_id.set(None);
+                        ctx.paste_chapter_warm.borrow_mut().clear();
                         cancel_in_flight_scans(ctx);
                         ctx.torrent_scans
                             .borrow_mut()
@@ -2057,7 +2174,14 @@ pub fn apply_resolved_streams(
                 );
             }
         }
-        YtAction::Refresh => {}
+        YtAction::Refresh => {
+            // Round 78: the paste popup asks for a pasted link's stream info
+            // before it is played so the download options can list its
+            // chapters — refresh the open popup in place once it lands.
+            if ctx.paste_modal_items.borrow().is_some() {
+                refresh_paste_modal(ctx);
+            }
+        }
     }
 }
 /// Rendered hint used by other panes is not needed here.
@@ -2326,27 +2450,78 @@ pub fn queue_stream_download(
     original_url: &str,
     audio_only: bool,
     split_chapters: bool,
-    replace: crate::shared::ytdlp::ReplaceAction,
+    replace: ReplaceAction,
+) {
+    queue_stream_download_with(
+        ctx,
+        original_url,
+        audio_only,
+        split_chapters,
+        replace,
+        Vec::new(),
+    );
+}
+/// Queue the download of selected chapter ranges of a ytdlp stream
+/// (round 78): one file per range, named after the chapter (the yt-dlp
+/// plumbing lives in `YtDlp::download_stream`).
+pub fn queue_stream_download_sections(
+    ctx: &Ctx,
+    original_url: &str,
+    audio_only: bool,
+    sections: Vec<ChapterSection>,
+) {
+    if sections.is_empty() {
+        status_warn!("No chapters selected");
+        return;
+    }
+    queue_stream_download_with(
+        ctx,
+        original_url,
+        audio_only,
+        false,
+        ReplaceAction::None,
+        sections,
+    );
+}
+/// The common body of the stream-download requests: yt-dlp needs the original
+/// link, not the resolved stream URL. `sections` is empty for a whole-media
+/// download.
+fn queue_stream_download_with(
+    ctx: &Ctx,
+    original_url: &str,
+    audio_only: bool,
+    split_chapters: bool,
+    replace: ReplaceAction,
+    sections: Vec<ChapterSection>,
 ) {
     use crate::shared::ytdlp::StreamDownloadSpec;
     let Some(output_dir) = downloads_dir() else {
         status_warn!("Cannot determine the downloads folder (~/Downloads)");
         return;
     };
-    let parsed: Result<crate::shared::ytdlp::YtDlpContent, _> = original_url.parse();
-    let Ok(crate::shared::ytdlp::YtDlpContent::Single(item)) = parsed else {
+    let parsed: Result<YtDlpContent, _> = original_url.parse();
+    let Ok(YtDlpContent::Single(item)) = parsed else {
         status_warn!("Cannot download: not a YouTube/Soundcloud/NicoVideo link");
         return;
     };
+    let chapter_count = sections.len();
     let spec = StreamDownloadSpec {
         output_dir,
         audio_only,
         split_chapters,
         on_complete: replace,
+        sections,
     };
     ctx.ytdlp_manager.queue_stream_download(item, spec);
-    status_info!("Downloading '{}' to s2udio-downloads", original_url);
+    if chapter_count > 0 {
+        status_info!(
+            "Downloading {chapter_count} chapter(s) of '{original_url}' to s2udio-downloads"
+        );
+    } else {
+        status_info!("Downloading '{}' to s2udio-downloads", original_url);
+    }
 }
+
 /// The save-as menu for a ytdlp stream: audio or video, and — when the
 /// media has chapters — one file with chapters or each chapter as its own
 /// file. `replace` is what the downloaded file(s) replace in the

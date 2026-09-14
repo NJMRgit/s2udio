@@ -39,6 +39,19 @@ impl QueuePane {
         };
         let current_idx = chapters.iter().rposition(|c| position >= c.start_secs).unwrap_or(0);
         self.chapters_items_len = chapters.len();
+        // The view was opened before this track's markers were known (a stream
+        // that just started): land the highlight on the playing chapter as soon
+        // as they arrive — `chapters_select_current` could not do it then.
+        if self.chapters_selection_pending && !chapters.is_empty() {
+            self.chapters_selection_pending = false;
+            self.chapters_state.select(Some(current_idx));
+            crate::ui::widgets::virtualized_list::scroll_selection_into_view(
+                &mut self.chapters_state,
+                chapters.len(),
+                self.areas[Areas::Table].height as usize,
+                ctx.config.scrolloff,
+            );
+        }
 
         // The chapters table uses its own columns (matching the chapters
         // header): Chapter (flexible) | Time (centered) | Duration

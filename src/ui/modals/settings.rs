@@ -1400,21 +1400,34 @@ impl SettingsModal {
         }
         Ok(())
     }
-    /// w/s: move the sidebar highlight (no pane population until `d`).
+    /// w/s: move the sidebar highlight. The right pane follows immediately —
+    /// the section under the highlight is the one displayed, so the pane no
+    /// longer waits for `d` (user request, round 76).
     fn move_sidebar(&mut self, dir: i64, ctx: &mut Ctx) {
         let n = Section::all().len();
         self.sidebar_selected = (self.sidebar_selected as i64 + dir).rem_euclid(n as i64)
             as usize;
-        ctx.render().ok();
+        self.populate(ctx);
     }
-    /// d / sidebar click: populate the right pane with the highlighted
-    /// section.
+    /// d / Enter / sidebar click: populate the right pane with the
+    /// highlighted section.
+    ///
+    /// The cursor lands on the first *option*, not on the section's first
+    /// row: every section opens with a header row (`general`, `keybinds`,
+    /// `library`, …), and parking the highlight there means `d`+`w`/`s` walk
+    /// straight back into the header (user request, round 76).
     fn populate(&mut self, ctx: &mut Ctx) {
         self.section = Section::all()[self.sidebar_selected];
-        self.selected = 0;
-        self.scroll = 0;
         self.refresh_rows(ctx);
+        self.selected = self.first_option();
+        self.scroll = 0;
         ctx.render().ok();
+    }
+    /// The first selectable (non-header) content row: where the highlight
+    /// lands when the content pane takes focus. `0` when the section is
+    /// header-only.
+    fn first_option(&self) -> usize {
+        self.rows.iter().position(|row| !row.is_header()).unwrap_or(0)
     }
     /// ↑/↓: move the content highlight; stops at the section boundaries (the
     /// section is chosen with `d`, not by scrolling).

@@ -60,6 +60,10 @@ pub struct QueuePane {
     startup_jump_done: bool,
     /// Scroll state of the chapter list (Chapters mode).
     chapters_state: ListState,
+    /// The Chapters view was opened before the track's markers were known: the
+    /// highlight lands on the playing chapter as soon as they arrive (a stream
+    /// that just started has no chapters for the first seconds).
+    chapters_selection_pending: bool,
     chapters_items_len: usize,
     /// Scroll state of the mpv playlist (Video mode).
     video_state: ListState,
@@ -196,6 +200,50 @@ impl QueuePane {
     fn current_chapters(ctx: &Ctx) -> Vec<crate::shared::chapters::Chapter> {
         ctx.current_playback_chapters()
     }
+    /// The Queue tab follows MPD playback after an mpv video session handed
+    /// over (music started, which pauses the video): the Video list inherited
+    /// from the video session has nothing behind it any more — mpv is not the
+    /// UI source and its playlist is empty — so the tab switches to Chapters
+    /// (when the current song has markers and auto-chapters is on) or the audio
+    /// queue. Called **once, at the handover** (not per frame): a mode the user
+    /// picked with `c` or a click must stay exactly as chosen (round 78
+    /// follow-up 8 — cycling to the empty Video list has to work).
+    pub(crate) fn follow_mpd_playback(&mut self, ctx: &Ctx) {
+        if crate::core::mpv::mpv_is_ui_source(ctx) {
+            return;
+        }
+        let video_len = if crate::core::mpv::session_playlist_shown(ctx) {
+            ctx.mpv.playlist.borrow().len()
+        } else {
+            ctx.video_playlist.borrow().len()
+        };
+        match ctx.queue_tab.get() {
+            crate::ctx::QueueTabMode::Video if video_len == 0 => {
+                let mode = if ctx.config.ui.auto_show_chapters
+                    && Self::chapters_available(ctx)
+                {
+                    crate::ctx::QueueTabMode::Chapters
+                } else {
+                    crate::ctx::QueueTabMode::Audio
+                };
+                Self::set_tab(self, ctx, mode);
+            }
+            _ => {}
+        }
+    }
+
+    /// The current song lost its chapter markers (a stream without chapters
+    /// replaced a chaptered one): a leftover Chapters view falls back to the
+    /// audio list. Called on a song change — a mode the user picked while
+    /// markers existed is never overridden by anything else.
+    fn follow_mpd_chapters(&mut self, ctx: &Ctx) {
+        if ctx.queue_tab.get() == crate::ctx::QueueTabMode::Chapters
+            && !Self::chapters_available(ctx)
+        {
+            Self::set_tab(self, ctx, crate::ctx::QueueTabMode::Audio);
+        }
+    }
+
     /// Switch the Queue tab's list to `mode`, resetting the list
     /// highlights and landing the Chapters/Video highlight on the currently
     /// playing item.
@@ -208,7 +256,12 @@ impl QueuePane {
         self.video_state = ListState::default();
         self.video_marked.clear();
         match mode {
-            crate::ctx::QueueTabMode::Chapters => self.chapters_select_current(ctx),
+            crate::ctx::QueueTabMode::Chapters => {
+                // Markers already known: land the highlight now. Otherwise the
+                // render does it the moment they arrive.
+                self.chapters_selection_pending = !Self::chapters_available(ctx);
+                self.chapters_select_current(ctx);
+            }
             crate::ctx::QueueTabMode::Video => {
                 let jellyfin = crate::core::mpv::session_playlist_shown(ctx);
                 let playlist: std::cell::Ref<
@@ -268,6 +321,7 @@ impl QueuePane {
             should_center_cursor_on_current: ctx.config.center_current_song_on_change,
             startup_jump_done: false,
             chapters_state: ListState::default(),
+            chapters_selection_pending: false,
             chapters_items_len: 0,
             video_state: ListState::default(),
             video_items_len: 0,
@@ -701,6 +755,9 @@ impl Pane for QueuePane {
                 self.queue.items.clone_from(&Self::local_queue(ctx));
             }
             UiEvent::SongChanged => {
+                // A track without markers replaced a chaptered one: the
+                // Chapters view falls back to the audio list.
+                self.follow_mpd_chapters(ctx);
                 if let Some((idx, _)) = ctx.find_current_song_in_queue()
                     && ctx.config.select_current_song_on_change
                 {
