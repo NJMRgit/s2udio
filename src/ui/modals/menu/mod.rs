@@ -3,7 +3,7 @@ use std::{borrow::Cow, collections::HashSet};
 use anyhow::Result;
 use input_section::InputSection;
 use itertools::Itertools;
-use list_section::ListSection;
+pub use list_section::ListSection;
 use modal::MenuModal;
 use multi_action_section::MultiActionSection;
 use ratatui::{
@@ -61,6 +61,110 @@ trait Section {
     fn double_click(&mut self, pos: ratatui::layout::Position, ctx: &Ctx) -> Result<bool>;
 
     fn item_labels_iter(&self) -> Box<dyn Iterator<Item = &str> + '_>;
+
+    /// Takes the selected row's child list (rows that open a submenu) — the
+    /// modal moves it into a level and hands it back when the level closes
+    /// (round 78).
+    fn take_selected_submenu(&mut self) -> Option<(String, ListSection)> {
+        None
+    }
+
+    /// Puts a child list back on row `idx` (see `take_selected_submenu`).
+    fn restore_submenu(&mut self, _idx: usize, _children: ListSection) {}
+
+    /// Flips the selected row's checkbox (checkbox lists).
+    fn toggle_selected_check(&mut self) -> bool {
+        false
+    }
+
+    /// The row index under a screen position (list sections only).
+    fn row_idx_at_position(&self, _pos: Position) -> Option<usize> {
+        None
+    }
+
+    /// Whether the row under a screen position opens a child list.
+    fn row_has_submenu_at(&self, _pos: Position) -> bool {
+        false
+    }
+
+    /// Whether the row under a screen position is a checkbox row.
+    fn row_is_check_at(&self, _pos: Position) -> bool {
+        false
+    }
+
+    /// Caps the section's window to `window_height` rows (a picker level uses
+    /// two thirds of the terminal; the rows scroll instead).
+    fn cap_window_height(&mut self, _window_height: u16) {}
+
+    /// True while the footer buttons hold the focus.
+    fn buttons_focused(&self) -> bool {
+        false
+    }
+
+    /// Moves the focus onto the first footer button (`Enter` from a row).
+    fn focus_buttons(&mut self) -> bool {
+        false
+    }
+
+    /// Moves the button focus (`Left`/`Right`); false when it left the row.
+    fn move_button_focus(&mut self, _forward: bool) -> bool {
+        false
+    }
+
+    /// Activates the focused footer button (`Enter`).
+    fn activate_focused_button(&mut self, _ctx: &Ctx) -> Result<Option<bool>> {
+        Ok(None)
+    }
+
+    /// The footer button under a screen position.
+    fn button_at_position(&self, _pos: Position) -> Option<usize> {
+        None
+    }
+
+    /// Activates footer button `idx` (`Some(true)` = close the modal).
+    fn activate_button(&mut self, _idx: usize, _ctx: &Ctx) -> Result<Option<bool>> {
+        Ok(None)
+    }
+
+    /// Ticks every checkbox row between the anchor and `idx` (drag select,
+    /// shift-click).
+    fn select_range_to(&mut self, _idx: usize) -> bool {
+        false
+    }
+
+    /// Extends the ticked range by one row (`Shift+Up` / `Shift+Down`).
+    fn extend_check_selection(&mut self, _down: bool) -> bool {
+        false
+    }
+
+    /// Toggles a checkbox row (mouse ctrl/alt+click).
+    fn toggle_check_row(&mut self, _idx: usize) -> bool {
+        false
+    }
+
+    /// Drag select between two rows.
+    fn drag_select(&mut self, _from: usize, _to: usize) -> bool {
+        false
+    }
+
+    /// Moves the cursor one row without wrapping (menu levels).
+    fn move_cursor(&mut self, _down: bool) -> bool {
+        false
+    }
+
+    /// The list's screen rect (its rows, without the footer buttons).
+    fn list_area(&self) -> Option<Rect> {
+        None
+    }
+
+    /// Drag auto-scroll: moves the cursor `rows` rows towards `down`, ticking
+    /// what the drag passed; false when the list is already at that end.
+    fn drag_scroll(&mut self, _rows: usize, _down: bool) -> bool {
+        false
+    }
+
+    /// Ends a running drag toggle (the painted state stays).
+    fn end_check_drag(&mut self) {}
 }
 
 #[derive(Debug)]
@@ -196,6 +300,153 @@ impl Section for SectionType<'_> {
             SectionType::Menu(s) => s.item_labels_iter(),
             SectionType::Multi(s) => s.item_labels_iter(),
             SectionType::Input(s) => s.item_labels_iter(),
+        }
+    }
+
+    fn take_selected_submenu(&mut self) -> Option<(String, ListSection)> {
+        match self {
+            SectionType::Menu(s) => s.take_selected_submenu(),
+            _ => None,
+        }
+    }
+
+    fn restore_submenu(&mut self, idx: usize, children: ListSection) {
+        if let SectionType::Menu(s) = self {
+            s.restore_submenu(idx, children);
+        }
+    }
+
+    fn toggle_selected_check(&mut self) -> bool {
+        match self {
+            SectionType::Menu(s) => s.toggle_selected(),
+            _ => false,
+        }
+    }
+
+    fn row_idx_at_position(&self, pos: Position) -> Option<usize> {
+        match self {
+            SectionType::Menu(s) => s.item_idx_at_position(pos),
+            _ => None,
+        }
+    }
+
+    fn row_has_submenu_at(&self, pos: Position) -> bool {
+        match self {
+            SectionType::Menu(s) => s
+                .item_idx_at_position(pos)
+                .and_then(|idx| s.items.get(idx))
+                .is_some_and(|item| item.submenu.is_some()),
+            _ => false,
+        }
+    }
+
+    fn row_is_check_at(&self, pos: Position) -> bool {
+        match self {
+            SectionType::Menu(s) => s
+                .item_idx_at_position(pos)
+                .and_then(|idx| s.items.get(idx))
+                .is_some_and(|item| item.checked.is_some()),
+            _ => false,
+        }
+    }
+
+    fn cap_window_height(&mut self, window_height: u16) {
+        if let SectionType::Menu(s) = self {
+            s.cap_window_height(window_height);
+        }
+    }
+
+    fn buttons_focused(&self) -> bool {
+        matches!(self, SectionType::Menu(s) if s.buttons_focused())
+    }
+
+    fn focus_buttons(&mut self) -> bool {
+        match self {
+            SectionType::Menu(s) => s.focus_buttons(),
+            _ => false,
+        }
+    }
+
+    fn move_button_focus(&mut self, forward: bool) -> bool {
+        match self {
+            SectionType::Menu(s) => s.move_button_focus(forward),
+            _ => false,
+        }
+    }
+
+    fn activate_focused_button(&mut self, ctx: &Ctx) -> Result<Option<bool>> {
+        match self {
+            SectionType::Menu(s) => s.activate_focused_button(ctx),
+            _ => Ok(None),
+        }
+    }
+
+    fn button_at_position(&self, pos: Position) -> Option<usize> {
+        match self {
+            SectionType::Menu(s) => s.button_at_position(pos),
+            _ => None,
+        }
+    }
+
+    fn activate_button(&mut self, idx: usize, ctx: &Ctx) -> Result<Option<bool>> {
+        match self {
+            SectionType::Menu(s) => s.activate_button(idx, ctx),
+            _ => Ok(None),
+        }
+    }
+
+    fn select_range_to(&mut self, idx: usize) -> bool {
+        match self {
+            SectionType::Menu(s) => s.select_range_to(idx),
+            _ => false,
+        }
+    }
+
+    fn extend_check_selection(&mut self, down: bool) -> bool {
+        match self {
+            SectionType::Menu(s) => s.extend_check_selection(down),
+            _ => false,
+        }
+    }
+
+    fn toggle_check_row(&mut self, idx: usize) -> bool {
+        match self {
+            SectionType::Menu(s) => s.toggle_row(idx),
+            _ => false,
+        }
+    }
+
+    fn drag_select(&mut self, from: usize, to: usize) -> bool {
+        match self {
+            SectionType::Menu(s) => s.drag_select(from, to),
+            _ => false,
+        }
+    }
+
+    fn move_cursor(&mut self, down: bool) -> bool {
+        match self {
+            SectionType::Menu(s) => s.move_cursor(down),
+            _ => false,
+        }
+    }
+
+    fn list_area(&self) -> Option<Rect> {
+        match self {
+            SectionType::Menu(s) => s.list_area(),
+            _ => None,
+        }
+    }
+
+    fn drag_scroll(&mut self, rows: usize, down: bool) -> bool {
+        match self {
+            SectionType::Menu(s) => s.drag_scroll(rows, down),
+            _ => false,
+        }
+    }
+
+    fn end_check_drag(&mut self) {
+        if let SectionType::Menu(s) = self {
+            s.end_check_drag();
         }
     }
 }

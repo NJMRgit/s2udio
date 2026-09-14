@@ -62,8 +62,13 @@ impl<'a> StatefulWidget for VirtualizedList<'a> {
             buf,
             &mut render_state,
         );
-        *state.offset_mut() = original_offset;
         state.select(original_selected);
+        // Restore the offset *after* the selection: ratatui's `ListState::select`
+        // resets the offset to 0 when the selection is `None` (a list can be
+        // scrolled by the wheel with nothing selected), and that clobbering made
+        // the chapters list spring back to the top on every frame (reported
+        // 2026-09-14).
+        *state.offset_mut() = original_offset;
     }
 }
 /// Scroll a `ListState`'s viewport by `dir * amount` rows without moving

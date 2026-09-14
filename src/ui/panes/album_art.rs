@@ -110,6 +110,21 @@ impl AlbumArtPane {
         if ctx.status.state != State::Play || ctx.find_current_song_in_queue().is_none() {
             return self.check_selected_art(ctx);
         }
+        // The same resolved-stream branch `before_show` has: a YouTube
+        // stream's art is its video thumbnail, never the MPD album-art query
+        // (which is protocol-disabled for `http(s)://`). Without it this
+        // re-arm path collapsed the box of a *playing* stream — and dropped
+        // the held bytes with it — instead of showing the cover, so any
+        // modal close / hidden->visible transition killed the stream art.
+        if let Some(yt) = Self::current_yt_info(ctx) {
+            match yt.thumbnail {
+                Some(thumbnail) => {
+                    Self::fetch_yt_thumbnail(ctx, thumbnail);
+                    return Ok(());
+                }
+                None => return self.collapse(ctx),
+            }
+        }
         if self.album_art.has_current() {
             ctx.album_art_collapsed.set(false);
             self.album_art.show_current(ctx)
@@ -187,6 +202,21 @@ impl AlbumArtPane {
     /// having changed, and collapses on a cleared selection.
     fn check_selected_art(&mut self, ctx: &Ctx) -> Result<()> {
         let file = Self::selected_queue_song(ctx).map(|song| song.file.clone());
+        // Round 78 follow-up (user, 2026-09-14): with no queue selection *and*
+        // nothing playing there is nothing the box could legitimately show —
+        // clearing the queue (or stopping an empty one) used to leave the last
+        // stream's art on the glass, because the "same selection" fast path
+        // below compared `None` with `None` and kept the held image.
+        if file.is_none() && ctx.status.state != State::Play {
+            if self.paused_art_file.is_some()
+                || self.album_art.is_showing()
+                || self.album_art.has_current()
+            {
+                self.paused_art_file = None;
+                return self.collapse(ctx);
+            }
+            return Ok(());
+        }
         if file == self.paused_art_file && self.album_art.is_showing() {
             return Ok(());
         }
@@ -227,6 +257,17 @@ impl AlbumArtPane {
         buffer: &ratatui::buffer::Buffer,
         ctx: &Ctx,
     ) -> Result<()> {
+        // Round 76: a modal (Settings et al.) fills the window, so the art
+        // overlay must stay off the glass while one is open. `ModalOpened`
+        // erased it, but this flush runs after *every* frame and its
+        // selection-follow re-place below (round 75) draws the held image
+        // again on the very next frame — straight over the dialog, because
+        // the modal's own frame rewrote the art pane's cells. Every other
+        // show path in this pane is already `is_modal_open`-guarded; this
+        // one was not. The pane re-shows on `ModalClosed`.
+        if self.is_modal_open {
+            return Ok(());
+        }
         // Round 48 add-on: while paused/stopped the box follows the queue
         // selection (refetch only when the selection's file changed).
         // Round 58: a video owns the box while mpv is the UI source —
@@ -423,8 +464,17 @@ impl Pane for AlbumArtPane {
                 }
                 self.is_modal_open = true;
             }
-            UiEvent::ModalClosed if is_visible => {
+            // Round 76: the flag is cleared on *every* ModalClosed, not only
+            // when the pane is visible on the active tab. `ModalOpened` only
+            // sets it while visible, but this arm used to be guarded the same
+            // way — so closing a modal from another tab left the pane
+            // permanently marked "modal open" and it never showed its art
+            // again (a latent stuck state that this guard also relies on).
+            UiEvent::ModalClosed => {
                 self.is_modal_open = false;
+                if !is_visible {
+                    return Ok(());
+                }
                 if self.fetch_needed {
                     self.fetch_needed = false;
                     self.before_show(ctx)?;

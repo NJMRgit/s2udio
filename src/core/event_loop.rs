@@ -1621,6 +1621,12 @@ fn main_task<B: Backend + std::io::Write>(
                             {
                                 log::debug!("MPD playback started; pausing mpv");
                                 crate::core::mpv::pause_mpv();
+                                // The Queue tab followed the video session; it
+                                // follows the music now (a stale Video list has
+                                // nothing behind it and its wheel did nothing).
+                                if let Err(err) = ui.follow_mpd_playback(&ctx) {
+                                    log::error!(error:? = err; "Failed to follow MPD playback");
+                                }
                             }
 
                             // Round 74 (74-1): a pasted YouTube-style link
@@ -1804,6 +1810,16 @@ fn main_task<B: Backend + std::io::Write>(
                                 crate::ui::modals::paste::ensure_chapters(&ctx);
                                 crate::ui::modals::paste::ensure_mpris_metadata(&ctx);
                                 ctx.auto_show_chapters();
+                                // The album-art box belongs to this fan-out
+                                // as well: a pasted YouTube stream showed no
+                                // art until an unrelated tab switch, while
+                                // MPRIS (restored just above) had it — the
+                                // skipped SongChanged had also skipped the
+                                // pane's `before_show`, and that leaves the
+                                // box collapsed.
+                                if let Err(err) = ui.rearm_album_art(&ctx) {
+                                    log::error!(error:? = err; "Failed to re-arm the album art after the queue refresh");
+                                }
                             }
                         }
                         (
