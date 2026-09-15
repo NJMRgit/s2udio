@@ -151,7 +151,12 @@ case "$1" in
         # Write the mock binary only when the dir is writable (skip silently
         # otherwise — byte-identity normalizes the version line below; no
         # shell redirect diagnostics may leak into the compared output).
-        if [[ -w target/release ]]; then
+        # ...and only when no real binary is there: the harness
+        # normalizes the summary's version line either way, so a real
+        # build must never be overwritten by the stub (the repo's target/
+        # is writable again since the 2026-08-23 ownership change — this
+        # used to clobber target/release/s2u after every mock run).
+        if [[ -w target/release ]] && [[ ! -x target/release/s2u ]]; then
             printf '#!/usr/bin/env bash\\necho "s2udio 0.11.0 (mock)"\\n' > target/release/s2u
             chmod +x target/release/s2u
         fi
@@ -383,8 +388,8 @@ def main():
     check('arch -y: exit 0', r_new['rc'] == 0, f"rc={r_new['rc']}")
     check('arch -y: user mpd unit written (round 52 ensure-user-instance)',
           'mpd.service (user) written (user-level instance' in r_new['out'])
-    check('arch -y: readiness step 8/9 runs before the summary',
-          '8/9  MPD readiness check' in r_new['out'])
+    check('arch -y: readiness step 9/9 runs before the summary',
+          '9/9  MPD readiness check' in r_new['out'])
     check('arch -y: wire probe warns (hermetic dead port) + BROKEN marker',
           f'MPD not reachable at 127.0.0.1:{MPD_PORT}' in r_new['out']
           and 'BROKEN - see above' in r_new['out'])
@@ -416,7 +421,7 @@ def main():
     check('arch -y system-mpd: user unit takes over',
           'system mpd.service stopped+disabled (user unit takes over)' in r['out']
           and 'mpd.service (user) written (user-level instance' in r['out'])
-    check('arch -y system-mpd: readiness still runs', '8/9  MPD readiness check' in r['out'])
+    check('arch -y system-mpd: readiness still runs', '9/9  MPD readiness check' in r['out'])
 
     print('== round 52 fix: wire probe vs REAL/fake MPD listeners (FEEDBACK-2026-08-27-4 §2/§4) ==')
     r = run_case('arch', ['-y'], extra_env={'MOCK_USER_MPD': '1'}, mpd_mode='ok', mode='wire-ok')

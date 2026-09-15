@@ -347,7 +347,9 @@ impl YtDlp {
     ) -> Result<Vec<YtDlpItem>, YtDlpDownloadError> {
         let mut command = Command::new("yt-dlp");
         command.arg("--print");
-        command.arg("%(id)s");
+        // Round 82: the item's title rides along with its id (the pickers
+        // label their rows with it; nothing else needs a second call).
+        command.arg("%(id)s\t%(title)s");
         command.arg("--flat-playlist");
         command.arg("--compat-options");
         command.arg("no-youtube-unavailable-videos");
@@ -372,10 +374,18 @@ impl YtDlp {
 
         Ok(stdout
             .lines()
-            .map(|line| YtDlpItem {
-                id: line.to_owned(),
-                filename: line.to_owned(),
-                kind: playlist.kind,
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| {
+                let (id, title) = match line.split_once('\t') {
+                    Some((id, title)) => (id.trim().to_owned(), title.trim().to_owned()),
+                    None => (line.trim().to_owned(), String::new()),
+                };
+                YtDlpItem {
+                    filename: id.clone(),
+                    id,
+                    kind: playlist.kind,
+                    title: (!title.is_empty() && title != "NA").then_some(title),
+                }
             })
             .collect())
     }

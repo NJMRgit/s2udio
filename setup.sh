@@ -31,18 +31,32 @@
 #                                PipeWire only — no MPD fifo output)
 #   * MPD / mpDris2 user services (enable/start via scripts/s2u-svc; the
 #                                Arch path keeps its direct systemctl --user)
+#   * torrent streaming          rqbit (official distro package; OPTIONAL
+#                                feature — the -y/prompt install), plus the
+#                                S2RQ .desktop launcher when rqbit is present
 #
 # Idempotent: safe to re-run at any time. Never overwrites existing configs
 # or user files. Package installs prompt for sudo/AUR-helper confirmation;
 # pass -y to accept without asking (non-interactive runs skip installs).
 #
-# Usage: ./setup.sh [-y]
+# Usage: ./setup.sh [-y] [--with-rqbit]
+#        -y           accept every install prompt (incl. rqbit)
+#        --with-rqbit install rqbit (torrent streaming) without prompting
 #        S2UDIO_OS_RELEASE=/path (testing hook; defaults to /etc/os-release)
 set -euo pipefail
 cd "$(dirname "$0")"
 
 ASSUME_YES=0
-[[ "${1:-}" == "-y" ]] && ASSUME_YES=1
+WITH_RQBIT=0
+# CLI flags (order-independent): -y accepts every install prompt, --with-rqbit
+# installs rqbit (torrent streaming) without prompting. Unknown arguments are
+# ignored, as before.
+for arg in "$@"; do
+    case "$arg" in
+        -y|--yes)     ASSUME_YES=1 ;;
+        --with-rqbit) WITH_RQBIT=1 ;;
+    esac
+done
 
 info()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 ok()    { printf '\033[1;32m  ok\033[0m %s\n' "$*"; }
@@ -81,6 +95,10 @@ resolve_elevation() {
 BIN_DIR="$HOME/.local/bin"
 CFG_DIR="$HOME/.config/s2udio"
 MPD_CONF="${MPD_CONF:-$HOME/.config/mpd/mpd.conf}"
+# rqbit (torrent streaming) + its S2RQ launcher entry live in the per-user
+# application dir; the entry is only written when rqbit is installed.
+APP_DIR="$HOME/.local/share/applications"
+RQBIT_DESKTOP="$APP_DIR/s2rq.desktop"
 
 # summary_step() reads these (set by each backend; Arch defaults below):
 SUMMARY_BIN="$BIN_DIR/s2udio"
@@ -132,7 +150,7 @@ version_ge() {
 # Shared step functions (used by every backend; Arch output byte-identical).
 
 install_support_scripts() {
-    info "4/8  Support scripts"
+    info "4/9  Support scripts"
     [[ -f scripts/rmpc-fetch-lyrics ]] && { install -Dm755 scripts/rmpc-fetch-lyrics "$BIN_DIR/rmpc-fetch-lyrics"; ok "lyrics fetcher -> $BIN_DIR/rmpc-fetch-lyrics"; } || warn "scripts/rmpc-fetch-lyrics missing in this checkout"
     # Round 70: all five helper programs (tracker, mpris bridge, mpdris2
     # shim, s2u-svc, bgutil-renew) consolidated into ONE executable
@@ -164,7 +182,7 @@ install_cava_name_shim() { # round 29: rename cava's PipeWire node (optional)
 }
 
 seed_config_theme() {
-    info "5/8  Seed config + theme (only if absent; embedded defaults otherwise)"
+    info "5/9  Seed config + theme (only if absent; embedded defaults otherwise)"
     mkdir -p "$CFG_DIR/themes"
     # Round 23: every s2udio config lives in ~/.config/s2udio — nothing in
     # ~/.config/rmpc anymore. A legacy ~/.config/rmpc/config.ron is migrated
@@ -226,8 +244,78 @@ migrate_radio_favourites() {
     ok "radio favourites -> $dest_dir/$playlist.m3u (removed from MPD playlists)"
 }
 
+# rqbit (torrent streaming) + its S2RQ launcher entry. OPTIONAL feature: the
+# install is offered on an interactive run and implied by -y/--with-rqbit;
+# without either, the step only reports the state. The entry is written only
+# when rqbit is on PATH — it starts the engine (`s2udio rq start`) and then
+# the tray icon, so nothing is bootstrapped before the engine can run.
+rqbit_step() { # $1 = distro package-manager command ("" = no package on this distro)
+    info "8/9  rqbit (torrent streaming)"
+    if command -v rqbit >/dev/null 2>&1; then
+        ok "rqbit present ($(rqbit --version 2>/dev/null | head -1 || echo '?'))"
+    elif [[ -z "$1" ]]; then
+        warn "rqbit missing - no distro package on this system; use a release binary"
+        warn "or cargo install rqbit, then re-run to get the S2RQ launcher entry"
+    elif [[ $WITH_RQBIT -eq 1 ]] || confirm "Install rqbit (torrent streaming; $1)? (needs root)"; then
+        # -y/--with-rqbit install without asking; a non-interactive run without
+        # either skips (confirm() reports that) and only prints the hint.
+        $1 && ok "rqbit installed ($(rqbit --version 2>/dev/null | head -1 || echo '?'))" \
+             || warn "rqbit install failed - torrent streaming stays unavailable"
+    else
+        warn "rqbit missing - install it ($1), then re-run for the S2RQ launcher entry"
+    fi
+    install_rqbit_desktop
+}
+
+# S2RQ: the rqbit launcher entry (only meaningful with rqbit installed). The
+# app starts the engine and then shows the tray icon, so a second start from
+# the menu reuses the running engine (rq start is idempotent). Rewritten on
+# every run — the entry is generated, never user-edited state.
+install_rqbit_desktop() {
+    if ! command -v rqbit >/dev/null 2>&1; then
+        warn "rqbit not on PATH - S2RQ .desktop entry skipped ($RQBIT_DESKTOP)"
+        return
+    fi
+    mkdir -p "$APP_DIR"
+    # The icon ships with the repo (monochrome, light — the tray icon uses
+    # the same name). Installed into both icon sections so the launcher and
+    # the panel find it.
+    local icon_dir="$HOME/.local/share/icons/hicolor/scalable"
+    install -Dm644 assets/icons/s2rq-torrent.svg "$icon_dir/status/s2rq-torrent.svg"
+    install -Dm644 assets/icons/s2rq-torrent.svg "$icon_dir/apps/s2rq-torrent.svg"
+    # …and the same glyph as SIZE-SPECIFIC PNGs (16…256 px): desktop
+    # environments ask for a concrete size, and a `scalable`-only icon can
+    # render as a placeholder in Plasma's QML menus.
+    for size in 16 22 24 32 48 64 128 256; do
+        for context in status apps; do
+            install -Dm644 "assets/icons/png/s2rq-torrent-${size}.png" \
+                "$HOME/.local/share/icons/hicolor/${size}x${size}/${context}/s2rq-torrent.png"
+        done
+    done
+    cat > "$RQBIT_DESKTOP" <<'EOF'
+[Desktop Entry]
+Type=Application
+Name=S2RQ
+Comment=s2udio rqbit
+Exec=sh -c "s2udio rq start; exec s2udio rq tray"
+Icon=s2rq-torrent
+Terminal=false
+Categories=Network;FileTransfer;
+StartupNotify=false
+EOF
+    # The launcher names the icon (`s2rq-torrent`, installed above); an
+    # absolute path is NOT used — KDE's menu renders a `?` placeholder for
+    # one. The tray draws its own pixmap in code and sends no icon name.
+    # KDE caches .desktop entries in its service database; without this the
+    # menu keeps showing the previous icon.
+    if command -v kbuildsycoca6 >/dev/null 2>&1; then
+        kbuildsycoca6 >/dev/null 2>&1 || true
+    fi
+    ok "S2RQ launcher -> $RQBIT_DESKTOP (rqbit engine + tray)"
+}
+
 build_binary() { # $1 = cargo-missing hint
-    info "2/8  Build the s2udio binary"
+    info "2/9  Build the s2udio binary"
     if ! command -v cargo >/dev/null 2>&1; then
         warn "cargo not found - $1"
     else
@@ -239,7 +327,7 @@ build_binary() { # $1 = cargo-missing hint
 }
 
 ytdlp_step() { # $1 = keep-current hint line; $2 = too-old hint ("" = none); $3 = missing hint
-    info "3/8  yt-dlp (official python-yt-dlp)"
+    info "3/9  yt-dlp (official python-yt-dlp)"
     if command -v yt-dlp >/dev/null 2>&1; then
         local ver; ver="$(yt-dlp --version 2>/dev/null || echo '?')"
         ok "yt-dlp $ver"
@@ -256,7 +344,7 @@ ytdlp_step() { # $1 = keep-current hint line; $2 = too-old hint ("" = none); $3 
 }
 
 cava_step() { # $1 = version fallback command ("" = none); $2 = missing hint
-    info "6/8  cava"
+    info "6/9  cava"
     if command -v cava >/dev/null 2>&1; then
         if [[ -n "$1" ]]; then
             ok "cava $(cava -v 2>/dev/null | head -1 || $1)"
@@ -507,7 +595,7 @@ mpd_readiness_check() { # $1 = optional info-header prefix (run_arch passes "8/9
 }
 
 summary_step() {
-    info "8/8  Summary"
+    info "Summary"
     if [[ -x "$SUMMARY_BIN" ]]; then
         "$SUMMARY_BIN" version 2>/dev/null | head -1 | sed 's/^/  s2udio: /'
     else
@@ -529,6 +617,7 @@ summary_step() {
     fi
     printf '  yt-dlp : %s (%s)\n' "$(command -v yt-dlp >/dev/null && echo present || echo MISSING)" "$(yt-dlp --version 2>/dev/null || echo '?')"
     printf '  cava   : %s\n' "$(command -v cava >/dev/null && echo present || echo MISSING)"
+    printf '  rqbit  : %s\n' "$(command -v rqbit >/dev/null && echo present || echo MISSING)"
     local mpd_state; mpd_state="$("${SUMMARY_MPD_ACTIVE[@]}" 2>/dev/null || echo inactive)"
     if [[ -n "${SUMMARY_MPD_READY:-}" ]]; then
         printf '  mpd    : %s %s\n' "$mpd_state" "$SUMMARY_MPD_READY"
@@ -572,7 +661,7 @@ ensure_rust_toolchain() {
 # ships one (Debian/Ubuntu do — plan §12.2), write user units when the
 # package has none, and enable/start through s2u-svc (systemd-user backend).
 services_step_systemd() {
-    info "7/8  MPD + mpDris2 user services (s2u-svc, systemd-user)"
+    info "7/9  MPD + mpDris2 user services (s2u-svc, systemd-user)"
     if systemctl list-unit-files 2>/dev/null | grep -q '^mpd.service'; then
         systemctl stop mpd.service >/dev/null 2>&1 || true
         systemctl disable mpd.service >/dev/null 2>&1 || true
@@ -645,7 +734,7 @@ EOF
 # launcher targets (apk/nix): no systemd — s2u-svc's launcher backend runs
 # mpd + the s2u-mpdris2 shim as plain user processes (plan §6.1).
 services_step_launcher() {
-    info "7/8  MPD + mpDris2 user services (s2u-svc launcher backend)"
+    info "7/9  MPD + mpDris2 user services (s2u-svc launcher backend)"
     "$BIN_DIR/s2u-helper" svc start mpd || true
     sleep 2
     "$BIN_DIR/s2u-helper" svc is-active mpd && ok "mpd active (launcher)" || warn "mpd not active"
@@ -710,7 +799,7 @@ EOF
 
 # through s2u-svc's runit-user backend (plan §12 / Phase 3).
 services_step_runit() {
-    info "7/8  MPD + mpDris2 user services (s2u-svc runit-user)"
+    info "7/9  MPD + mpDris2 user services (s2u-svc runit-user)"
     # Stop any running mpd BEFORE the runit dirs appear, or the
     # runit-supervised mpd cannot bind port 6600. On a re-run the dirs
     # already exist and s2u-svc stops via sv instead; both paths leave a
@@ -788,7 +877,7 @@ run_arch() {
     PACMAN_NOCONFIRM=()
     [[ $ASSUME_YES -eq 1 ]] && PACMAN_NOCONFIRM=(--noconfirm)
     # ---------------------------------------------------------------------------
-    info "1/8  System packages (mpd ffmpeg cava yt-dlp)"
+    info "1/9  System packages (mpd ffmpeg cava yt-dlp)"
     PACMAN_PKGS=(mpd ffmpeg cava yt-dlp)
     MISSING=()
     for p in "${PACMAN_PKGS[@]}"; do
@@ -913,7 +1002,7 @@ run_arch() {
     # — the user-level instance takes over — and make sure a user unit
     # targets $MPD_CONF.
     ensure_mpd_conf
-    info "7/8  MPD + mpDris2 user services"
+    info "7/9  MPD + mpDris2 user services"
     UNITS=$(systemctl --user list-unit-files 2>/dev/null || true)
     if systemctl list-unit-files 2>/dev/null | grep -q '^mpd.service'; then
         systemctl stop mpd.service >/dev/null 2>&1 || true
@@ -996,8 +1085,12 @@ EOF
         warn "mpDris2.service not found - install mpdris2-git and enable it"
     fi
     install_bgutil_renew
+
     # ---------------------------------------------------------------------------
-    mpd_readiness_check "8/9  "
+    rqbit_step "sudo pacman -S rqbit"
+
+    # ---------------------------------------------------------------------------
+    mpd_readiness_check "9/9  "
     pacman -Q mpv-full >/dev/null 2>&1 && SUMMARY_MPV_FULL=1
     summary_step
 }
@@ -1006,7 +1099,7 @@ EOF
 run_dnf5() {
     resolve_elevation
     info "Detected distro: ${DISTRO_ID:-?}${DISTRO_ID_LIKE:+ (ID_LIKE=$DISTRO_ID_LIKE)} -> dnf5 backend (Fedora; RPM Fusion free provides mpd/ffmpeg/mpv, plan §12.1)"
-    info "1/8  System packages (mpd mpdris2 cava yt-dlp mpv ffmpeg python3-dbus python3-gobject python3-mutagen + toolchain)"
+    info "1/9  System packages (mpd mpdris2 cava yt-dlp mpv ffmpeg python3-dbus python3-gobject python3-mutagen + toolchain)"
     # Fedora's official repos dropped the `mpd` server — RPM Fusion free is
     # the Fedora analogue of Arch's AUR usage for mpdris2-git (plan §12.1).
     if ! rpm -q rpmfusion-free-release >/dev/null 2>&1; then
@@ -1049,6 +1142,7 @@ run_dnf5() {
     cava_step "" "install it (sudo dnf5 install cava)"
     ensure_mpd_conf
     services_step_systemd
+    rqbit_step "sudo dnf5 install rqbit"
     mpd_readiness_check
     mpv_plain_note
     summary_step
@@ -1058,7 +1152,7 @@ run_dnf5() {
 run_apt() {
     resolve_elevation
     info "Detected distro: ${DISTRO_ID:-?}${DISTRO_ID_LIKE:+ (ID_LIKE=$DISTRO_ID_LIKE)} -> apt backend (Debian/Ubuntu/Devuan)"
-    info "1/8  System packages (mpd mpdris2 cava yt-dlp mpv ffmpeg python3-dbus python3-gi python3-mutagen + toolchain)"
+    info "1/9  System packages (mpd mpdris2 cava yt-dlp mpv ffmpeg python3-dbus python3-gi python3-mutagen + toolchain)"
     APT_PKGS=(mpd mpdris2 cava yt-dlp mpv ffmpeg python3-dbus python3-gi python3-mutagen build-essential git curl)
     MISSING=()
     for p in "${APT_PKGS[@]}"; do
@@ -1089,6 +1183,7 @@ run_apt() {
     cava_step "" "install it (sudo apt-get install cava)"
     ensure_mpd_conf
     services_step_systemd
+    rqbit_step "sudo apt-get install rqbit"
     mpd_readiness_check
     mpv_plain_note
     summary_step
@@ -1098,7 +1193,7 @@ run_apt() {
 run_apk() {
     resolve_elevation
     info "Detected distro: ${DISTRO_ID:-?}${DISTRO_ID_LIKE:+ (ID_LIKE=$DISTRO_ID_LIKE)} -> apk backend (Alpine)"
-    info "1/8  System packages (mpd mpv yt-dlp ffmpeg python3 py3-dbus py3-gobject3 + toolchain; cava from source)"
+    info "1/9  System packages (mpd mpv yt-dlp ffmpeg python3 py3-dbus py3-gobject3 + toolchain; cava from source)"
     APK_PKGS=(mpd mpv yt-dlp ffmpeg python3 py3-dbus py3-gobject3 py3-mutagen py3-pip build-base git curl fftw-dev iniparser-dev ncurses-dev sdl2-dev autoconf automake libtool ncurses-terminfo-base)
     MISSING=()
     for p in "${APK_PKGS[@]}"; do
@@ -1148,6 +1243,7 @@ run_apk() {
     cava_step "" "install it or rebuild from source (see step 1)"
     ensure_mpd_conf
     services_step_launcher
+    rqbit_step ""
     mpd_readiness_check
     mpv_plain_note
     summary_step
@@ -1157,7 +1253,7 @@ run_apk() {
 run_xbps() {
     resolve_elevation
     info "Detected distro: ${DISTRO_ID:-?}${DISTRO_ID_LIKE:+ (ID_LIKE=$DISTRO_ID_LIKE)} -> xbps backend (Void)"
-    info "1/8  System packages (mpd mpv yt-dlp cava ffmpeg mpDris2 python3-dbus python3-gobject + toolchain)"
+    info "1/9  System packages (mpd mpv yt-dlp cava ffmpeg mpDris2 python3-dbus python3-gobject + toolchain)"
     # runit-user backend prerequisites: sv + runsvdir. No-op on real Void
     # hosts (runit is the init system, already installed); without it the
     # service step silently degrades to the launcher backend (seen in the
@@ -1199,6 +1295,7 @@ run_xbps() {
     cava_step "" "install it (sudo xbps-install -S cava)"
     ensure_mpd_conf
     services_step_runit
+    rqbit_step "sudo xbps-install -S rqbit"
     mpd_readiness_check
     mpv_plain_note
     summary_step
@@ -1217,7 +1314,7 @@ run_nix() {
     }
     ensure_nix_flakes
 
-    info "1/8  nix profile install (flake.nix: s2udio + bridgePython + runtime deps)"
+    info "1/9  nix profile install (flake.nix: s2udio + bridgePython + runtime deps)"
     NIX_RUNTIME_DEPS="nixpkgs#mpd nixpkgs#mpv nixpkgs#yt-dlp nixpkgs#cava nixpkgs#mpdris2 nixpkgs#ffmpeg nixpkgs#tmux nixpkgs#dbus nixpkgs#procps nixpkgs#systemd nixpkgs#gnused nixpkgs#gawk nixpkgs#util-linux nixpkgs#rustc nixpkgs#cargo nixpkgs#gcc nixpkgs#gnumake"
     if confirm "Install s2udio + runtime deps via 'nix profile install' (flake.nix; needs network)?"; then
         # remove stale same-name entries first (nix profile install refuses
@@ -1233,7 +1330,7 @@ run_nix() {
 
     # the flake package builds the binary (build.rs/vergen handled inside the
     # nix sandbox) — no local cargo build needed
-    info "2/8  Build the s2udio binary"
+    info "2/9  Build the s2udio binary"
     # grep -q would exit at the first match and SIGPIPE nix (nix exits 1 on a
     # closed stdout) -> the pipefail pipeline fails even when s2udio IS in the
     # profile. Read the full list so nix exits cleanly; match on the full
@@ -1256,6 +1353,7 @@ run_nix() {
     # patch (plan §5 decision point) -> upstream python source at /usr/bin.
     install_upstream_mpdris2 "nixpkgs mpDris2 is a compiled ELF the s2u-mpdris2 shim cannot patch"
     services_step_launcher
+    rqbit_step "nix profile install nixpkgs#rqbit"
     mpd_readiness_check
     mpv_plain_note
     SUMMARY_BIN="$HOME/.nix-profile/bin/s2udio"

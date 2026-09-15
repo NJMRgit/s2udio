@@ -64,6 +64,7 @@ thiserror = "2.0.17"
 parking_lot = { version = "0.12.5", features = [] }
 unicode-segmentation = "1.12.0"
 winnow = "^0.7.14"
+ksni = { version = "0.3", features = ["blocking"] }
 
 [build-dependencies]
 clap = { workspace = true }

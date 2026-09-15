@@ -38,7 +38,9 @@ Built with the help of Deepseek v4 Flash, pi, and prime-agent
 ## Dependencies
 - yt-dlp
 - mpDris2
-- rqbit (torrent streaming only — static binary or `cargo install rqbit`; not installed by setup.sh)
+- rqbit (torrent streaming + web UI; `./setup.sh --with-rqbit` installs the
+  distro package, the interactive setup prompt offers it, or use a static
+  binary / `cargo install rqbit` yourself)
 - ffmpeg
 - cava
 - mpv
@@ -119,16 +121,24 @@ Configuration is stored at ~/.config/s2udio and separate from rmpc
 
 ## rqbit — torrent web UI & commands
 
-Torrent streaming runs through **rqbit** (`cargo install rqbit` or a static
-binary; not installed by setup.sh). Besides streaming torrents to mpv,
-rqbit serves a **web UI** (torrent management + peer/VPN-route
-verification) that s2udio exposes through a small localhost proxy, so the
-browser needs no credentials:
+Torrent streaming runs through **rqbit** (`./setup.sh --with-rqbit`
+installs the distro package, the interactive step offers it, or use a
+static binary / `cargo install rqbit` yourself). Besides streaming
+torrents to mpv, rqbit serves a **web UI** (torrent management +
+peer/VPN-route verification) that s2udio exposes through a small
+localhost proxy, so the browser needs no credentials:
 
 ```
 s2udio rq start    start the standalone engine (idempotent; prints the web UI URL)
 s2udio rq stop     stop the standalone engine
-s2udio rq open     open the web UI in the browser
+s2udio rq open     open the web UI (chromium --app=<url> --frameless window
+                   when chromium is installed, else the default browser).
+                   An already-open window is focused, not duplicated
+s2udio rq tray     show a tray icon while the engine runs: menu `Open` /
+                   `Shutdown`; a left DOUBLE click opens the web UI
+                   (a single click does nothing). Starts an engine when none
+                   is running and leaves when it is stopped; one tray per
+                   machine
 s2udio rq check    verify the proxy: /web/ + API answer without credentials
                    (200) while the engine port still rejects them (401)
 s2udio dl status   torrent downloads in progress (name, status, %)
@@ -162,4 +172,21 @@ in-TUI engines and stop their download when the stream ends.
   (`--socks-url`, incoming connections disabled). The web UI itself has
   no VPN settings (it is torrent management only); restart the engine
   after changing the proxy.
-- Shorthand (fish): `alias s2rq 's2udio rq'` → `s2rq start|stop|open|check`.
+- `rq tray` is the engine's status icon (StatusNotifierItem; the monochrome
+  light torrent glyph, drawn as a pixmap in the current colour scheme's
+  foreground colour — no icon-name lookup is involved; the desktop entry
+  points at the same glyph by absolute path): it tracks the engine — the icon is there exactly
+  while the web UI is up — and its menu opens the web UI or shuts the
+  engine down (which removes the icon). A left double click opens the web
+  UI; a single click does nothing.
+- The web UI is a **single window**: opening it again focuses the window
+  that is already there (KWin scripting is asked to focus it — chromium's
+  `--class`/`--wayland-app-id` are ignored on Wayland, so the window is
+  matched by the class chromium derives from the URL); a window left over
+  from an earlier engine (dead proxy port) is closed and replaced. It runs
+  in its own chromium profile (`~/.cache/s2udio/chromium-webui`), so
+  quitting your own browser does not close it.
+- `setup.sh` also writes **S2RQ** (`~/.local/share/applications/s2rq.desktop`)
+  when rqbit is on PATH: it runs `s2udio rq start` and then `s2udio rq tray`,
+  so the menu entry both brings the engine up and shows the tray icon.
+- Shorthand (fish): `alias s2rq 's2udio rq'` → `s2rq start|stop|open|tray|check`.

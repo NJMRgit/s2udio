@@ -23,7 +23,7 @@ use crate::{
         mpd_client::{MpdClient, SaveMode},
     },
     shared::{
-        events::{AppEvent, ClientRequest, WorkDone, WorkRequest},
+        events::{AppEvent, ClientRequest, PlaylistAction, WorkDone, WorkRequest},
         ext::error::ErrorExt,
         id::{self, Id},
         keys::KeyResolver,
@@ -1399,13 +1399,49 @@ fn main_task<B: Backend + std::io::Write>(
                             }
                         }
                     }
-                    WorkDone::YtDlpPlaylistResolved { urls } => {
-                        ctx.ytdlp_manager.queue_download_many(urls);
-                        ctx.ytdlp_manager.download_next();
+                    WorkDone::YtDlpPlaylistResolved { urls, action } => {
+                        match action {
+                            // Round 79: a playlist link's items are known —
+                            // import them (cache download + queue) or save
+                            // every track as a file.
+                            PlaylistAction::ImportToQueue { position, autoplay } => {
+                                if urls.is_empty() {
+                                    status_warn!("The playlist has no tracks to import");
+                                } else {
+                                    status_info!(
+                                        "Importing {} track(s) from the playlist",
+                                        urls.len()
+                                    );
+                                    ctx.ytdlp_manager.queue_download_many(
+                                        urls, position, autoplay,
+                                    );
+                                    ctx.ytdlp_manager.download_next();
+                                }
+                            }
+                            // Round 82: a picker row — the playlist's items
+                            // are known now, so open the list of videos and
+                            // continue from there (audio/video, then the
+                            // target playlist or the save).
+                            PlaylistAction::Pick(kind) => {
+                                if urls.is_empty() {
+                                    status_warn!("The playlist has no items");
+                                } else {
+                                    crate::ui::modals::paste::open_playlist_picker(
+                                        &ctx, urls, kind,
+                                    );
+                                }
+                            }
+                            // Round 83: an empty playlist is the only way
+                            // this lands here — the queue rows resolve their
+                            // items on the work thread.
+                            PlaylistAction::QueueStreams { .. } => {
+                                status_warn!("The playlist has no tracks to add");
+                            }
+                        }
                     }
                     WorkDone::YtDlpDownloaded { id, result, spec } => {
                         match ctx.ytdlp_manager.resolve_download(id, result) {
-                            Ok((result, position)) => {
+                            Ok((result, position, autoplay)) => {
                                 let cache_dir = ctx.config.cache_dir.clone();
                                 match spec {
                                     // A stream download (the controls'
@@ -1421,13 +1457,40 @@ fn main_task<B: Backend + std::io::Write>(
                                     None => {
                                         let path = result.file_path;
                                         ctx.command(move |client| {
+                                            // Round 79: "Import and play"
+                                            // starts the first track the
+                                            // moment it lands (it is
+                                            // appended, so its index is the
+                                            // queue length right before the
+                                            // add).
+                                            let play_at = if autoplay {
+                                                // `playlistinfo` is empty
+                                                // (`None`) for an empty
+                                                // queue — the new entry is
+                                                // then at index 0.
+                                                Some(
+                                                    client
+                                                        .playlist_info()?
+                                                        .map_or(0, |songs| songs.len()),
+                                                )
+                                            } else {
+                                                None
+                                            };
                                             client.add_downloaded_file_to_queue(
                                                 path,
                                                 cache_dir.as_deref(),
                                                 position,
                                             )?;
+                                            if let Some(idx) = play_at {
+                                                client.play_position_safe(idx)?;
+                                            }
                                             Ok(())
                                         });
+                                        if autoplay {
+                                            status_info!(
+                                                "Playing the first track of the playlist"
+                                            );
+                                        }
                                     }
                                 }
                             }
