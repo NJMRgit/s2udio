@@ -1650,7 +1650,11 @@ impl SettingsModal {
                         };
                         if needs_start {
                             if let Some(reg) = crate::core::rqctl::registered_running() {
-                                Self::open_url(&reg.web_url);
+                                if let Err(err) =
+                                    crate::core::rqctl::open_web_ui(&reg.web_url)
+                                {
+                                    status_warn!("{err}");
+                                }
                                 status_info!("rqbit web UI opened at {}", reg.web_url);
                                 ctx.render()?;
                                 return Ok(());
@@ -1678,7 +1682,9 @@ impl SettingsModal {
                             .as_ref()
                             .expect("engine started just above")
                             .web_url();
-                        Self::open_url(&url);
+                        if let Err(err) = crate::core::rqctl::open_web_ui(&url) {
+                            status_warn!("{err}");
+                        }
                         status_info!("rqbit web UI opened at {url}");
                         ctx.render()?;
                         Ok(())
@@ -2659,23 +2665,6 @@ impl SettingsModal {
             .as_mut()
             .map(|e| e.is_running())
             .unwrap_or(false) || crate::core::rqctl::registered_running().is_some()
-    }
-    /// Open `url` in the system browser (`xdg-open`); on failure the URL
-    /// stays in the status bar so the user can paste it manually.
-    fn open_url(url: &str) {
-        use std::process::Stdio;
-        match Command::new("xdg-open")
-            .arg(url)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-        {
-            Ok(_) => {}
-            Err(err) => {
-                status_warn!("Could not open a browser (xdg-open): {err}");
-            }
-        }
     }
     /// Whether the row registers a row-wide click (only those lighten on
     /// hover).

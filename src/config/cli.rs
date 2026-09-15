@@ -312,6 +312,10 @@ pub enum RqCmd {
     /// (proxy serves the web UI + API without credentials while the
     /// engine port itself still rejects unauthenticated requests).
     Check,
+    /// Show a tray icon while the engine runs (starts one when none is
+    /// running): its menu opens the web UI or shuts the engine down. This
+    /// is what the S2RQ desktop entry runs after `rq start`.
+    Tray,
     /// Hidden daemon entry point for `rq start`: owns the engine + the
     /// auth proxy and stays alive until stopped (never typed by users).
     #[clap(hide = true)]

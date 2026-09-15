@@ -38,6 +38,49 @@ pub(crate) enum ClientRequest {
     Command(MpdCommand),
 }
 
+/// Round 79 (79-1): what a playlist link should do once its items are
+/// known — the paste popup's playlist rows and the CLI's playlist import.
+#[derive(Debug, Clone)]
+pub enum PlaylistAction {
+    /// Download every track into the yt-dlp cache and append it to the
+    /// queue in playlist order. `autoplay` starts the first track that
+    /// lands (`Import and play`); `position` is where the first entry
+    /// goes (None = end of the queue).
+    ImportToQueue {
+        position: Option<QueuePosition>,
+        autoplay: bool,
+    },
+    /// Round 83: queue the playlist's items **without downloading them**.
+    /// Each item's stream URL is resolved in the background and the entry
+    /// is added as it lands (`audio` → the MPD queue, else the persistent
+    /// video playlist). `autoplay` inserts the first entry after the one
+    /// playing now and starts it; without it every item appends to the
+    /// end.
+    QueueStreams { audio: bool, autoplay: bool },
+    /// Round 82: the playlist's items are known — open the picker the row
+    /// asked for (which videos of the playlist to act on); the remaining
+    /// steps (audio/video, target) are modals in the UI.
+    Pick(PlaylistPick),
+}
+
+/// Round 82: the picker a `[Playlist]` row opens once the playlist's items
+/// are resolved.
+#[derive(Debug, Clone, Copy)]
+pub enum PlaylistPick {
+    /// Multi-select the videos, then Audio/Video, then the stored playlist
+    /// to add them to.
+    AddToPlaylist,
+    /// Multi-select the videos, then Audio/Video, then a name for the new
+    /// playlist.
+    CreatePlaylist,
+    /// Save every track of the playlist as its own file
+    /// (`Download > <kind> > All files`).
+    SaveAll { audio_only: bool },
+    /// Multi-select the videos and save those as their own files
+    /// (`Download > <kind> > Select files`).
+    SaveSelected { audio_only: bool },
+}
+
 #[allow(unused)]
 pub(crate) enum WorkRequest {
     IndexLyrics {
@@ -63,6 +106,8 @@ pub(crate) enum WorkRequest {
     },
     YtDlpResolvePlaylist {
         playlist: YtDlpPlaylist,
+        /// What to do with the resolved items (round 79).
+        action: PlaylistAction,
     },
     /// Fetch the radio-browser.info station directory on the work thread;
     /// the result is delivered to the Radio pane like an MPD query result.
@@ -261,6 +306,8 @@ pub(crate) enum WorkDone {
     },
     YtDlpPlaylistResolved {
         urls: Vec<YtDlpItem>,
+        /// What the request asked to do with the resolved items.
+        action: PlaylistAction,
     },
     YtDlpDownloaded {
         id: DownloadId,

@@ -199,7 +199,19 @@ fn find_head_end(buf: &[u8]) -> Option<usize> {
 /// Inject/force the `Authorization` header and `Connection: close`.
 fn rewrite_head(head: &[u8], auth_header: &str) -> Vec<u8> {
     let text = String::from_utf8_lossy(head);
-    let lines: Vec<&str> = text.lines().collect();
+    // `lines()` keeps the empty line the `\r\n\r\n` terminator produces
+    // (`split_inclusive` yields a final empty piece), and the head is then
+    // re-emitted with its own closing CRLF. Keeping that empty line wrote
+    // TWO blank-line pairs, so the engine began every request BODY two
+    // bytes early: it received `\r\n` followed by the body's first
+    // `Content-Length - 2` bytes (the tail was cut). GET requests were
+    // unaffected, but every POST body was corrupted — the web UI's "Add
+    // Torrent" failed with `unsupported URL "\r\nmagnet:?xt=…"`, `.torrent`
+    // uploads arrived two bytes short, and JSON bodies were truncated.
+    let mut lines: Vec<&str> = text.lines().collect();
+    while lines.last().is_some_and(|line| line.is_empty()) {
+        lines.pop();
+    }
     let mut has_auth = false;
     for line in lines.iter().skip(1) {
         // Header names are compared without the trailing ':' — the

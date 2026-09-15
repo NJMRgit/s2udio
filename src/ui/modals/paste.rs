@@ -21,10 +21,13 @@ use crate::{
     },
     ctx::Ctx, mpd::{QueuePosition, mpd_client::MpdClient},
     shared::{
-        events::WorkRequest,
+        events::{PlaylistAction, PlaylistPick, WorkRequest},
         macros::{modal, status_error, status_info, status_warn},
         mpd_client_ext::{Enqueue, MpdClientExt as _},
-        ytdlp::{ChapterSection, ReplaceAction, YtDlpContent, YtStreamInfo},
+        ytdlp::{
+            ChapterSection, ReplaceAction, StreamDownloadSpec, StreamIntent, YtDlpContent,
+            YtDlpHost, YtDlpItem, YtStreamInfo, tagged_stream_link, yt_video_id,
+        },
     },
     ui::modals::{
         input_modal::InputModal,
@@ -63,10 +66,6 @@ pub enum YtAction {
     /// Insert the resolved videos into the persistent video playlist after
     /// the current entry and start playing them immediately.
     AddToVideoQueueAndPlay,
-    /// Add the resolved streams to an existing stored playlist.
-    AddToPlaylist(String),
-    /// Create a new stored playlist from the resolved streams.
-    CreatePlaylist(String),
     /// Only refresh the cached stream info (startup re-fetch when a
     /// previously resolved stream is still playing); no queue action.
     Refresh,
@@ -546,31 +545,6 @@ fn playlist_audio_uris(items: &[PastedItem]) -> (Vec<String>, Vec<String>) {
 }
 /// Add audio items to an existing playlist: direct URIs immediately,
 /// YouTube-style links after their streams resolve (the work request
-/// carries the playlist name so the result handler can add them).
-fn add_audio_items_to_playlist(
-    ctx: &Ctx,
-    direct: &[String],
-    yt: &[String],
-    playlist: &str,
-) {
-    if !direct.is_empty() {
-        let direct = direct.to_vec();
-        let playlist = playlist.to_owned();
-        ctx.command(move |client| {
-            client.add_to_playlist_multiple(&playlist, direct)?;
-            Ok(())
-        });
-    }
-    if !yt.is_empty() {
-        let playlist = playlist.to_owned();
-        let _ = ctx
-            .work_sender
-            .send(WorkRequest::ResolveYtStreams {
-                urls: yt.to_vec(),
-                action: YtAction::AddToPlaylist(playlist),
-            });
-    }
-}
 /// The replacement id of the paste popup: when a torrent scan completes,
 /// a rebuilt popup replaces the open one in place (same spot in the modal
 /// stack, selection reset) instead of stacking a second copy on top.
@@ -694,14 +668,275 @@ fn download_kind_menu(
     }
     sub
 }
+/// Round 79: a link is a playlist link when it carries a playlist id
+/// (`/playlist?list=…` or `watch?v=…&list=…`).
+fn is_playlist_link(url: &str) -> bool {
+    matches!(url.parse::<YtDlpContent>(), Ok(YtDlpContent::Playlist(_)))
+}
+
+/// Round 82: a playlist's `Download` row — Audio or Video, each with
+/// `All files` (save every track of the playlist) and `Select files` (pick
+/// which videos to save). Chapters never apply to a playlist's items, so
+/// there is no `Single File` / `All Chapters` / `Chapter(s)` row here.
+fn playlist_download_menu(ctx: &Ctx, url: String) -> ListSection {
+    let mut sub = ListSection::new(ctx.config.theme.current_item_style);
+    for (label, audio_only) in [("Audio", true), ("Video", false)] {
+        let mut kind = ListSection::new(ctx.config.theme.current_item_style);
+        let all_url = url.clone();
+        kind.add_item("All files", move |ctx| {
+            pick_playlist_items(ctx, &all_url, PlaylistPick::SaveAll { audio_only });
+            Ok(())
+        });
+        let pick_url = url.clone();
+        kind.add_item("Select files", move |ctx| {
+            pick_playlist_items(ctx, &pick_url, PlaylistPick::SaveSelected { audio_only });
+            Ok(())
+        });
+        kind.add_item("Cancel", |_ctx| Ok(()));
+        sub.add_submenu_item(label, kind);
+    }
+    sub.add_item("Cancel", |_ctx| Ok(()));
+    sub
+}
+
+/// Round 83: a playlist link's queue rows. The playlist's items are added
+/// as YouTube **stream entries** — nothing is downloaded: each item's
+/// stream URL is resolved in the background
+/// (`PlaylistAction::QueueStreams`) and the entry is added as it lands, so
+/// a 10-track playlist is in the queue in seconds instead of after ten
+/// full downloads. `audio` queues them for MPD (the audio queue), else for
+/// the video playlist; `autoplay` starts the first entry that lands.
+fn import_playlist(ctx: &Ctx, url: &str, audio: bool, autoplay: bool) {
+    let action = PlaylistAction::QueueStreams { audio, autoplay };
+    if let Err(err) = ctx.ytdlp_manager.resolve_playlist(url, action) {
+        status_error!("Failed to add the playlist: {err}");
+    }
+}
+
+/// Round 82: a picker row (`Add to playlist` / `Create Playlist` /
+/// `Download > … > All files | Select files`). The playlist's items are
+/// listed first — one fast yt-dlp call, they carry their titles — and the
+/// picker opens as soon as they are known.
+fn pick_playlist_items(ctx: &Ctx, url: &str, kind: PlaylistPick) {
+    if let Err(err) = ctx
+        .ytdlp_manager
+        .resolve_playlist(url, PlaylistAction::Pick(kind))
+    {
+        status_error!("Failed to read the playlist: {err}");
+    } else {
+        status_info!("Fetching the playlist's items…");
+    }
+}
+
+/// Round 82: the playlist's items are known — open the picker the row asked
+/// for. Called from the event loop when a `Pick` request lands.
+pub fn open_playlist_picker(ctx: &Ctx, items: Vec<YtDlpItem>, kind: PlaylistPick) {
+    match kind {
+        PlaylistPick::AddToPlaylist => {
+            playlist_item_picker(ctx, "Add to playlist", "Add", items, |ctx, chosen| {
+                playlist_kind_choice(ctx, chosen, false);
+                Ok(())
+            })
+        }
+        PlaylistPick::CreatePlaylist => {
+            playlist_item_picker(ctx, "Create playlist", "Create", items, |ctx, chosen| {
+                playlist_kind_choice(ctx, chosen, true);
+                Ok(())
+            })
+        }
+        // `All files`: every track, no picker.
+        PlaylistPick::SaveAll { audio_only } => {
+            queue_playlist_save_files(ctx, items, audio_only);
+        }
+        PlaylistPick::SaveSelected { audio_only } => {
+            playlist_item_picker(ctx, "Select files", "Download", items, move |ctx, chosen| {
+                queue_playlist_save_files(ctx, chosen, audio_only);
+                Ok(())
+            })
+        }
+    }
+}
+
+/// Round 82: the checkbox list of a playlist's videos — the picker every
+/// picker row opens, drawn like the download `Chapter(s)` picker.
+/// `confirm` labels its footer button; `on_pick` receives the ticked items
+/// in playlist order.
+fn playlist_item_picker(
+    ctx: &Ctx,
+    title: &'static str,
+    confirm: &'static str,
+    items: Vec<YtDlpItem>,
+    on_pick: impl FnOnce(&Ctx, Vec<YtDlpItem>) -> Result<()> + Send + Sync + 'static,
+) {
+    modal!(
+        ctx, MenuModal::new(ctx).width(60).title(title).list_section(
+            ctx,
+            move |mut section| {
+                for item in &items {
+                    section.add_check_item(item.display_title().to_owned(), false);
+                }
+                section.add_check_buttons(confirm, "Cancel");
+                section.check_list(move |ctx, selected| {
+                    let chosen: Vec<YtDlpItem> = selected
+                        .iter()
+                        .filter_map(|idx| items.get(*idx).cloned())
+                        .collect();
+                    on_pick(ctx, chosen)
+                });
+                Some(section)
+            }
+        )
+    );
+}
+
+/// Round 82: the Audio/Video step of the playlist rows that end in a stored
+/// playlist.
+fn playlist_kind_choice(ctx: &Ctx, items: Vec<YtDlpItem>, create: bool) {
+    modal!(
+        ctx, SelectModal::builder().ctx(ctx)
+        .options(vec!["Audio".to_owned(), "Video".to_owned()])
+        .confirm_label("Select").title("Audio or video")
+        .on_confirm(move |ctx, kind, _idx| {
+            if create {
+                playlist_create_target(ctx, items, kind == "Audio");
+            } else {
+                playlist_add_target(ctx, items, kind == "Audio");
+            }
+            Ok(())
+        }).build()
+    );
+}
+
+/// Round 82: add the picked videos of a playlist to an existing one — the
+/// stored playlist is chosen by name.
+fn playlist_add_target(ctx: &Ctx, items: Vec<YtDlpItem>, audio: bool) {
+    let radio_playlist = ctx.config.radio.playlist.clone();
+    let playlists = ctx
+        .query_sync(move |client| {
+            Ok(client
+                .picker_playlists(&radio_playlist)?
+                .into_iter()
+                .map(|p| p.name)
+                .collect::<Vec<_>>())
+        })
+        .unwrap_or_default();
+    if playlists.is_empty() {
+        status_warn!("No playlists yet — use 'Create Playlist'");
+        return;
+    }
+    modal!(
+        ctx, SelectModal::builder().ctx(ctx).options(playlists)
+        .confirm_label("Add").title("Select a playlist")
+        .on_confirm(move |ctx, selected, _idx| {
+            playlist_store_items(ctx, &items, &selected, audio);
+            Ok(())
+        }).build()
+    );
+}
+
+/// Round 82: create a playlist from the picked videos of another one.
+fn playlist_create_target(ctx: &Ctx, items: Vec<YtDlpItem>, audio: bool) {
+    modal!(
+        ctx, InputModal::new(ctx).title("Create playlist").confirm_label("Save")
+        .input_label("Playlist name:").on_confirm(move |ctx, value| {
+            let name = value.to_owned();
+            // Round 86: links + intent tag, resolved when the entry is
+            // played (see `playlist_store_items`).
+            let intent =
+                if audio { StreamIntent::Audio } else { StreamIntent::Video };
+            let uris: Vec<String> = items
+                .iter()
+                .map(|item| tagged_stream_link(&item.to_url(), intent))
+                .collect();
+            ctx.command(move |client| {
+                client.create_playlist(&name, uris)?;
+                Ok(())
+            });
+            Ok(())
+        })
+    );
+}
+
+/// Round 82: store the picked videos in an existing playlist — `audio`
+/// resolves each item's stream URL first (the single-link row's path),
+/// video keeps the links.
+fn playlist_store_items(ctx: &Ctx, items: &[YtDlpItem], playlist: &str, audio: bool) {
+    if items.is_empty() {
+        return;
+    }
+    // Round 86: the entry keeps the LINK with its intent tag — a resolved
+    // stream URL would expire within hours; the link is resolved when the
+    // entry is played (the Playlists tab) or added to the queue.
+    let intent = if audio { StreamIntent::Audio } else { StreamIntent::Video };
+    let uris: Vec<String> = items
+        .iter()
+        .map(|item| tagged_stream_link(&item.to_url(), intent))
+        .collect();
+    let playlist = playlist.to_owned();
+    ctx.command(move |client| {
+        client.add_to_playlist_multiple(&playlist, uris)?;
+        Ok(())
+    });
+}
+
+/// Round 79: save every track of an already-resolved playlist link as its
+/// own file (one yt-dlp run per track; the download manager runs them one at
+/// a time).
+pub fn queue_playlist_save_files(ctx: &Ctx, items: Vec<YtDlpItem>, audio_only: bool) {
+    let Some(output_dir) = downloads_dir() else {
+        status_warn!("Cannot determine the downloads folder (~/Downloads)");
+        return;
+    };
+    let count = items.len();
+    for item in items {
+        ctx.ytdlp_manager.queue_stream_download(
+            item,
+            StreamDownloadSpec {
+                output_dir: output_dir.clone(),
+                audio_only,
+                split_chapters: false,
+                sections: Vec::new(),
+                on_complete: ReplaceAction::None,
+            },
+        );
+    }
+    status_info!(
+        "Saving {count} track(s) of the playlist to s2udio-downloads as {}",
+        if audio_only { "audio" } else { "video" }
+    );
+}
+
 fn paste_menu(ctx: &Ctx, items: Vec<PastedItem>) -> MenuModal<'static> {
     let count = items.len();
+    // Round 79: a pasted playlist link gets its own `[Playlist]` rows — the
+    // whole playlist can be imported into the queue or saved as files.
+    let playlist_url: Option<String> = (count == 1)
+        .then(|| match &items[0] {
+            PastedItem::Yt(url) if is_playlist_link(url) => Some(url.clone()),
+            _ => None,
+        })
+        .flatten();
+    // Round 84: a link that carries a playlist gets the `[Playlist]` rows
+    // and nothing else that would repeat them — the single-link queue rows
+    // (`Add to queue…` / `Add to playlist` / `Create Playlist`) and the
+    // single-link `Download` are the same actions on a smaller item set, so
+    // they are dropped (only `Play` stays: it plays the pasted video
+    // itself). Without this the menu showed the same five rows twice.
+    let playlist_carried = playlist_url.is_some();
+    // A link that names only a playlist (no video id of its own) has nothing
+    // else to play or download, so its single-link rows are dropped.
+    let playlist_only = playlist_url.is_some()
+        && matches!(&items[0], PastedItem::Yt(url) if yt_video_id(url).is_none());
     let title = if count == 1 {
         match &items[0] {
             // A pasted link is a web stream: its raw URL (query string,
             // timestamps, tracking parameters) makes a poor title.
             PastedItem::Url(_) | PastedItem::VideoUrl(_) | PastedItem::Yt(_) => {
-                " Web Stream ".to_owned()
+                if playlist_only {
+                    " YouTube Playlist ".to_owned()
+                } else {
+                    " Web Stream ".to_owned()
+                }
             }
             item => format!(" Paste: {} ", item.label()),
         }
@@ -711,20 +946,22 @@ fn paste_menu(ctx: &Ctx, items: Vec<PastedItem>) -> MenuModal<'static> {
     let audio: Vec<PastedItem> = items
         .iter()
         .filter(|item| {
-            matches!(
-                item, PastedItem::File(_) | PastedItem::Url(_) | PastedItem::VideoFile(_)
-                | PastedItem::VideoUrl(_) | PastedItem::Yt(_)
-            )
+            !(playlist_only && matches!(item, PastedItem::Yt(_)))
+                && matches!(
+                    item, PastedItem::File(_) | PastedItem::Url(_) | PastedItem::VideoFile(_)
+                    | PastedItem::VideoUrl(_) | PastedItem::Yt(_)
+                )
         })
         .cloned()
         .collect();
     let video: Vec<PastedItem> = items
         .iter()
         .filter(|item| {
-            matches!(
-                item, PastedItem::VideoFile(_) | PastedItem::VideoUrl(_) |
-                PastedItem::Yt(_)
-            )
+            !(playlist_only && matches!(item, PastedItem::Yt(_)))
+                && matches!(
+                    item, PastedItem::VideoFile(_) | PastedItem::VideoUrl(_) |
+                    PastedItem::Yt(_)
+                )
         })
         .cloned()
         .collect();
@@ -734,7 +971,8 @@ fn paste_menu(ctx: &Ctx, items: Vec<PastedItem>) -> MenuModal<'static> {
     let queue_audio: Vec<PastedItem> = items
         .iter()
         .filter(|item| {
-            matches!(item, PastedItem::File(_) | PastedItem::Url(_) | PastedItem::Yt(_))
+            !(playlist_only && matches!(item, PastedItem::Yt(_)))
+                && matches!(item, PastedItem::File(_) | PastedItem::Url(_) | PastedItem::Yt(_))
         })
         .cloned()
         .collect();
@@ -750,7 +988,10 @@ fn paste_menu(ctx: &Ctx, items: Vec<PastedItem>) -> MenuModal<'static> {
     // per link.
     let downloads: Vec<PastedItem> = items
         .iter()
-        .filter(|item| matches!(item, PastedItem::Yt(_)))
+        .filter(|item| {
+            !(playlist_only && matches!(item, PastedItem::Yt(_)))
+                && matches!(item, PastedItem::Yt(_))
+        })
         .cloned()
         .collect();
     let download_url = (downloads.len() == 1)
@@ -776,11 +1017,68 @@ fn paste_menu(ctx: &Ctx, items: Vec<PastedItem>) -> MenuModal<'static> {
         .list_section(
             ctx,
             |mut section| {
+                // Round 79: a playlist link — import the whole playlist into
+                // the queue (optionally starting it) or save every track as
+                // a file. Above the single-link rows: the playlist is what
+                // the link is mostly about.
+                // Round 79/82/83: a playlist link — the playlist is what
+                // the link is mostly about, so its rows come first. The
+                // queue rows add the playlist's items as YouTube *stream*
+                // entries (nothing is downloaded; each track is fetched
+                // when it is played), the picker rows let the user choose
+                // which of the playlist's videos to act on.
+                if let Some(url) = playlist_url.clone() {
+                    section.header("[Playlist]");
+                    // Add to queue and play > Audio | Video: everything
+                    // lands in the queue, the first entry starts playing.
+                    let mut play_sub = ListSection::new(ctx.config.theme.current_item_style);
+                    for (label, audio) in [("Audio", true), ("Video", false)] {
+                        let play_url = url.clone();
+                        play_sub.add_item(label, move |ctx| {
+                            import_playlist(ctx, &play_url, audio, true);
+                            Ok(())
+                        });
+                    }
+                    play_sub.add_item("Cancel", |_ctx| Ok(()));
+                    section.add_submenu_item("Add to queue and play", play_sub);
+
+                    // Add to queue > Audio | Video: the same without
+                    // starting playback.
+                    let mut queue_sub = ListSection::new(ctx.config.theme.current_item_style);
+                    for (label, audio) in [("Audio", true), ("Video", false)] {
+                        let queue_url = url.clone();
+                        queue_sub.add_item(label, move |ctx| {
+                            import_playlist(ctx, &queue_url, audio, false);
+                            Ok(())
+                        });
+                    }
+                    queue_sub.add_item("Cancel", |_ctx| Ok(()));
+                    section.add_submenu_item("Add to queue", queue_sub);
+
+                    // Add to playlist / Create Playlist: which videos of the
+                    // playlist, then Audio or Video, then the target.
+                    let add_url = url.clone();
+                    section.add_item("Add to playlist", move |ctx| {
+                        pick_playlist_items(ctx, &add_url, PlaylistPick::AddToPlaylist);
+                        Ok(())
+                    });
+                    let create_url = url.clone();
+                    section.add_item("Create Playlist", move |ctx| {
+                        pick_playlist_items(ctx, &create_url, PlaylistPick::CreatePlaylist);
+                        Ok(())
+                    });
+                    section.add_submenu_item("Download", playlist_download_menu(ctx, url));
+                }
+
                 // Play: the audio stream through MPD, or the video through
                 // mpv — a submenu, because a pasted web stream is both.
+                // Round 85 (user): a playlist has many items, so a row that
+                // plays ONE item as a temporary, queue-free entry has no
+                // place in a playlist paste — playlist streams only ever
+                // enter through the queue (`Add to queue…` above).
                 let single_audio = (audio.len() == 1).then(|| audio[0].clone());
                 let single_video = (video.len() == 1).then(|| video[0].clone());
-                if single_audio.is_some() || single_video.is_some() {
+                if !playlist_carried && (single_audio.is_some() || single_video.is_some()) {
                     let mut play = ListSection::new(ctx.config.theme.current_item_style);
                     if let Some(item) = single_audio {
                         play.add_item("Audio", move |ctx| play_item(ctx, &item));
@@ -793,7 +1091,7 @@ fn paste_menu(ctx: &Ctx, items: Vec<PastedItem>) -> MenuModal<'static> {
                     }
                     section.add_submenu_item("Play", play);
                 }
-                if !queue_audio.is_empty() || !queue_video.is_empty() {
+                if !playlist_carried && (!queue_audio.is_empty() || !queue_video.is_empty()) {
                     let play_audio = queue_audio.clone();
                     let play_video = queue_video.clone();
                     section = section.item(
@@ -824,73 +1122,74 @@ fn paste_menu(ctx: &Ctx, items: Vec<PastedItem>) -> MenuModal<'static> {
                     );
                     let (audio_direct, audio_yt) = playlist_audio_uris(&queue_audio);
                     let video_uris = video_playlist_uris(&queue_video);
-                    let audio_direct_pick = audio_direct.clone();
-                    let audio_yt_pick = audio_yt.clone();
-                    let video_uris_pick = video_uris.clone();
-                    section = section
-                        .item(
-                            "Add to playlist",
-                            move |ctx| {
-                                let radio_playlist = ctx.config.radio.playlist.clone();
-                                let (direct, yt, videos, playlists) = ctx
-                                    .query_sync(move |client| {
-                                        let playlists = client
-                                            .picker_playlists(&radio_playlist)?
-                                            .into_iter()
-                                            .map(|p| p.name)
-                                            .collect::<Vec<_>>();
-                                        Ok((
-                                            audio_direct_pick.clone(),
-                                            audio_yt_pick.clone(),
-                                            video_uris_pick.clone(),
-                                            playlists,
-                                        ))
-                                    })?;
-                                if playlists.is_empty() {
-                                    status_warn!("No playlists yet — use 'Create Playlist'");
-                                    return Ok(());
-                                }
-                                modal!(
-                                    ctx, SelectModal::builder().ctx(ctx).options(playlists)
-                                    .confirm_label("Add").title("Select a playlist")
-                                    .on_confirm(move | ctx, selected, _idx | {
-                                    add_audio_items_to_playlist(ctx, & direct, & yt, & selected); if !
-                                    videos.is_empty() { let videos = videos.clone(); ctx.command(move
-                                    | client | { client.add_to_playlist_multiple(& selected, videos) ?
-                                    ; Ok(()) }); } Ok(()) }).build()
-                                );
-                                Ok(())
-                            },
-                        );
-                    let audio_direct_create = audio_direct.clone();
-                    let audio_yt_create = audio_yt.clone();
-                    let video_create = video_uris.clone();
-                    section = section
-                        .item(
-                            "Create Playlist",
-                            move |ctx| {
-                                modal!(
-                                    ctx, InputModal::new(ctx).title("Create playlist")
-                                    .confirm_label("Save").input_label("Playlist name:")
-                                    .on_confirm(move | ctx, value | { let value = value.to_owned();
-                                    let mut create_with = audio_direct_create.clone(); create_with
-                                    .extend(video_create.clone()); let create_name = value.clone();
-                                    ctx.command(move | client | { client.create_playlist(&
-                                    create_name, create_with) ?; Ok(()) }); if ! audio_yt_create
-                                    .is_empty() { let action = if audio_direct_create.is_empty() {
-                                    YtAction::CreatePlaylist(value) } else {
-                                    YtAction::AddToPlaylist(value) }; let _ = ctx.work_sender.send(
-                                    WorkRequest::ResolveYtStreams { urls : audio_yt_create.clone(),
-                                    action, }); } Ok(()) })
-                                );
-                                Ok(())
-                            },
-                        );
+                    // Round 86: entries keep the LINK plus its intent tag —
+                    // a resolved stream URL expires within hours. The link
+                    // is resolved when the entry is played.
+                    let mut entry_uris = audio_direct.clone();
+                    entry_uris.extend(
+                        audio_yt.iter().map(|url| tagged_stream_link(url, StreamIntent::Audio)),
+                    );
+                    entry_uris.extend(
+                        video_uris.iter().map(|url| tagged_stream_link(url, StreamIntent::Video)),
+                    );
+                    let add_uris = entry_uris.clone();
+                    section = section.item(
+                        "Add to playlist",
+                        move |ctx| {
+                            let radio_playlist = ctx.config.radio.playlist.clone();
+                            let (uris, playlists) = ctx
+                                .query_sync(move |client| {
+                                    let playlists = client
+                                        .picker_playlists(&radio_playlist)?
+                                        .into_iter()
+                                        .map(|p| p.name)
+                                        .collect::<Vec<_>>();
+                                    Ok((add_uris.clone(), playlists))
+                                })?;
+                            if playlists.is_empty() {
+                                status_warn!("No playlists yet — use 'Create Playlist'");
+                                return Ok(());
+                            }
+                            modal!(
+                                ctx, SelectModal::builder().ctx(ctx).options(playlists)
+                                .confirm_label("Add").title("Select a playlist")
+                                .on_confirm(move |ctx, selected, _idx| {
+                                    ctx.command(move |client| {
+                                        client.add_to_playlist_multiple(&selected, uris)?;
+                                        Ok(())
+                                    });
+                                    Ok(())
+                                }).build()
+                            );
+                            Ok(())
+                        },
+                    );
+                    let create_uris = entry_uris;
+                    section = section.item(
+                        "Create Playlist",
+                        move |ctx| {
+                            modal!(
+                                ctx, InputModal::new(ctx).title("Create playlist")
+                                .confirm_label("Save").input_label("Playlist name:")
+                                .on_confirm(move |ctx, value| {
+                                    let name = value.to_owned();
+                                    let uris = create_uris.clone();
+                                    ctx.command(move |client| {
+                                        client.create_playlist(&name, uris)?;
+                                        Ok(())
+                                    });
+                                    Ok(())
+                                })
+                            );
+                            Ok(())
+                        },
+                    );
                 }
-                // Download the pasted web stream (round 78): the save-as
-                // options the controls pane's Download button offers, now
-                // reachable from the paste popup itself.
-                if let Some(url) = download_url.clone() {
+                // (A playlist link's own `Download` row lives in its
+                // `[Playlist]` section above.)
+                if !playlist_carried
+                    && let Some(url) = download_url.clone()
+                {
                     let download = download_submenu(ctx, url, download_info.clone());
                     section.add_submenu_item("Download", download);
                 }
@@ -2110,24 +2409,6 @@ pub fn apply_resolved_streams(
             });
             status_info!("Stream URL expired — re-resolved from the original link");
         }
-        YtAction::AddToPlaylist(playlist) => {
-            let playlist_add = playlist.clone();
-            let urls_add = urls.clone();
-            ctx.command(move |client| {
-                client.add_to_playlist_multiple(&playlist_add, urls_add)?;
-                Ok(())
-            });
-            status_info!("Added {count} item(s) to playlist '{playlist}'");
-        }
-        YtAction::CreatePlaylist(playlist) => {
-            let playlist_create = playlist.clone();
-            let urls_create = urls.clone();
-            ctx.command(move |client| {
-                client.create_playlist(&playlist_create, urls_create)?;
-                Ok(())
-            });
-            status_info!("Created playlist '{playlist}' with {count} item(s)");
-        }
         YtAction::AddToVideoQueue
         | YtAction::AppendVideoQueue
         | YtAction::AddToVideoQueueAndPlay => {
@@ -2499,10 +2780,31 @@ fn queue_stream_download_with(
         status_warn!("Cannot determine the downloads folder (~/Downloads)");
         return;
     };
-    let parsed: Result<YtDlpContent, _> = original_url.parse();
-    let Ok(YtDlpContent::Single(item)) = parsed else {
-        status_warn!("Cannot download: not a YouTube/Soundcloud/NicoVideo link");
-        return;
+    // Round 79: a playlist link that names a video (`watch?v=ID&list=…`)
+    // downloads THAT video — the yt-dlp run gets the bare watch URL (the
+    // raw link would download the whole playlist into one file). A
+    // playlist-only link has nothing to save this way; `Download > All
+    // files` is the row for it.
+    let item = match original_url.parse::<YtDlpContent>() {
+        Ok(YtDlpContent::Single(item)) => item,
+        Ok(YtDlpContent::Playlist(_)) => match yt_video_id(original_url) {
+            Some(id) => YtDlpItem {
+                filename: id.clone(),
+                id,
+                kind: YtDlpHost::Youtube,
+                title: None,
+            },
+            None => {
+                status_warn!(
+                    "Cannot download a playlist link — use 'Download > All files' to save every track"
+                );
+                return;
+            }
+        },
+        Err(_) => {
+            status_warn!("Cannot download: not a YouTube/Soundcloud/NicoVideo link");
+            return;
+        }
     };
     let chapter_count = sections.len();
     let spec = StreamDownloadSpec {

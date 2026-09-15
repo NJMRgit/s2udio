@@ -30,6 +30,8 @@ use crate::{
         macros::{modal, status_info},
         mouse_event::{MouseEvent, MouseEventKind},
         mpd_client_ext::{Enqueue, MpdClientExt, MpdDelete},
+        events::WorkRequest,
+        ytdlp::{StreamIntent, tagged_stream_entry, untag_stream_link},
     },
     status_warn,
     ui::{
@@ -378,7 +380,7 @@ impl PlaylistKind {
     /// entry usually suffices; a mixed legacy playlist is still shown as
     /// video).
     pub(crate) fn of(songs: &[Song]) -> Self {
-        if songs.iter().any(|s| is_video_uri(&s.file)) {
+        if songs.iter().any(|s| is_video_entry(&s.file)) {
             PlaylistKind::Video
         } else {
             PlaylistKind::Audio
@@ -390,6 +392,14 @@ impl PlaylistKind {
 pub(crate) fn is_video_uri(uri: &str) -> bool {
     crate::ui::modals::paste::is_video_extension(uri)
 }
+/// Round 86: whether a stored playlist entry is meant to be played as
+/// video — a video file/direct video URL, or a stream **link** carrying the
+/// video tag (a stored entry keeps the link, not the resolved stream URL,
+/// so its extension says nothing).
+pub(crate) fn is_video_entry(uri: &str) -> bool {
+    is_video_uri(uri)
+        || tagged_stream_entry(uri).is_some_and(|(_, intent)| !intent.is_audio())
+}
 /// The cached info of a stream entry (looked up by its resolved URL, or
 /// matched by a cached entry's `original_url`), for the video-style info
 /// box and the row titles.
@@ -397,6 +407,9 @@ pub(crate) fn stream_info(
     ctx: &Ctx,
     uri: &str,
 ) -> Option<crate::shared::ytdlp::YtStreamInfo> {
+    // A stored entry carries its intent tag on the link; the cached info is
+    // keyed by the plain link / the resolved URL.
+    let uri = untag_stream_link(uri);
     let info = ctx.yt_info.borrow();
     info.get(uri)
         .cloned()
@@ -409,6 +422,71 @@ pub(crate) fn stream_display_title(ctx: &Ctx, uri: &str) -> Option<String> {
     stream_info(ctx, uri)
         .filter(|entry| !entry.title.is_empty())
         .map(|entry| entry.title)
+}
+/// Round 87: split a stored playlist's URIs into (links that must be
+/// resolved, everything else) so a queue action never hands MPD a YouTube
+/// link it cannot open.
+fn split_tagged_entries(uris: &[String]) -> (Vec<String>, Vec<String>) {
+    let mut tagged = Vec::new();
+    let mut plain = Vec::new();
+    for uri in uris {
+        match tagged_stream_entry(uri) {
+            Some((link, _)) => tagged.push(link),
+            None => plain.push(uri.clone()),
+        }
+    }
+    (tagged, plain)
+}
+/// Round 87: queue stored stream **links** by resolving them (nothing is
+/// downloaded). `play` inserts after the current entry and starts the first
+/// one; `replace` empties the queue first, like the plain items' `Replace
+/// queue` does.
+fn resolve_stored_entries(ctx: &Ctx, links: Vec<String>, play: bool, replace: bool) {
+    if links.is_empty() {
+        return;
+    }
+    if replace {
+        ctx.command(|client| {
+            client.clear()?;
+            Ok(())
+        });
+    }
+    let count = links.len();
+    let action = if play {
+        crate::ui::modals::paste::YtAction::AddAfterCurrentAndPlay
+    } else {
+        crate::ui::modals::paste::YtAction::Append
+    };
+    let _ = ctx
+        .work_sender
+        .send(WorkRequest::ResolveYtStreams { urls: links, action })
+        .map_err(|err| log::error!(error:? = err; "Failed to request stream resolution"));
+    status_info!("Resolving {count} playlist entry/entries…");
+}
+/// Round 86: play a stored playlist entry that holds a YouTube-style link —
+/// the link is resolved **now** (nothing is downloaded; a stored resolved
+/// URL would have expired). Audio enters the queue and starts
+/// (`YtAction::AddAfterCurrentAndPlay`), video is played by mpv, which is
+/// how the video arm plays links everywhere else.
+fn play_stored_stream_entry(ctx: &Ctx, link: &str, intent: StreamIntent, entry_uri: &str) {
+    if intent.is_audio() {
+        let _ = ctx
+            .work_sender
+            .send(WorkRequest::ResolveYtStreams {
+                urls: vec![link.to_owned()],
+                action: crate::ui::modals::paste::YtAction::AddAfterCurrentAndPlay,
+            })
+            .map_err(|err| log::error!(error:? = err; "Failed to request stream resolution"));
+        status_info!("Resolving the playlist entry…");
+        return;
+    }
+    let mut entry = crate::core::mpv::MpvPlaylistEntry::new(
+        stream_display_title(ctx, entry_uri).unwrap_or_else(|| link.to_owned()),
+        link,
+        None,
+    );
+    entry.original_url = Some(link.to_owned());
+    crate::core::mpv::play_video_entries(ctx, vec![entry]);
 }
 impl PlaylistsPane {
     pub fn new(ctx: &Ctx) -> Self {
@@ -1161,20 +1239,27 @@ impl PlaylistsPane {
                             {
                                 let files = files.clone();
                                 move |ctx| {
-                                    ctx.command(move |client| {
-                                        client
-                                            .enqueue_multiple(
-                                                files
-                                                    .iter()
-                                                    .cloned()
-                                                    .map(|f| Enqueue::File { path: f })
-                                                    .collect_vec(),
-                                                None,
-                                                None,
-                                                false,
-                                            )?;
-                                        Ok(())
-                                    });
+                                    // Round 87: a stored entry holds a link —
+                                    // resolve it instead of handing MPD a URI
+                                    // it cannot open.
+                                    let (tagged, plain) = split_tagged_entries(&files);
+                                    if !plain.is_empty() {
+                                        ctx.command(move |client| {
+                                            client
+                                                .enqueue_multiple(
+                                                    plain
+                                                        .iter()
+                                                        .cloned()
+                                                        .map(|f| Enqueue::File { path: f })
+                                                        .collect_vec(),
+                                                    None,
+                                                    None,
+                                                    false,
+                                                )?;
+                                            Ok(())
+                                        });
+                                    }
+                                    resolve_stored_entries(ctx, tagged, false, false);
                                     Ok(())
                                 }
                             },
@@ -1185,20 +1270,24 @@ impl PlaylistsPane {
                             {
                                 let files = files.clone();
                                 move |ctx| {
-                                    ctx.command(move |client| {
-                                        client
-                                            .enqueue_multiple(
-                                                files
-                                                    .iter()
-                                                    .cloned()
-                                                    .map(|f| Enqueue::File { path: f })
-                                                    .collect_vec(),
-                                                None,
-                                                None,
-                                                true,
-                                            )?;
-                                        Ok(())
-                                    });
+                                    let (tagged, plain) = split_tagged_entries(&files);
+                                    if !plain.is_empty() {
+                                        ctx.command(move |client| {
+                                            client
+                                                .enqueue_multiple(
+                                                    plain
+                                                        .iter()
+                                                        .cloned()
+                                                        .map(|f| Enqueue::File { path: f })
+                                                        .collect_vec(),
+                                                    None,
+                                                    None,
+                                                    true,
+                                                )?;
+                                            Ok(())
+                                        });
+                                    }
+                                    resolve_stored_entries(ctx, tagged, true, true);
                                     Ok(())
                                 }
                             },
@@ -3006,6 +3095,18 @@ impl SongListCore<DirOrSong, ListState> for PlaylistsPane {
         BrowserPane::list_area(self)
     }
     fn open(&mut self, autoplay: bool, ctx: &Ctx) -> Result<()> {
+        // Round 86: a stored entry holds the YouTube **link** (with its
+        // intent tag), never a resolved stream URL — resolve it now, at play
+        // time. Audio goes into the queue (`AddAfterCurrentAndPlay`, the
+        // same path the paste popup's rows use); video goes to mpv.
+        if !self.stack.path().is_empty()
+            && let Some(DirOrSong::Song(song)) =
+                self.songs_dir_mut().and_then(|dir| dir.selected().cloned())
+            && let Some((link, intent)) = tagged_stream_entry(&song.file)
+        {
+            play_stored_stream_entry(ctx, &link, intent, &song.file);
+            return Ok(());
+        }
         if self.stack.path().is_empty() {
             // Same bookkeeping as open_selected_playlist, for the mouse /
             // Enter-open paths through the shared BrowserPane.

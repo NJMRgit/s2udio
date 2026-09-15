@@ -612,14 +612,59 @@ fn handle_work_request(
                 spec,
             })
         }
-        WorkRequest::YtDlpResolvePlaylist { playlist } => {
+        WorkRequest::YtDlpResolvePlaylist { playlist, action } => {
             let Some(ytdlp) = ytdlp else {
                 anyhow::bail!("Youtube support requires 'cache_dir' to be configured")
             };
-            let result = ytdlp.resolve_playlist_urls(&playlist)?;
-            Ok(WorkDone::YtDlpPlaylistResolved {
-                urls: result,
-            })
+            // Round 83: listing the playlist is one fast yt-dlp call (it
+            // carries each item's title). What happens next is what the
+            // action decides: the popup's queue rows enqueue stream entries
+            // without downloading anything, the rest hand the item list to
+            // the UI.
+            let urls = ytdlp.resolve_playlist_urls(&playlist)?;
+            if let crate::shared::events::PlaylistAction::QueueStreams { audio, autoplay } =
+                &action
+            {
+                if urls.is_empty() {
+                    return Ok(WorkDone::YtDlpPlaylistResolved { urls, action });
+                }
+                let (audio, autoplay) = (*audio, *autoplay);
+                let event_tx = event_tx.clone();
+                // One item at a time, in playlist order, so the entries
+                // land in the queue in that order and the first one can
+                // start playing the moment it is resolved.
+                std::thread::Builder::new()
+                    .name("yt-playlist-queue".to_owned())
+                    .spawn(move || {
+                        for (idx, item) in urls.iter().enumerate() {
+                            let (info, failures) =
+                                crate::shared::ytdlp::resolve_audio_urls(&[item.to_url()]);
+                            let action = match (idx == 0 && autoplay, audio) {
+                                (true, true) => {
+                                    crate::ui::modals::paste::YtAction::AddAfterCurrentAndPlay
+                                }
+                                (true, false) => {
+                                    crate::ui::modals::paste::YtAction::AddToVideoQueueAndPlay
+                                }
+                                (false, true) => crate::ui::modals::paste::YtAction::Append,
+                                (false, false) => {
+                                    crate::ui::modals::paste::YtAction::AppendVideoQueue
+                                }
+                            };
+                            try_skip!(
+                                event_tx.send(AppEvent::WorkDone(Ok(
+                                    WorkDone::YtStreamsResolved { info, action, failures }
+                                ))),
+                                "Failed to send a playlist item's resolved streams"
+                            );
+                        }
+                    })
+                    .map_err(|err| {
+                        anyhow::anyhow!("Failed to spawn the playlist queue thread: {err}")
+                    })?;
+                return Ok(WorkDone::None);
+            }
+            Ok(WorkDone::YtDlpPlaylistResolved { urls, action })
         }
     }
 }

@@ -6,7 +6,7 @@ use crossbeam::channel::Sender;
 use crate::{
     mpd::QueuePosition,
     shared::{
-        events::WorkRequest,
+        events::{PlaylistAction, WorkRequest},
         id::{self, Id},
         macros::{status_error, status_info},
         ytdlp::{
@@ -81,6 +81,10 @@ pub enum ReplaceAction {
 pub struct QueuedYtDlpItem {
     pub state: DownloadState,
     pub add_position: Option<QueuePosition>,
+    /// Round 79: start playing this item the moment it lands in the queue
+    /// (the paste popup's "Import and play" sets it on the first track of
+    /// a playlist).
+    pub autoplay: bool,
     pub inner: YtDlpItem,
     /// The stream-download spec (None = the classic cache-dir download).
     pub spec: Option<StreamDownloadSpec>,
@@ -134,13 +138,47 @@ impl YtDlpManager {
                 self.download_next();
             }
             YtDlpContent::Playlist(playlist) => {
-                if let Err(err) =
-                    self.work_sender.send(WorkRequest::YtDlpResolvePlaylist { playlist })
+                // Round 79: the playlist link's import keeps the caller's
+                // position (the CLI's `add-yt` used to drop it).
+                let action = PlaylistAction::ImportToQueue { position, autoplay: false };
+                if let Err(err) = self
+                    .work_sender
+                    .send(WorkRequest::YtDlpResolvePlaylist { playlist, action })
                 {
                     status_error!(err:?; "Failed to send playlist download request");
                 } else {
                     status_info!("Fetching playlist info");
                 }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Round 79: resolve a playlist link and act on the items it contains —
+    /// import every track into the cache + queue, or save every track as a
+    /// file. The popup's `[Playlist]` rows use this; `download_url` (the
+    /// CLI's `add-yt` and the yt search) keeps the plain import.
+    pub fn resolve_playlist(
+        &self,
+        url: &str,
+        action: PlaylistAction,
+    ) -> Result<(), YtDlpParseError> {
+        match YtDlpContent::from_str(url)? {
+            YtDlpContent::Playlist(playlist) => {
+                if let Err(err) =
+                    self.work_sender.send(WorkRequest::YtDlpResolvePlaylist { playlist, action })
+                {
+                    status_error!(err:?; "Failed to send playlist request");
+                } else {
+                    status_info!("Fetching playlist info");
+                }
+            }
+            // A link with no playlist id (should not happen: the caller
+            // checks first) is downloaded the classic way.
+            YtDlpContent::Single(item) => {
+                self.queue_download(item, None);
+                self.download_next();
             }
         }
 
@@ -204,11 +242,23 @@ impl YtDlpManager {
     }
 
     pub fn queue_download(&self, item: YtDlpItem, position: Option<QueuePosition>) {
+        self.queue_download_with(item, position, false);
+    }
+
+    /// Round 79: queue a cache-dir download, optionally starting playback
+    /// as soon as it lands in the queue.
+    pub fn queue_download_with(
+        &self,
+        item: YtDlpItem,
+        position: Option<QueuePosition>,
+        autoplay: bool,
+    ) {
         self.queue.borrow_mut().insert(
             DownloadId::new(),
             QueuedYtDlpItem {
                 state: DownloadState::Queued,
                 add_position: position,
+                autoplay,
                 inner: item,
                 spec: None,
             },
@@ -223,6 +273,7 @@ impl YtDlpManager {
             QueuedYtDlpItem {
                 state: DownloadState::Queued,
                 add_position: None,
+                autoplay: false,
                 inner: item,
                 spec: Some(spec),
             },
@@ -230,10 +281,24 @@ impl YtDlpManager {
         self.download_next();
     }
 
-    pub fn queue_download_many(&self, items: Vec<YtDlpItem>) {
+    /// Round 79: queue a whole playlist. `autoplay` is set on the first
+    /// item only — the first track that lands starts playback.
+    ///
+    /// `position` is also applied to the first item only: tracks land in
+    /// completion order, and `add <uri> <pos>` inserts AT that index, so a
+    /// position shared by the whole batch would store the playlist in
+    /// reverse order (the rest append at the end, which is what a caller
+    /// asking for a start position means).
+    pub fn queue_download_many(
+        &self,
+        items: Vec<YtDlpItem>,
+        position: Option<QueuePosition>,
+        autoplay: bool,
+    ) {
         status_info!("Queueing {} items for download", items.len());
-        for item in items {
-            self.queue_download(item, None);
+        for (idx, item) in items.into_iter().enumerate() {
+            let position = (idx == 0).then_some(position).flatten();
+            self.queue_download_with(item, position, autoplay && idx == 0);
         }
     }
 
@@ -241,7 +306,7 @@ impl YtDlpManager {
         &self,
         id: DownloadId,
         result: Result<YtDlpDownloadResult, YtDlpDownloadError>,
-    ) -> Result<(YtDlpDownloadResult, Option<QueuePosition>)> {
+    ) -> Result<(YtDlpDownloadResult, Option<QueuePosition>, bool)> {
         if let Some(item) = self.queue.borrow_mut().get_mut(&id) {
             match result {
                 Ok(result) => {
@@ -263,7 +328,7 @@ impl YtDlpManager {
                         };
                         status_info!("Downloaded {}", item.inner.id);
                     }
-                    Ok((result, item.add_position))
+                    Ok((result, item.add_position, item.autoplay))
                 }
                 Err(YtDlpDownloadError::YtDlpError { stdout, stderr, code }) => {
                     item.state = DownloadState::Failed {

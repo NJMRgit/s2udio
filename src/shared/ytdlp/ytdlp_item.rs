@@ -18,6 +18,12 @@ pub struct YtDlpItem {
     /// filename of the video/audio, will be used to cache the file
     pub filename: String,
     pub kind: YtDlpHost,
+    /// Round 82: the video's title when the item came from a playlist
+    /// listing (yt-dlp's flat playlist carries it). `None` for a pasted
+    /// single link, whose title is only known once its stream is resolved.
+    /// The pickers (which videos of a playlist to add/save) label their
+    /// rows with it.
+    pub title: Option<String>,
 }
 
 pub struct YtDlpPlaylist {
@@ -40,6 +46,15 @@ pub enum YtDlpHost {
 impl YtDlpItem {
     pub fn to_url(&self) -> String {
         self.kind.watch_url(&self.id)
+    }
+
+    /// Round 82: the label a picker row shows — the playlist listing's
+    /// title when there is one, else the id/filename.
+    pub fn display_title(&self) -> &str {
+        self.title
+            .as_deref()
+            .filter(|title| !title.trim().is_empty())
+            .unwrap_or(&self.filename)
     }
 
     pub fn cache_subdir(&self, root: &Path) -> PathBuf {
@@ -107,6 +122,96 @@ impl YtDlpHost {
     }
 }
 
+/// Round 86: how a stored playlist entry is meant to be played. A playlist
+/// keeps the **link** (a resolved googlevideo URL expires after a few
+/// hours), so the entry needs the intent alongside it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamIntent {
+    Audio,
+    Video,
+}
+
+impl StreamIntent {
+    fn tag(self) -> &'static str {
+        match self {
+            Self::Audio => "#s2u-audio",
+            Self::Video => "#s2u-video",
+        }
+    }
+
+    pub fn is_audio(self) -> bool {
+        matches!(self, Self::Audio)
+    }
+}
+
+/// Round 86: the stored-playlist form of a YouTube-style link: the link
+/// with its intent tag as a URL **fragment**. MPD stores the URI verbatim,
+/// yt-dlp ignores fragments, and the link stays recognisable in other MPD
+/// clients (`mpc listplaylist` shows `…watch?v=ID#s2u-audio`).
+pub fn tagged_stream_link(link: &str, intent: StreamIntent) -> String {
+    format!("{}{}", untag_stream_link(link), intent.tag())
+}
+
+/// Round 86: `(link, intent)` when a stored playlist entry is a tagged
+/// YouTube-style link (what `tagged_stream_link` wrote).
+pub fn tagged_stream_entry(uri: &str) -> Option<(String, StreamIntent)> {
+    let (link, intent) = split_stream_tag(uri);
+    intent.map(|intent| (link.to_owned(), intent))
+}
+
+/// Round 86: the link of a stored entry with its tag stripped, for
+/// `yt_info`/title lookups.
+pub fn untag_stream_link(uri: &str) -> &str {
+    split_stream_tag(uri).0
+}
+
+fn split_stream_tag(uri: &str) -> (&str, Option<StreamIntent>) {
+    for (tag, intent) in [
+        ("#s2u-audio", StreamIntent::Audio),
+        ("#s2u-video", StreamIntent::Video),
+    ] {
+        if let Some(link) = uri.strip_suffix(tag) {
+            return (link, Some(intent));
+        }
+    }
+    (uri, None)
+}
+
+/// Round 79: the video id a YouTube-style link names (`?v=` or the id in a
+/// `shorts` / `live` / `embed` / legacy `/v/` path). `None` for a link that
+/// carries only a playlist (`/playlist?list=…`).
+pub fn yt_video_id(s: &str) -> Option<String> {
+    let url = url::Url::parse(s).ok()?;
+    let host = url.host_str()?;
+    let bare_host = host.strip_prefix("www.").unwrap_or(host);
+
+    if bare_host == "youtu.be" {
+        return url
+            .path_segments()?
+            .next()
+            .map(str::to_owned)
+            .filter(|id| !id.is_empty());
+    }
+
+    if !is_youtube_host(bare_host) {
+        return None;
+    }
+
+    url.query_pairs()
+        .find(|(key, _)| key == "v")
+        .map(|(_, value)| value.to_string())
+        .filter(|id| !id.is_empty())
+        .or_else(|| {
+            let segments = url.path_segments()?.collect_vec();
+            segments
+                .iter()
+                .position(|seg| matches!(*seg, "shorts" | "live" | "embed" | "v"))
+                .and_then(|idx| segments.get(idx + 1))
+                .map(|id| (*id).to_owned())
+                .filter(|id| !id.is_empty())
+        })
+}
+
 /// Hosts that serve YouTube content: `youtube.com` plus the mobile /
 /// music / nocookie flavours (`www.` is stripped before this is called).
 fn is_youtube_host(host: &str) -> bool {
@@ -165,21 +270,41 @@ impl FromStr for YtDlpContent {
                             id: id.clone(),
                             filename: id,
                             kind: YtDlpHost::Youtube,
+                            title: None,
                         }))
                         .ok_or_else(|| YtDlpParseError::invalid_yt(s, "no video id found"))
                 }
             }
-            "youtu.be" => url
-                .path_segments()
-                .ok_or_else(|| YtDlpParseError::invalid_yt(s, "cannot-be-a-base"))?
-                .next()
-                .map(|x| YtDlpItem {
-                    id: x.to_string(),
-                    filename: x.to_string(),
-                    kind: YtDlpHost::Youtube,
-                })
-                .ok_or_else(|| YtDlpParseError::invalid_yt(s, "no video id found"))
-                .map(YtDlpContent::Single),
+            "youtu.be" => {
+                // Round 79: a `youtu.be` share link copied from inside a
+                // playlist carries that playlist in `?list=` — treat it
+                // like the `watch?v=…&list=…` form, so the paste popup
+                // offers the same `[Playlist]` rows for both. The video id
+                // stays available through `yt_video_id`, which is what the
+                // single-link rows use.
+                if let Some(list_id) = url
+                    .query_pairs()
+                    .find(|(key, _)| key == "list")
+                    .map(|(_, value)| value.to_string())
+                    .filter(|id| !id.is_empty())
+                {
+                    return Ok(YtDlpContent::Playlist(YtDlpPlaylist {
+                        id: list_id,
+                        kind: YtDlpHost::Youtube,
+                    }));
+                }
+                url.path_segments()
+                    .ok_or_else(|| YtDlpParseError::invalid_yt(s, "cannot-be-a-base"))?
+                    .next()
+                    .map(|x| YtDlpItem {
+                        id: x.to_string(),
+                        filename: x.to_string(),
+                        kind: YtDlpHost::Youtube,
+                        title: None,
+                    })
+                    .ok_or_else(|| YtDlpParseError::invalid_yt(s, "no video id found"))
+                    .map(YtDlpContent::Single)
+            }
             "soundcloud.com" | "api.soundcloud.com" => {
                 let mut path_segments = url
                     .path_segments()
@@ -198,6 +323,7 @@ impl FromStr for YtDlpContent {
                         id: track_id.to_string(),
                         filename: track_id.to_string(),
                         kind: YtDlpHost::Soundcloud,
+                        title: None,
                     }))
                 } else {
                     // Web form: https://soundcloud.com/<user>/<track>
@@ -210,6 +336,7 @@ impl FromStr for YtDlpContent {
                         id: format!("{username}/{track_name}"),
                         filename: format!("{username}-{track_name}"),
                         kind: YtDlpHost::Soundcloud,
+                        title: None,
                     }))
                 }
             }
@@ -230,6 +357,7 @@ impl FromStr for YtDlpContent {
                     id: id.to_string(),
                     filename: id.to_string(),
                     kind: YtDlpHost::NicoVideo,
+                    title: None,
                 }))
             }
             _ => {
