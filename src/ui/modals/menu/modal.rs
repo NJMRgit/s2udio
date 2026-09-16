@@ -69,11 +69,16 @@ pub struct MenuModal<'a> {
     /// Mouse position the popup is anchored at (right-click menus); the
     /// popup's top-left lands under the cursor, clamped into the frame.
     /// `None` keeps the centered placement (keyboard-opened menus and
-    /// every menu opened from inside another modal).
+    /// every menu opened from inside another modal). It also decides the
+    /// dismissal gesture: an anchored (mouse-raised) popup is dismissed by a
+    /// left click outside it, a centred (keyboard-raised) one only by a right
+    /// click or Esc (round 88.1).
     anchor: Option<Position>,
     /// The popup's rect from the most recent render (computed fresh each
-    /// frame); the mouse handler uses it to dismiss the menu on a
-    /// left-click outside the popup (Round 47).
+    /// frame); the mouse handler uses it to tell a click on the popup from one
+    /// on the UI behind it, and `is_empty` (nothing rendered yet) disables the
+    /// outside-click dismissal so a click is never judged against a stale
+    /// rect (round 88).
     popup_area: Rect,
     /// Open submenu levels below the popup's own sections (round 78). The
     /// popup itself is level 0; empty = it shows its own sections.
@@ -87,6 +92,12 @@ impl Modal for MenuModal<'_> {
     }
     fn replacement_id(&self) -> Option<&Cow<'static, str>> {
         self.replacement_id.as_ref()
+    }
+    fn submenu_path(&self) -> Vec<String> {
+        self.selected_row_path()
+    }
+    fn restore_submenu_path(&mut self, path: &[String], ctx: &mut Ctx) {
+        self.restore_row_path(path, ctx);
     }
     fn render(&mut self, frame: &mut Frame, ctx: &mut Ctx) -> Result<()> {
         // A running drag auto-scroll steps once per frame; asking for the next
@@ -373,9 +384,15 @@ impl Modal for MenuModal<'_> {
         let position: Position = event.into();
         match event.kind {
             MouseEventKind::LeftClick => {
-                // A click outside the popup dismisses it (round 47). Inside it
-                // selects/ticks the row, runs a footer button or opens the
-                // row's child list — the same window the keyboard walks.
+                // Inside the popup the click selects/ticks the row, runs a
+                // footer button or opens the row's child list — the same
+                // window the keyboard walks. A click *outside* is inert for a
+                // keyboard-raised popup (round 88, user): dismissing it on a
+                // stray click threw it away, e.g. the click that opened a level
+                // landed outside the window the level re-centred to, or a click
+                // during the in-place refresh before the popup was re-rendered.
+                // A mouse-raised (anchored) popup is the exception — an outside
+                // click dismisses it (round 88.1); see the branch below.
                 self.drag_scroll = None;
                 if let Some(section) = self.levels.last_mut().map(|level| &mut level.sections[0])
                 {
@@ -386,7 +403,23 @@ impl Modal for MenuModal<'_> {
                     }
                 }
                 if !self.popup_area.contains(position) {
-                    return self.destroy(ctx);
+                    // A popup raised at the pointer — a right-click context
+                    // menu (`anchor`, round 47) — is dismissed by a click on
+                    // the UI behind it; the user asked for that gesture back
+                    // for mouse-spawned menus (round 88.1).
+                    //
+                    // A popup the keyboard opened (centred, or opened from
+                    // inside another modal) is NOT dismissed this way: a stray
+                    // click must not throw it away. That was the round-88
+                    // report — the click that opened a level landing outside
+                    // the re-centred window, and a click landing between an
+                    // in-place refresh and its next render, when the fresh
+                    // popup still had no recorded area (hence `is_empty`: no
+                    // geometry means no dismissal).
+                    if self.anchor.is_some() && !self.popup_area.is_empty() {
+                        return self.destroy(ctx);
+                    }
+                    return Ok(());
                 }
                 self.handle_left_click(position, event.modifiers, ctx)?;
             }
@@ -757,6 +790,72 @@ impl<'a> MenuModal<'a> {
         true
     }
 
+    /// The label of the selected row on each open level, outermost first: the
+    /// popup's own cursor row, then the cursor row of every open submenu
+    /// level. A popup refreshed in place is rebuilt from scratch (starting on
+    /// its own sections), so this chain is what lets the rebuild put the user
+    /// back where they were (`restore_row_path`, round 88).
+    pub fn selected_row_path(&self) -> Vec<String> {
+        let mut path = Vec::new();
+        for section in std::iter::once(&self.sections[self.current_section_idx])
+            .chain(self.levels.iter().map(|level| &level.sections[0]))
+        {
+            if let Some(idx) = section.selected()
+                && let Some(label) = section.item_labels_iter().nth(idx)
+            {
+                path.push(label.to_owned());
+            }
+        }
+        path
+    }
+
+    /// Selects the row labelled `label`: in the deepest open level when one is
+    /// open, else in the popup's own sections (the section holding the row
+    /// becomes the current one). False when no row carries that label.
+    fn select_row_by_label(&mut self, label: &str, ctx: &Ctx) -> bool {
+        if let Some(level) = self.levels.last_mut() {
+            let Some(row) = section_row_by_label(&level.sections[0], label) else {
+                return false;
+            };
+            level.sections[0].select(row);
+            return true;
+        }
+        let Some(section_idx) = self
+            .sections
+            .iter()
+            .position(|section| section_row_by_label(section, label).is_some())
+        else {
+            return false;
+        };
+        if section_idx != self.current_section_idx {
+            self.sections[self.current_section_idx].unselect(ctx);
+            self.current_section_idx = section_idx;
+        }
+        let Some(row) = section_row_by_label(&self.sections[section_idx], label) else {
+            return false;
+        };
+        self.sections[section_idx].select(row);
+        true
+    }
+
+    /// Puts the cursor back where `selected_row_path` found it and re-opens
+    /// the submenu levels that were open (round 88): every row of the chain
+    /// but the last is selected and its child list opened again, the last row
+    /// is only selected. A row the refreshed popup no longer has stops the
+    /// replay (the rest of the chain is dropped). False when nothing at all
+    /// could be restored.
+    pub fn restore_row_path(&mut self, path: &[String], ctx: &Ctx) -> bool {
+        let Some((last, open)) = path.split_last() else {
+            return false;
+        };
+        for label in open {
+            if !self.select_row_by_label(label, ctx) || !self.open_selected_submenu() {
+                return false;
+            }
+        }
+        self.select_row_by_label(last, ctx)
+    }
+
     /// Closes the deepest level, handing its list back to the row it was
     /// opened from (so ticked boxes survive a reopen) and restoring that row
     /// as the cursor.
@@ -875,6 +974,12 @@ impl<'a> MenuModal<'a> {
     fn section_idx_at_position(&self, position: Position) -> Option<usize> {
         self.areas.iter().enumerate().find(|(_, a)| a.contains(position)).map(|(i, _)| i)
     }
+}
+
+/// The index of the first row labelled `label` in `section`
+/// (case-insensitive; `item_labels_iter` is indexed like the section's rows).
+fn section_row_by_label(section: &SectionType<'_>, label: &str) -> Option<usize> {
+    section.item_labels_iter().position(|row| row.eq_ignore_ascii_case(label))
 }
 
 /// The fastest drag auto-scroll: rows per frame when the pointer is held far

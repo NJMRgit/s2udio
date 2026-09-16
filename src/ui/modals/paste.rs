@@ -1449,6 +1449,7 @@ fn scan_wait_elapsed(secs: u64) -> String {
 /// section). No-op when no paste popup is open.
 pub fn refresh_paste_modal(ctx: &Ctx) {
     let Some(items) = ctx.paste_modal_items.borrow().clone() else { return };
+    log::debug!("Refreshing the paste popup in place (a background resolve landed)");
     let menu = paste_menu(ctx, items);
     modal!(ctx, menu);
 }
