@@ -78,6 +78,20 @@ pub(crate) trait Modal: std::fmt::Debug {
         None
     }
 
+    /// The open submenu chain of a menu popup: the label of the selected row
+    /// on each open level, outermost first (see `MenuModal::selected_row_path`).
+    /// A modal replaced in place (`replacement_id`) hands this to its
+    /// successor, so a background refresh keeps the level (and cursor row) the
+    /// user is on instead of collapsing the popup to its first level (round
+    /// 88). Empty for every other modal.
+    fn submenu_path(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Restores what [`Modal::submenu_path`] reported, after an in-place
+    /// replacement.
+    fn restore_submenu_path(&mut self, _path: &[String], _ctx: &mut Ctx) {}
+
     fn hide(&mut self, ctx: &Ctx) -> Result<()> {
         ctx.app_event_sender
             .send(crate::AppEvent::UiEvent(crate::ui::UiAppEvent::PopModal(self.id())))?;

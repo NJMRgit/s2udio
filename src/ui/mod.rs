@@ -1282,7 +1282,17 @@ impl Ui {
                 });
 
                 if let Some(existing_modal) = existing_modal {
+                    // An in-place refresh (the paste popup, when a background
+                    // resolve lands) rebuilds the menu from scratch, which
+                    // starts on the popup's own sections: carry the open
+                    // submenu chain over so the user's open level and cursor
+                    // row survive the refresh (round 88).
+                    let path = existing_modal.submenu_path();
                     *existing_modal = modal;
+                    if !path.is_empty() {
+                        log::debug!(path:?; "Carrying the open submenu chain into the refreshed menu");
+                    }
+                    existing_modal.restore_submenu_path(&path, ctx);
                 } else {
                     self.modals.push(modal);
                 }
