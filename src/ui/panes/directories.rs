@@ -24,6 +24,7 @@ use crate::{
         UiEvent, dir_or_song::DirOrSong, dirstack::{DirStackItem, MarkState, Path},
         input::InputResultEvent,
         modals::{
+            info_list_modal::{INFO_COLUMN_WIDTHS, InfoListModal, song_info_rows},
             input_modal::InputModal, menu::modal::MenuModal, select_modal::SelectModal,
         },
         tree_browser::{TreeBrowserCore, TreeRowView},
@@ -949,6 +950,27 @@ impl TreeBrowserCore for DirectoriesPane {
     }
     fn items_scrollbar_drag(&mut self) -> &mut crate::shared::mouse_event::ScrollbarDrag {
         &mut self.item_scrollbar_drag
+    }
+    /// Round 89: "show info" on the highlighted file / folder row — the
+    /// detailed song panel for a file, the folder's own facts for a
+    /// directory. The Directories pane's rows are the raw library tree, so
+    /// the info box's preview is not the whole story.
+    fn show_info(&self, ctx: &Ctx) -> Result<bool> {
+        let Some(idx) = self.item_list.selected() else { return Ok(false) };
+        let Some(item) = self.items.get(idx) else { return Ok(false) };
+        let rows = match item {
+            DirOrSong::Song(song) => song_info_rows(ctx, song),
+            DirOrSong::Dir { name, full_path, .. } => {
+                let path = if full_path.is_empty() { name } else { full_path };
+                crate::ui::song_list::directory_info_rows(path)
+            }
+        };
+        modal!(
+            ctx, InfoListModal::builder().rows(rows).title("Info")
+            .column_widths(INFO_COLUMN_WIDTHS).build()
+        );
+        ctx.render()?;
+        Ok(true)
     }
     fn item_row(&self, idx: usize, hovered: bool, ctx: &Ctx) -> ListItem<'static> {
         let is_marked = self.marked.contains(idx);

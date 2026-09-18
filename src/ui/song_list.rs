@@ -27,6 +27,7 @@ use crate::{
         input::InputResultEvent,
         modals::{
             confirm_modal::{Action, ConfirmModal},
+            info_list_modal::{INFO_COLUMN_WIDTHS, InfoListModal, song_info_rows},
             input_modal::InputModal,
             menu::{
                 add_to_playlist_or_show_modal, create_add_modal, create_delete_modal,
@@ -65,7 +66,8 @@ pub enum MoveDirection {
 #[allow(unused)]
 pub(in crate::ui) trait SongListCore<T, S = ListState>: Pane
 where
-    T: DirStackItem + std::fmt::Debug + Clone + Send + Sync + 'static,
+    T: DirStackItem + crate::ui::dir_or_song::AsDirOrSong
+        + std::fmt::Debug + Clone + Send + Sync + 'static,
     S: ScrollingState + std::fmt::Debug + Default + 'static,
 {
     // ── required: the list this core operates on ──────────────────────
@@ -181,7 +183,15 @@ where
         Ok(())
     }
 
-    fn show_info(&self, _item: &T, _ctx: &Ctx) -> Result<()> {
+    /// Round 89: "show info" is never a no-op. A song row (MPD tags,
+    /// directories, downloads) opens the detailed panel; a directory /
+    /// playlist row shows its own folder facts instead of silence.
+    fn show_info(&self, item: &T, ctx: &Ctx) -> Result<()> {
+        let rows = item.info_rows(ctx);
+        modal!(
+            ctx, InfoListModal::builder().rows(rows).title("Info")
+            .column_widths(INFO_COLUMN_WIDTHS).build()
+        );
         Ok(())
     }
 
@@ -1065,4 +1075,66 @@ where
         ctx.render()?;
         Ok(())
     }
+}
+
+/// Round 89: the rows of the "show info" panel of one list item. The
+/// blanket impl covers every item type the song-list panes carry, so a pane
+/// added later can never produce a silent no-op again: a `DirOrSong::Song`
+/// is routed to the detailed song panel while a directory / playlist row
+/// shows its own folder facts.
+trait InfoRows {
+    fn info_rows(&self, ctx: &Ctx) -> Vec<Vec<String>>;
+}
+impl<T: crate::ui::dir_or_song::AsDirOrSong> InfoRows for T {
+    fn info_rows(&self, ctx: &Ctx) -> Vec<Vec<String>> {
+        match self.as_dir_or_song() {
+            crate::ui::dir_or_song::DirOrSongRef::Song(song) => {
+                song_info_rows(ctx, song)
+            }
+            crate::ui::dir_or_song::DirOrSongRef::Dir { path } => directory_info_rows(path),
+        }
+    }
+}
+/// Round 89: a directory row's own info — its path, that it *is* a
+/// directory, and how many entries sit directly in it (when it is readable
+/// on disk; an MPD-side artist/album grouping is not).
+pub(in crate::ui) fn directory_info_rows(path: &str) -> Vec<Vec<String>> {
+    let mut rows = vec![
+        vec!["Directory".to_owned(), path.to_owned()],
+        vec!["Type".to_owned(), "Directory".to_owned()],
+        vec![
+            "On disk".to_owned(),
+            (std::path::Path::new(path).is_dir()).to_string(),
+        ],
+    ];
+    if let Some(name) = std::path::Path::new(path).file_name() {
+        rows.push(vec!["Name".to_owned(), name.to_string_lossy().into_owned()]);
+    }
+    if let Some(parent) = std::path::Path::new(path).parent()
+        && !parent.as_os_str().is_empty()
+    {
+        rows.push(vec!["Location".to_owned(), parent.to_string_lossy().into_owned()]);
+    }
+    match std::fs::read_dir(path) {
+        Ok(entries) => {
+            let mut files = 0usize;
+            let mut dirs = 0usize;
+            for entry in entries.flatten() {
+                if entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false) {
+                    dirs += 1;
+                } else {
+                    files += 1;
+                }
+            }
+            rows.push(vec!["Items".to_owned(), (files + dirs).to_string()]);
+            rows.push(vec!["Files".to_owned(), files.to_string()]);
+            rows.push(vec!["Subdirectories".to_owned(), dirs.to_string()]);
+        }
+        Err(err) => {
+            log::debug!(
+                error:? = err, path; "Directory not readable on disk; keeping the path rows"
+            );
+        }
+    }
+    rows
 }

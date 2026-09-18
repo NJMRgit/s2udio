@@ -258,6 +258,15 @@ fn newest_mpv_sockets_socket(sockets_dir: &Path) -> Option<PathBuf> {
     let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
     for entry in entries.flatten() {
         let path = entry.path();
+        // Round 91: a crashed mpv leaves its socket file behind, so picking
+        // the newest entry without checking it can return a DEAD socket
+        // while the freshly launched mpv is still starting up; the poll then
+        // reads nothing and tears the healthy session down (which deletes
+        // the MPRIS state file the desktop media controls serve from). Only
+        // live sockets qualify.
+        if !is_live_socket(&path) {
+            continue;
+        }
         let Ok(modified) = entry.metadata().and_then(|m| m.modified()) else {
             continue;
         };

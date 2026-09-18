@@ -20,7 +20,7 @@ use crate::{
     shared::{
         events::WorkRequest,
         keys::ActionEvent,
-        macros::{status_info, status_warn},
+        macros::{modal, status_info, status_warn},
         mouse_event::{MouseEvent, MouseEventKind},
         mpd_query::PreviewGroup,
         ytdlp::{DownloadId, DownloadState},
@@ -28,7 +28,13 @@ use crate::{
     ui::{
         UiEvent, dir_or_song::DirOrSong,
         dirstack::{Dir, DirStackItem},
-        modals::{menu::modal::MenuModal, paste::YtAction},
+        modals::{
+            info_list_modal::{
+            INFO_COLUMN_WIDTHS, InfoListModal, song_info_rows, torrent_info_rows,
+            ytdlp_info_rows,
+        },
+            menu::modal::MenuModal, paste::YtAction,
+        },
     },
 };
 /// The Downloads tab (round 60 amendment): lists every file in
@@ -417,6 +423,49 @@ impl DownloadsPane {
         }
     }
 }
+impl DownloadsPane {
+    /// Round 89: the "show info" panel of the selected Download-tab row. A
+    /// disk file row carries a full `Song`, so it gets the same detailed
+    /// panel every other pane shows; an in-progress row (yt-dlp manager
+    /// entry or daemon torrent job) shows its job facts.
+    fn show_info(&self, ctx: &Ctx) -> Result<()> {
+        let Some(row) = self.list.selected().cloned() else {
+            return Ok(());
+        };
+        let (title, rows) = match &row {
+            DownloadRow::File(DirOrSong::Song(song)) => {
+                ("Song info", song_info_rows(ctx, song))
+            }
+            DownloadRow::File(DirOrSong::Dir { .. }) => {
+                ("Directory info", crate::ui::song_list::directory_info_rows(row.as_path()))
+            }
+            DownloadRow::Yt { id, label, downloading, .. } => {
+                (
+                    "Download info",
+                    crate::ui::panes::downloads::ytdlp_info_rows(
+                        ctx, *id, label, *downloading,
+                    ),
+                )
+            }
+            DownloadRow::Torrent { job_id, label, progress, .. } => {
+                // The row keeps its own progress/label even when the job has
+                // left `downloads.json`; the shared helper adds the rest.
+                let mut rows = vec![
+                    vec!["Torrent".to_owned(), label.clone()],
+                    vec!["Progress".to_owned(), format!("{progress:.1} %")],
+                ];
+                rows.extend(torrent_info_rows(ctx, job_id));
+                ("Torrent info", rows)
+            }
+        };
+        modal!(
+            ctx, InfoListModal::builder()
+            .rows(rows).title(title).column_widths(INFO_COLUMN_WIDTHS).build()
+        );
+        ctx.render()?;
+        Ok(())
+    }
+}
 impl Pane for DownloadsPane {
     fn render(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) -> Result<()> {
         // Round 64: rescan while visible, throttled to once per ~2.5 s.
@@ -502,6 +551,11 @@ impl Pane for DownloadsPane {
                 }
                 CommonAction::Confirm => return self.open_menu(ctx, None),
                 CommonAction::ContextMenu => return self.open_menu(ctx, None),
+                // Round 89: "show info" on a Download-tab row. A disk file
+                // row gets the same detailed panel every other pane shows; an
+                // in-progress yt-dlp / torrent row shows its job facts. The
+                // arm used to abandon the action (silent no-op).
+                CommonAction::ShowInfo => return self.show_info(ctx),
                 CommonAction::Close => {
                     if !self.list.state.marked.is_empty() {
                         self.list.state.unmark_all();

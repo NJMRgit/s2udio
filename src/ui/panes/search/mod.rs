@@ -32,6 +32,7 @@ use crate::{
     ui::{
         UiEvent, dirstack::Dir, input::InputResultEvent,
         modals::{
+            info_list_modal::{INFO_COLUMN_WIDTHS, InfoListModal, song_info_rows},
             input_modal::InputModal,
             menu::{
                 add_to_playlist_or_show_modal, create_delete_modal, create_save_modal,
@@ -513,7 +514,21 @@ impl SearchPane {
                 CommonAction::PaneUp => {}
                 CommonAction::PaneRight => {}
                 CommonAction::PaneLeft => {}
-                CommonAction::ShowInfo => {}
+                CommonAction::ShowInfo => {
+                    // Round 89: the same detailed song panel every other
+                    // "show info" trigger opens (this arm used to swallow
+                    // the action silently).
+                    if let Some((_, song)) = self.songs_dir.selected_with_idx() {
+                        modal!(
+                            ctx, InfoListModal::builder()
+                            .rows(song_info_rows(ctx, song))
+                            .title("Song info").column_widths(INFO_COLUMN_WIDTHS).build()
+                        );
+                        ctx.render()?;
+                    } else {
+                        status_info!("No song selected");
+                    }
+                }
                 CommonAction::ContextMenu => {}
                 CommonAction::Rate {
                     kind: _,

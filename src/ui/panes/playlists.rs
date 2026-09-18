@@ -40,7 +40,10 @@ use crate::{
         input::InputResultEvent,
         modals::{
             confirm_modal::{Action, ConfirmModal},
-            info_list_modal::InfoListModal, input_modal::InputModal,
+            info_list_modal::{
+                INFO_COLUMN_WIDTHS, InfoListModal, playlist_info, song_info_rows,
+            },
+            input_modal::InputModal,
             menu::{delete_from_playlist_or_show_confirmation, modal::MenuModal},
             select_modal::SelectModal,
         },
@@ -197,6 +200,11 @@ pub struct PlaylistsPane {
     back_area: Rect,
     /// Buffer id of the search query input (session-lived).
     search_buffer: crate::ui::input::BufferId,
+    /// Round 89: the playlist row the last "show info" was fired from
+    /// (name, library path) — the query result carries only the songs, and
+    /// the panel needs the playlist's own identity too. A `RefCell` because
+    /// `show_info` (the `SongListCore` hook) takes `&self`.
+    info_playlist: std::cell::RefCell<Option<(String, Option<String>)>>,
     /// Keyboard phase of the search mode: true = the `Search:` input row
     /// is focused, false = the results list is focused. Round 73.2: starts
     /// false and is only set by the `S` jump — Shift+Tab / the toggle click
@@ -519,6 +527,7 @@ impl PlaylistsPane {
             search_results: Dir::new(Vec::new()),
             search_results_area: Rect::default(),
             pending_open: None,
+            info_playlist: std::cell::RefCell::new(None),
         }
     }
     fn render_playlists(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) {
@@ -2904,9 +2913,21 @@ impl Pane for PlaylistsPane {
     ) -> Result<()> {
         match (id, mpd_command) {
             (PLAYLIST_INFO, MpdQueryResult::SongsList { data, .. }) => {
+                // Round 89: the playlist's own facts (name / library path)
+                // come from the pane's own stack — the row the user pressed
+                // "show info" on — and the songs add the count, total
+                // duration and the unique artists / albums / genres. Every
+                // entry keeps the full detailed panel through `show_info`.
+                let (name, library_path) = self
+                    .info_playlist
+                    .borrow()
+                    .clone()
+                    .unwrap_or_else(|| (String::new(), None));
                 modal!(
-                    ctx, InfoListModal::builder().column_widths(& [30, 70])
-                    .title("Playlist info").rows(data).size((40, 20)).build()
+                    ctx, InfoListModal::builder().column_widths(INFO_COLUMN_WIDTHS)
+                    .title("Playlist info")
+                    .rows(playlist_info(&name, library_path.as_deref(), &data))
+                    .size((50, 30)).build()
                 );
                 ctx.render()?;
             }
@@ -3197,11 +3218,26 @@ impl SongListCore<DirOrSong, ListState> for PlaylistsPane {
         }
         Ok(())
     }
+    /// Round 89: a playlist row fires the async query (below) which opens
+    /// "Playlist info"; a song *inside* a playlist now opens the detailed
+    /// song panel like every other trigger instead of doing nothing.
     fn show_info(&self, item: &DirOrSong, ctx: &Ctx) -> Result<()> {
         match item {
+            DirOrSong::Song(song) => {
+                modal!(
+                    ctx, InfoListModal::builder()
+                    .rows(song_info_rows(ctx, song))
+                    .title("Song info").column_widths(INFO_COLUMN_WIDTHS).build()
+                );
+            }
             DirOrSong::Dir { name, full_path, .. } => {
                 let playlist = name.clone();
                 let library_path = (!full_path.is_empty()).then(|| full_path.clone());
+                // Round 89: remembered so `on_query_finished` can title the
+                // panel with the playlist's own name / path without a second
+                // query (the pane is the only place that holds the row).
+                *self.info_playlist.borrow_mut() =
+                    Some((playlist.clone(), library_path.clone()));
                 ctx.query()
                     .target(PaneType::Playlists {
                         tree: TreeBrowserArgs::default(),
@@ -3209,8 +3245,8 @@ impl SongListCore<DirOrSong, ListState> for PlaylistsPane {
                     .replace_id(PLAYLIST_INFO)
                     .id(PLAYLIST_INFO)
                     .query(move |client| {
-                        let data = if let Some(path) = library_path {
-                            read_library_playlist_songs(&path)
+                        let data = if let Some(path) = &library_path {
+                            read_library_playlist_songs(path)
                         } else {
                             client.list_playlist_info(&playlist, None)?
                         };
@@ -3220,7 +3256,6 @@ impl SongListCore<DirOrSong, ListState> for PlaylistsPane {
                         })
                     });
             }
-            DirOrSong::Song(_) => {}
         }
         Ok(())
     }

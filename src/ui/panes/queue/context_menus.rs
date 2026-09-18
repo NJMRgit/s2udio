@@ -16,7 +16,9 @@ use crate::{
     ui::{
         UiAppEvent,
         modals::{
-            confirm_modal::ConfirmModal, info_list_modal::InfoListModal, input_modal::InputModal,
+            confirm_modal::ConfirmModal,
+            info_list_modal::{InfoListModal, INFO_COLUMN_WIDTHS, song_info},
+            input_modal::InputModal,
             menu::modal::MenuModal, select_modal::SelectModal,
         },
     },
@@ -254,12 +256,14 @@ impl QueuePane {
                 });
                 section.add_item("Show info", move |ctx| {
                     if let Some(song) = selected_song {
+                        // Round 89: same detailed panel as every other
+                        // "show info" trigger.
                         modal!(
                             ctx,
                             InfoListModal::builder()
-                                .rows(&song)
+                                .rows(song_info(ctx, &song))
                                 .title("Song info")
-                                .column_widths(&[30, 70])
+                                .column_widths(INFO_COLUMN_WIDTHS)
                                 .build()
                         );
                     }

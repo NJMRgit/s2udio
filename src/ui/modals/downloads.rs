@@ -31,7 +31,13 @@ use crate::{
         UiEvent,
         dirstack::{Dir, DirStackItem},
         modal,
-        modals::{Modal, info_modal::InfoModal, menu::modal::MenuModal},
+        modals::{
+            Modal, info_modal::InfoModal,
+            info_list_modal::{
+                INFO_COLUMN_WIDTHS, InfoListModal, torrent_info_rows, ytdlp_info_rows,
+            },
+            menu::modal::MenuModal,
+        },
     },
 };
 
@@ -212,7 +218,20 @@ impl Modal for DownloadsModal {
                     ctx.render()?;
                 }
                 CommonAction::Select => {}
-                CommonAction::ShowInfo => {}
+                CommonAction::ShowInfo => {
+                    // Round 89: a download row is never a no-op either — the
+                    // selected yt-dlp or torrent job renders its own info
+                    // panel (id, state, target, progress, speed, files).
+                    if let Some(rows) = self.selected_info_rows(ctx) {
+                        modal!(
+                            ctx, InfoListModal::builder().rows(rows).title("Download info")
+                            .column_widths(INFO_COLUMN_WIDTHS).build()
+                        );
+                        ctx.render()?;
+                    } else {
+                        status_info!("No download selected");
+                    }
+                }
 
                 _ => {}
             }
@@ -404,6 +423,31 @@ impl DownloadsModal {
             })
             .build();
         modal!(ctx, modal);
+    }
+
+    /// Round 89: the info rows of the selected download row. The row math
+    /// (yt-dlp rows first, then the torrent rows) mirrors `create_menu`; the
+    /// job details come from the shared builders in `panes/downloads.rs`, so
+    /// the modal and the Downloads tab describe a job identically.
+    fn selected_info_rows(&self, ctx: &Ctx) -> Option<Vec<Vec<String>>> {
+        let selected = self.queue.state.get_selected()?;
+        let yt_count = ctx.ytdlp_manager.len();
+        if selected < yt_count {
+            let id = self.queue.selected().copied()?;
+            let item = ctx.ytdlp_manager.get(id)?;
+            let downloading = matches!(item.state, DownloadState::Downloading);
+            let label = if item.inner.filename.is_empty() {
+                item.inner.id.clone()
+            } else {
+                item.inner.filename.clone()
+            };
+            return Some(ytdlp_info_rows(
+                ctx, id, &label, downloading,
+            ));
+        }
+        let job_id = self.torrent_jobs.get(selected.saturating_sub(yt_count))?.clone();
+        let rows = torrent_info_rows(ctx, &job_id);
+        (!rows.is_empty()).then_some(rows)
     }
 
     pub fn create_menu(&self, ctx: &mut Ctx) {

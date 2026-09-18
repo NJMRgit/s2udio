@@ -27,7 +27,8 @@ pub use crate::ui::song_list::MoveDirection;
 #[allow(unused)]
 pub(in crate::ui) trait BrowserPane<T>: SongListCore<T, ListState>
 where
-    T: DirStackItem + std::fmt::Debug + Clone + Send + Sync + 'static,
+    T: DirStackItem + crate::ui::dir_or_song::AsDirOrSong
+        + std::fmt::Debug + Clone + Send + Sync + 'static,
 {
     fn stack(&self) -> &DirStack<T, ListState>;
     fn stack_mut(&mut self) -> &mut DirStack<T, ListState>;

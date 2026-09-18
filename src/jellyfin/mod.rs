@@ -49,8 +49,9 @@ pub struct Jellyfin {
     pub user_id: String,
 }
 /// One item of the Jellyfin library tree (a view, artist, album, folder or
-/// song). Only the fields the tab displays are kept.
-#[derive(Debug, Clone, PartialEq, Default)]
+/// song). Only the fields the tab displays are kept. Serializable so the
+/// round-92 views cache can store them verbatim.
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct JfItem {
     pub id: String,
     pub name: String,
@@ -702,6 +703,87 @@ fn item_from_value(value: &serde_json::Value, is_music_view: bool) -> Option<JfI
         child_count: value.get("ChildCount").and_then(|v| v.as_i64()).map(|c| c as i32),
         is_music_view,
     })
+}
+/// Round 92: on-disk cache of the server's top-level library views
+/// (`<cache_dir>/jellyfin-views.json`).
+///
+/// The Libraries tab used to render empty until the server answered the
+/// first views fetch — on a fresh boot the tab stayed blank for a while
+/// with no sign that anything was loading. The pane now paints the cached
+/// list on the first frame and refreshes it in the background
+/// (stale-while-revalidate); this file is what makes that first frame
+/// possible.
+///
+/// The cache is keyed to the account it was fetched from (the server URL
+/// is recorded too, but only as context: one server can be reached through
+/// several addresses, e.g. a LAN IP and a localhost proxy).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct JfViewsCache {
+    /// Server base URL the views came from.
+    pub server: String,
+    /// Account the views belong to.
+    pub user_id: String,
+    /// When the cache was written (epoch seconds; diagnostics only — the
+    /// pane always refreshes, so there is no TTL).
+    #[serde(default)]
+    pub saved_at: u64,
+    /// The top-level views (libraries/categories) as the server returned
+    /// them.
+    pub views: Vec<JfItem>,
+}
+/// File name of the views cache inside the cache dir.
+const VIEWS_CACHE_FILE: &str = "jellyfin-views.json";
+/// Path of the views cache: `<cache_dir>/jellyfin-views.json` (the
+/// configured cache dir, else s2udio's default `~/.cache/s2udio`).
+pub fn views_cache_path(cache_dir: Option<&Path>) -> std::path::PathBuf {
+    if let Some(dir) = cache_dir {
+        return dir.join(VIEWS_CACHE_FILE);
+    }
+    crate::shared::paths::s2udio_cache_dir()
+        .unwrap_or_else(|| {
+            crate::config::utils::tilde_expand("~/.cache/s2udio")
+                .into_owned()
+                .into()
+        })
+        .join(VIEWS_CACHE_FILE)
+}
+/// The cached views, or None when there is no readable cache.
+pub fn load_views_cache(cache_dir: Option<&Path>) -> Option<JfViewsCache> {
+    let data = std::fs::read(views_cache_path(cache_dir)).ok()?;
+    serde_json::from_slice(&data).ok()
+}
+/// Write the views cache. Atomic (temp file + rename), so a crash mid-write
+/// cannot leave a half-written cache behind.
+pub fn save_views_cache(
+    cache_dir: Option<&Path>,
+    server: &str,
+    user_id: &str,
+    views: &[JfItem],
+) {
+    let cache = JfViewsCache {
+        server: server.to_owned(),
+        user_id: user_id.to_owned(),
+        saved_at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+        views: views.to_vec(),
+    };
+    let Ok(data) = serde_json::to_vec(&cache) else {
+        log::warn!("Failed to serialize the Jellyfin views cache");
+        return;
+    };
+    let path = views_cache_path(cache_dir);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let tmp = path.with_extension("json.tmp");
+    if std::fs::write(&tmp, data)
+        .and_then(|()| std::fs::rename(&tmp, &path))
+        .is_err()
+    {
+        log::warn!(path:?; "Failed to write the Jellyfin views cache");
+    }
 }
 /// Extract the Jellyfin item id from a stream URL of the form
 /// `{base}/Audio/{id}/stream` or `{base}/Videos/{id}/stream`.

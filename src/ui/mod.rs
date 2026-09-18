@@ -3,7 +3,8 @@ use std::collections::HashMap;
 use anyhow::{Context, Result, anyhow};
 use itertools::Itertools;
 use modals::{
-    add_random_modal::AddRandomModal, decoders::DecodersModal, info_list_modal::InfoListModal,
+    add_random_modal::AddRandomModal, decoders::DecodersModal,
+    info_list_modal::{InfoListModal, INFO_COLUMN_WIDTHS, song_info},
     input_modal::InputModal, menu::modal::MenuModal, outputs::OutputsModal, tab_help::TabHelpModal,
 };
 use panes::{PaneContainer, Panes, pane_call};
@@ -1072,12 +1073,14 @@ impl Ui {
                 }
                 GlobalAction::ShowCurrentSongInfo => {
                     if let Some((_, current_song)) = ctx.find_current_song_in_queue() {
+                        // Round 89: the detailed panel (metadata, audio,
+                        // file, queue, stream, chapters, lyrics, stickers).
                         modal!(
                             ctx,
                             InfoListModal::builder()
-                                .rows(current_song)
+                                .rows(song_info(ctx, current_song))
                                 .title("Song info")
-                                .column_widths(&[30, 70])
+                                .column_widths(INFO_COLUMN_WIDTHS)
                                 .build()
                         );
                     } else {
@@ -1158,6 +1161,14 @@ impl Ui {
                     } else {
                         status_error!("No song is currently playing");
                     }
+                }
+                // Round 89: "show info" is handled by every pane that has
+                // item metadata (the song-list panes, search, the tree
+                // browsers that override the hook, the Downloads modal and
+                // the queue). A pane that does not (Radio, Jellyfin) would
+                // otherwise swallow the key in silence — say so instead.
+                CommonAction::ShowInfo => {
+                    status_info!("No item info available in this view");
                 }
                 _ => {}
             }

@@ -126,6 +126,14 @@ pub(in crate::ui) trait TreeBrowserCore: Pane {
     /// The bottom info box (fully pane-specific: file preview / poster +
     /// metadata / station info).
     fn render_info(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx);
+    /// Round 89: "show info" on the highlighted items row. Returns `false`
+    /// when the pane has nothing to say (the default), in which case the
+    /// action stays unclaimed and the app-level fallback decides. Panes with
+    /// real item metadata (the Directories pane's files) override it so the
+    /// action is never a silent no-op.
+    fn show_info(&self, _ctx: &Ctx) -> Result<bool> {
+        Ok(false)
+    }
 
     // ── temp-play lifecycle (the queue id of a `d`/play-temp entry) ────
 
@@ -838,6 +846,13 @@ pub(in crate::ui) trait TreeBrowserCore: Pane {
                 CommonAction::ContextMenu => {
                     self.open_context_menu(ctx, None)?;
                     return Ok(true);
+                }
+                // Round 89: the bottom info box already shows the selection,
+                // but "show info" must open the modal like everywhere else
+                // (panes without item-level info report `false` and the
+                // action stays unclaimed).
+                CommonAction::ShowInfo => {
+                    return self.show_info(ctx);
                 }
                 CommonAction::Close => {
                     if self.on_close(ctx)? {
