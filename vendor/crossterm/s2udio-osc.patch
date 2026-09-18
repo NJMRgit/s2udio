@@ -1,0 +1,97 @@
+diff -ruN pristine/src/event/sys/unix/parse.rs patched/src/event/sys/unix/parse.rs
+--- pristine/src/event/sys/unix/parse.rs	2006-07-23 21:21:28.000000000 -0400
++++ patched/src/event/sys/unix/parse.rs	2026-09-17 21:45:00.482573993 -0400
+@@ -74,6 +74,10 @@
+                         }
+                     }
+                     b'[' => parse_csi(buffer),
++                    // s2udio patch (round 90): OSC strings (kitty's drag &
++                    // drop protocol is OSC 72) — upstream parses these as a
++                    // stream of bogus key events.
++                    b']' => parse_osc(buffer),
+                     b'\x1B' => Ok(Some(InternalEvent::Event(Event::Key(KeyCode::Esc.into())))),
+                     _ => parse_event(&buffer[1..], input_available).map(|event_option| {
+                         event_option.map(|event| {
+@@ -125,6 +129,42 @@
+     }
+ }
+ 
++/// s2udio patch (round 90): decode one OSC (operating system command)
++/// string.
++///
++/// `buffer` starts with `ESC ]`; the body runs until `ESC \` (the string
++/// terminator) or `BEL`. `Ok(None)` means "not complete yet" — the caller
++/// keeps the bytes and re-parses when the rest arrives, so a sequence split
++/// across reads (or a chunked transfer) still parses. `Err` discards a
++/// runaway sequence instead of buffering without bound.
++fn parse_osc(buffer: &[u8]) -> io::Result<Option<InternalEvent>> {
++    /// A body this long without a terminator is garbage, not a sequence.
++    const MAX_OSC_BODY_LEN: usize = 64 * 1024;
++
++    let body = &buffer[2..];
++    let mut index = 0;
++    while index < body.len() {
++        match body[index] {
++            // BEL-terminated form (`ESC ] <body> BEL`).
++            0x07 => return Ok(Some(osc_event(&body[..index]))),
++            // The proper terminator: `ESC \`.
++            0x1B if body.get(index + 1) == Some(&b'\\') => {
++                return Ok(Some(osc_event(&body[..index])))
++            }
++            _ => index += 1,
++        }
++    }
++    if body.len() > MAX_OSC_BODY_LEN {
++        return Err(could_not_parse_event_error());
++    }
++    Ok(None)
++}
++
++/// Build the [`Event::Osc`] for an already-terminated OSC body (round 90).
++fn osc_event(body: &[u8]) -> InternalEvent {
++    InternalEvent::Event(Event::Osc(body.to_vec()))
++}
++
+ // converts KeyCode to KeyEvent (adds shift modifier in case of uppercase characters)
+ fn char_code_to_event(code: KeyCode) -> KeyEvent {
+     let modifiers = match code {
+diff -ruN pristine/src/event.rs patched/src/event.rs
+--- pristine/src/event.rs	2006-07-23 21:21:28.000000000 -0400
++++ patched/src/event.rs	2026-09-17 21:45:00.482201650 -0400
+@@ -545,7 +545,8 @@
+ /// Represents an event.
+ #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+ #[cfg_attr(feature = "derive-more", derive(IsVariant))]
+-#[cfg_attr(not(feature = "bracketed-paste"), derive(Copy))]
++// s2udio patch (round 90): [`Event::Osc`] carries a `Vec<u8>`, so `Event` is
++// never `Copy`. Upstream derived `Copy` when `bracketed-paste` was disabled.
+ #[derive(Debug, PartialOrd, PartialEq, Eq, Clone, Hash)]
+ pub enum Event {
+     /// The terminal gained focus
+@@ -563,6 +564,14 @@
+     /// An resize event with new dimensions after resize (columns, rows).
+     /// **Note** that resize events can occur in batches.
+     Resize(u16, u16),
++    /// A complete OSC (operating system command) string the terminal sent,
++    /// with the leading `ESC ]` and the terminating `ESC \` (or `BEL`)
++    /// removed.
++    ///
++    /// s2udio patch (round 90): upstream crossterm does not parse OSC at all,
++    /// so kitty's drag & drop protocol (OSC 72) used to arrive as a burst of
++    /// bogus key events. A caller that does not know the code ignores it.
++    Osc(Vec<u8>),
+ }
+ 
+ impl Event {
+diff -ruN pristine/src/terminal/sys/unix.rs patched/src/terminal/sys/unix.rs
+--- pristine/src/terminal/sys/unix.rs	2006-07-23 21:21:28.000000000 -0400
++++ patched/src/terminal/sys/unix.rs	2026-09-17 21:49:13.140590316 -0400
+@@ -84,7 +84,7 @@
+ 
+ #[cfg(not(feature = "libc"))]
+ pub(crate) fn window_size() -> io::Result<WindowSize> {
+-    let file = File::open("/dev/tty").map(|file| (FileDesc::Owned(file.into())));
++    let file = File::open("/dev/tty").map(|file| FileDesc::Owned(file.into()));
+     let fd = if let Ok(file) = &file {
+         file.as_fd()
+     } else {

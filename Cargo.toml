@@ -106,3 +106,9 @@ cast_sign_loss = "allow"
 [lints.rust]
 unused_macros = "allow"
 deprecated = "allow"
+
+# s2udio patch (round 90): the vendored crossterm carries the OSC parsing that
+# kitty's drag & drop protocol (OSC 72) needs; upstream crossterm has none, so
+# the drop escapes arrived as bogus key events. See vendor/crossterm/S2UDIO-PATCH.md.
+[patch.crates-io]
+crossterm = { path = "vendor/crossterm" }

@@ -6,6 +6,7 @@ use crossterm::event::Event;
 use crate::shared::{
     events::AppEvent,
     mouse_event::{MouseEvent, MouseEventKind, MouseEventTracker},
+    terminal::dnd::{DndOutcome, DndReceiver},
 };
 
 pub fn init(event_tx: Sender<AppEvent>) -> std::io::Result<std::thread::JoinHandle<()>> {
@@ -72,6 +73,28 @@ fn read_clipboard(primary: bool) -> Option<String> {
     if text.trim().is_empty() { None } else { Some(text) }
 }
 
+/// Hand one drag & drop outcome to the app: a pasted payload goes through the
+/// ordinary paste pipeline, a drop the terminal had no data for is reported
+/// (the gesture reached the app, so saying nothing looks like a dead feature),
+/// and a handshake step needs nothing.
+fn handle_dnd_outcome(outcome: DndOutcome, event_tx: &Sender<AppEvent>) {
+    match outcome {
+        DndOutcome::Paste(text) => {
+            if let Err(err) = event_tx.send(AppEvent::UserPaste(text)) {
+                log::error!(error:? = err; "Failed to send dropped text");
+            }
+        }
+        DndOutcome::Empty => {
+            let _ = event_tx.send(AppEvent::Status(
+                "The dropped item carried no data".to_owned(),
+                crate::shared::events::Level::Warn,
+                Duration::from_secs(4),
+            ));
+        }
+        DndOutcome::Handled => {}
+    }
+}
+
 fn input_poll_task(event_tx: &Sender<AppEvent>) {
     // Sometimes in there are inputs left in the buffer(because of tmux maybe?)
     // before starting to read inputs (from reading terminal sequences), this
@@ -79,8 +102,16 @@ fn input_poll_task(event_tx: &Sender<AppEvent>) {
     drain_crossterm_events();
 
     let mut mouse_event_tracker = MouseEventTracker::default();
+    // Round 90: the client side of kitty's drag & drop protocol (OSC 72).
+    // Its escape codes arrive as `Event::Osc` — crossterm is patched to parse
+    // OSC strings, see vendor/crossterm/S2UDIO-PATCH.md.
+    let mut dnd = DndReceiver::new();
     loop {
-        match crossterm::event::poll(Duration::from_millis(250)) {
+        // Round 90.5: while a drop's data request is waiting to be retried the
+        // poll has to wake early — the transport can answer the first request
+        // of a fresh drop with nothing and deliver a moment later.
+        let timeout = dnd.next_timeout().unwrap_or(Duration::from_millis(250));
+        match crossterm::event::poll(timeout) {
             Ok(true) => match crossterm::event::read() {
                 Ok(Event::Mouse(mouse)) => {
                     // Middle-click pastes the primary selection: with mouse
@@ -135,6 +166,22 @@ fn input_poll_task(event_tx: &Sender<AppEvent>) {
                         log::error!(error:? = err; "Failed to send user paste");
                     }
                 }
+                // Round 90: a terminal-to-client OSC. Only OSC 72 (kitty's
+                // drag & drop) is acted on; the handshake answers the drag
+                // over the wire, and a completed drop is fed into the same
+                // paste pipeline a pasted path or link takes.
+                Ok(Event::Osc(body)) => {
+                    // Round 90: log the body (truncated — a data chunk can be
+                    // kilobytes of base64). The handshake is silent otherwise,
+                    // which makes a drop that never arrives impossible to tell
+                    // from one the terminal never sent.
+                    let osc = String::from_utf8_lossy(&body)
+                        .chars()
+                        .take(160)
+                        .collect::<String>();
+                    log::debug!(osc = osc.as_str(); "Terminal OSC received");
+                    handle_dnd_outcome(dnd.handle_body(&body), event_tx);
+                }
                 Ok(Event::FocusLost) => {
                     // The window lost focus: the pointer can be anywhere now,
                     // so clear the hover position (the 65535 leave convention
@@ -158,6 +205,10 @@ fn input_poll_task(event_tx: &Sender<AppEvent>) {
             },
             Ok(_) => {}
             Err(e) => log::warn!(error:? = e; "Error when polling for event"),
+        }
+        // A drop whose data request is waiting for its retry (round 90.5).
+        if let Some(outcome) = dnd.tick() {
+            handle_dnd_outcome(outcome, event_tx);
         }
     }
 }

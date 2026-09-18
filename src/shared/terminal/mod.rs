@@ -20,12 +20,31 @@ use crate::{
     },
 };
 mod crossterm_backend;
+/// Kitty drag & drop (OSC 72) — round 90, second attempt. The OSC strings
+/// ride on the patched crossterm parser (`Event::Osc`); see
+/// `vendor/crossterm/S2UDIO-PATCH.md`.
+pub mod dnd;
 mod emulator;
 mod features;
 mod tty;
 pub use emulator::Emulator;
 pub use features::ImageBackend;
 pub use tty::{TtyReader, TtyWriter};
+/// The escape character, spelled out so the sequences this module builds are
+/// readable (round 90).
+const ESCAPE: char = '\u{1b}';
+
+/// Build a complete escape code from its body (round 90): the leading `ESC`,
+/// the body, and the `ESC \` string terminator.
+///
+/// The terminator is **mandatory**: an unterminated OSC makes the terminal
+/// treat every following byte as part of the string and swallow the whole UI
+/// until it happens to find one — the round-90 blocker that left a real kitty
+/// showing nothing but the album art (the graphics transmissions carry their
+/// own terminator, which is exactly why the art survived).
+pub(crate) fn escape_code(body: &str) -> String {
+    format!("{ESCAPE}{body}{ESCAPE}\\")
+}
 pub struct Terminal {
     tty: Tty,
     emulator: Emulator,
@@ -95,6 +114,39 @@ impl Terminal {
     }
     pub fn keyboard_protocol_kitty(&self) -> bool {
         self.kitty_keyboard_protocol
+    }
+    /// Whether the drag & drop protocol (OSC 72, kitty >= 0.47) can be used
+    /// here (round 90): only kitty implements it, so no other emulator ever
+    /// receives the announce escape code.
+    ///
+    /// The XTVERSION probe identifies `kitty`; a tmux client's response can
+    /// come back empty on some setups, so the same environment marker the
+    /// image backends rely on is accepted as a fallback.
+    pub fn kitty_dnd_supported(&self) -> bool {
+        // A terminal multiplexer is never a drop target: it cannot forward a
+        // terminal-to-client escape code, and it inherits the environment of
+        // the kitty it runs in (`KITTY_WINDOW_ID`), so the fallback below
+        // must not fire there (round 90).
+        if *IS_TMUX || self.zellij {
+            return false;
+        }
+        let supported = self.emulator == Emulator::Kitty
+            || ENV.var("KITTY_WINDOW_ID").is_ok_and(|value| !value.is_empty())
+            // Test hook: lets the pty harness drive the whole client side
+            // without a real kitty (round 90). Never set in normal use; the
+            // announce is the only thing it changes.
+            || ENV.var("S2UDIO_DND_FORCE").is_ok_and(|value| value == "1");
+        log::debug!(emulator:? = self.emulator, supported; "Kitty drag & drop usable");
+        supported
+    }
+    /// Write a complete escape code (the body only: `]72;t=a;text/uri-list`)
+    /// to the terminal, terminated and flushed immediately — a drop answer
+    /// that sits in a buffer is an answer the terminal never sees (round 90).
+    pub fn write_escape(&self, sequence: &str) -> std::io::Result<()> {
+        use std::io::Write as _;
+        let mut writer = self.writer();
+        write!(writer, "{}", escape_code(sequence))?;
+        writer.flush()
     }
     pub fn zellij(&self) -> bool {
         self.zellij
@@ -207,6 +259,13 @@ impl Terminal {
         supported
     }
     pub fn try_restore(enable_mouse: bool) -> std::io::Result<()> {
+        // Round 90: stop accepting drops first, so a drop that lands during
+        // the shutdown is never half-answered. Only written where the
+        // protocol was announced.
+        if TERMINAL.kitty_dnd_supported() {
+            let result = TERMINAL.write_escape(&format!("]{};t=A", dnd::DND_CODE));
+            log::debug!(result:?; "Stopped accepting drag & drop");
+        }
         let mut writer = TERMINAL.writer();
         if enable_mouse {
             execute!(writer, DisableMouseCapture)?;
@@ -236,6 +295,17 @@ impl Terminal {
             }),
         );
         enable_raw_mode()?;
+        // Round 90: announce that drops are accepted (kitty >= 0.47 only —
+        // no other terminal ever receives this). Written first, because this
+        // is the one thing the shutdown path and the panic hook must undo.
+        if TERMINAL.kitty_dnd_supported() {
+            TERMINAL.write_escape(&format!(
+                "]{};t=a;{}",
+                dnd::DND_CODE,
+                dnd::ACCEPTED_MIMES.join(" ")
+            ))?;
+            log::debug!(mimes:? = dnd::ACCEPTED_MIMES; "Announced that drops are accepted");
+        }
         let mut writer = TERMINAL.writer();
         execute!(writer, EnterAlternateScreen)?;
         execute!(writer, EnableBracketedPaste)?;
