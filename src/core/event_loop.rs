@@ -1083,6 +1083,20 @@ fn main_task<B: Backend + std::io::Write>(
                             crate::ui::modals::paste::apply_resolved_streams(
                                 &ctx, info, action, failures,
                             );
+                            // Round 90.3: a pasted link starts playing before
+                            // its resolve lands (round 92), so a chaptered
+                            // video's markers only exist now — run the same
+                            // chapters fan-out as a song change: take them for
+                            // the current song, and let the Queue tab follow
+                            // the playing video into its Chapters list. Without
+                            // this the list stayed on the mpv playlist until
+                            // the video was played a second time (the info is
+                            // then already known when the session starts).
+                            crate::ui::modals::paste::ensure_chapters(&ctx);
+                            ctx.auto_show_chapters();
+                            if let Err(err) = ui.follow_video_session(&ctx) {
+                                log::error!(error:? = err; "Failed to follow the video session after a stream resolve");
+                            }
                         }
                         render_wanted = true;
                     }

@@ -2659,6 +2659,13 @@ pub fn apply_resolved_streams(
                 }
             }
             if !item.chapters.is_empty() {
+                // Round 90.3: the keys matter — a video session looks its
+                // chapters up by the mpv playlist entry's URL, so a resolve
+                // stored under a different string shows no chapters.
+                log::debug!(
+                    url = item.url.as_str(), original = item.original_url.as_str(),
+                    chapters = item.chapters.len(); "Stored the resolved chapters"
+                );
                 chapters.insert(item.url.clone(), item.chapters.clone());
                 if !item.original_url.is_empty() && item.original_url != item.url {
                     chapters.insert(item.original_url.clone(), item.chapters.clone());
@@ -2877,6 +2884,10 @@ pub fn ensure_chapters(ctx: &Ctx) {
         return;
     }
     if let Some(yt) = ctx.yt_info.borrow().get(&song.file) && !yt.chapters.is_empty() {
+        log::debug!(
+            file = song.file.as_str(), len = yt.chapters.len();
+            "Chapters for the current song taken from the resolved stream info"
+        );
         ctx.chapters.borrow_mut().insert(song.file.clone(), yt.chapters.clone());
         return;
     }
