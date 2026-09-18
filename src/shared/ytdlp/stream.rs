@@ -36,6 +36,14 @@ pub struct YtStreamInfo {
     /// absent in entries written before this round).
     #[serde(default)]
     pub start_secs: Option<f64>,
+    /// Round 91b: when this entry was resolved, in epoch seconds. A later
+    /// play of the same link reuses the entry while it is fresh instead of
+    /// running yt-dlp again, so a link the paste popup already resolved
+    /// starts immediately. `#[serde(default)]` keeps the existing
+    /// `<cache_dir>/yt-info.json` loadable - an entry written before this
+    /// field has no age and is therefore treated as stale.
+    #[serde(default)]
+    pub resolved_at: Option<u64>,
 }
 /// Resolve a YouTube/Soundcloud/NicoVideo URL to its direct audio stream
 /// URL(s) with yt-dlp, along with each video's title, thumbnail and
@@ -166,7 +174,8 @@ fn resolve_one(bin: &str, input_url: &str) -> anyhow::Result<Vec<YtStreamInfo>> 
             .unwrap_or_default(), channel : parsed.channel.or(parsed.uploader).filter(| c
             | ! c.is_empty()), subscribers : parsed.channel_follower_count, thumbnail :
             parsed.thumbnail.filter(| t | ! t.is_empty()), description, duration : parsed
-            .duration, chapters, start_secs : parse_start_offset(input_url), }
+            .duration, chapters, start_secs : parse_start_offset(input_url),
+            resolved_at : None, }
         ],
     )
 }

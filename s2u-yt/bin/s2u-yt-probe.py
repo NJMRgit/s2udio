@@ -1,11 +1,17 @@
 #!/usr/bin/env python3
 """s2u-yt probe: exit 1 if the best video+audio URLs from a yt-dlp stdout payload
 answer HTTP 403 to an open-range/follow request (i.e. mpv could not play them)."""
-import json, re, subprocess, sys
+import json, re, subprocess, sys, time
 
-def probe(url):
-    if not url.startswith("http"):
-        return None
+# A freshly issued googlevideo URL can answer 403 to the FIRST range request and
+# 206 to the identical request seconds later (measured 2026-09-17: 403 at t~0,
+# 206 at t~+8..10 s, same URL, same client). A single immediate probe therefore
+# reports a false 403 and the wrapper wrongly falls back to the P3 web_safari
+# HLS floor, whose ceiling is 1080p. A 403 is only fatal when a retry confirms it.
+RETRY_DELAY_S = 8.0
+RETRIES = 1
+
+def probe_once(url):
     try:
         r = subprocess.run(
             ["curl", "-s", "-L", "-o", "/dev/null", "-w", "%{http_code}", "-m", "12", "-r", "0-1023", url],
@@ -13,6 +19,17 @@ def probe(url):
         return r.stdout.strip() or None
     except Exception:
         return None
+
+def probe(url):
+    if not url.startswith("http"):
+        return None
+    code = probe_once(url)
+    for _ in range(RETRIES):
+        if code != "403":
+            return code
+        time.sleep(RETRY_DELAY_S)
+        code = probe_once(url)
+    return code
 
 def main(path):
     try:

@@ -26,7 +26,8 @@ use crate::{
         mpd_client_ext::{Enqueue, MpdClientExt as _},
         ytdlp::{
             ChapterSection, ReplaceAction, StreamDownloadSpec, StreamIntent, YtDlpContent,
-            YtDlpHost, YtDlpItem, YtStreamInfo, tagged_stream_link, yt_video_id,
+            YtDlpHost, YtDlpItem, YtStreamInfo, tagged_stream_entry, tagged_stream_link,
+            yt_video_id,
         },
     },
     ui::modals::{
@@ -238,11 +239,43 @@ fn unescape_path(s: &str) -> String {
     }
     out
 }
+/// Decode `%XX` escapes (UTF-8 aware). Sequences that are malformed — a
+/// lone `%`, a non-hex digit, or bytes that do not form valid UTF-8 — are
+/// left exactly as they arrived, so a path that legitimately contains a
+/// percent sign is never mangled. Round 90.
+fn unescape_percent(s: &str) -> String {
+    if !s.contains('%') {
+        return s.to_owned();
+    }
+    let bytes = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut idx = 0;
+    while idx < bytes.len() {
+        if bytes[idx] == b'%' && idx + 2 < bytes.len() {
+            let hex = |b: u8| (b as char).to_digit(16).map(|d| d as u8);
+            if let (Some(high), Some(low)) = (hex(bytes[idx + 1]), hex(bytes[idx + 2])) {
+                out.push(high * 16 + low);
+                idx += 3;
+                continue;
+            }
+        }
+        out.push(bytes[idx]);
+        idx += 1;
+    }
+    match String::from_utf8(out) {
+        Ok(decoded) => decoded,
+        // Not valid UTF-8 once decoded (a truncated multi-byte escape):
+        // keep the text as it was pasted.
+        Err(_) => s.to_owned(),
+    }
+}
 /// Split on whitespace while keeping backslash-escaped characters (kitty's
-/// drag&drop escapes spaces as `\ `) inside one token.
+/// drag&drop escapes spaces as `\ `) and single- or double-quoted groups
+/// (round 90: `"a path with spaces.flac"` is one token) inside one token.
 fn split_unescaped(input: &str) -> Vec<String> {
     let mut tokens = Vec::new();
     let mut current = String::new();
+    let mut quote: Option<char> = None;
     let mut chars = input.chars().peekable();
     while let Some(c) = chars.next() {
         if c == '\\' {
@@ -253,6 +286,16 @@ fn split_unescaped(input: &str) -> Vec<String> {
             } else {
                 current.push(c);
             }
+        } else if let Some(open) = quote {
+            // Inside a quoted group quoting is literal (`'it''s'`); only
+            // the matching quote closes it.
+            current.push(c);
+            if c == open {
+                quote = None;
+            }
+        } else if c == '"' || c == '\'' {
+            quote = Some(c);
+            current.push(c);
         } else if c.is_whitespace() {
             if !current.is_empty() {
                 tokens.push(std::mem::take(&mut current));
@@ -268,28 +311,83 @@ fn split_unescaped(input: &str) -> Vec<String> {
 }
 /// Split the pasted text into recognized audio items. Anything unrecognized
 /// is silently ignored; the paste is dropped entirely when nothing matches.
+///
+/// Round 90: the text is processed one pasted LINE at a time, so an
+/// unquoted path that contains spaces can still be recognized as a whole.
 pub fn parse_paste(input: &str) -> Vec<PastedItem> {
     let mut items = Vec::new();
     let mut seen = std::collections::HashSet::new();
     let mut seen_magnets = std::collections::HashSet::new();
-    for raw in split_unescaped(input) {
-        let token = raw.trim().trim_matches('"').trim_matches('\'').trim();
-        if token.is_empty() {
-            continue;
-        }
-        let Some(item) = classify(token) else { continue };
-        let is_new = match &item {
-            PastedItem::Magnet(magnet) => {
-                let key = magnet_infohash_full(magnet).unwrap_or_else(|| magnet.clone());
-                seen_magnets.insert(key)
+    for line in input.split('\n') {
+        for item in parse_paste_line(line) {
+            let is_new = match &item {
+                PastedItem::Magnet(magnet) => {
+                    let key = magnet_infohash_full(magnet)
+                        .unwrap_or_else(|| magnet.clone());
+                    seen_magnets.insert(key)
+                }
+                _ => seen.insert(item.clone()),
+            };
+            if is_new {
+                items.push(item);
             }
-            _ => seen.insert(item.clone()),
-        };
-        if is_new {
-            items.push(item);
         }
     }
     items
+}
+/// The recognized items of a single pasted line: the whitespace/quoted
+/// token split first, and — only when that found nothing at all — the
+/// whole line as one token (the unquoted spaced path case, round 90).
+fn parse_paste_line(line: &str) -> Vec<PastedItem> {
+    let tokens: Vec<String> = split_unescaped(line)
+        .iter()
+        .filter_map(|raw| {
+            let token = strip_quotes(raw).trim();
+            (!token.is_empty()).then(|| token.to_owned())
+        })
+        .collect();
+    let mut items = Vec::new();
+    for token in &tokens {
+        if let Some(item) = classify(token) {
+            items.push(item);
+        }
+    }
+    if items.is_empty() {
+        return whole_line_item(line).into_iter().collect();
+    }
+    items
+}
+/// The whole line as ONE candidate (an unquoted path with spaces): trimmed,
+/// quotes stripped, then backslash- and percent-unescaped. Round 90.
+fn whole_line_item(line: &str) -> Option<PastedItem> {
+    let candidate = strip_quotes(line.trim());
+    let candidate = candidate.trim();
+    ((candidate.contains(' ') || candidate.contains('\t')) && looks_like_path(candidate))
+        .then(|| classify(&unescape_path(&unescape_percent(candidate))))
+        .flatten()
+}
+/// Strip one layer of surrounding quotes (`"…"` or `'…'`).
+fn strip_quotes(token: &str) -> &str {
+    let trimmed = token.trim();
+    trimmed
+        .strip_prefix('"')
+        .and_then(|rest| rest.strip_suffix('"'))
+        .or_else(|| {
+            trimmed
+                .strip_prefix('\'')
+                .and_then(|rest| rest.strip_suffix('\''))
+        })
+        .unwrap_or(trimmed)
+}
+/// Whether a whole line carries an audio/video/torrent extension (query
+/// strings/fragments and a `file://` prefix stripped): the guard that stops
+/// an arbitrary prose line (a chat message) from being read as one path.
+fn looks_like_path(candidate: &str) -> bool {
+    let candidate = candidate.strip_prefix("file://").unwrap_or(candidate);
+    let candidate = candidate.split(['?', '#']).next().unwrap_or(candidate);
+    is_audio_extension(candidate)
+        || is_video_extension(candidate)
+        || is_torrent_extension(candidate)
 }
 /// Classify a single whitespace-separated token.
 fn classify(token: &str) -> Option<PastedItem> {
@@ -297,7 +395,9 @@ fn classify(token: &str) -> Option<PastedItem> {
         return Some(PastedItem::Magnet(token.to_owned()));
     }
     if let Some(rest) = token.strip_prefix("file://") {
-        let path = unescape_path(rest);
+        // Round 90: `file://` URIs arrive percent-encoded (spaces as
+        // `%20`) — decode before the on-disk checks.
+        let path = unescape_path(&unescape_percent(rest));
         if is_local_torrent(&path) {
             return Some(PastedItem::Torrent(path));
         }
@@ -334,7 +434,9 @@ fn classify(token: &str) -> Option<PastedItem> {
         }
         return None;
     }
-    let path = unescape_path(token);
+    // Round 90: a plain path can carry `%XX` escapes too (a path dropped
+    // or pasted from a URL-aware source).
+    let path = unescape_path(&unescape_percent(token));
     if is_local_torrent(&path) {
         return Some(PastedItem::Torrent(path));
     }
@@ -474,7 +576,8 @@ fn play_video_now(ctx: &Ctx, vids: &[PastedItem]) {
 }
 /// "Add / Append to queue": insert the video items into the persistent
 /// video playlist (YouTube-style links after resolving them). With `play`
-/// the added videos start playing immediately.
+/// the added videos start playing immediately. A set may mix both kinds
+/// (round 89) — see the comment inside.
 fn queue_videos(ctx: &Ctx, vids: &[PastedItem], after_current: bool, play: bool) {
     if all_yt(vids) {
         let action = if play {
@@ -492,10 +595,37 @@ fn queue_videos(ctx: &Ctx, vids: &[PastedItem], after_current: bool, play: bool)
             });
         return;
     }
-    let entries = video_entries_for(vids);
-    crate::core::mpv::add_to_video_playlist(ctx, entries.clone(), after_current);
-    if play {
-        crate::core::mpv::play_video_entries(ctx, entries);
+    // Round 89: one video set can mix local videos and YouTube-style links
+    // (the paste popup's `Add to queue [> Video]` on a paste that holds
+    // both). The links need yt-dlp before mpv can open them — they are
+    // resolved on the work thread and land as they arrive — while the local
+    // ones enter the video playlist right away.
+    let links = yt_urls(vids);
+    let local: Vec<PastedItem> = vids
+        .iter()
+        .filter(|item| !matches!(item, PastedItem::Yt(_)))
+        .cloned()
+        .collect();
+    if !local.is_empty() {
+        let entries = video_entries_for(&local);
+        crate::core::mpv::add_to_video_playlist(ctx, entries.clone(), after_current);
+        // With links in the same set, playback is started by the links'
+        // resolve (the local entries precede them, so nothing is skipped).
+        if play && links.is_empty() {
+            crate::core::mpv::play_video_entries(ctx, entries);
+        }
+    }
+    if !links.is_empty() {
+        let action = if play {
+            YtAction::AddToVideoQueueAndPlay
+        } else if after_current {
+            YtAction::AddToVideoQueue
+        } else {
+            YtAction::AppendVideoQueue
+        };
+        let _ = ctx
+            .work_sender
+            .send(WorkRequest::ResolveYtStreams { urls: links, action });
     }
 }
 /// The stored-playlist URIs of the given video items: local files keep
@@ -906,6 +1036,71 @@ pub fn queue_playlist_save_files(ctx: &Ctx, items: Vec<YtDlpItem>, audio_only: b
     );
 }
 
+/// Round 89: the stored-playlist URIs of a pasted row's **audio** arm -
+/// direct files/URLs as they are, YouTube-style links tagged `#s2u-audio`
+/// (round 86: the link is stored and resolved when the entry is played).
+fn paste_audio_uris(items: &[PastedItem]) -> Vec<String> {
+    let (direct, yt) = playlist_audio_uris(items);
+    let mut uris = direct;
+    uris.extend(yt.iter().map(|url| tagged_stream_link(url, StreamIntent::Audio)));
+    uris
+}
+/// Round 89: the same for a pasted row's **video** arm - the video
+/// playlist's own URIs, each tagged `#s2u-video` (the tag is a URL
+/// fragment: MPD stores it, yt-dlp ignores it, and the Playlists tab plays
+/// such an entry through mpv).
+fn paste_video_uris(items: &[PastedItem]) -> Vec<String> {
+    video_playlist_uris(items)
+        .iter()
+        .map(|url| tagged_stream_link(url, StreamIntent::Video))
+        .collect()
+}
+/// Round 89: the `Add to playlist` target picker, shared by a pasted row's
+/// Audio and Video arms.
+fn paste_add_to_playlist(ctx: &Ctx, uris: Vec<String>) -> Result<()> {
+    let radio_playlist = ctx.config.radio.playlist.clone();
+    let playlists = ctx.query_sync(move |client| {
+        Ok(client
+            .picker_playlists(&radio_playlist)?
+            .into_iter()
+            .map(|p| p.name)
+            .collect::<Vec<_>>())
+    })?;
+    if playlists.is_empty() {
+        status_warn!("No playlists yet — use 'Create Playlist'");
+        return Ok(());
+    }
+    modal!(
+        ctx, SelectModal::builder().ctx(ctx).options(playlists)
+        .confirm_label("Add").title("Select a playlist")
+        .on_confirm(move |ctx, selected, _idx| {
+            ctx.command(move |client| {
+                client.add_to_playlist_multiple(&selected, uris)?;
+                Ok(())
+            });
+            Ok(())
+        }).build()
+    );
+    Ok(())
+}
+/// Round 89: the `Create Playlist` name prompt, shared by a pasted row's
+/// Audio and Video arms.
+fn paste_create_playlist(ctx: &Ctx, uris: Vec<String>) -> Result<()> {
+    modal!(
+        ctx, InputModal::new(ctx).title("Create playlist")
+        .confirm_label("Save").input_label("Playlist name:")
+        .on_confirm(move |ctx, value| {
+            let name = value.to_owned();
+            let uris = uris.clone();
+            ctx.command(move |client| {
+                client.create_playlist(&name, uris)?;
+                Ok(())
+            });
+            Ok(())
+        })
+    );
+    Ok(())
+}
 fn paste_menu(ctx: &Ctx, items: Vec<PastedItem>) -> MenuModal<'static> {
     let count = items.len();
     // Round 79: a pasted playlist link gets its own `[Playlist]` rows — the
@@ -1091,99 +1286,114 @@ fn paste_menu(ctx: &Ctx, items: Vec<PastedItem>) -> MenuModal<'static> {
                     }
                     section.add_submenu_item("Play", play);
                 }
+                // Round 89 (user): a pasted web stream reaches the library as
+                // **audio** (MPD's queue / a stored playlist entry tagged
+                // `#s2u-audio`) or as **video** (the mpv video playlist /
+                // `#s2u-video`) - `Play` and `Download` already ask, these
+                // rows did not. The `Audio | Video` step appears whenever both
+                // destinations have items (`queue_audio` is what MPD takes,
+                // `video` what the video playlist takes, and a pasted web
+                // stream is in both); a paste of a single kind keeps today's
+                // one-line row.
+                let kind_split = !queue_audio.is_empty() && !video.is_empty();
                 if !playlist_carried && (!queue_audio.is_empty() || !queue_video.is_empty()) {
-                    let play_audio = queue_audio.clone();
-                    let play_video = queue_video.clone();
-                    section = section.item(
-                        "Add to queue and play",
-                        move |ctx| {
-                            if !play_video.is_empty() {
-                                queue_videos(ctx, &play_video, true, true);
-                            }
-                            if !play_audio.is_empty() {
-                                enqueue_items(ctx, &play_audio, true, true)?;
-                            }
+                    if kind_split {
+                        let mut play_sub =
+                            ListSection::new(ctx.config.theme.current_item_style);
+                        let play_audio = queue_audio.clone();
+                        play_sub.add_item("Audio", move |ctx| {
+                            enqueue_items(ctx, &play_audio, true, true)
+                        });
+                        let play_video = video.clone();
+                        play_sub.add_item("Video", move |ctx| {
+                            queue_videos(ctx, &play_video, true, true);
                             Ok(())
-                        },
-                    );
-                    let append_audio = queue_audio.clone();
-                    let append_video = queue_video.clone();
-                    section = section.item(
-                        "Add to queue",
-                        move |ctx| {
-                            if !append_video.is_empty() {
-                                queue_videos(ctx, &append_video, false, false);
-                            }
-                            if !append_audio.is_empty() {
-                                enqueue_items(ctx, &append_audio, false, false)?;
-                            }
+                        });
+                        play_sub.add_item("Cancel", |_ctx| Ok(()));
+                        section.add_submenu_item("Add to queue and play", play_sub);
+
+                        let mut append_sub =
+                            ListSection::new(ctx.config.theme.current_item_style);
+                        let append_audio = queue_audio.clone();
+                        append_sub.add_item("Audio", move |ctx| {
+                            enqueue_items(ctx, &append_audio, false, false)
+                        });
+                        let append_video = video.clone();
+                        append_sub.add_item("Video", move |ctx| {
+                            queue_videos(ctx, &append_video, false, false);
                             Ok(())
-                        },
-                    );
-                    let (audio_direct, audio_yt) = playlist_audio_uris(&queue_audio);
-                    let video_uris = video_playlist_uris(&queue_video);
-                    // Round 86: entries keep the LINK plus its intent tag —
-                    // a resolved stream URL expires within hours. The link
-                    // is resolved when the entry is played.
-                    let mut entry_uris = audio_direct.clone();
-                    entry_uris.extend(
-                        audio_yt.iter().map(|url| tagged_stream_link(url, StreamIntent::Audio)),
-                    );
-                    entry_uris.extend(
-                        video_uris.iter().map(|url| tagged_stream_link(url, StreamIntent::Video)),
-                    );
-                    let add_uris = entry_uris.clone();
-                    section = section.item(
-                        "Add to playlist",
-                        move |ctx| {
-                            let radio_playlist = ctx.config.radio.playlist.clone();
-                            let (uris, playlists) = ctx
-                                .query_sync(move |client| {
-                                    let playlists = client
-                                        .picker_playlists(&radio_playlist)?
-                                        .into_iter()
-                                        .map(|p| p.name)
-                                        .collect::<Vec<_>>();
-                                    Ok((add_uris.clone(), playlists))
-                                })?;
-                            if playlists.is_empty() {
-                                status_warn!("No playlists yet — use 'Create Playlist'");
-                                return Ok(());
-                            }
-                            modal!(
-                                ctx, SelectModal::builder().ctx(ctx).options(playlists)
-                                .confirm_label("Add").title("Select a playlist")
-                                .on_confirm(move |ctx, selected, _idx| {
-                                    ctx.command(move |client| {
-                                        client.add_to_playlist_multiple(&selected, uris)?;
-                                        Ok(())
-                                    });
-                                    Ok(())
-                                }).build()
-                            );
-                            Ok(())
-                        },
-                    );
-                    let create_uris = entry_uris;
-                    section = section.item(
-                        "Create Playlist",
-                        move |ctx| {
-                            modal!(
-                                ctx, InputModal::new(ctx).title("Create playlist")
-                                .confirm_label("Save").input_label("Playlist name:")
-                                .on_confirm(move |ctx, value| {
-                                    let name = value.to_owned();
-                                    let uris = create_uris.clone();
-                                    ctx.command(move |client| {
-                                        client.create_playlist(&name, uris)?;
-                                        Ok(())
-                                    });
-                                    Ok(())
-                                })
-                            );
-                            Ok(())
-                        },
-                    );
+                        });
+                        append_sub.add_item("Cancel", |_ctx| Ok(()));
+                        section.add_submenu_item("Add to queue", append_sub);
+
+                        let mut add_sub =
+                            ListSection::new(ctx.config.theme.current_item_style);
+                        let add_audio = paste_audio_uris(&queue_audio);
+                        add_sub.add_item("Audio", move |ctx| {
+                            paste_add_to_playlist(ctx, add_audio)
+                        });
+                        let add_video = paste_video_uris(&video);
+                        add_sub.add_item("Video", move |ctx| {
+                            paste_add_to_playlist(ctx, add_video)
+                        });
+                        add_sub.add_item("Cancel", |_ctx| Ok(()));
+                        section.add_submenu_item("Add to playlist", add_sub);
+
+                        let mut create_sub =
+                            ListSection::new(ctx.config.theme.current_item_style);
+                        let create_audio = paste_audio_uris(&queue_audio);
+                        create_sub.add_item("Audio", move |ctx| {
+                            paste_create_playlist(ctx, create_audio)
+                        });
+                        let create_video = paste_video_uris(&video);
+                        create_sub.add_item("Video", move |ctx| {
+                            paste_create_playlist(ctx, create_video)
+                        });
+                        create_sub.add_item("Cancel", |_ctx| Ok(()));
+                        section.add_submenu_item("Create Playlist", create_sub);
+                    } else {
+                        let play_audio = queue_audio.clone();
+                        let play_video = queue_video.clone();
+                        section = section.item(
+                            "Add to queue and play",
+                            move |ctx| {
+                                if !play_video.is_empty() {
+                                    queue_videos(ctx, &play_video, true, true);
+                                }
+                                if !play_audio.is_empty() {
+                                    enqueue_items(ctx, &play_audio, true, true)?;
+                                }
+                                Ok(())
+                            },
+                        );
+                        let append_audio = queue_audio.clone();
+                        let append_video = queue_video.clone();
+                        section = section.item(
+                            "Add to queue",
+                            move |ctx| {
+                                if !append_video.is_empty() {
+                                    queue_videos(ctx, &append_video, false, false);
+                                }
+                                if !append_audio.is_empty() {
+                                    enqueue_items(ctx, &append_audio, false, false)?;
+                                }
+                                Ok(())
+                            },
+                        );
+                        // Round 86: entries keep the LINK plus its intent tag -
+                        // a resolved stream URL expires within hours. The link
+                        // is resolved when the entry is played.
+                        let mut entry_uris = paste_audio_uris(&queue_audio);
+                        entry_uris.extend(paste_video_uris(&queue_video));
+                        let add_uris = entry_uris.clone();
+                        section = section.item("Add to playlist", move |ctx| {
+                            paste_add_to_playlist(ctx, add_uris)
+                        });
+                        let create_uris = entry_uris;
+                        section = section.item("Create Playlist", move |ctx| {
+                            paste_create_playlist(ctx, create_uris)
+                        });
+                    }
                 }
                 // (A playlist link's own `Download` row lives in its
                 // `[Playlist]` section above.)
@@ -2186,9 +2396,22 @@ fn yt_play_audio(ctx: &Ctx, url: &str) -> Result<()> {
     status_info!("Resolving YouTube link…");
     Ok(())
 }
-/// Add all items to the queue: direct files/URLs immediately, YouTube-style
-/// links after their streams are resolved on the work thread. With `play`
-/// the first inserted item starts playing immediately.
+/// Add all items to the queue in one MPD enqueue call.
+///
+/// Round 91: a pasted YouTube-style link is queued **verbatim** as its
+/// tagged audio link (`watch?v=ID#s2u-audio`) - the shape a stored playlist
+/// entry already has - so every row shows up immediately and nothing waits
+/// for yt-dlp. A link that sat unresolved for seconds looked like a hang and
+/// users pasted it again, which queued it twice. The link is resolved when
+/// its entry is played: `play_queue_song` for the Queue tab's Enter and the
+/// event loop for an entry MPD started on its own (both call
+/// [`resolve_tagged_queue_entry`]).
+///
+/// With `play` the first queued item starts playing. When that item is such
+/// a link MPD cannot open it, so its autoplay is skipped and the entry is
+/// resolved + replaced as soon as the enqueue has landed
+/// ([`YtAction::ReplaceAndPlay`]): the rows appear while yt-dlp runs and
+/// playback starts once the stream is there.
 fn enqueue_items(
     ctx: &Ctx,
     items: &[PastedItem],
@@ -2198,66 +2421,189 @@ fn enqueue_items(
     let has_current = ctx.find_current_song_in_queue().is_some();
     let position = (after_current && has_current)
         .then_some(QueuePosition::RelativeAdd(0));
-    let autoplay_idx = play
-        .then(|| {
-            ctx.find_current_song_in_queue()
-                .map(|(idx, _)| idx + 1)
-                .unwrap_or_else(|| ctx.queue.len())
-        });
-    let (direct, yt): (Vec<String>, Vec<String>) = items
-        .iter()
-        .fold(
-            (Vec::new(), Vec::new()),
-            |(mut direct, mut yt), item| match item {
-                PastedItem::File(path) => {
-                    direct.push(mpd_addable_path(path));
-                    (direct, yt)
-                }
-                PastedItem::VideoFile(path) => {
-                    direct.push(mpd_addable_path(path));
-                    (direct, yt)
-                }
-                PastedItem::Url(url) | PastedItem::VideoUrl(url) => {
-                    direct.push(url.clone());
-                    (direct, yt)
-                }
-                PastedItem::Yt(url) => {
-                    yt.push(url.clone());
-                    (direct, yt)
-                }
-                PastedItem::Torrent(_) | PastedItem::Magnet(_) => (direct, yt),
-            },
-        );
-    if !direct.is_empty() {
-        let enqueue: Vec<Enqueue> = direct
-            .iter()
-            .cloned()
-            .map(|path| Enqueue::File { path })
-            .collect();
-        ctx.command(move |client| {
-            client.enqueue_multiple(enqueue, autoplay_idx, position, false)?;
-            Ok(())
-        });
+    // Round 91: every item keeps its pasted order, and a web stream joins
+    // the same list as its tagged audio link.
+    let mut uris: Vec<String> = Vec::new();
+    let mut links: Vec<String> = Vec::new();
+    for item in items {
+        match item {
+            PastedItem::File(path) | PastedItem::VideoFile(path) => {
+                uris.push(mpd_addable_path(path));
+            }
+            PastedItem::Url(url) | PastedItem::VideoUrl(url) => uris.push(url.clone()),
+            PastedItem::Yt(url) => {
+                let tagged = tagged_stream_link(url, StreamIntent::Audio);
+                links.push(tagged.clone());
+                uris.push(tagged);
+            }
+            PastedItem::Torrent(_) | PastedItem::Magnet(_) => {}
+        }
     }
-    if !yt.is_empty() {
-        let action = if play {
-            YtAction::AddAfterCurrentAndPlay
+    if uris.is_empty() {
+        return Ok(());
+    }
+    let count = uris.len();
+    let has_links = !links.is_empty();
+    // The index the first inserted item lands on: `play` starts it (after
+    // the current entry with `after_current`, else at the end of the queue)
+    // and the link lookup below reads it back.
+    let insert_idx = play.then(|| {
+        ctx.find_current_song_in_queue()
+            .map(|(idx, _)| idx + 1)
+            .unwrap_or_else(|| ctx.queue.len())
+    });
+    // MPD would fail on a tagged link, so its autoplay is left to the
+    // resolve below when that link is the first queued item (Round 91).
+    let first_is_link = uris.first().is_some_and(|uri| links.contains(uri));
+    let autoplay_idx = if first_is_link { None } else { insert_idx };
+    // Round 91: only the paste row's "play" arm starts playback. Choosing
+    // "Add to queue" must leave the raw link in the queue (it resolves when
+    // the entry is played) - resolving here played a row the user only
+    // wanted queued (validated live: status "Resolving the stream...", the
+    // entry replaced by a googlevideo URL and MPD playing it).
+    let first_link = (play && first_is_link).then(|| links[0].clone());
+    let enqueue: Vec<Enqueue> = uris
+        .iter()
+        .cloned()
+        .map(|path| Enqueue::File { path })
+        .collect();
+    ctx.command(move |client| {
+        client.enqueue_multiple(enqueue, autoplay_idx, position, false)?;
+        // The rows are in the queue now (the generic "Added N item(s)" line
+        // is already written): say what happens to the links, so the rows
+        // are not mistaken for a stuck paste (Round 91).
+        if has_links && !(play && first_is_link) {
+            status_info!(
+                "{count} item(s) queued - the stream link(s) resolve when played"
+            );
+        }
+        Ok(())
+    });
+    if let Some(tagged) = first_link {
+        // Round 91: the row exists now - find the id it was given (the query
+        // is queued behind the enqueue command) and resolve it, so the paste
+        // row's "play" arm starts playback without waiting for yt-dlp.
+        let lookup = tagged.clone();
+        let inserted = ctx.query_sync(move |client| {
+            let songs = client.playlist_info()?.unwrap_or_default();
+            let song = insert_idx
+                .and_then(|idx| songs.get(idx))
+                .filter(|song| song.file == lookup)
+                .or_else(|| songs.iter().find(|song| song.file == lookup));
+            Ok(song.map(|song| song.id))
+        });
+        if let Ok(Some(song_id)) = inserted {
+            resolve_tagged_queue_entry(ctx, &tagged, song_id);
         } else {
-            YtAction::Append
-        };
-        let count = yt.len();
-        let _ = ctx
-            .work_sender
-            .send(WorkRequest::ResolveYtStreams {
-                urls: yt,
-                action,
-            })
-            .map_err(|err| {
-                anyhow::anyhow!("Failed to request stream resolution: {err}")
-            })?;
-        status_info!("Resolving YouTube link{}…", if count == 1 { "" } else { "s" });
+            status_warn!("Cannot find the queued stream entry to resolve");
+        }
     }
     Ok(())
+}
+/// Round 91: resolve a queue entry that is still a pasted stream **link**
+/// (`watch?v=ID#s2u-audio`) - the Queue tab's Enter on such an entry, or MPD
+/// starting one on its own (media keys, `next`, a restored queue). The link
+/// is resolved and the entry replaced in place with its stream, which starts
+/// playing ([`YtAction::ReplaceAndPlay`]).
+///
+/// The replacement entry carries the resolved googlevideo URL, never a
+/// tagged link, so one row cannot resolve twice. The
+/// `ctx.pending_stream_resolve` marker keeps the request to **one per queue
+/// entry**, which matters because MPD keeps reporting the unplayable link as
+/// the current song until the replacement lands, and because the paste row's
+/// "play" arm asks for the entry it just queued. `false` means nothing was
+/// sent (not a tagged audio link, or its resolve is already pending).
+/// Round 91b: how long a cached resolve may be reused for a play. The
+/// signed stream URL is valid for hours; the bound only keeps a play from
+/// reusing a URL that has been sitting around long enough to be a gamble,
+/// and a miss simply resolves the link again.
+const CACHED_RESOLVE_MAX_AGE_SECS: u64 = 30 * 60;
+
+/// Seconds since the Unix epoch.
+fn now_epoch_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// The `expire=` epoch of a googlevideo stream URL, when it carries one.
+fn stream_url_expire(url: &str) -> Option<i64> {
+    url.split("expire=").nth(1)?.split('&').next()?.parse::<i64>().ok()
+}
+
+/// Round 91b: the cached resolve of `link` while it is still usable - the
+/// entry the paste popup's background resolve (round 88), an earlier play,
+/// or a stored playlist entry put in `<cache_dir>/yt-info.json`. Playing a
+/// queued link then starts immediately instead of waiting for yt-dlp again.
+/// `None` when the link is unknown, the entry has no age (written before
+/// this field existed), it is older than
+/// [`CACHED_RESOLVE_MAX_AGE_SECS`], or its signed URL has expired.
+fn fresh_cached_stream_info(
+    ctx: &Ctx,
+    link: &str,
+) -> Option<crate::shared::ytdlp::YtStreamInfo> {
+    let info = {
+        let cache = ctx.yt_info.borrow();
+        cache
+            .get(link)
+            .cloned()
+            .or_else(|| cache.values().find(|info| info.original_url == link).cloned())
+    }?;
+    if info.url.is_empty() {
+        return None;
+    }
+    let Some(resolved_at) = info.resolved_at else {
+        return None;
+    };
+    let now = now_epoch_secs();
+    if now.saturating_sub(resolved_at) > CACHED_RESOLVE_MAX_AGE_SECS {
+        log::debug!(link = link; "Cached stream resolve is too old to reuse");
+        return None;
+    }
+    if let Some(expire) = stream_url_expire(&info.url)
+        && expire <= now as i64
+    {
+        log::debug!(link = link; "Cached stream resolve has expired; resolving again");
+        return None;
+    }
+    Some(info)
+}
+
+pub fn resolve_tagged_queue_entry(ctx: &Ctx, file: &str, song_id: u32) -> bool {
+    let Some((link, intent)) = tagged_stream_entry(file) else {
+        return false;
+    };
+    if !intent.is_audio() {
+        return false;
+    }
+    {
+        let mut pending = ctx.pending_stream_resolve.borrow_mut();
+        // Keep the marker queue-sized: a replaced entry stops matching.
+        pending.retain(|(uri, id)| {
+            ctx.queue.iter().any(|song| song.id == *id && song.file == *uri)
+        });
+        if !pending.insert((file.to_owned(), song_id)) {
+            return false;
+        }
+    }
+    // Round 91b: reuse a fresh resolve (the paste popup already resolved
+    // this link, or an earlier play did) so the stream starts at once.
+    if let Some(info) = fresh_cached_stream_info(ctx, &link) {
+        log::debug!(link = link.as_str(); "Reusing the cached stream resolve for a queued entry");
+        status_info!("Playing the resolved stream…");
+        apply_resolved_streams(ctx, vec![info], YtAction::ReplaceAndPlay(song_id), Vec::new());
+        return true;
+    }
+    if let Err(err) = ctx.work_sender.send(WorkRequest::ResolveYtStreams {
+        urls: vec![link],
+        action: YtAction::ReplaceAndPlay(song_id),
+    }) {
+        log::error!(error:? = err; "Failed to request stream resolution");
+        return false;
+    }
+    status_info!("Resolving the stream…");
+    true
 }
 /// Round 74 (74-1): remember the start offsets carried by the pasted links
 /// for the streams that are about to be played through MPD.
@@ -2293,6 +2639,14 @@ pub fn apply_resolved_streams(
 ) {
     if info.is_empty() {
         return;
+    }
+    // Round 91b: stamp the resolve so a later play of the same link can
+    // reuse it ([`fresh_cached_stream_info`]) instead of running yt-dlp
+    // again.
+    let mut info = info;
+    let resolved_at = now_epoch_secs();
+    for item in &mut info {
+        item.resolved_at = Some(resolved_at);
     }
     {
         let mut yt_info = ctx.yt_info.borrow_mut();
@@ -2398,6 +2752,19 @@ pub fn apply_resolved_streams(
             status_info!("Appended {count} item(s) to the queue");
         }
         YtAction::ReplaceAndPlay(song_id) => {
+            // Round 91: the entry is still a tagged link when this is the
+            // **first** play of a pasted stream (the Queue tab's Enter or an
+            // MPD advance), not an expired signed URL. Such an entry never
+            // played, so a pasted start offset (`?t=90`) still has to be
+            // armed; the expired-URL case deliberately is not (see
+            // `arm_start_offsets`).
+            let first_play = ctx.queue.iter().any(|song| {
+                song.id == song_id
+                    && crate::shared::ytdlp::tagged_stream_entry(&song.file).is_some()
+            });
+            if first_play {
+                arm_start_offsets(ctx, &info);
+            }
             let url = urls[0].clone();
             ctx.command(move |client| {
                 let position = client
@@ -2408,7 +2775,14 @@ pub fn apply_resolved_streams(
                 client.play_id(new_id)?;
                 Ok(())
             });
-            status_info!("Stream URL expired — re-resolved from the original link");
+            status_info!(
+                "{}",
+                if first_play {
+                    "Resolved the stream — playing it"
+                } else {
+                    "Stream URL expired — re-resolved from the original link"
+                }
+            );
         }
         YtAction::AddToVideoQueue
         | YtAction::AppendVideoQueue
@@ -2637,6 +3011,10 @@ pub fn write_mpv_mpris_state(ctx: &Ctx) {
         .mpv
         .art_path
         .as_ref()
+        // Round 91: never advertise a poster that is no longer on disk - the
+        // media controls would otherwise keep a dead file:// URL until the
+        // next fetch.
+        .filter(|p| p.exists())
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_default();
     let socket = ctx
@@ -2660,11 +3038,21 @@ pub fn write_mpv_mpris_state(ctx: &Ctx) {
     let duration = if ctx.mpv.duration > 0.0 {
         ctx.mpv.duration
     } else {
-        ctx.mpv
+        let entry_duration = ctx
+            .mpv
             .playlist
             .borrow()
             .get(ctx.mpv.playlist_pos.get().unwrap_or(0))
-            .and_then(|e| e.duration)
+            .and_then(|e| e.duration);
+        entry_duration
+            // Round 92: mpv reports no duration for the first seconds of a
+            // resolved stream (the DASH/HLS manifest has not been parsed
+            // yet), so the media controls showed a dead timeline until mpv
+            // learned the length. The resolve cache already holds the real
+            // duration (the link was resolved before playback), so use it
+            // for the entry that is playing - keyed to that entry's URL,
+            // never to the previous video.
+            .or_else(|| mpv_yt_info(ctx).and_then(|info| info.duration))
             .unwrap_or(0.0)
     };
     let state = serde_json::json!(
@@ -2974,3 +3362,135 @@ pub fn handle_paste(ctx: &Ctx, text: &str) -> bool {
     true
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A temp dir with files to paste; `None` when it cannot be created.
+    struct TempDir(std::path::PathBuf);
+
+    impl TempDir {
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "s2udio-paste-{name}-{}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&dir).expect("temp dir");
+            Self(dir)
+        }
+
+        /// Create an empty file and return its absolute path.
+        fn file(&self, name: &str) -> String {
+            let path = self.0.join(name);
+            std::fs::write(&path, b"").expect("temp file");
+            path.to_string_lossy().into_owned()
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn spaced_path_is_one_token() {
+        // Round 90: dragging (or pasting) an unquoted path with spaces did
+        // nothing because the tokenizer split it. The whole line is now
+        // tried as one path when the split found nothing.
+        let dir = TempDir::new("spaced");
+        let path = dir.file("my song.flac");
+        assert_eq!(parse_paste(&path), vec![PastedItem::File(path.clone())]);
+        // Leading directories contain spaces too.
+        assert_eq!(
+            parse_paste(&format!("  {path}  ")),
+            vec![PastedItem::File(path)]
+        );
+    }
+
+    #[test]
+    fn quoted_spaced_path_is_one_token() {
+        let dir = TempDir::new("quoted");
+        let path = dir.file("a song with spaces.flac");
+        assert_eq!(
+            parse_paste(&format!("\"{path}\"")),
+            vec![PastedItem::File(path.clone())]
+        );
+        assert_eq!(
+            parse_paste(&format!("'{path}'")),
+            vec![PastedItem::File(path.clone())]
+        );
+        // Two quoted paths on one line stay two items.
+        let other = dir.file("second song.mp3");
+        assert_eq!(
+            parse_paste(&format!("\"{path}\" \"{other}\"")),
+            vec![PastedItem::File(path), PastedItem::File(other)]
+        );
+    }
+
+    #[test]
+    fn file_uri_decodes_percent_escapes() {
+        let dir = TempDir::new("uri");
+        let path = dir.file("uri song.flac");
+        let encoded = path.replace(' ', "%20");
+        assert_eq!(
+            parse_paste(&format!("file://{encoded}")),
+            vec![PastedItem::File(path)]
+        );
+        // UTF-8 escapes decode to the original characters.
+        let utf8 = dir.file("M\u{e4}rchen.flac");
+        let encoded = utf8.replace('\u{e4}', "%C3%A4");
+        assert_eq!(
+            parse_paste(&format!("file://{encoded}")),
+            vec![PastedItem::File(utf8)]
+        );
+    }
+
+    #[test]
+    fn plain_path_decodes_percent_escapes() {
+        let dir = TempDir::new("plain");
+        let path = dir.file("plain song.flac");
+        assert_eq!(
+            parse_paste(&path.replace(' ', "%20")),
+            vec![PastedItem::File(path.clone())]
+        );
+        // A malformed escape is left alone instead of being mangled.
+        let weird = dir.file("100% song.flac");
+        assert_eq!(
+            parse_paste(&weird.replace(' ', "%20")),
+            vec![PastedItem::File(weird)]
+        );
+    }
+
+    #[test]
+    fn backslash_escaped_path_still_works() {
+        // Kitty's legacy drag&drop escaping (`\ ` for a space).
+        let dir = TempDir::new("backslash");
+        let path = dir.file("escaped song.flac");
+        let escaped = path.replace(' ', "\\ ");
+        assert_eq!(parse_paste(&escaped), vec![PastedItem::File(path)]);
+    }
+
+    #[test]
+    fn multi_item_paste_keeps_every_item() {
+        // One URL plus one spaced path: the whole-line fallback must not
+        // swallow the URL's own line.
+        let dir = TempDir::new("multi");
+        let path = dir.file("another song.flac");
+        let text = format!("https://example.com/song.mp3\n{path}");
+        assert_eq!(
+            parse_paste(&text),
+            vec![
+                PastedItem::Url("https://example.com/song.mp3".to_owned()),
+                PastedItem::File(path),
+            ]
+        );
+    }
+
+    #[test]
+    fn prose_with_spaces_stays_unrecognized() {
+        // Guard: a chat line must never be read as one long path.
+        assert!(parse_paste("hello there, how are you today?").is_empty());
+        assert!(parse_paste("no such audio file here.flac").is_empty());
+    }
+}

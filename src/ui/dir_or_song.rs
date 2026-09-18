@@ -488,3 +488,38 @@ impl CmpByProp {
         }
     }
 }
+
+/// Round 89: a borrowed view of a `DirOrSong` used by the "show info" panel
+/// builder in `src/ui/song_list.rs` — a `DirOrSong` yields itself, a `Song`
+/// yields its song half. Keeping the enum here (instead of a new trait per
+/// pane item type) means every song-list pane shares one info-row path.
+pub(crate) enum DirOrSongRef<'a> {
+    Song(&'a Song),
+    /// A directory / stored playlist / MPD-side grouping, with the path the
+    /// "show info" panel reports.
+    Dir { path: &'a str },
+}
+/// Round 89: the item types the song-list panes carry convert to the
+/// borrowed `DirOrSongRef` view above.
+pub(crate) trait AsDirOrSong {
+    fn as_dir_or_song(&self) -> DirOrSongRef<'_>;
+}
+impl AsDirOrSong for Song {
+    fn as_dir_or_song(&self) -> DirOrSongRef<'_> {
+        DirOrSongRef::Song(self)
+    }
+}
+impl AsDirOrSong for DirOrSong {
+    fn as_dir_or_song(&self) -> DirOrSongRef<'_> {
+        match self {
+            DirOrSong::Song(song) => DirOrSongRef::Song(song),
+            // A stored playlist / MPD-side grouping has no `full_path`; its
+            // MPD name is all the row owns.
+            DirOrSong::Dir { name, full_path, .. } => {
+                DirOrSongRef::Dir {
+                    path: if full_path.is_empty() { name } else { full_path },
+                }
+            }
+        }
+    }
+}

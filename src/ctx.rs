@@ -194,6 +194,13 @@ pub struct Ctx {
     /// fast status cadence would otherwise repeat.
     pub(crate) pending_start_seek:
         RefCell<HashMap<String, (f64, u8, Option<std::time::Instant>)>>,
+    /// Round 91: the `(tagged link, song id)` pairs whose resolve-and-replace
+    /// has already been requested - the Queue tab's Enter on a pasted stream
+    /// link, or MPD starting one on its own. MPD keeps reporting the
+    /// unplayable link as the current song until the replacement lands, so
+    /// this keeps the request to one per queue entry (`resolve_tagged_queue_entry`
+    /// prunes it against the queue on every insert).
+    pub(crate) pending_stream_resolve: RefCell<HashSet<(String, u32)>>,
     /// Song file -> chapter markers (YouTube videos, Jellyfin items, local
     /// files with embedded chapters). Shown in the Queue tab via the
     /// Queue / Chapters toggle.
@@ -339,6 +346,12 @@ pub struct Ctx {
     /// `PopModal` drops the modal without running its close hook, so the
     /// caller also clears the scan state itself).
     pub(crate) paste_modal_id: Cell<Option<crate::shared::id::Id>>,
+    /// Round 89: MPD's own `music_directory`, read once over a unix-socket
+    /// connection (`config` is TCP-restricted). The `[File]` section of the
+    /// detailed "show info" panel resolves a song URI to its real path with
+    /// this first, before falling back to the mpd.conf candidates. `None`
+    /// when MPD serves over TCP, or reports no music directory.
+    pub(crate) mpd_music_directory: Option<String>,
 }
 #[bon]
 impl Ctx {
@@ -354,6 +367,11 @@ impl Ctx {
         >,
     ) -> Result<Self> {
         let supported_commands: HashSet<String> = client.supported_commands.clone();
+        // Round 89: MPD's own music_directory, read once over the socket
+        // connection — the detailed "show info" panel resolves a song URI to
+        // its real path with it (mpd.conf parsing is only the fallback,
+        // because `config` is TCP-restricted and the file may not exist).
+        let mpd_music_directory = client.config().map(|config| config.music_directory.clone());
         let stickers_supported = if supported_commands.contains("sticker") {
             StickersSupport::Supported
         } else {
@@ -417,6 +435,7 @@ impl Ctx {
             mpv: crate::core::mpv::MpvSession::default(),
             yt_info: RefCell::new(yt_info),
             pending_start_seek: RefCell::new(HashMap::new()),
+            pending_stream_resolve: RefCell::new(HashSet::new()),
             chapters: RefCell::new(HashMap::new()),
             queue_tab: Cell::new(QueueTabMode::Audio),
             video_playlist: RefCell::new(Vec::new()),
@@ -441,6 +460,7 @@ impl Ctx {
             paste_modal_items: RefCell::new(None),
             paste_modal_id: Cell::new(None),
             paste_chapter_warm: RefCell::new(HashSet::new()),
+            mpd_music_directory,
         };
         if let Some((_, song)) = ctx.find_current_song_in_queue() {
             if let Some(entry) = ctx.yt_info.borrow().get(&song.file) {

@@ -37,7 +37,8 @@ use crate::{
         input::InputResultEvent,
         modals::{
             confirm_modal::{Action, ConfirmModal},
-            info_list_modal::InfoListModal, menu::create_add_modal,
+            info_list_modal::{InfoListModal, INFO_COLUMN_WIDTHS, song_info},
+            menu::create_add_modal,
             select_modal::SelectModal,
         },
         panes::queue_header::QueueHeaderPane, song_list::SongListCore,
@@ -122,12 +123,22 @@ fn resolved_stream_expired(file: &str) -> bool {
         .unwrap_or(0);
     expire < now
 }
-/// Play a queue song. A resolved YouTube stream whose signed URL expired
-/// cannot be played as-is: when the cached info still knows its original
-/// link, the link is re-resolved and the dead entry replaced in place
-/// ([`YtAction::ReplaceAndPlay`]); otherwise the failure is explained
-/// instead of failing silently in MPD.
+/// Play a queue song. Round 91: a pasted stream **link**
+/// (`watch?v=ID#s2u-audio`) is queued as the link and has no stream URL yet,
+/// so playing it resolves the link and replaces the entry in place - the
+/// paste itself never waits for yt-dlp. A resolved YouTube stream whose
+/// signed URL expired cannot be played as-is either: when the cached info
+/// still knows its original link, the link is re-resolved and the dead entry
+/// replaced in place ([`YtAction::ReplaceAndPlay`]); otherwise the failure is
+/// explained instead of failing silently in MPD.
 fn play_queue_song(song: &crate::mpd::commands::Song, ctx: &Ctx) {
+    // Round 91: the entry holds the link, not a stream (the only resolution
+    // request for it - the guard inside the helper absorbs a second one from
+    // the event loop's MPD-driven path).
+    if crate::shared::ytdlp::tagged_stream_entry(&song.file).is_some() {
+        crate::ui::modals::paste::resolve_tagged_queue_entry(ctx, &song.file, song.id);
+        return;
+    }
     if resolved_stream_expired(&song.file) {
         let original = ctx
             .yt_info
@@ -184,7 +195,13 @@ impl QueuePane {
         ctx.queue
             .iter()
             .filter(|song| {
+                // Round 91: a pasted stream link is queue content from the
+                // moment it is queued, before any stream exists - the yt-info
+                // cache only knows it once it has been played.
+                let tagged_link = crate::shared::ytdlp::tagged_stream_entry(&song.file)
+                    .is_some();
                 let hidden_stream = crate::ui::panes::radio::is_stream_url(&song.file)
+                    && !tagged_link
                     && !ctx.yt_info.borrow().contains_key(&song.file);
                 !hidden_stream && Some(song.id) != temp_play
             })
@@ -1666,9 +1683,11 @@ impl Pane for QueuePane {
                 }
                 CommonAction::ShowInfo => {
                     if let Some(selected_song) = self.queue.selected() {
+                        // Round 89: the detailed panel (metadata, audio,
+                        // file, queue, stream, chapters, lyrics, stickers).
                         modal!(
-                            ctx, InfoListModal::builder().rows(selected_song)
-                            .title("Song info").column_widths(& [30, 70]).build()
+                            ctx, InfoListModal::builder().rows(song_info(ctx, selected_song))
+                            .title("Song info").column_widths(INFO_COLUMN_WIDTHS).build()
                         );
                     } else {
                         status_error!("No song selected");

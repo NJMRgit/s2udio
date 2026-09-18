@@ -196,6 +196,13 @@ fn main_task<B: Backend + std::io::Write>(
     // session is treated as ended (needed for reattached sessions, where no
     // launcher thread exists to send MpvSessionEnded when mpv exits).
     let mut mpv_stale_ticks = 0u8;
+    // Round 91: when the current mpv session first went active, and how long
+    // a missing/unreachable socket is tolerated after that. SVP's mpv takes
+    // seconds to create its IPC socket, while the 100 ms poll reached the
+    // 5-tick limit in 500 ms - a healthy session was torn down (and with it
+    // the MPRIS state file) while the video kept playing.
+    let mut mpv_session_since: Option<Instant> = None;
+    const MPV_START_GRACE: Duration = Duration::from_secs(10);
 
     // A previous s2udio instance may have left mpv playing (mpv survives the
     // app's exit; the standalone tracker daemon keeps the MPRIS state + the
@@ -713,8 +720,12 @@ fn main_task<B: Backend + std::io::Write>(
                 }
                 AppEvent::MpvPoll => {
                     if !ctx.mpv.active {
+                        mpv_session_since = None;
+                        mpv_stale_ticks = 0;
                         continue;
                     }
+                    let session_age =
+                        mpv_session_since.get_or_insert_with(Instant::now).elapsed();
                     // Keep the MPRIS bridge in sync (title/art/position);
                     // written before the socket is even up so the daemon
                     // never sees a missing state file.
@@ -724,9 +735,13 @@ fn main_task<B: Backend + std::io::Write>(
                         // instance reattached to there is no launcher thread
                         // to send MpvSessionEnded, so count failures and
                         // tear the session down ourselves after a few.
-                        mpv_stale_ticks += 1;
-                        if mpv_stale_ticks >= 5 {
-                            let _ = ctx.app_event_sender.send(AppEvent::MpvSessionEnded);
+                        if session_age >= MPV_START_GRACE {
+                            mpv_stale_ticks += 1;
+                            if mpv_stale_ticks >= 5 {
+                                let _ = ctx
+                                    .app_event_sender
+                                    .send(AppEvent::MpvSessionEnded);
+                            }
                         }
                         render_wanted = true;
                         continue;
@@ -737,9 +752,13 @@ fn main_task<B: Backend + std::io::Write>(
                     else {
                         // Socket file exists but mpv is unreachable: same as
                         // above (the stale file can outlive mpv).
-                        mpv_stale_ticks += 1;
-                        if mpv_stale_ticks >= 5 {
-                            let _ = ctx.app_event_sender.send(AppEvent::MpvSessionEnded);
+                        if session_age >= MPV_START_GRACE {
+                            mpv_stale_ticks += 1;
+                            if mpv_stale_ticks >= 5 {
+                                let _ = ctx
+                                    .app_event_sender
+                                    .send(AppEvent::MpvSessionEnded);
+                            }
                         }
                         render_wanted = true;
                         continue;
@@ -1616,6 +1635,39 @@ fn main_task<B: Backend + std::io::Write>(
                             } else if last_reported_mpd_error.take().is_some() {
                                 status_info!("MPD: error cleared — MPD is ready");
                             }
+                            // Round 91: MPD cannot open a queued stream
+                            // **link** (the `watch?v=ID#s2u-audio`
+                            // placeholder a queued web stream starts as): it
+                            // reports the failed decode in `error:` and leaves
+                            // NO current song, so the song-id hooks never see
+                            // that entry and the queue would stall silently.
+                            // Recover here: the link named by the error is
+                            // resolved and its entry replaced in place, which
+                            // plays it. The generic MPD warning is suppressed
+                            // for this case (the link was never something MPD
+                            // was meant to open).
+                            let tagged_error_link = ctx
+                                .status
+                                .error
+                                .as_deref()
+                                .and_then(|err| err.split('"').nth(1))
+                                .filter(|uri| {
+                                    crate::shared::ytdlp::tagged_stream_entry(uri).is_some()
+                                })
+                                .map(str::to_owned)
+                                .and_then(|uri| {
+                                    ctx.queue
+                                        .iter()
+                                        .find(|song| song.file == uri)
+                                        .map(|song| (uri.clone(), song.id))
+                                });
+                            if let Some((uri, song_id)) = tagged_error_link
+                                && crate::ui::modals::paste::resolve_tagged_queue_entry(
+                                    &ctx, &uri, song_id,
+                                )
+                            {
+                                last_reported_mpd_error = ctx.status.error.clone();
+                            }
                             let new_playlist = ctx.status.lastloadedplaylist.as_ref();
                             let mut song_changed = false;
 
@@ -1697,6 +1749,13 @@ fn main_task<B: Backend + std::io::Write>(
                             // armed offset now that the status reports the
                             // stream playing.
                             apply_pending_start_seek(&ctx);
+
+                            // Round 91: MPD can land on the queue entry of a
+                            // pasted stream that has not been resolved yet
+                            // (media keys, `next`, a restored queue); it
+                            // cannot open the link, so the entry is resolved
+                            // and replaced once — the replacement plays.
+                            resolve_tagged_current_song(&ctx);
 
                             // The mpv video / MPD audio UI-source switch
                             // (music starts or stops while the video is
@@ -2393,6 +2452,25 @@ const MAX_START_SEEK_ATTEMPTS: u8 = 20;
 /// only reflects a seek a little after it lands — without this the retry
 /// would issue ~20 seeks into the first fraction of a second.
 const START_SEEK_RETRY_INTERVAL: Duration = Duration::from_millis(500);
+
+/// Round 91: resolve the queue entry of a pasted stream link that MPD
+/// started on its own (a media-key `next`, `mpc next`, a queue restored from
+/// MPD's state): the entry is still `watch?v=ID#s2u-audio`, which MPD cannot
+/// open, so the link is resolved and the entry replaced in place, and the
+/// replacement plays. Runs on every status update because MPD keeps the
+/// unplayable link as the current song until the replacement lands;
+/// `resolve_tagged_queue_entry` fires once per queue entry and is the same
+/// call the Queue tab's Enter makes, so the two paths cannot double-request
+/// (Round 91).
+fn resolve_tagged_current_song(ctx: &Ctx) {
+    let Some(songid) = ctx.status.songid else {
+        return;
+    };
+    let Some(song) = ctx.queue.iter().find(|song| song.id == songid) else {
+        return;
+    };
+    crate::ui::modals::paste::resolve_tagged_queue_entry(ctx, &song.file, song.id);
+}
 
 /// Round 74 (74-1): apply the start offset of a pasted link (`?t=90`) once
 /// its stream is actually playing.

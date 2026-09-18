@@ -47,6 +47,16 @@ pub const JF_SEASON_PLAY: &str = "jellyfin_season_play";
 /// Server-side search results (round 60 B2, `SearchHints`).
 pub const JF_SEARCH: &str = "jellyfin_search";
 const JF_PLAY: &str = "jellyfin_play";
+/// Round 92: the animated "loading" indicator on the mode-toggle row. Braille
+/// spinner frames (one column wide) plus a label; the frame is picked from
+/// wall-clock time, and `LOADING_FRAME_MS` is both the frame step and the
+/// interval of the redraw tick that keeps the spinner moving.
+const LOADING_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+const LOADING_LABEL: &str = "Loading…";
+const LOADING_FRAME_MS: u64 = 120;
+/// A tracked fetch that never reports back (dropped result, hung work
+/// thread) must not leave the indicator spinning forever.
+const LOADING_WATCHDOG: std::time::Duration = std::time::Duration::from_secs(30);
 /// Round 64: the small poster shelf between the items list and the Info
 /// box (user feedback: the poster/preview must not dominate the Info box;
 /// show a compact preview in the gap instead of a 40%-column art block).
@@ -209,6 +219,17 @@ pub struct JellyfinPane {
     /// constants: 50-col minimum tree, hidden <= 120).
     tree_args: TreeBrowserArgs,
     initialized: bool,
+    /// Round 92: library fetches in flight (views / children / search). The
+    /// loading indicator on the toggle row is up while this is > 0.
+    fetches_in_flight: u32,
+    /// When the in-flight count last changed (watchdog: a fetch that never
+    /// reports back must not leave the indicator up forever).
+    fetch_activity_at: std::time::Instant,
+    /// Scheduler id of the indicator's redraw tick (None = no tick running).
+    loading_tick: Option<crate::shared::id::Id>,
+    /// When the indicator came up (drives the spinner frame; wall clock, so
+    /// no render keeps its own animation state).
+    loading_since: Option<std::time::Instant>,
     tree_area: Rect,
     items_area: Rect,
     info_area: Rect,
@@ -294,6 +315,10 @@ impl JellyfinPane {
             temp_play_id: None,
             tree_args: ctx.config.tree_browser_args(PaneTypeDiscriminants::Jellyfin),
             initialized: false,
+            fetches_in_flight: 0,
+            fetch_activity_at: std::time::Instant::now(),
+            loading_tick: None,
+            loading_since: None,
             tree_area: Rect::default(),
             items_area: Rect::default(),
             info_area: Rect::default(),
@@ -357,76 +382,161 @@ impl JellyfinPane {
         if self.load_server(ctx).is_none() {
             return;
         }
-        let _ = ctx
-            .work_sender
-            .send(WorkRequest::FetchJellyfinViews)
-            .map_err(|err| {
-                log::error!(error:? = err; "Failed to request jellyfin views")
-            });
+        self.request_fetch(ctx, WorkRequest::FetchJellyfinViews);
+    }
+    /// Round 92: paint the last known library list from disk before the
+    /// server answers, so the Libraries tab is populated on its first frame
+    /// instead of staying blank until the fetch returns. The pane then
+    /// refreshes in the background and rewrites the cache (`JF_VIEWS`).
+    /// A cache written for another server/account is ignored; a missing or
+    /// unparsable one simply leaves the tab to fill in from the fetch.
+    fn load_cached_views(&mut self, ctx: &Ctx) {
+        if !self.views.is_empty() {
+            return;
+        }
+        let Some((base, user_id)) = self
+            .load_server(ctx)
+            .map(|server| (server.base.clone(), server.user_id.clone()))
+        else {
+            return;
+        };
+        let Some(cache) = crate::jellyfin::load_views_cache(ctx.config.cache_dir.as_deref())
+        else {
+            return;
+        };
+        if cache.views.is_empty() {
+            return;
+        }
+        // Identity check: the account must match. The server address alone
+        // is NOT enough to reject the cache — the same server is reachable
+        // through more than one address (a LAN IP and a localhost proxy),
+        // and the cached list is identical for both; a genuinely different
+        // account still invalidates it.
+        if cache.user_id != user_id {
+            log::debug!(
+                cached_user:? = cache.user_id, user:? = user_id; "Ignoring the Jellyfin views cache (different account)"
+            );
+            return;
+        }
+        if cache.server != base {
+            log::debug!(
+                cached_server:? = cache.server, server:? = base; "Showing the Jellyfin views cache from another address of the same account"
+            );
+        }
+        log::debug!(views = cache.views.len(), saved_at = cache.saved_at; "Showing the cached Jellyfin views");
+        self.views = cache.views;
+        self.rebuild_tree();
+        if self.selected.is_none() {
+            if !self.tree.is_empty() {
+                self.tree_list.select(Some(0));
+            }
+            self.populate_items();
+            self.sync_poster(ctx);
+        } else {
+            self.populate_items();
+        }
+    }
+    /// Round 92: one library fetch started — show the loading indicator and
+    /// keep a slow redraw tick alive so its spinner animates.
+    fn begin_fetch(&mut self, ctx: &Ctx) {
+        self.fetches_in_flight = self.fetches_in_flight.saturating_add(1);
+        self.fetch_activity_at = std::time::Instant::now();
+        if self.loading_since.is_none() {
+            self.loading_since = Some(std::time::Instant::now());
+        }
+        self.schedule_loading_tick(ctx);
+    }
+    /// Round 92: one tracked fetch finished (result or error).
+    fn end_fetch(&mut self, ctx: &Ctx) {
+        self.fetches_in_flight = self.fetches_in_flight.saturating_sub(1);
+        self.fetch_activity_at = std::time::Instant::now();
+        if self.fetches_in_flight == 0 {
+            self.loading_since = None;
+            if let Some(id) = self.loading_tick.take() {
+                ctx.scheduler.cancel(id);
+            }
+        }
+    }
+    /// Result ids whose fetches the loading indicator tracks (poster,
+    /// info-item and playback fetches are not part of the "library is
+    /// loading" signal).
+    fn is_tracked_fetch(id: &str) -> bool {
+        matches!(
+            id,
+            JF_VIEWS | JF_FOLDER | JF_ARTISTS | JF_ALBUMS | JF_SONGS | JF_SEARCH
+        )
+    }
+    /// Arm (and re-arm) the single redraw tick that animates the indicator.
+    fn schedule_loading_tick(&mut self, ctx: &Ctx) {
+        let id = self.loading_tick.unwrap_or_else(|| {
+            let id = crate::shared::id::new();
+            self.loading_tick = Some(id);
+            id
+        });
+        ctx.scheduler.schedule_replace(
+            id,
+            std::time::Duration::from_millis(LOADING_FRAME_MS),
+            move |(tx, _)| {
+                tx.send(crate::AppEvent::RequestRender)?;
+                Ok(())
+            },
+        );
+    }
+    /// Request one library fetch (round 92: every request goes through
+    /// here, so the loading indicator always matches what is in flight; a
+    /// send that fails clears the slot again immediately).
+    fn request_fetch(&mut self, ctx: &Ctx, request: WorkRequest) {
+        self.begin_fetch(ctx);
+        if ctx.work_sender.send(request).is_err() {
+            log::error!("Failed to request jellyfin data");
+            self.end_fetch(ctx);
+        }
     }
     /// Lazy-load the children of a node kind.
     fn ensure_loaded(&mut self, kind: &JfNodeKind, ctx: &Ctx) {
         if self.load_server(ctx).is_none() {
             return;
         }
-        let send = |ctx: &Ctx, request: WorkRequest| {
-            let _ = ctx
-                .work_sender
-                .send(request)
-                .map_err(|err| {
-                    log::error!(error:? = err; "Failed to request jellyfin data")
-                });
-        };
-        match kind {
+        let request = match kind {
             JfNodeKind::View(item) => {
                 if item.is_music_view {
-                    if !self.artists.contains_key(&item.id) {
-                        send(
-                            ctx,
-                            WorkRequest::FetchJellyfinArtists {
-                                view_id: item.id.clone(),
-                            },
-                        );
-                    }
-                } else if !self.folders.contains_key(&item.id) {
-                    send(
-                        ctx,
+                    (!self.artists.contains_key(&item.id)).then(|| {
+                        WorkRequest::FetchJellyfinArtists {
+                            view_id: item.id.clone(),
+                        }
+                    })
+                } else {
+                    (!self.folders.contains_key(&item.id)).then(|| {
                         WorkRequest::FetchJellyfinFolder {
                             parent_id: item.id.clone(),
-                        },
-                    );
+                        }
+                    })
                 }
             }
             JfNodeKind::Artist(item) => {
-                if !self.albums.contains_key(&item.id) {
-                    send(
-                        ctx,
-                        WorkRequest::FetchJellyfinAlbums {
-                            artist_id: item.id.clone(),
-                        },
-                    );
-                }
+                (!self.albums.contains_key(&item.id)).then(|| {
+                    WorkRequest::FetchJellyfinAlbums {
+                        artist_id: item.id.clone(),
+                    }
+                })
             }
             JfNodeKind::Album(item) => {
-                if !self.songs.contains_key(&item.id) {
-                    send(
-                        ctx,
-                        WorkRequest::FetchJellyfinSongs {
-                            album_id: item.id.clone(),
-                        },
-                    );
-                }
+                (!self.songs.contains_key(&item.id)).then(|| {
+                    WorkRequest::FetchJellyfinSongs {
+                        album_id: item.id.clone(),
+                    }
+                })
             }
             JfNodeKind::Folder(item) => {
-                if !self.folders.contains_key(&item.id) {
-                    send(
-                        ctx,
-                        WorkRequest::FetchJellyfinFolder {
-                            parent_id: item.id.clone(),
-                        },
-                    );
-                }
+                (!self.folders.contains_key(&item.id)).then(|| {
+                    WorkRequest::FetchJellyfinFolder {
+                        parent_id: item.id.clone(),
+                    }
+                })
             }
+        };
+        if let Some(request) = request {
+            self.request_fetch(ctx, request);
         }
     }
     /// Children of a node from whatever is loaded (None = still loading).
@@ -2084,12 +2194,7 @@ impl JellyfinPane {
         }
         self.search_pending = true;
         self.last_sent_query = query.clone();
-        let _ = ctx
-            .work_sender
-            .send(WorkRequest::FetchJellyfinSearch { query })
-            .map_err(|err| {
-                log::error!(error:? = err; "Failed to request jellyfin search")
-            });
+        self.request_fetch(ctx, WorkRequest::FetchJellyfinSearch { query });
     }
 
     /// `d`/`→`/double-click on a result: play it with the existing
@@ -2410,6 +2515,68 @@ fn render_toggle(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) {
         // and in search mode).
         let visible = self.mode == JellyfinTabMode::Libraries && self.selected.is_some();
         self.back_area = crate::ui::draw_back_button(frame, area, visible, ctx);
+        self.draw_loading(frame, area, ctx);
+    }
+    /// Round 92: the animated loading indicator, right-aligned on the
+    /// mode-toggle row (`⭘ Libraries ● Search`). It ends one blank column
+    /// left of `↰ Back` when that button is visible, degrades to the spinner
+    /// glyph alone when the label does not fit, and draws nothing at all
+    /// rather than overwriting a mode label. The redraw tick that keeps the
+    /// spinner moving is re-armed here, so the animation costs nothing while
+    /// no fetch is in flight.
+    fn draw_loading(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) {
+        let Some(since) = self.loading_since else { return };
+        if self.fetches_in_flight == 0 || area.height == 0 {
+            return;
+        }
+        // A tracked fetch that never reports back (dropped result, hung work
+        // thread) must not leave the indicator spinning forever.
+        if self.fetch_activity_at.elapsed() > LOADING_WATCHDOG {
+            log::warn!(
+                in_flight = self.fetches_in_flight; "Jellyfin fetch never reported back; clearing the loading indicator"
+            );
+            self.fetches_in_flight = 0;
+            self.loading_since = None;
+            if let Some(id) = self.loading_tick.take() {
+                ctx.scheduler.cancel(id);
+            }
+            return;
+        }
+        self.schedule_loading_tick(ctx);
+        let frame_idx = (since.elapsed().as_millis() as u64 / LOADING_FRAME_MS) as usize
+            % LOADING_FRAMES.len();
+        let spinner = LOADING_FRAMES[frame_idx];
+        // The mode labels own the left end of the row; the indicator never
+        // reaches into them.
+        let labels_end = self.toggle_areas[0]
+            .right()
+            .max(self.toggle_areas[1].right())
+            .max(area.x);
+        let right = if self.back_area.width > 0 {
+            self.back_area.x.saturating_sub(1)
+        } else {
+            area.right().saturating_sub(1)
+        };
+        let style = ctx.config.as_list_text_style();
+        let full = format!("{spinner} {LOADING_LABEL}");
+        let full_w =
+            unicode_width::UnicodeWidthStr::width(full.as_str()).min(u16::MAX as usize) as u16;
+        // One blank column of slack on either side of the indicator.
+        let (text, width) = if right >= labels_end + full_w + 2 {
+            (full, full_w)
+        } else if right >= labels_end + 2 {
+            (spinner.to_owned(), 1)
+        } else {
+            return;
+        };
+        let x = right.saturating_sub(width);
+        if x <= labels_end {
+            return;
+        }
+        frame.render_widget(
+            ratatui::widgets::Paragraph::new(text).style(style),
+            Rect { x, y: area.y, width, height: 1 },
+        );
     }
     /// Search mode (round 60 B2): `Search:` input row + separator, the
     /// scrollable results list and the info box.
@@ -2598,7 +2765,16 @@ impl Pane for JellyfinPane {
     }
     /// The mode toggle row (`⭘ Libraries ● Search`) + the `↰ Back` button.
     fn before_show(&mut self, ctx: &Ctx) -> Result<()> {
-        if !self.initialized || self.error.is_some() {
+        // Round 92: `first_show` = the tab has never been opened (or the
+        // server was dropped after a config change). The cached views are
+        // loaded before the fetch so the first frame is already populated;
+        // the fetch itself still runs in the background (stale-while-
+        // revalidate) and rewrites the cache.
+        let first_show = !self.initialized;
+        if first_show {
+            self.load_cached_views(ctx);
+        }
+        if first_show || self.error.is_some() {
             self.fetch_views(ctx);
         }
         self.initialized = true;
@@ -2841,6 +3017,12 @@ impl Pane for JellyfinPane {
         let MpdQueryResult::Any(any) = data else { return Ok(()) };
         match any.downcast::<crate::jellyfin::JellyfinResult>() {
             Ok(boxed) => {
+                // Round 92: a tracked library fetch finished (result or
+                // error alike), so its in-flight slot goes away — the last
+                // one clears the loading indicator.
+                if Self::is_tracked_fetch(id) {
+                    self.end_fetch(ctx);
+                }
                 match (*boxed, id) {
                     (crate::jellyfin::JellyfinResult::Error(_), JF_IMAGE) => {
                         self.poster.clear(ctx);
@@ -2906,6 +3088,18 @@ impl Pane for JellyfinPane {
                     (crate::jellyfin::JellyfinResult::Views(views), JF_VIEWS) => {
                         self.views = views;
                         self.error = None;
+                        // Round 92: remember the fresh list for the next
+                        // start (the first frame paints from it). A failed
+                        // refresh never reaches here, so the cache is only
+                        // ever replaced by server data.
+                        if let Some(server) = self.server.as_ref() {
+                            crate::jellyfin::save_views_cache(
+                                ctx.config.cache_dir.as_deref(),
+                                &server.base,
+                                &server.user_id,
+                                &self.views,
+                            );
+                        }
                         self.rebuild_tree();
                         if self.selected.is_none() {
                             if !self.tree.is_empty() {
