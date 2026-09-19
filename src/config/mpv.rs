@@ -136,16 +136,46 @@ pub struct Mpv {
     pub audio_lang: MpvAudioLang,
     pub subtitles: MpvSubtitleMode,
     /// The mpv binary launched for video playback — a path or a name
-    /// resolved via PATH (default `"mpv"`). Point it at SVP4's bundled
-    /// mpv (e.g. `~/.local/bin/SVP4/mpv/mpv`) to use SVP's own portable
-    /// VapourSynth + Python 3.12 stack instead of the distro's.
+    /// resolved via PATH (default `"mpv"`). Used for every launch except
+    /// the SVP one (see [`Mpv::svp_bin`]).
     pub bin: String,
-    /// SVP4 (SmoothVideo Project) support: when on, mpv is launched with
+    /// The mpv binary SVP support launches — SVP4's own bundled mpv
+    /// (default [`SVP_MPV_BIN`], `~` is expanded). Only used while
+    /// [`Mpv::svp`] is on *and* the file exists, so a user without SVP4
+    /// keeps running a plain `mpv`.
+    pub svp_bin: String,
+    /// SVP4 (SmoothVideo Project) support: when on, playback launches
+    /// SVP4's own mpv (see [`Mpv::svp_bin`]) with
     /// `--input-ipc-server=/tmp/mpvsocket` — the fixed socket SVP4's
     /// manager connects to for frame interpolation, and the socket
-    /// s2udio tracks playback over. Off (default) leaves mpv's IPC socket
-    /// to the user's own mpv.conf / scripts.
+    /// s2udio tracks playback over. Off (default) launches the configured
+    /// `bin` and leaves mpv's IPC socket to the user's own mpv.conf /
+    /// scripts.
     pub svp: bool,
+}
+/// Where SVP4 keeps its bundled mpv (the `opt.mpv` component): the player
+/// built against SVP's own portable VapourSynth + Python. The
+/// distro/pipx VapourSynth refuses SVP's SVPflow plugins ("uses API 3,
+/// which is no longer supported"), so SVP support cannot run on a system
+/// mpv — and everything outside SVP support cannot depend on SVP4 being
+/// installed.
+pub const SVP_MPV_BIN: &str = "~/SVP4/mpv/mpv";
+impl Mpv {
+    /// The binary to launch: SVP4's own mpv while SVP support is on and
+    /// installed, the configured `bin` otherwise.
+    pub fn launch_bin(&self) -> &str {
+        if self.svp {
+            if std::path::Path::new(&self.svp_bin).is_file() {
+                return &self.svp_bin;
+            }
+            log::warn!(
+                svp_bin:? = self.svp_bin,
+                bin:? = self.bin;
+                "SVP support is on but SVP4's mpv is missing - launching the configured mpv"
+            );
+        }
+        &self.bin
+    }
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(default)]
@@ -154,6 +184,9 @@ pub struct MpvFile {
     pub subtitles: Option<MpvSubtitleMode>,
     /// Override for [`Mpv::bin`]; `~` is expanded.
     pub bin: Option<String>,
+    /// Override for [`Mpv::svp_bin`]; `~` is expanded. Point it at
+    /// SVP4's bundled mpv when SVP4 lives somewhere else than `~/SVP4`.
+    pub svp_bin: Option<String>,
     /// Override for [`Mpv::svp`] (the Settings panel's "svp support"
     /// toggle; persisted to state.ron).
     pub svp: Option<bool>,
@@ -168,6 +201,11 @@ impl From<MpvFile> for Mpv {
                 .filter(|b| !b.trim().is_empty())
                 .map(|b| crate::config::utils::tilde_expand(&b).into_owned())
                 .unwrap_or_else(|| "mpv".to_owned()),
+            svp_bin: value
+                .svp_bin
+                .filter(|b| !b.trim().is_empty())
+                .map(|b| crate::config::utils::tilde_expand(&b).into_owned())
+                .unwrap_or_else(|| crate::config::utils::tilde_expand(SVP_MPV_BIN).into_owned()),
             svp: value.svp.unwrap_or(false),
         }
     }

@@ -106,13 +106,24 @@ pub struct MpvSession {
 /// The fixed mpv IPC socket. s2udio launches mpv with
 /// `--input-ipc-server=/tmp/mpvsocket` and tracks playback over it — the
 /// same socket SVP4's manager connects to for frame interpolation, so one
-/// mpv has one socket and both clients talk to it. (Legacy setups without
-/// SVP: mpvSockets.lua's per-instance `/tmp/mpvSockets/<pid>` sockets are
-/// still discovered as a fallback.)
+/// mpv has one socket and both clients talk to it. It is best-effort: the
+/// `mpvSockets.lua` script SVP4's own bundled mpv installs (SVP's
+/// `opt.mpv` component, copied into `~/.config/mpv/scripts/` by SVP's
+/// `initcfg.sh`) re-points `input-ipc-server` to
+/// `/tmp/mpvSockets/<pid>` at startup and leaves the fixed file dead —
+/// see [`LAUNCHED_MPV_PID`] and [`mpv_socket`].
 pub const MPV_SOCKET: &str = "/tmp/mpvsocket";
 /// Whether s2udio launched mpv and it is still running.
 pub static MPV_RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(
     false,
+);
+/// The pid of the mpv s2udio launched (`0` = none, e.g. a player started by
+/// hand). mpvSockets.lua names its per-instance socket after mpv's own pid,
+/// so this makes the socket of *our* player known exactly instead of
+/// guessed by mtime — the fixed `/tmp/mpvsocket` is dead whenever that
+/// script is installed (SVP4 ships it).
+pub static LAUNCHED_MPV_PID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(
+    0,
 );
 /// Pick up a live mpv session left behind by a previous s2udio instance
 /// (mpv survives the app's exit; the standalone `s2u-helper tracker`
@@ -225,18 +236,34 @@ fn detect_mpv_session_at(ctx: &mut Ctx, socket: std::path::PathBuf) -> bool {
 /// Discover the running mpv's IPC socket.
 ///
 /// Priority:
-/// 1. the fixed [`MPV_SOCKET`] socket (`/tmp/mpvsocket`) when it is live —
-///    the socket s2udio passes on launch and SVP4's manager connects to;
-/// 2. the newest per-instance socket under `/tmp/mpvSockets` (legacy
-///    mpvSockets.lua setups, or an externally launched mpv without the
-///    fixed socket);
-/// 3. the fixed path even when stale, so callers can detect the dead
+/// 1. `/tmp/mpvSockets/<pid>` of the mpv **s2udio launched** (its pid comes
+///    from [`LAUNCHED_MPV_PID`]) when it is live — with mpvSockets.lua
+///    installed (SVP4's bundled mpv does) that per-instance socket is the
+///    only live one, and knowing the pid keeps the pick exact when several
+///    mpv windows run;
+/// 2. the fixed [`MPV_SOCKET`] socket (`/tmp/mpvsocket`) when it is live —
+///    the socket s2udio passes on launch, and the live one when no
+///    mpvSockets.lua is in play;
+/// 3. the newest per-instance socket under `/tmp/mpvSockets` (an mpv
+///    started by hand, or a session left behind by an earlier s2udio);
+/// 4. the fixed path even when stale, so callers can detect the dead
 ///    socket (a stale file outlives a crashed mpv).
 pub fn mpv_socket() -> Option<PathBuf> {
-    mpv_socket_in(Path::new(MPV_SOCKET), Path::new("/tmp/mpvSockets"))
+    let pid = LAUNCHED_MPV_PID.load(std::sync::atomic::Ordering::Relaxed);
+    mpv_socket_in(
+        Path::new(MPV_SOCKET),
+        Path::new("/tmp/mpvSockets"),
+        (pid != 0).then_some(pid),
+    )
 }
-/// [`mpv_socket`] with explicit paths, split out for tests.
-fn mpv_socket_in(fixed: &Path, sockets_dir: &Path) -> Option<PathBuf> {
+/// [`mpv_socket`] with explicit paths/pid, split out for tests.
+fn mpv_socket_in(fixed: &Path, sockets_dir: &Path, launched_pid: Option<u32>) -> Option<PathBuf> {
+    if let Some(pid) = launched_pid {
+        let launched = sockets_dir.join(pid.to_string());
+        if is_live_socket(&launched) {
+            return Some(launched);
+        }
+    }
     if is_live_socket(fixed) {
         return Some(fixed.to_path_buf());
     }
@@ -1158,8 +1185,12 @@ pub fn run_mpv_playlist(
     let volume = *ctx.status.volume.value();
     let audio_lang = ctx.config.mpv.audio_lang.clone();
     let subtitles = ctx.config.mpv.subtitles.clone();
-    let mpv_bin = ctx.config.mpv.bin.clone();
     let svp = ctx.config.mpv.svp;
+    // SVP4 runs on its own mpv — SVPflow is built against SVP's bundled
+    // VapourSynth/Python and is refused by the distro/pipx builds. Every
+    // other launch uses the configured `bin` (default `"mpv"`), so s2udio
+    // never depends on SVP4 being installed.
+    let mpv_bin = ctx.config.mpv.launch_bin().to_owned();
     let client_sender = ctx.client_request_sender.clone();
     let event_sender = ctx.app_event_sender.clone();
     log::debug!(urls:?, start_index, mpv_bin:?, svp; "Launching mpv for video playback");
@@ -1211,6 +1242,10 @@ pub fn run_mpv_playlist(
             }
         };
         MPV_RUNNING.store(true, std::sync::atomic::Ordering::Relaxed);
+        // The player's own pid: mpvSockets.lua (SVP4's bundled mpv installs
+        // it) names its socket `/tmp/mpvSockets/<pid>`, which the discovery
+        // then uses instead of guessing by mtime.
+        LAUNCHED_MPV_PID.store(child.id(), std::sync::atomic::Ordering::Relaxed);
         spawn_tracker();
         let start_url = urls.get(start_index.unwrap_or(0)).cloned().unwrap_or_default();
         let _ = event_sender
@@ -1232,6 +1267,7 @@ pub fn run_mpv_playlist(
         }
         let status = child.wait();
         MPV_RUNNING.store(false, std::sync::atomic::Ordering::Relaxed);
+        LAUNCHED_MPV_PID.store(0, std::sync::atomic::Ordering::Relaxed);
         log::debug!(status:?; "mpv exited");
         // Round 59: mpv exiting non-zero on a YouTube link usually means
         // yt-dlp could not resolve a playable stream (the bgutil PO-token
@@ -1270,6 +1306,13 @@ fn spawn_tracker() {
         tracker.arg("tracker");
         if let Some(cache) = crate::shared::paths::s2udio_cache_dir() {
             tracker.env("S2U_CACHE_DIR", cache);
+        }
+        // Same socket the app tracks: the tracker must not fall back to the
+        // dead fixed path when mpvSockets.lua moved the mpv to
+        // `/tmp/mpvSockets/<pid>` (SVP4's bundled mpv does that).
+        let pid = LAUNCHED_MPV_PID.load(std::sync::atomic::Ordering::Relaxed);
+        if pid != 0 {
+            tracker.env("S2U_MPV_PID", pid.to_string());
         }
         tracker
             .stdin(std::process::Stdio::null())

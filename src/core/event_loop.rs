@@ -243,6 +243,13 @@ fn main_task<B: Backend + std::io::Write>(
         if let Err(err) = {
             let mut tracker = std::process::Command::new("s2u-helper");
             tracker.arg("tracker");
+            // Hand over the socket this instance reattached to: on a host
+            // with mpvSockets.lua (SVP4's bundled mpv installs it) the
+            // fixed /tmp/mpvsocket is dead and only the per-instance path
+            // is live.
+            if let Some(socket) = crate::core::mpv::mpv_socket() {
+                tracker.env("S2U_MPV_SOCKET", socket);
+            }
             tracker
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())

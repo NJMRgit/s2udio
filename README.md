@@ -28,9 +28,11 @@ Built with the help of Deepseek v4 Flash, pi, and prime-agent
 - play videos as audio
 - download stream/torrent
 - SVP4 (SmoothVideo Project) support — a Settings -> mpv "svp support"
-  toggle wires playback to SVP's fixed IPC socket (`/tmp/mpvsocket`), and
-  `mpv.bin` can point at SVP's bundled mpv (its own VapourSynth + Python
-  3.12) so SVPflow/RIFE frame interpolation runs without crashing mpv
+  toggle wires playback to SVP's fixed IPC socket (`/tmp/mpvsocket`) and
+  launches SVP4's own bundled mpv (config.ron `mpv.svp_bin`, default
+  `~/SVP4/mpv/mpv`), whose VapourSynth + Python the SVPflow/RIFE plugins
+  are built against. The toggle off — and any machine without SVP4 —
+  launches `mpv.bin` (default `mpv`) instead, so SVP4 stays optional
 - full mouse controls
 - sensible and intuitive key binds
 - library playlist files — Settings > MPD "show .m3u/.pls/.xspf playlists from the music library": the Playlists tab also lists playlist files found inside the MPD music library (nested album .m3u files included), ♫-marked, opened with the app's own m3u/pls/xspf parsers (Add to Queue / Replace Queue); read-only — the app never edits or deletes the library files
