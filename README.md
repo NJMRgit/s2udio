@@ -45,6 +45,8 @@ Built with the help of Deepseek v4 Flash, pi, and prime-agent
 - cava
 - mpv
 - mpd
+- wl-clipboard (Ctrl+V / middle-click clipboard reads; bracketed paste and
+  drag & drop work without it)
 - kitty* (not a hard requirement, but development and testing is focused on kitty)
 - [STTM](https://github.com/NJMRgit/STTM) - TUI supports auto theming if using my KDE theme tool.
     * planned support for following KDE accent color

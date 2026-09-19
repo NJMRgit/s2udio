@@ -371,10 +371,10 @@ def check(name, cond, detail=''):
 
 def main():
     make_shims()
-    DNF5 = 'dnf5 install -y mpd mpdris2 cava yt-dlp mpv ffmpeg python3-dbus python3-gobject python3-mutagen gcc make git curl'
-    APT = 'apt-get install -y --no-install-recommends mpd mpdris2 cava yt-dlp mpv ffmpeg python3-dbus python3-gi python3-mutagen build-essential git curl'
-    APK = 'apk add --no-cache mpd mpv yt-dlp ffmpeg python3 py3-dbus py3-gobject3 py3-mutagen py3-pip build-base git curl fftw-dev iniparser-dev ncurses-dev sdl2-dev autoconf automake libtool ncurses-terminfo-base'
-    XBPS = 'xbps-install -Sy mpd mpv yt-dlp cava ffmpeg mpDris2 python3 python3-dbus python3-gobject python3-mutagen python3-mpd2 base-devel cargo rust git curl util-linux procps-ng ncurses-term runit'
+    DNF5 = 'dnf5 install -y mpd mpdris2 cava yt-dlp mpv ffmpeg wl-clipboard python3-dbus python3-gobject python3-mutagen gcc make git curl'
+    APT = 'apt-get install -y --no-install-recommends mpd mpdris2 cava yt-dlp mpv ffmpeg wl-clipboard python3-dbus python3-gi python3-mutagen build-essential git curl'
+    APK = 'apk add --no-cache mpd mpv yt-dlp ffmpeg wl-clipboard python3 py3-dbus py3-gobject3 py3-mutagen py3-pip build-base git curl fftw-dev iniparser-dev ncurses-dev sdl2-dev autoconf automake libtool ncurses-terminfo-base'
+    XBPS = 'xbps-install -Sy mpd mpv yt-dlp cava ffmpeg wl-clipboard mpDris2 python3 python3-dbus python3-gobject python3-mutagen python3-mpd2 base-devel cargo rust git curl util-linux procps-ng ncurses-term runit'
 
     print('== arch -y (byte-identity old vs new) ==')
     r_old = run_case('arch', ['-y'], extra_env={'MOCK_USER_MPD': '1'}, old=True, mode='y')
@@ -382,7 +382,7 @@ def main():
     check('arch -y: output byte-identical', norm(r_old['out']) == norm(r_new['out']),
           f"old {len(r_old['out'])}B new {len(r_new['out'])}B")
     check('arch -y: pacman backend + installs (mpd ffmpeg cava yt-dlp)',
-          'pacman -S --needed mpd ffmpeg cava yt-dlp' in r_new['calls'])
+          'pacman -S --needed mpd ffmpeg cava yt-dlp wl-clipboard' in r_new['calls'])
     check('arch -y: AUR mpdris2-git + mpv-full via yay',
           'yay -S --needed mpdris2-git' in r_new['calls'] and 'yay -S --needed mpv-full' in r_new['calls'])
     check('arch -y: exit 0', r_new['rc'] == 0, f"rc={r_new['rc']}")
@@ -405,7 +405,7 @@ def main():
     # to the pacman backend (run_arch) even though the ID is not arch/cachyos.
     r = run_case('artix', ['-y'], extra_env={'MOCK_USER_MPD': '1'})
     check('artix: routed to pacman backend (ID_LIKE=arch)',
-          'pacman -S --needed mpd ffmpeg cava yt-dlp' in r['calls'])
+          'pacman -S --needed mpd ffmpeg cava yt-dlp wl-clipboard' in r['calls'])
     check('artix -y: AUR mpdris2-git + mpv-full via yay',
           'yay -S --needed mpdris2-git' in r['calls'] and 'yay -S --needed mpv-full' in r['calls'])
     check('artix -y: arch services path (systemctl --user)',

@@ -91,6 +91,7 @@
             pkgs.cava
             pkgs.mpdris2
             pkgs.ffmpeg
+            pkgs.wl-clipboard
             bridgePython
             pkgs.tmux
             pkgs.git

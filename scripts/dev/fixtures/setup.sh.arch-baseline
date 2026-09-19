@@ -854,8 +854,11 @@ run_arch() {
     PACMAN_NOCONFIRM=()
     [[ $ASSUME_YES -eq 1 ]] && PACMAN_NOCONFIRM=(--noconfirm)
     # ---------------------------------------------------------------------------
-    info "1/9  System packages (mpd ffmpeg cava yt-dlp)"
-    PACMAN_PKGS=(mpd ffmpeg cava yt-dlp)
+    info "1/9  System packages (mpd ffmpeg cava yt-dlp wl-clipboard)"
+    # wl-clipboard: Ctrl+V / middle-click read the clipboard through wl-paste
+    # (src/core/input.rs; xclip/xsel are the fallbacks). Bracketed paste and
+    # drag & drop work without it, but a removal silently kills Ctrl+V.
+    PACMAN_PKGS=(mpd ffmpeg cava yt-dlp wl-clipboard)
     MISSING=()
     for p in "${PACMAN_PKGS[@]}"; do
         pacman -Q "$p" >/dev/null 2>&1 || MISSING+=("$p")
@@ -1076,7 +1079,7 @@ EOF
 run_dnf5() {
     resolve_elevation
     info "Detected distro: ${DISTRO_ID:-?}${DISTRO_ID_LIKE:+ (ID_LIKE=$DISTRO_ID_LIKE)} -> dnf5 backend (Fedora; RPM Fusion free provides mpd/ffmpeg/mpv, plan §12.1)"
-    info "1/9  System packages (mpd mpdris2 cava yt-dlp mpv ffmpeg python3-dbus python3-gobject python3-mutagen + toolchain)"
+    info "1/9  System packages (mpd mpdris2 cava yt-dlp mpv ffmpeg wl-clipboard python3-dbus python3-gobject python3-mutagen + toolchain)"
     # Fedora's official repos dropped the `mpd` server — RPM Fusion free is
     # the Fedora analogue of Arch's AUR usage for mpdris2-git (plan §12.1).
     if ! rpm -q rpmfusion-free-release >/dev/null 2>&1; then
@@ -1092,7 +1095,7 @@ run_dnf5() {
     else
         ok "RPM Fusion free already enabled"
     fi
-    DNF5_PKGS=(mpd mpdris2 cava yt-dlp mpv ffmpeg python3-dbus python3-gobject python3-mutagen gcc make git curl)
+    DNF5_PKGS=(mpd mpdris2 cava yt-dlp mpv ffmpeg wl-clipboard python3-dbus python3-gobject python3-mutagen gcc make git curl)
     MISSING=()
     for p in "${DNF5_PKGS[@]}"; do
         rpm -q "$p" >/dev/null 2>&1 || MISSING+=("$p")
@@ -1129,8 +1132,8 @@ run_dnf5() {
 run_apt() {
     resolve_elevation
     info "Detected distro: ${DISTRO_ID:-?}${DISTRO_ID_LIKE:+ (ID_LIKE=$DISTRO_ID_LIKE)} -> apt backend (Debian/Ubuntu/Devuan)"
-    info "1/9  System packages (mpd mpdris2 cava yt-dlp mpv ffmpeg python3-dbus python3-gi python3-mutagen + toolchain)"
-    APT_PKGS=(mpd mpdris2 cava yt-dlp mpv ffmpeg python3-dbus python3-gi python3-mutagen build-essential git curl)
+    info "1/9  System packages (mpd mpdris2 cava yt-dlp mpv ffmpeg wl-clipboard python3-dbus python3-gi python3-mutagen + toolchain)"
+    APT_PKGS=(mpd mpdris2 cava yt-dlp mpv ffmpeg wl-clipboard python3-dbus python3-gi python3-mutagen build-essential git curl)
     MISSING=()
     for p in "${APT_PKGS[@]}"; do
         dpkg-query -W "$p" >/dev/null 2>&1 || MISSING+=("$p")
@@ -1170,8 +1173,8 @@ run_apt() {
 run_apk() {
     resolve_elevation
     info "Detected distro: ${DISTRO_ID:-?}${DISTRO_ID_LIKE:+ (ID_LIKE=$DISTRO_ID_LIKE)} -> apk backend (Alpine)"
-    info "1/9  System packages (mpd mpv yt-dlp ffmpeg python3 py3-dbus py3-gobject3 + toolchain; cava from source)"
-    APK_PKGS=(mpd mpv yt-dlp ffmpeg python3 py3-dbus py3-gobject3 py3-mutagen py3-pip build-base git curl fftw-dev iniparser-dev ncurses-dev sdl2-dev autoconf automake libtool ncurses-terminfo-base)
+    info "1/9  System packages (mpd mpv yt-dlp ffmpeg wl-clipboard python3 py3-dbus py3-gobject3 + toolchain; cava from source)"
+    APK_PKGS=(mpd mpv yt-dlp ffmpeg wl-clipboard python3 py3-dbus py3-gobject3 py3-mutagen py3-pip build-base git curl fftw-dev iniparser-dev ncurses-dev sdl2-dev autoconf automake libtool ncurses-terminfo-base)
     MISSING=()
     for p in "${APK_PKGS[@]}"; do
         apk info -e "$p" >/dev/null 2>&1 || MISSING+=("$p")
@@ -1230,12 +1233,12 @@ run_apk() {
 run_xbps() {
     resolve_elevation
     info "Detected distro: ${DISTRO_ID:-?}${DISTRO_ID_LIKE:+ (ID_LIKE=$DISTRO_ID_LIKE)} -> xbps backend (Void)"
-    info "1/9  System packages (mpd mpv yt-dlp cava ffmpeg mpDris2 python3-dbus python3-gobject + toolchain)"
+    info "1/9  System packages (mpd mpv yt-dlp cava ffmpeg wl-clipboard mpDris2 python3-dbus python3-gobject + toolchain)"
     # runit-user backend prerequisites: sv + runsvdir. No-op on real Void
     # hosts (runit is the init system, already installed); without it the
     # service step silently degrades to the launcher backend (seen in the
     # first setup-void-glibc run) instead of supervising via runsvdir/sv.
-    XBPS_PKGS=(mpd mpv yt-dlp cava ffmpeg mpDris2 python3 python3-dbus python3-gobject python3-mutagen python3-mpd2 base-devel cargo rust git curl util-linux procps-ng ncurses-term runit)
+    XBPS_PKGS=(mpd mpv yt-dlp cava ffmpeg wl-clipboard mpDris2 python3 python3-dbus python3-gobject python3-mutagen python3-mpd2 base-devel cargo rust git curl util-linux procps-ng ncurses-term runit)
     MISSING=()
     for p in "${XBPS_PKGS[@]}"; do
         xbps-query "$p" >/dev/null 2>&1 || MISSING+=("$p")

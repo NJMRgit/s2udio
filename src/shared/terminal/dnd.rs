@@ -12,6 +12,8 @@
 //! drop     (terminal -> client)  ESC ] 72 ; t=M:... ; <full MIME list>
 //! request  (client -> terminal)  ESC ] 72 ; t=r:x=<1-based index in the list>
 //! data     (terminal -> client)  ESC ] 72 ; t=r:x=<idx>:m=<1|0> ; <base64 chunk>
+//!         (the payload is base64 **without** `=` padding — kitty encodes with
+//!         `add_padding = false`, see [`decode_b64_chunk`])
 //! error    (terminal -> client)  ESC ] 72 ; t=R:x=<idx> ; <POSIX error name[:desc]>
 //! finish   (client -> terminal)  ESC ] 72 ; t=r:o=<1|2|0>
 //! ```
@@ -184,9 +186,7 @@ pub fn parse_dnd_escape(body: &str) -> Option<DndEvent> {
             let chunks = if payload.is_empty() {
                 Vec::new()
             } else {
-                vec![base64::engine::general_purpose::STANDARD
-                    .decode(payload)
-                    .ok()?]
+                vec![decode_b64_chunk(payload)?]
             };
             Some(DndEvent::Data {
                 chunks,
@@ -207,6 +207,26 @@ pub fn parse_dnd_escape(body: &str) -> Option<DndEvent> {
         }
         _ => Some(DndEvent::Unknown),
     }
+}
+
+/// Decode one base64 chunk of a `t=r` reply.
+///
+/// kitty strips the `=` padding: `dnd.c` encodes every chunk it sends with
+/// `base64_encode8(…, add_padding = false)`, so a chunk whose data length is
+/// not a multiple of 3 bytes arrives **unpadded**. base64's `STANDARD` engine
+/// requires canonical padding (`DecodePaddingMode::RequireCanonical`) and
+/// rejects that, which silently discarded the whole reply — and a discarded
+/// reply is indistinguishable from a terminal that sent no data (this is what
+/// round 90 read as "the transport answers the first request with an empty
+/// payload"). Pad to a multiple of 4 first: an already padded chunk is left
+/// untouched, so both forms decode.
+fn decode_b64_chunk(payload: &str) -> Option<Vec<u8>> {
+    let mut padded = String::with_capacity(payload.len() + 3);
+    padded.push_str(payload);
+    while padded.len() % 4 != 0 {
+        padded.push('=');
+    }
+    base64::engine::general_purpose::STANDARD.decode(padded).ok()
 }
 
 /// What handling one OSC 72 body told the input loop to do.
@@ -277,8 +297,14 @@ impl DndReceiver {
         };
         match parse_dnd_escape(body) {
             Some(event) => self.act(event),
-            // Undecodable: ignored, exactly like an unknown `t=`.
-            None => DndOutcome::Handled,
+            // Undecodable: ignored, exactly like an unknown `t=`. Logged, so a
+            // reply that never reaches the state machine is visible in the log
+            // instead of looking like a terminal that sent nothing.
+            None => {
+                let head = body.chars().take(120).collect::<String>();
+                log::debug!(body = head.as_str(); "Undecodable OSC 72 body ignored");
+                DndOutcome::Handled
+            }
         }
     }
 
