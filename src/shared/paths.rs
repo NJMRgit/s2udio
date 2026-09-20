@@ -114,3 +114,40 @@ pub fn cava_node_name_shim() -> Option<PathBuf> {
         .or_else(|| home_dir().map(|h| h.join(".local/share/s2udio/libcavaname.so")))?;
     path.is_file().then_some(path)
 }
+/// s2udio's own unmanaged prefix (`/opt/s2udio`; `S2UDIO_OPT_PREFIX`
+/// overrides it). `setup.sh` installs the programs no package manager owns
+/// there instead of `/usr/bin` or `/usr/local/bin`: the vendored upstream
+/// python mpDris2 source and a cava built from source on the distros without
+/// a patchable package (Alpine, NixOS), plus their python dependencies.
+pub fn opt_prefix() -> PathBuf {
+    ENV.var_os("S2UDIO_OPT_PREFIX")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/opt/s2udio"))
+}
+/// A program in s2udio's own prefix (`/opt/s2udio/bin/<name>`).
+pub fn opt_bin(name: &str) -> PathBuf {
+    opt_prefix().join("bin").join(name)
+}
+/// Resolve a support program the way `setup.sh` installed it: PATH first (a
+/// distro package, or the user-level `~/.local/bin` copy), then s2udio's own
+/// prefix, else the bare name so the spawn error still names the program.
+/// `S2UDIO_<PROGRAM>_BIN` (upper-cased, non-alphanumerics to `_`) overrides
+/// the whole lookup — `S2UDIO_CAVA_BIN` for cava.
+pub fn resolve_bin(name: &str) -> PathBuf {
+    let override_var = format!(
+        "S2UDIO_{}_BIN",
+        name.to_uppercase().replace(|c: char| !c.is_alphanumeric(), "_")
+    );
+    if let Some(path) = ENV.var_os(&override_var).filter(|value| !value.is_empty()) {
+        return PathBuf::from(path);
+    }
+    if let Ok(path) = which::which(name) {
+        return path;
+    }
+    let own = opt_bin(name);
+    if own.is_file() {
+        return own;
+    }
+    PathBuf::from(name)
+}

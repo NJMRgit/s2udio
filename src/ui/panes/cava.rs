@@ -294,7 +294,10 @@ impl CavaPane {
         let node_name = Self::node_name_rename_env(config.input.node_name.as_deref());
         let config = config.to_cava_config_file(bars)?;
         std::fs::write(&cfg_path, config)?;
-        let mut cmd = std::process::Command::new("cava");
+        // cava is resolved like the dependency check does: PATH first, then
+        // s2udio's own prefix (`/opt/s2udio/bin/cava`, what setup.sh installs
+        // when the distro has no cava package - Alpine builds it from source).
+        let mut cmd = std::process::Command::new(crate::shared::paths::resolve_bin("cava"));
         cmd.arg("-p")
             .arg(cfg_path)
             .stdout(Stdio::piped())

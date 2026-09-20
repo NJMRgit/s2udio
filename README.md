@@ -70,9 +70,9 @@ overwrites existing configs.
 | `pacman` | Arch / CachyOS / Artix | official repos + AUR (mpdris2-git, mpv-full) | the original 9-step installer; `yt-dlp` is the `extra/yt-dlp` package (`python-yt-dlp` is **not** in the repos); needs `yay`/`paru` for the AUR packages |
 | `dnf5` | Fedora | dnf5 + **RPM Fusion free** | Fedora dropped `mpd` from the official repos — RPM Fusion free provides mpd/full ffmpeg/full mpv |
 | `apt` | Debian / Ubuntu / Devuan | apt | the distro's **system `mpd` is stopped+disabled**; s2udio runs a **user-level** MPD instance; prints a pip hint when the distro yt-dlp pin is stale |
-| `apk` | Alpine | apk | **cava is built from source** (not in the Alpine 3.20 repos); **upstream python mpDris2** is installed at `/usr/bin/mpDris2` |
+| `apk` | Alpine | apk | **cava is built from source** (not in the Alpine 3.20 repos); **upstream python mpDris2** is installed in s2udio's own prefix (`/opt/s2udio/bin/mpDris2`) |
 | `xbps` | Void | xbps | **mpd file capabilities are stripped** (`setcap -r /usr/bin/mpd`) — needed in restricted environments; services supervised via **runit-user** (`runsvdir` + `sv`) |
-| `nix` | NixOS | `nix profile install` (flake.nix) | nixpkgs ships mpDris2 as a compiled ELF the shim cannot patch → **upstream python mpDris2** at `/usr/bin/mpDris2`; launcher services |
+| `nix` | NixOS | `nix profile install` (flake.nix) | nixpkgs ships mpDris2 as a compiled ELF the shim cannot patch → **upstream python mpDris2** in s2udio's own prefix (`/opt/s2udio/bin/mpDris2`); launcher services |
 
 ### Per-distro notes
 
@@ -84,13 +84,23 @@ overwrites existing configs.
   and runs s2udio's **user-level** instance (`~/.config/mpd/mpd.conf` +
   `mpd.service`, created when absent) — MPD then lives in your session, not
   the system (cava captures PipeWire directly; there is no MPD fifo tap).
+- **s2udio's own prefix (`/opt/s2udio`, all backends)**: programs *no package
+  manager owns* are installed there, never into `/usr/bin` or
+  `/usr/local/bin` — the vendored upstream python mpDris2 (Alpine, NixOS), a
+  cava built from source (Alpine) and the python-mpd2 they need
+  (`/opt/s2udio/lib/python`, `pip --target`). `S2UDIO_OPT_PREFIX` relocates
+  the prefix. **Nothing is symlinked into `/usr`**: s2udio resolves the prefix
+  itself (`$OPT_PREFIX/bin` after `PATH`, `S2UDIO_CAVA_BIN` overrides), the
+  mpDris2 shim loads `/usr/bin/mpDris2` (distro package) or
+  `$OPT_PREFIX/bin/mpDris2`, and the prefix goes on `PATH` only for CLI use.
 - **cava from source (Alpine)**: cava is absent from the Alpine 3.20 repos;
-  the apk backend clones and builds it (`autogen.sh && configure && make`,
-  installed to `/usr/local/bin/cava`).
+  the apk backend clones and builds it (`autogen.sh && configure && make`),
+  installing the result to `/opt/s2udio/bin/cava`.
 - **Upstream python mpDris2 (Alpine, NixOS)**: mpDris2 has no Alpine package,
   and nixpkgs ships a compiled ELF the s2u-mpdris2 stream-art shim cannot
-  patch — setup.sh fetches the upstream python source and installs it at the
-  shim's fixed `/usr/bin/mpDris2` path (python-mpd2 via pip on Alpine).
+  patch — setup.sh fetches the upstream python source and installs it at
+  `/opt/s2udio/bin/mpDris2` (python-mpd2 into `/opt/s2udio/lib/python` on
+  Alpine).
 - **setcap (Void)**: Void's `mpd` ships file caps (`cap_ipc_lock,
   cap_sys_nice`) that restricted environments (containers) cannot grant →
   `execve` fails. The xbps backend strips them (`setcap -r /usr/bin/mpd`);

@@ -26,6 +26,12 @@
 #                                s2u-helper executable (tracker caretaker /
 #                                s2udio-mpris bridge / s2u-mpdris2 shim /
 #                                s2u-svc / bgutil-renew subcommands)
+#   * unmanaged extras           -> /opt/s2udio (s2udio's own prefix: the
+#                                upstream python mpDris2 source, a cava
+#                                built from source, python-mpd2) — the
+#                                installer never puts software no package
+#                                manager owns into /usr/bin or
+#                                /usr/local/bin (reviewer feedback 2026-09-19)
 #   * seeds config/theme         -> ~/.config/s2udio/ (if absent)
 #   * cava (PipeWire input)      (official cava; s2udio drives it through
 #                                PipeWire only — no MPD fifo output)
@@ -94,6 +100,16 @@ resolve_elevation() {
 
 BIN_DIR="$HOME/.local/bin"
 CFG_DIR="$HOME/.config/s2udio"
+# s2udio's own unmanaged prefix (FHS /opt): software that no package
+# manager owns lives here — never in /usr/bin or /usr/local/bin. It holds
+# the vendored upstream python mpDris2 source (Alpine, NixOS — the
+# distros with no patchable package), a cava built from source (Alpine)
+# and the python-mpd2 those need. Package-managed programs stay wherever
+# their package manager puts them.
+# S2UDIO_OPT_PREFIX relocates the prefix (tests, containers).
+OPT_PREFIX="${S2UDIO_OPT_PREFIX:-/opt/s2udio}"
+OPT_BIN="$OPT_PREFIX/bin"
+OPT_PYLIB="$OPT_PREFIX/lib/python"
 MPD_CONF="${MPD_CONF:-$HOME/.config/mpd/mpd.conf}"
 # rqbit (torrent streaming) + its S2RQ launcher entry live in the per-user
 # application dir; the entry is only written when rqbit is installed.
@@ -602,6 +618,11 @@ summary_step() {
         warn "s2udio binary not built (cargo missing?) - build with: cargo build --release"
     fi
     printf '  scripts: %s\n' "$BIN_DIR"
+    # s2udio's own /opt prefix: only shown when it holds something, so the
+    # Arch output stays byte-identical (nothing unmanaged is installed there).
+    if [[ -d "$OPT_BIN" ]]; then
+        printf '  extras : %s (s2udio-managed; no package manager)\n' "$OPT_BIN"
+    fi
     printf '  config : %s/config.ron (embedded defaults active if absent)\n' "$CFG_DIR"
     printf "  lyrics: %s/lyrics (s2udio's own .lrc library; the user's MPD\n" "$CFG_DIR"
     printf '           library .lrc files are read first and never overwritten)\n'
@@ -616,7 +637,13 @@ summary_step() {
         printf '  mpv    : MISSING\n'
     fi
     printf '  yt-dlp : %s (%s)\n' "$(command -v yt-dlp >/dev/null && echo present || echo MISSING)" "$(yt-dlp --version 2>/dev/null || echo '?')"
-    printf '  cava   : %s\n' "$(command -v cava >/dev/null && echo present || echo MISSING)"
+    if command -v cava >/dev/null 2>&1; then
+        printf '  cava   : present\n'
+    elif [[ -x "$OPT_BIN/cava" ]]; then
+        printf '  cava   : present (%s)\n' "$OPT_BIN/cava"
+    else
+        printf '  cava   : MISSING\n'
+    fi
     printf '  rqbit  : %s\n' "$(command -v rqbit >/dev/null && echo present || echo MISSING)"
     local mpd_state; mpd_state="$("${SUMMARY_MPD_ACTIVE[@]}" 2>/dev/null || echo inactive)"
     if [[ -n "${SUMMARY_MPD_READY:-}" ]]; then
@@ -833,20 +860,26 @@ EOF
 }
 
 # apk/nix: no distro mpDris2 (Alpine) or an unshimmable compiled ELF (nixpkgs)
-# — install the upstream python source at the shim's fixed /usr/bin/mpDris2
-# path (plan §5 decision point, §12.6).
+# — install the upstream python source into s2udio's own /opt prefix (plan §5
+# decision point, §12.6). No package manager owns it, so it does not go into
+# /usr/bin; the s2u-mpdris2 shim looks for it in "$OPT_BIN" (and still uses a
+# distro-provided /usr/bin/mpDris2 when one exists).
 install_upstream_mpdris2() { # $1 = reason text
-    if [[ -s /usr/bin/mpDris2 ]]; then
-        ok "mpDris2 already at /usr/bin/mpDris2"
+    if [[ -s "$OPT_BIN/mpDris2" ]]; then
+        ok "mpDris2 already at $OPT_BIN/mpDris2"
         return 0
     fi
-    if confirm "Install upstream python mpDris2 at /usr/bin/mpDris2? ($1) (needs root + network)"; then
+    if [[ -s /usr/bin/mpDris2 ]]; then
+        ok "mpDris2 already at /usr/bin/mpDris2 (package-managed)"
+        return 0
+    fi
+    if confirm "Install upstream python mpDris2 at $OPT_BIN/mpDris2? ($1) (needs root + network)"; then
         if curl -fsSL --max-time 60             https://raw.githubusercontent.com/eonpatapon/mpDris2/master/src/mpDris2.in.py             -o /tmp/mpDris2.in.py; then
-            if "${ELEVATE_CMD[@]}" mkdir -p /usr/bin                && sed -e 's/@version@/0.9.1/g' -e 's/@gitversion@/0.9.1/g' -e 's|@datadir@|/usr/share|g'                     /tmp/mpDris2.in.py | "${ELEVATE_CMD[@]}" tee /usr/bin/mpDris2 >/dev/null                && "${ELEVATE_CMD[@]}" chmod +x /usr/bin/mpDris2; then
+            if "${ELEVATE_CMD[@]}" mkdir -p "$OPT_BIN"                && sed -e 's/@version@/0.9.1/g' -e 's/@gitversion@/0.9.1/g' -e 's|@datadir@|/usr/share|g'                     /tmp/mpDris2.in.py | "${ELEVATE_CMD[@]}" tee "$OPT_BIN/mpDris2" >/dev/null                && "${ELEVATE_CMD[@]}" chmod +x "$OPT_BIN/mpDris2"; then
                 rm -f /tmp/mpDris2.in.py
-                ok "upstream mpDris2 source -> /usr/bin/mpDris2"
+                ok "upstream mpDris2 source -> $OPT_BIN/mpDris2"
             else
-                warn "could not write /usr/bin/mpDris2 (permission denied?) - MPRIS bridge will not work"
+                warn "could not write $OPT_BIN/mpDris2 (permission denied?) - MPRIS bridge will not work"
             fi
         else
             warn "upstream mpDris2 fetch failed - MPRIS bridge will not work"
@@ -1213,12 +1246,15 @@ run_apk() {
         ok "all system packages present"
     fi
     # cava is NOT in the Alpine 3.20 repos (plan §5 corrected in-container) ->
-    # built from source (validated in the alpine-320 harness target).
-    if ! command -v cava >/dev/null 2>&1; then
-        if confirm "Build cava from source (not in the Alpine repos; needs root + network)?"; then
-            if git clone -q --depth 1 https://github.com/karlstav/cava /tmp/cava-src                && (cd /tmp/cava-src && ./autogen.sh >/dev/null && ./configure >/dev/null && make -j"$(nproc)" >/dev/null)                && "${ELEVATE_CMD[@]}" install -Dm755 /tmp/cava-src/cava /usr/local/bin/cava 2>/dev/null; then
+    # built from source (validated in the alpine-320 harness target) into
+    # s2udio's own /opt prefix: no package manager owns this build, so it does
+    # not go into /usr/local/bin. s2udio resolves "$OPT_BIN/cava" itself when
+    # no cava is on PATH (src/shared/paths.rs::resolve_bin).
+    if ! command -v cava >/dev/null 2>&1 && [[ ! -x "$OPT_BIN/cava" ]]; then
+        if confirm "Build cava from source into $OPT_BIN (not in the Alpine repos; needs root + network)?"; then
+            if git clone -q --depth 1 https://github.com/karlstav/cava /tmp/cava-src                && (cd /tmp/cava-src && ./autogen.sh >/dev/null && ./configure >/dev/null && make -j"$(nproc)" >/dev/null)                && "${ELEVATE_CMD[@]}" install -Dm755 /tmp/cava-src/cava "$OPT_BIN/cava" 2>/dev/null; then
                 rm -rf /tmp/cava-src
-                ok "cava built from source: $(cava --version 2>&1 | head -1)"
+                ok "cava built from source -> $OPT_BIN/cava (add $OPT_BIN to PATH for CLI use)"
             else
                 warn "cava source build failed - cava visualizer unavailable (see /tmp/cava-src)"
             fi
@@ -1226,12 +1262,15 @@ run_apk() {
             warn "cava not built - cava visualizer unavailable"
         fi
     fi
-    # mpDris2 has no Alpine package (plan §12.6): upstream python source at
-    # the shim's fixed /usr/bin/mpDris2 + python-mpd2 via pip.
+    # mpDris2 has no Alpine package (plan §12.6): upstream python source in
+    # s2udio's /opt prefix + its python-mpd2 dependency. python-mpd2 goes into
+    # "$OPT_PYLIB" (pip --target) instead of the distro site-packages, which no
+    # package manager owns either; the s2u-mpdris2 shim puts that dir on
+    # sys.path. Both are skipped when a distro package already provides them.
     install_upstream_mpdris2 "no Alpine mpdris2 package"
-    if [[ ! -s /usr/bin/mpDris2 ]] && command -v python3 >/dev/null 2>&1; then
-        if confirm "Install python-mpd2 via pip (mpDris2 dependency; needs root)?"; then
-            "${ELEVATE_CMD[@]}" python3 -m pip install --break-system-packages python-mpd2                 && ok "python-mpd2 installed (pip)" || warn "python-mpd2 install failed (pip)"
+    if [[ ! -e "$OPT_PYLIB/mpd/__init__.py" ]] && command -v python3 >/dev/null 2>&1; then
+        if confirm "Install python-mpd2 into $OPT_PYLIB (mpDris2 dependency; needs root)?"; then
+            "${ELEVATE_CMD[@]}" mkdir -p "$OPT_PYLIB"                 && "${ELEVATE_CMD[@]}" python3 -m pip install --break-system-packages --target "$OPT_PYLIB" python-mpd2                 && ok "python-mpd2 -> $OPT_PYLIB (pip --target)" || warn "python-mpd2 install failed (pip)"
         fi
     fi
 
@@ -1353,7 +1392,9 @@ run_nix() {
     ensure_mpd_conf
 
     # nixpkgs ships mpDris2 as a compiled ELF the s2u-mpdris2 shim cannot
-    # patch (plan §5 decision point) -> upstream python source at /usr/bin.
+    # patch (plan §5 decision point) -> upstream python source in s2udio's own
+    # /opt prefix (the shim cannot patch a nix-store ELF, so the vendored copy
+    # wins; nothing is written into /usr).
     install_upstream_mpdris2 "nixpkgs mpDris2 is a compiled ELF the s2u-mpdris2 shim cannot patch"
     services_step_launcher
     rqbit_step "nix profile install nixpkgs#rqbit"

@@ -19,6 +19,8 @@ pub static PYTHON3MUTAGEN: LazyLock<Dep> = LazyLock::new(|| {
         ],
     )
 });
+// cava may come from PATH or from s2udio's own prefix (`/opt/s2udio/bin/cava`,
+// built from source on Alpine by setup.sh) — see `Dep::new`/`resolve_bin`.
 pub static CAVA: LazyLock<Dep> = LazyLock::new(|| Dep::new("cava", "cava", &["-v"]));
 
 pub static DEPENDENCIES: [&std::sync::LazyLock<Dep>; 7] =
@@ -56,9 +58,14 @@ pub struct Dep {
 
 impl Dep {
     fn new(name: &'static str, bin: &'static str, version_args: &'static [&str]) -> Self {
-        let mut installed = which::which(bin).is_ok();
+        // `resolve_bin` finds a program s2udio's own installer placed in its
+        // unmanaged prefix (`/opt/s2udio/bin`, e.g. cava built from source on
+        // Alpine) as well as a PATH install, so the dependency check matches
+        // what the app actually spawns.
+        let path = crate::shared::paths::resolve_bin(bin);
+        let mut installed = path.is_file() || which::which(bin).is_ok();
         let version = if installed {
-            Command::new(bin)
+            Command::new(&path)
                 .args(version_args)
                 .output()
                 .ok()
