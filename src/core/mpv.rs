@@ -1200,6 +1200,13 @@ pub fn run_mpv_playlist(
             cmd.arg(format!("--input-ipc-server={MPV_SOCKET}"));
         }
         cmd.arg("--no-terminal");
+        // mpv's own watch_later resume is off. `save-position-on-quit` makes
+        // mpv inject a startup seek from its saved state, which is invisible
+        // to s2udio and - on a YouTube HLS (m3u8) video stream - makes the
+        // video end at once: the window never opens while the audio plays.
+        // s2udio applies the resume position itself (`pending_seek`, the
+        // tracker's state file), so mpv's copy is redundant as well.
+        cmd.arg("--no-resume-playback");
         cmd.arg(format!("--volume={volume}"));
         if let Some(start) = start_index {
             cmd.arg(format!("--playlist-start={start}"));
