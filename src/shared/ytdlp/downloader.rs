@@ -44,6 +44,18 @@ struct SearchEntry {
     webpage_url: Option<String>,
     #[serde(default)]
     title: Option<String>,
+    /// Round 96: the search modal's rows show the channel too. A flat search
+    /// entry carries `channel` (YouTube) or `uploader` (SoundCloud); either
+    /// may be missing.
+    #[serde(default)]
+    channel: Option<String>,
+    #[serde(default)]
+    uploader: Option<String>,
+    /// Round 96: the result's length in seconds, straight from the flat
+    /// listing (`-J --flat-playlist`, one call, no per-item resolve). A live
+    /// stream or an unknown length is `null`.
+    #[serde(default)]
+    duration: Option<f64>,
 }
 
 #[derive(serde::Deserialize)]
@@ -55,6 +67,10 @@ struct SearchJson {
 pub struct YtDlpSearchItem {
     pub title: Option<String>,
     pub url: String,
+    /// Round 96: the uploader/channel shown in the search modal's rows.
+    pub channel: Option<String>,
+    /// Round 96: the result's length in seconds, when the listing knows it.
+    pub duration: Option<f64>,
 }
 
 impl YtDlp {
@@ -83,7 +99,15 @@ impl YtDlp {
                     _ => e.url.or(e.webpage_url),
                 }
                 .or_else(|| e.id.clone().map(|id| kind.watch_url(&id)))?;
-                Some(YtDlpSearchItem { title: e.title, url })
+                // Round 96: the flat listing names a YouTube entry's channel
+                // and a SoundCloud entry's uploader — normalize to one field
+                // for the search modal's rows.
+                let channel = e
+                    .channel
+                    .or(e.uploader)
+                    .map(|channel| channel.trim().to_owned())
+                    .filter(|channel| !channel.is_empty());
+                Some(YtDlpSearchItem { title: e.title, url, channel, duration: e.duration })
             })
             .collect::<Vec<_>>();
 
@@ -349,7 +373,11 @@ impl YtDlp {
         command.arg("--print");
         // Round 82: the item's title rides along with its id (the pickers
         // label their rows with it; nothing else needs a second call).
-        command.arg("%(id)s\t%(title)s");
+        // Round 95: the channel and the duration ride along too - a
+        // playlist added to the queue takes its rows' titles, channels and
+        // durations from this one listing instead of resolving every item,
+        // so the rows are correct the moment they land.
+        command.arg("%(id)s\t%(title)s\t%(uploader)s\t%(channel)s\t%(duration)s");
         command.arg("--flat-playlist");
         command.arg("--compat-options");
         command.arg("no-youtube-unavailable-videos");
@@ -376,15 +404,39 @@ impl YtDlp {
             .lines()
             .filter(|line| !line.trim().is_empty())
             .map(|line| {
+                // Round 95: the last two fields are the item's channel and
+                // duration (`NA` when the host does not report them), so a
+                // title that contains a tab still parses.
+                let (line, duration) = match line.rsplit_once('\t') {
+                    Some((rest, duration)) => (rest, duration.trim()),
+                    None => (line, ""),
+                };
+                let (line, channel) = match line.rsplit_once('\t') {
+                    Some((rest, channel)) => (rest, channel.trim()),
+                    None => (line, ""),
+                };
+                let (line, uploader) = match line.rsplit_once('\t') {
+                    Some((rest, uploader)) => (rest, uploader.trim()),
+                    None => (line, ""),
+                };
                 let (id, title) = match line.split_once('\t') {
                     Some((id, title)) => (id.trim().to_owned(), title.trim().to_owned()),
                     None => (line.trim().to_owned(), String::new()),
+                };
+                let clean = |value: &str| {
+                    let value = value.trim();
+                    (!value.is_empty() && value != "NA").then(|| value.to_owned())
                 };
                 YtDlpItem {
                     filename: id.clone(),
                     id,
                     kind: playlist.kind,
-                    title: (!title.is_empty() && title != "NA").then_some(title),
+                    title: clean(&title),
+                    channel: clean(channel).or_else(|| clean(uploader)),
+                    duration: duration
+                        .parse::<f64>()
+                        .ok()
+                        .filter(|duration| *duration > 0.0),
                 }
             })
             .collect())

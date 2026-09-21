@@ -34,6 +34,11 @@ pub enum QueueTabMode {
     Radio,
 }
 pub const FETCH_SONG_STICKERS: &str = "fetch_song_stickers";
+/// Round 95: how long a requested-but-unanswered stream resolve keeps the
+/// queue's spinner alive. A work thread that never reports back (a dropped
+/// result, a hung yt-dlp) must not leave a row spinning forever.
+pub const PENDING_YT_LINK_MAX_AGE: std::time::Duration =
+    std::time::Duration::from_secs(120);
 pub const LIKE_STICKER: &str = "like";
 pub const RATING_STICKER: &str = "rating";
 /// Choose the tab the app should open on: the tab matching the currently
@@ -185,6 +190,21 @@ pub struct Ctx {
     /// itself has no metadata, so the controls, album art and info box look
     /// the info up when the playing song matches).
     pub(crate) yt_info: RefCell<HashMap<String, crate::shared::ytdlp::YtStreamInfo>>,
+    /// Round 95: the flat playlist listing's metadata per **plain**
+    /// (untagged) YouTube-style link - title, channel, duration. A playlist
+    /// added to the queue enters as its links in one call, so its rows have
+    /// no resolved info yet; the queue renders them from here (and this is
+    /// what a stored playlist built from such a listing shows, loaded from
+    /// `<cache_dir>/yt-list-meta.json` at startup).
+    pub(crate) yt_list_meta:
+        RefCell<HashMap<String, crate::shared::ytdlp::YtListMeta>>,
+    /// Round 95: plain links whose stream resolve has been **requested** and
+    /// has not come back yet. The queue's Duration column shows a spinner
+    /// for such a row while its duration is still unknown (that is what
+    /// "this row is still being parsed" means today); markers older than
+    /// [`PENDING_YT_LINK_MAX_AGE`] are treated as stale.
+    pub(crate) pending_yt_links:
+        RefCell<HashMap<String, std::time::Instant>>,
     /// Round 74 (74-1): song file -> (start offset in seconds, seeks issued,
     /// when the last one was issued) for a YouTube-style stream whose pasted
     /// link carried a timestamp (`?t=90`). MPD cannot seek a stream that is
@@ -394,6 +414,9 @@ impl Ctx {
         let yt_info = crate::ui::modals::paste::load_yt_cache(
             config.cache_dir.as_deref(),
         );
+        let yt_list_meta = crate::ui::modals::paste::load_yt_list_meta(
+            config.cache_dir.as_deref(),
+        );
         let yt_streams: HashSet<String> = yt_info.keys().cloned().collect();
         let active_tab = initial_tab(&config, &status, &queue, &yt_streams);
         let mut state = crate::config::state::AppStateFile::load();
@@ -434,6 +457,8 @@ impl Ctx {
             cached_queue_time_total,
             mpv: crate::core::mpv::MpvSession::default(),
             yt_info: RefCell::new(yt_info),
+            yt_list_meta: RefCell::new(yt_list_meta),
+            pending_yt_links: RefCell::new(HashMap::new()),
             pending_start_seek: RefCell::new(HashMap::new()),
             pending_stream_resolve: RefCell::new(HashSet::new()),
             chapters: RefCell::new(HashMap::new()),

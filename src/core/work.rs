@@ -586,6 +586,30 @@ fn handle_work_request(
                 interactive,
             })
         }
+        // Round 96: the Queue tab's search modal. The result is the items
+        // themselves (the modal queues or plays one when the user picks it);
+        // a failure is carried inside the variant so the modal can show it
+        // in place instead of leaving a stuck "Searching…" row.
+        WorkRequest::SearchYtModal { request_id, query, kind, limit } => {
+            if ytdlp.is_none() {
+                return Ok(WorkDone::SearchYtModalResults {
+                    request_id,
+                    items: Vec::new(),
+                    error: Some(
+                        "Youtube support requires 'cache_dir' to be configured".to_owned(),
+                    ),
+                });
+            }
+            let (items, error) = match YtDlp::search(kind, &query, limit) {
+                Ok(items) => (items, None),
+                Err(err) => (Vec::new(), Some(err.to_string())),
+            };
+            Ok(WorkDone::SearchYtModalResults {
+                request_id,
+                items,
+                error,
+            })
+        }
         WorkRequest::YtDlpDownload { id, url, spec } => {
             let result = if let Some(spec) = spec.as_ref() {
                 match ytdlp {
@@ -622,48 +646,12 @@ fn handle_work_request(
             // without downloading anything, the rest hand the item list to
             // the UI.
             let urls = ytdlp.resolve_playlist_urls(&playlist)?;
-            if let crate::shared::events::PlaylistAction::QueueStreams { audio, autoplay } =
-                &action
-            {
-                if urls.is_empty() {
-                    return Ok(WorkDone::YtDlpPlaylistResolved { urls, action });
-                }
-                let (audio, autoplay) = (*audio, *autoplay);
-                let event_tx = event_tx.clone();
-                // One item at a time, in playlist order, so the entries
-                // land in the queue in that order and the first one can
-                // start playing the moment it is resolved.
-                std::thread::Builder::new()
-                    .name("yt-playlist-queue".to_owned())
-                    .spawn(move || {
-                        for (idx, item) in urls.iter().enumerate() {
-                            let (info, failures) =
-                                crate::shared::ytdlp::resolve_audio_urls(&[item.to_url()]);
-                            let action = match (idx == 0 && autoplay, audio) {
-                                (true, true) => {
-                                    crate::ui::modals::paste::YtAction::AddAfterCurrentAndPlay
-                                }
-                                (true, false) => {
-                                    crate::ui::modals::paste::YtAction::AddToVideoQueueAndPlay
-                                }
-                                (false, true) => crate::ui::modals::paste::YtAction::Append,
-                                (false, false) => {
-                                    crate::ui::modals::paste::YtAction::AppendVideoQueue
-                                }
-                            };
-                            try_skip!(
-                                event_tx.send(AppEvent::WorkDone(Ok(
-                                    WorkDone::YtStreamsResolved { info, action, failures }
-                                ))),
-                                "Failed to send a playlist item's resolved streams"
-                            );
-                        }
-                    })
-                    .map_err(|err| {
-                        anyhow::anyhow!("Failed to spawn the playlist queue thread: {err}")
-                    })?;
-                return Ok(WorkDone::None);
-            }
+            // Round 95: the listing carries every item's title, channel and
+            // duration, so the queue rows no longer wait for a per-item
+            // resolve - `QueueStreams` hands the listed items to the UI,
+            // which queues them all at once (the old shape resolved one
+            // item at a time and appended each as it landed, so a playlist
+            // trickled into the queue over minutes).
             Ok(WorkDone::YtDlpPlaylistResolved { urls, action })
         }
     }

@@ -431,19 +431,32 @@ pub(crate) fn stream_display_title(ctx: &Ctx, uri: &str) -> Option<String> {
         .filter(|entry| !entry.title.is_empty())
         .map(|entry| entry.title)
 }
-/// Round 87: split a stored playlist's URIs into (links that must be
-/// resolved, everything else) so a queue action never hands MPD a YouTube
-/// link it cannot open.
-fn split_tagged_entries(uris: &[String]) -> (Vec<String>, Vec<String>) {
-    let mut tagged = Vec::new();
-    let mut plain = Vec::new();
-    for uri in uris {
+/// Round 95: the queue action of a stored playlist — every row lands at
+/// once. Its plain URIs and its **audio** stream links enter the MPD queue
+/// in one command list, in playlist order (a link is resolved when it is
+/// played, rounds 91 / 91b); the video-intent links keep the round-87
+/// resolve-then-append path, because an MPD queue entry cannot play one.
+/// `play` starts the first queued entry, `replace` empties the queue first
+/// (`Replace queue`).
+fn queue_stored_playlist(ctx: &Ctx, files: &[String], play: bool, replace: bool) {
+    let mut uris: Vec<String> = Vec::new();
+    let mut video: Vec<String> = Vec::new();
+    for uri in files {
         match tagged_stream_entry(uri) {
-            Some((link, _)) => tagged.push(link),
-            None => plain.push(uri.clone()),
+            Some((_, intent)) if intent.is_audio() => uris.push(uri.clone()),
+            Some((link, _)) => video.push(link),
+            None => uris.push(uri.clone()),
         }
     }
-    (tagged, plain)
+    let queued = crate::ui::modals::paste::queue_stored_stream_links(
+        ctx, uris, play, replace,
+    );
+    if video.is_empty() {
+        return;
+    }
+    // Nothing was queued (a playlist of video links only): the resolve path
+    // owns the replace.
+    resolve_stored_entries(ctx, video, false, replace && !queued);
 }
 /// Round 87: queue stored stream **links** by resolving them (nothing is
 /// downloaded). `play` inserts after the current entry and starts the first
@@ -1248,27 +1261,12 @@ impl PlaylistsPane {
                             {
                                 let files = files.clone();
                                 move |ctx| {
-                                    // Round 87: a stored entry holds a link —
-                                    // resolve it instead of handing MPD a URI
-                                    // it cannot open.
-                                    let (tagged, plain) = split_tagged_entries(&files);
-                                    if !plain.is_empty() {
-                                        ctx.command(move |client| {
-                                            client
-                                                .enqueue_multiple(
-                                                    plain
-                                                        .iter()
-                                                        .cloned()
-                                                        .map(|f| Enqueue::File { path: f })
-                                                        .collect_vec(),
-                                                    None,
-                                                    None,
-                                                    false,
-                                                )?;
-                                            Ok(())
-                                        });
-                                    }
-                                    resolve_stored_entries(ctx, tagged, false, false);
+                                    // Round 87/95: a stored entry may hold a
+                                    // link MPD cannot open — it enters the
+                                    // queue as the link it is (resolved when
+                                    // played) and the whole playlist lands in
+                                    // one command list.
+                                    queue_stored_playlist(ctx, &files, false, false);
                                     Ok(())
                                 }
                             },
@@ -1279,24 +1277,11 @@ impl PlaylistsPane {
                             {
                                 let files = files.clone();
                                 move |ctx| {
-                                    let (tagged, plain) = split_tagged_entries(&files);
-                                    if !plain.is_empty() {
-                                        ctx.command(move |client| {
-                                            client
-                                                .enqueue_multiple(
-                                                    plain
-                                                        .iter()
-                                                        .cloned()
-                                                        .map(|f| Enqueue::File { path: f })
-                                                        .collect_vec(),
-                                                    None,
-                                                    None,
-                                                    true,
-                                                )?;
-                                            Ok(())
-                                        });
-                                    }
-                                    resolve_stored_entries(ctx, tagged, true, true);
+                                    // Round 95: replace the queue with the
+                                    // whole playlist in one call; the first
+                                    // stream entry is resolved and starts
+                                    // playing.
+                                    queue_stored_playlist(ctx, &files, true, true);
                                     Ok(())
                                 }
                             },

@@ -2068,6 +2068,15 @@ pub enum UiEvent {
     ImageEncoded { data: EncodeData },
     ImageEncodeFailed { err: anyhow::Error },
     DownloadsUpdated,
+    /// Round 96: the Queue tab's YouTube search finished. Broadcast like
+    /// every other `UiEvent`; the search modal picks it up in `on_event` and
+    /// ignores a reply whose `request_id` is not the one it is waiting for
+    /// (a slow answer to an older query must not replace a newer list).
+    YtSearchResults {
+        request_id: u64,
+        items: Vec<crate::shared::ytdlp::YtDlpSearchItem>,
+        error: Option<String>,
+    },
 }
 
 impl TryFrom<IdleEvent> for UiEvent {

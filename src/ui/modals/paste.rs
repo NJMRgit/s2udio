@@ -26,8 +26,8 @@ use crate::{
         mpd_client_ext::{Enqueue, MpdClientExt as _},
         ytdlp::{
             ChapterSection, ReplaceAction, StreamDownloadSpec, StreamIntent, YtDlpContent,
-            YtDlpHost, YtDlpItem, YtStreamInfo, tagged_stream_entry, tagged_stream_link,
-            yt_video_id,
+            YtDlpHost, YtDlpItem, YtListMeta, YtStreamInfo, tagged_stream_entry,
+            tagged_stream_link, untag_stream_link, yt_video_id,
         },
     },
     ui::modals::{
@@ -727,6 +727,9 @@ fn warm_chapters(ctx: &Ctx, downloads: &[PastedItem]) {
         }
     }
     log::debug!(urls:?; "Fetching the pasted links' stream info for the download options");
+    // Round 95: a queued row for one of these links has no duration yet -
+    // its cell spins until the info lands.
+    mark_stream_parse_pending(ctx, &urls);
     let _ = ctx
         .work_sender
         .send(WorkRequest::ResolveYtStreams {
@@ -2595,6 +2598,9 @@ pub fn resolve_tagged_queue_entry(ctx: &Ctx, file: &str, song_id: u32) -> bool {
         apply_resolved_streams(ctx, vec![info], YtAction::ReplaceAndPlay(song_id), Vec::new());
         return true;
     }
+    // Round 95: the queue's Duration column spins for this row until the
+    // resolve lands (its duration is unknown until then).
+    mark_stream_parse_pending(ctx, std::slice::from_ref(&link));
     if let Err(err) = ctx.work_sender.send(WorkRequest::ResolveYtStreams {
         urls: vec![link],
         action: YtAction::ReplaceAndPlay(song_id),
@@ -2874,6 +2880,350 @@ pub fn save_yt_cache(
     if let Ok(data) = serde_json::to_vec(cache) {
         let _ = std::fs::write(path, data);
     }
+}
+/// Round 95: cache file of the flat playlist listings:
+/// `<cache_dir>/yt-list-meta.json`, keyed by the video id (or the link when
+/// it names none). A playlist added to the queue enters as its links, so the
+/// queue rows take their title/channel/duration from here — and a stored
+/// playlist built from such a listing keeps showing them after a restart.
+pub fn yt_list_meta_path(cache_dir: Option<&std::path::Path>) -> std::path::PathBuf {
+    s2udio_cache_path(cache_dir, "yt-list-meta.json")
+}
+pub fn load_yt_list_meta(
+    cache_dir: Option<&std::path::Path>,
+) -> std::collections::HashMap<String, YtListMeta> {
+    std::fs::read(yt_list_meta_path(cache_dir))
+        .ok()
+        .and_then(|data| serde_json::from_slice(&data).ok())
+        .unwrap_or_default()
+}
+fn save_yt_list_meta(
+    cache_dir: Option<&std::path::Path>,
+    cache: &std::collections::HashMap<String, YtListMeta>,
+) {
+    let path = yt_list_meta_path(cache_dir);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(data) = serde_json::to_vec(cache) {
+        let _ = std::fs::write(path, data);
+    }
+}
+/// Round 95: the key a YouTube-style link is remembered and looked up under —
+/// the video id when the link names one (`watch?v=ID`, `youtu.be/ID`,
+/// `…&list=…`, `shorts/ID` all name the same video), else the link itself.
+/// One video therefore matches however its link is spelled.
+fn stream_meta_key(link: &str) -> String {
+    let link = untag_stream_link(link);
+    yt_video_id(link).unwrap_or_else(|| link.to_owned())
+}
+/// Round 95: remember a flat playlist listing's metadata (title, channel,
+/// duration) for every item that has a title — in the session store the
+/// queue rows read and in `<cache_dir>/yt-list-meta.json`.
+pub fn remember_yt_list_meta(ctx: &Ctx, items: &[YtDlpItem]) {
+    let entries: Vec<(String, YtListMeta)> = items
+        .iter()
+        .filter_map(|item| {
+            let title = item.title.clone().filter(|t| !t.trim().is_empty())?;
+            let meta = YtListMeta {
+                title,
+                channel: item.channel.clone().filter(|c| !c.trim().is_empty()),
+                duration: item.duration,
+            };
+            Some((stream_meta_key(&item.to_url()), meta))
+        })
+        .collect();
+    if entries.is_empty() {
+        return;
+    }
+    {
+        let mut store = ctx.yt_list_meta.borrow_mut();
+        for (key, meta) in &entries {
+            store.insert(key.clone(), meta.clone());
+        }
+    }
+    let cache_dir = ctx.config.cache_dir.as_deref();
+    let mut cache = load_yt_list_meta(cache_dir);
+    for (key, meta) in entries {
+        cache.insert(key, meta);
+    }
+    save_yt_list_meta(cache_dir, &cache);
+}
+/// Round 95: what the app knows about a queue row that is a YouTube-style
+/// stream: the resolved stream info when there is one (it carries the
+/// chapters and the subscribers too), else the flat playlist listing's
+/// metadata. `None` for local files and for a stream nothing has been
+/// resolved or listed yet.
+pub fn stream_row_meta(ctx: &Ctx, file: &str) -> Option<YtListMeta> {
+    let link = untag_stream_link(file);
+    // Cheap guard: the lookup below falls back to a scan of the whole
+    // resolve cache (`stream_info` matches an entry by its original link),
+    // and the queue table asks this for **every** row of every frame. Local
+    // files never have stream info, so they stop here.
+    if link == file && !crate::ui::panes::radio::is_stream_url(file) {
+        return None;
+    }
+    let resolved = crate::ui::panes::playlists::stream_info(ctx, file).or_else(|| {
+        (link != file)
+            .then(|| crate::ui::panes::playlists::stream_info(ctx, link))
+            .flatten()
+    });
+    if let Some(info) = resolved.filter(|info| {
+        !info.title.is_empty() || info.duration.is_some()
+    }) {
+        return Some(YtListMeta {
+            title: info.title,
+            channel: info.channel,
+            duration: info.duration,
+        });
+    }
+    ctx.yt_list_meta.borrow().get(&stream_meta_key(link)).cloned()
+}
+/// Round 95b (user): while a track plays, resolve the queue entry **after**
+/// it when that entry is still an unresolved audio link. MPD cannot open a
+/// link, so without this it skips past the following entries until the app's
+/// resolve lands (~1-2 s later) — with the look-ahead the resolve is already
+/// cached when MPD reaches the entry, and the app replaces it in place
+/// immediately (round 91b reuses a fresh cached resolve).
+///
+/// Only the **next** entry is warmed (never the rest of the playlist), and
+/// only when nothing is known for it yet: a fresh cached resolve, a resolve
+/// already in flight, or a non-link entry all leave the queue alone.
+pub fn warm_next_queue_link(ctx: &Ctx) {
+    let Some((idx, _)) = ctx.find_current_song_in_queue() else { return };
+    let Some(next) = ctx.queue.get(idx + 1) else { return };
+    let Some((link, intent)) = tagged_stream_entry(&next.file) else { return };
+    if !intent.is_audio() {
+        return;
+    }
+    if fresh_cached_stream_info(ctx, &link).is_some() {
+        return;
+    }
+    if stream_parse_pending(ctx, &next.file) {
+        return;
+    }
+    log::debug!(link = link.as_str(); "Warming the next queue entry's stream while the current one plays");
+    mark_stream_parse_pending(ctx, std::slice::from_ref(&link));
+    if let Err(err) = ctx.work_sender.send(WorkRequest::ResolveYtStreams {
+        urls: vec![link],
+        action: YtAction::Refresh,
+    }) {
+        log::error!(error:? = err; "Failed to request the next entry's stream resolution");
+    }
+}
+/// Round 95: the queue renders this row as a **stream row** — a tagged
+/// stream link (queued, waiting to be resolved) or a stream URL the app has
+/// info for (a resolved YouTube stream, or one being parsed right now).
+/// Everything else (local files, radio stations, Jellyfin items) keeps its
+/// normal rendering.
+pub fn is_stream_row(ctx: &Ctx, file: &str) -> bool {
+    if tagged_stream_entry(file).is_some() {
+        return true;
+    }
+    crate::ui::panes::radio::is_stream_url(file)
+        && (ctx.yt_info.borrow().contains_key(file) || stream_parse_pending(ctx, file))
+}
+/// Round 95: mark the links whose resolve has just been requested, so the
+/// queue's Duration column can spin while their duration is still unknown.
+pub fn mark_stream_parse_pending(ctx: &Ctx, links: &[String]) {
+    let now = std::time::Instant::now();
+    let max_age = crate::ctx::PENDING_YT_LINK_MAX_AGE;
+    let mut pending = ctx.pending_yt_links.borrow_mut();
+    pending.retain(|_, at| now.duration_since(*at) <= max_age);
+    for link in links {
+        pending.insert(stream_meta_key(link), now);
+    }
+}
+/// Round 95: the resolve of these links landed (successfully or not) — one
+/// fewer row spins in the queue.
+pub fn clear_stream_parse_pending(ctx: &Ctx, links: &[String]) {
+    let mut pending = ctx.pending_yt_links.borrow_mut();
+    for link in links {
+        pending.remove(&stream_meta_key(link));
+    }
+    if pending.is_empty() {
+        pending.shrink_to_fit();
+    }
+}
+/// Round 95: is a resolve for this queue row's link in flight right now? A
+/// marker older than [`crate::ctx::PENDING_YT_LINK_MAX_AGE`] is stale (a work
+/// thread that never reported back) and is dropped.
+pub fn stream_parse_pending(ctx: &Ctx, file: &str) -> bool {
+    // A resolved row is keyed by its stream URL, while the marker was set
+    // for the link it was resolved from - follow the cached info back to
+    // that link before giving up.
+    let key = {
+        let pending = ctx.pending_yt_links.borrow();
+        let link_key = stream_meta_key(file);
+        if pending.contains_key(&link_key) {
+            link_key
+        } else {
+            let from_info = ctx
+                .yt_info
+                .borrow()
+                .get(file)
+                .map(|info| stream_meta_key(&info.original_url))
+                .filter(|key| pending.contains_key(key));
+            from_info.unwrap_or(link_key)
+        }
+    };
+    let mut pending = ctx.pending_yt_links.borrow_mut();
+    let Some(at) = pending.get(&key).copied() else { return false };
+    if at.elapsed() > crate::ctx::PENDING_YT_LINK_MAX_AGE {
+        pending.remove(&key);
+        return false;
+    }
+    true
+}
+/// Round 95: put stream **links** into the MPD queue in one command list.
+/// Every row is there the moment the command lands; nothing is resolved
+/// here — a link is resolved when its entry is played (rounds 91 / 91b),
+/// which is why the caller is told how many rows it just got.
+///
+/// `play` starts the first link entry: MPD cannot open a link, so the
+/// autoplay is left to the resolve below, which replaces the row in place
+/// and starts it ([`YtAction::ReplaceAndPlay`], the single-link shape).
+/// `replace` empties the queue first (the stored playlists' *Replace
+/// queue*), `play` then pins the resolved row to the top.
+fn enqueue_stream_links(
+    ctx: &Ctx,
+    uris: Vec<String>,
+    play: bool,
+    replace: bool,
+) -> Result<()> {
+    if uris.is_empty() {
+        return Ok(());
+    }
+    let has_current = ctx.find_current_song_in_queue().is_some();
+    let position =
+        (play && !replace && has_current).then_some(QueuePosition::RelativeAdd(0));
+    // The row the `play` arm resolves and starts: the first queued link.
+    let first_link = uris
+        .iter()
+        .find(|uri| tagged_stream_entry(uri).is_some_and(|(_, intent)| intent.is_audio()))
+        .cloned();
+    let enqueue: Vec<Enqueue> =
+        uris.into_iter().map(|path| Enqueue::File { path }).collect();
+    ctx.command(move |client| {
+        client.enqueue_multiple(enqueue, None, position, replace)?;
+        Ok(())
+    });
+    if let Some(link) = first_link.filter(|_| play) {
+        // The rows are in the queue now (the query below is queued behind
+        // the enqueue command): find the id the entry was given and resolve
+        // it, so playback starts without waiting for a second user action.
+        let lookup = link.clone();
+        let inserted = ctx.query_sync(move |client| {
+            let songs = client.playlist_info()?.unwrap_or_default();
+            Ok(songs.iter().find(|song| song.file == lookup).map(|song| song.id))
+        });
+        match inserted {
+            Ok(Some(song_id)) => {
+                resolve_tagged_queue_entry(ctx, &link, song_id);
+            }
+            _ => status_warn!("Cannot find the queued stream entry to resolve"),
+        }
+    }
+    Ok(())
+}
+/// Round 95: a pasted playlist link's queue rows, all at once. The flat
+/// listing that named the items carries each one's title, channel and
+/// duration, so the rows are complete the moment they land — no per-item
+/// resolve, which is what made a playlist trickle into the queue before.
+///
+/// Audio queues the items as tagged audio **links** in one `add` (each
+/// resolves when played); video builds the mpv playlist entries from the
+/// listing (mpv plays the links itself). `autoplay` starts the first item.
+pub fn queue_playlist_streams(
+    ctx: &Ctx,
+    items: Vec<YtDlpItem>,
+    audio: bool,
+    autoplay: bool,
+) {
+    if items.is_empty() {
+        status_warn!("The playlist has no tracks to add");
+        return;
+    }
+    remember_yt_list_meta(ctx, &items);
+    let count = items.len();
+    if audio {
+        let uris: Vec<String> = items
+            .iter()
+            .map(|item| tagged_stream_link(&item.to_url(), StreamIntent::Audio))
+            .collect();
+        if let Err(err) = enqueue_stream_links(ctx, uris, autoplay, false) {
+            status_error!("Failed to add the playlist: {err}");
+            return;
+        }
+        status_info!(
+            "{count} track(s) queued — each stream resolves when it is played"
+        );
+    } else {
+        let entries: Vec<crate::core::mpv::MpvPlaylistEntry> = items
+            .iter()
+            .map(|item| {
+                let url = item.to_url();
+                let mut entry = crate::core::mpv::MpvPlaylistEntry::new(
+                    item.display_title().to_owned(),
+                    url.clone(),
+                    item.duration,
+                );
+                entry.original_url = Some(url);
+                entry
+            })
+            .collect();
+        if autoplay {
+            crate::core::mpv::add_to_video_playlist(ctx, entries.clone(), true);
+            crate::core::mpv::play_video_entries(ctx, entries);
+            status_info!("Added {count} video(s) to the video queue and started playback");
+        } else {
+            crate::core::mpv::add_to_video_playlist(ctx, entries, false);
+            status_info!("Added {count} video(s) to the video queue");
+        }
+    }
+}
+/// Round 95: queue the links of a stored playlist (or the marked rows of
+/// one) in one command list, in the order they were read. `play` starts the
+/// first link (resolved on the spot), `replace` empties the queue first.
+/// Returns false when there is nothing to queue.
+pub fn queue_stored_stream_links(
+    ctx: &Ctx,
+    uris: Vec<String>,
+    play: bool,
+    replace: bool,
+) -> bool {
+    if uris.is_empty() {
+        return false;
+    }
+    let count = uris.len();
+    if let Err(err) = enqueue_stream_links(ctx, uris, play, replace) {
+        status_error!("Failed to queue the playlist: {err}");
+        return true;
+    }
+    if !play {
+        status_info!(
+            "{count} playlist entry/entries queued — each stream resolves when it is played"
+        );
+    }
+    true
+}
+/// Round 96: queue **one** YouTube search result (the Queue tab's `Shift+S`
+/// popup) as an audio link, optionally starting it. It is the same
+/// tagged-link path the paste popup and stored playlists take — the entry
+/// resolves when it is played — but the wording fits a single result (the
+/// playlist helper above counts "playlist entries").
+pub fn queue_search_result(ctx: &Ctx, link: &str, title: &str, play: bool) -> bool {
+    let uri = tagged_stream_link(link, StreamIntent::Audio);
+    if let Err(err) = enqueue_stream_links(ctx, vec![uri], play, false) {
+        status_error!("Failed to queue the stream: {err}");
+        return false;
+    }
+    if play {
+        status_info!("Resolving \"{title}\" — playing it now");
+    } else {
+        status_info!("Queued \"{title}\" — it resolves when it is played");
+    }
+    true
 }
 /// Make sure the chapters of the current song are known: sync from the
 /// resolved YouTube info, or fetch them (Jellyfin items via the API, local
@@ -3193,6 +3543,7 @@ fn queue_stream_download_with(
                 id,
                 kind: YtDlpHost::Youtube,
                 title: None,
+                ..Default::default()
             },
             None => {
                 status_warn!(
@@ -3326,8 +3677,10 @@ pub fn ensure_mpris_metadata(ctx: &Ctx) {
         crate::core::work::set_expected_mpris_art(thumb.clone());
         ctx.command(move |client| {
             if !title.is_empty() {
+                // Round 95 (user): no album tag for a YouTube-style stream -
+                // it only ever repeated the title, and an empty album is
+                // what the media widget should show.
                 let _ = client.add_tag_id(song_id, "title", &title);
-                let _ = client.add_tag_id(song_id, "album", &title);
             }
             if let Some(channel) = channel && !channel.is_empty() {
                 let _ = client.add_tag_id(song_id, "artist", &channel);

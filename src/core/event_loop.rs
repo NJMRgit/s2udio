@@ -1081,6 +1081,26 @@ fn main_task<B: Backend + std::io::Write>(
                 }
                 AppEvent::WorkDone(Ok(result)) => match result {
                     WorkDone::YtStreamsResolved { info, action, failures } => {
+                        // Round 95: the resolve landed (for good or ill) —
+                        // those rows stop spinning in the queue's Duration
+                        // column.
+                        {
+                            let mut keys: Vec<String> = Vec::new();
+                            for item in &info {
+                                keys.push(item.url.clone());
+                                if !item.original_url.is_empty() {
+                                    keys.push(item.original_url.clone());
+                                }
+                            }
+                            for failure in &failures {
+                                if let Some((url, _)) = failure.split_once(": ") {
+                                    keys.push(url.to_owned());
+                                }
+                            }
+                            crate::ui::modals::paste::clear_stream_parse_pending(
+                                &ctx, &keys,
+                            );
+                        }
                         for failure in &failures {
                             status_warn!("Failed to resolve stream: {failure}");
                         }
@@ -1471,11 +1491,15 @@ fn main_task<B: Backend + std::io::Write>(
                                     );
                                 }
                             }
-                            // Round 83: an empty playlist is the only way
-                            // this lands here — the queue rows resolve their
-                            // items on the work thread.
-                            PlaylistAction::QueueStreams { .. } => {
-                                status_warn!("The playlist has no tracks to add");
+                            // Round 95: a pasted playlist link's queue
+                            // rows — every item lands at once, as a stream
+                            // link carrying the listing's title, channel
+                            // and duration (audio: the MPD queue, video:
+                            // the persistent video playlist).
+                            PlaylistAction::QueueStreams { audio, autoplay } => {
+                                crate::ui::modals::paste::queue_playlist_streams(
+                                    &ctx, urls, audio, autoplay,
+                                );
                             }
                         }
                     }
@@ -1595,6 +1619,18 @@ fn main_task<B: Backend + std::io::Write>(
                             }
                         }
 
+                        render_wanted = true;
+                    }
+                    // Round 96: hand the search modal its results (or the
+                    // failure) — the modal is the only listener that cares,
+                    // and it drops a reply it is no longer waiting for.
+                    WorkDone::SearchYtModalResults { request_id, items, error } => {
+                        if let Err(err) = ui.on_event(
+                            UiEvent::YtSearchResults { request_id, items, error },
+                            &mut ctx,
+                        ) {
+                            log::error!(error:? = err; "UI failed to handle search results");
+                        }
                         render_wanted = true;
                     }
                     WorkDone::ImageResized { data } => {
@@ -1898,6 +1934,11 @@ fn main_task<B: Backend + std::io::Write>(
                                 // never switched).
                                 crate::ui::modals::paste::ensure_chapters(&ctx);
                                 crate::ui::modals::paste::ensure_mpris_metadata(&ctx);
+                                // Round 95b (user): warm the next queue
+                                // entry's stream while this one plays, so a
+                                // playlist of stream links plays in order
+                                // (MPD cannot open a link and skips it).
+                                crate::ui::modals::paste::warm_next_queue_link(&ctx);
                                 ctx.auto_show_chapters();
                                 ctx.metadata_processed_song = ctx.status.songid;
                             }
@@ -1952,6 +1993,11 @@ fn main_task<B: Backend + std::io::Write>(
                                 ctx.metadata_processed_song = Some(songid);
                                 crate::ui::modals::paste::ensure_chapters(&ctx);
                                 crate::ui::modals::paste::ensure_mpris_metadata(&ctx);
+                                // Round 95b: same look-ahead as the status
+                                // handler's song change (a ReplaceAndPlay
+                                // changes the song id, so this path is the
+                                // one that sees the new current entry).
+                                crate::ui::modals::paste::warm_next_queue_link(&ctx);
                                 ctx.auto_show_chapters();
                                 // The album-art box belongs to this fan-out
                                 // as well: a pasted YouTube stream showed no

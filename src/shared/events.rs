@@ -97,6 +97,17 @@ pub(crate) enum WorkRequest {
         interactive: bool,
         position: Option<QueuePosition>,
     },
+    /// Round 96: a query typed into the Queue tab's YouTube search modal
+    /// (`Shift+S`). Unlike `SearchYt`, nothing is downloaded or queued — the
+    /// items go straight back to the open modal as
+    /// `WorkDone::SearchYtModalResults`, tagged with `request_id` so a slow
+    /// reply to an older query cannot overwrite a newer one.
+    SearchYtModal {
+        request_id: u64,
+        query: String,
+        kind: YtDlpHost,
+        limit: usize,
+    },
     YtDlpDownload {
         id: DownloadId,
         url: YtDlpItem,
@@ -303,6 +314,16 @@ pub(crate) enum WorkDone {
         items: Vec<YtDlpSearchItem>,
         position: Option<QueuePosition>,
         interactive: bool,
+    },
+    /// Round 96: the reply to `WorkRequest::SearchYtModal`, handed to the
+    /// open search modal (never queued, never downloaded). An error is
+    /// carried here rather than returned as `Err`, so the modal can show it
+    /// in place instead of leaving a stuck "Searching…" row and a status-bar
+    /// message.
+    SearchYtModalResults {
+        request_id: u64,
+        items: Vec<YtDlpSearchItem>,
+        error: Option<String>,
     },
     YtDlpPlaylistResolved {
         urls: Vec<YtDlpItem>,

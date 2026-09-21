@@ -11,7 +11,7 @@ use walkdir::WalkDir;
 
 use crate::shared::ytdlp::error::YtDlpParseError;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct YtDlpItem {
     /// id of the video/audio, to be used in the url
     pub id: String,
@@ -24,6 +24,13 @@ pub struct YtDlpItem {
     /// The pickers (which videos of a playlist to add/save) label their
     /// rows with it.
     pub title: Option<String>,
+    /// Round 95: the video's duration in seconds and its channel/uploader,
+    /// both from the flat playlist listing. A playlist added to the queue
+    /// takes its rows' titles and durations from this listing (one yt-dlp
+    /// call) instead of resolving every item, so the rows are correct the
+    /// moment they land. `None` when the listing has no value for them.
+    pub duration: Option<f64>,
+    pub channel: Option<String>,
 }
 
 pub struct YtDlpPlaylist {
@@ -36,8 +43,9 @@ pub enum YtDlpContent {
     Playlist(YtDlpPlaylist),
 }
 
-#[derive(Clone, Copy, Debug, strum::AsRefStr, strum::Display)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, strum::AsRefStr, strum::Display)]
 pub enum YtDlpHost {
+    #[default]
     Youtube,
     Soundcloud,
     NicoVideo,
@@ -120,6 +128,31 @@ impl YtDlpHost {
             Self::NicoVideo => "nicosearch",
         }
     }
+
+    /// Round 96: the provider's name as the search modal labels it — the
+    /// title on the popup's top border and the provider row itself. The
+    /// variant name is close but not right ("Youtube" / "Soundcloud").
+    pub fn search_label(self) -> &'static str {
+        match self {
+            Self::Youtube => "YouTube",
+            Self::Soundcloud => "SoundCloud",
+            Self::NicoVideo => "NicoVideo",
+        }
+    }
+}
+
+/// Round 95: what a yt-dlp **flat playlist listing** knows about one
+/// YouTube-style link: the title, the channel/uploader and the duration.
+/// A playlist added to the queue shows these in its rows right away (the
+/// listing is one yt-dlp call, no per-item resolve), and they are cached so
+/// a stored playlist built from that listing keeps showing them later.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct YtListMeta {
+    pub title: String,
+    #[serde(default)]
+    pub channel: Option<String>,
+    #[serde(default)]
+    pub duration: Option<f64>,
 }
 
 /// Round 86: how a stored playlist entry is meant to be played. A playlist
@@ -271,6 +304,7 @@ impl FromStr for YtDlpContent {
                             filename: id,
                             kind: YtDlpHost::Youtube,
                             title: None,
+                            ..Default::default()
                         }))
                         .ok_or_else(|| YtDlpParseError::invalid_yt(s, "no video id found"))
                 }
@@ -301,6 +335,7 @@ impl FromStr for YtDlpContent {
                         filename: x.to_string(),
                         kind: YtDlpHost::Youtube,
                         title: None,
+                        ..Default::default()
                     })
                     .ok_or_else(|| YtDlpParseError::invalid_yt(s, "no video id found"))
                     .map(YtDlpContent::Single)
@@ -324,6 +359,7 @@ impl FromStr for YtDlpContent {
                         filename: track_id.to_string(),
                         kind: YtDlpHost::Soundcloud,
                         title: None,
+                        ..Default::default()
                     }))
                 } else {
                     // Web form: https://soundcloud.com/<user>/<track>
@@ -337,6 +373,7 @@ impl FromStr for YtDlpContent {
                         filename: format!("{username}-{track_name}"),
                         kind: YtDlpHost::Soundcloud,
                         title: None,
+                        ..Default::default()
                     }))
                 }
             }
@@ -358,6 +395,7 @@ impl FromStr for YtDlpContent {
                     filename: id.to_string(),
                     kind: YtDlpHost::NicoVideo,
                     title: None,
+                    ..Default::default()
                 }))
             }
             _ => {

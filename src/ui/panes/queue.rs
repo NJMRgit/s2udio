@@ -84,6 +84,10 @@ pub struct QueuePane {
     video_band: crate::ui::band::BandState,
     /// Click areas of the Audio / Video / Chapters toggle.
     pub(crate) toggle_areas: [Rect; 4],
+    /// Round 95: the redraw tick that keeps the Duration column's spinner
+    /// moving while a queued stream resolve is in flight. Armed only while
+    /// such a row is on screen, so the animation costs nothing otherwise.
+    loading_tick: Option<crate::shared::id::Id>,
 }
 #[derive(Debug, Enum)]
 enum Areas {
@@ -102,6 +106,23 @@ pub const FILE_CHAPTERS: &str = "file_chapters";
 /// chapters header so the labels and values line up.
 pub(crate) const CHAPTER_TIME_COL: u16 = 10;
 pub(crate) const CHAPTER_DURATION_COL: u16 = 10;
+/// Round 95: the spinner the queue's Duration column shows for a stream
+/// whose duration is not known yet while its parse is in flight — the same
+/// braille frames (and step) as the Jellyfin loading indicator, one cell
+/// wide, so a spinning cell never shifts the column.
+pub(crate) const SPINNER_FRAMES: [&str; 10] =
+    ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+pub(crate) const SPINNER_FRAME_MS: u64 = 120;
+/// The frame to draw right now (wall clock, so the animation is shared by
+/// every spinning row and survives a missing tick).
+fn spinner_frame() -> &'static str {
+    let step = (std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as u64)
+        .unwrap_or(0)
+        / SPINNER_FRAME_MS) as usize;
+    SPINNER_FRAMES[step % SPINNER_FRAMES.len()]
+}
 /// Whether `file` is a resolved YouTube stream whose signed URL has
 /// expired. googlevideo `videoplayback` URLs carry an `expire` epoch; once
 /// it passes, MPD cannot open the stream (the YouTube video itself may
@@ -347,6 +368,30 @@ impl QueuePane {
             chapters_scrollbar_drag: crate::shared::mouse_event::ScrollbarDrag::default(),
             video_band: crate::ui::band::BandState::default(),
             toggle_areas: [Rect::default(); 4],
+            loading_tick: None,
+        }
+    }
+    /// Round 95: arm (and re-arm) the redraw tick that animates the
+    /// Duration column's spinner, the same way the Jellyfin indicator does.
+    fn schedule_spinner_tick(&mut self, ctx: &Ctx) {
+        let id = self.loading_tick.unwrap_or_else(|| {
+            let id = crate::shared::id::new();
+            self.loading_tick = Some(id);
+            id
+        });
+        ctx.scheduler.schedule_replace(
+            id,
+            std::time::Duration::from_millis(SPINNER_FRAME_MS),
+            move |(tx, _)| {
+                tx.send(crate::AppEvent::RequestRender)?;
+                Ok(())
+            },
+        );
+    }
+    /// Round 95: stop the tick once no row is parsing any more.
+    fn cancel_spinner_tick(&mut self, ctx: &Ctx) {
+        if let Some(id) = self.loading_tick.take() {
+            ctx.scheduler.cancel(id);
         }
     }
     pub fn init(ctx: &Ctx) -> (Vec<Constraint>, Vec<Property<SongProperty>>) {
@@ -537,6 +582,15 @@ impl Pane for QueuePane {
         let current_song_id = ctx.find_current_song_in_queue().map(|(_, song)| song.id);
         let marked = std::mem::take(self.queue.marked_mut());
         let filter = ctx.input.value(self.queue.filter_buffer_id);
+        // Round 95: the spinner in a Duration cell needs a redraw tick; one
+        // is armed while any stream resolve is in flight and dropped as soon
+        // as none is.
+        let spinning_any = !ctx.pending_yt_links.borrow().is_empty();
+        if spinning_any {
+            self.schedule_spinner_tick(ctx);
+        } else {
+            self.cancel_spinner_tick(ctx);
+        }
         let table = VirtualizedTable::new(&self.queue.items)
             .column_widths(self.column_widths.clone())
             .row_highlight_style(row_highlight)
@@ -544,7 +598,21 @@ impl Pane for QueuePane {
                 let is_current = current_song_id.is_some_and(|v| v == song.id);
                 let is_marked = marked.contains(&idx);
                 let is_hovered = hover_idx == Some(idx);
-                let yt = ctx.yt_info.borrow().get(&song.file).cloned();
+                // Round 95: a stream row is a link (`watch?v=ID#s2u-audio`)
+                // until it is played, so the overlay matches the row by its
+                // normalized link and reads the resolved info first, the
+                // flat playlist listing second. A stream row with no info
+                // yet still renders through the overlay: its Album cell
+                // stays empty and its Duration cell can spin while the
+                // stream is parsed.
+                let stream_row = crate::ui::modals::paste::is_stream_row(ctx, &song.file);
+                let row_meta = stream_row
+                    .then(|| crate::ui::modals::paste::stream_row_meta(ctx, &song.file))
+                    .flatten();
+                let spinning = stream_row
+                    && song.duration.is_none()
+                    && row_meta.as_ref().and_then(|meta| meta.duration).is_none()
+                    && crate::ui::modals::paste::stream_parse_pending(ctx, &song.file);
                 let columns = (0..formats.len())
                     .map(|i| {
                         let mut max_len: usize = widths[i].width.into();
@@ -553,10 +621,12 @@ impl Pane for QueuePane {
                                 max_len = max_len.saturating_sub(2);
                                 Span::styled("❯ ", Style::default())
                             });
-                        let mut line = if let Some(yt) = &yt {
+                        let mut line = if stream_row {
                             stream_column_line(
                                     &formats[i].prop,
-                                    yt,
+                                    row_meta.as_ref(),
+                                    song,
+                                    spinning,
                                     max_len,
                                     &config.theme.symbols,
                                 )
@@ -1373,6 +1443,18 @@ impl Pane for QueuePane {
         Ok(())
     }
     fn handle_action(&mut self, event: &mut ActionEvent, ctx: &mut Ctx) -> Result<()> {
+        // Round 96: `S` (Shift+S, `GlobalAction::LibrarySearch`) opens the
+        // YouTube search popup on the Queue tab — on library tabs the same
+        // key jumps to that library's search page, and on the Queue tab it
+        // was a no-op before this. Handled before the Audio/Video/Chapters
+        // dispatch so it works from all three lists.
+        if let Some(action) = event.claim_global() {
+            if matches!(action, GlobalAction::LibrarySearch) {
+                modal!(ctx, crate::ui::modals::yt_search::YtSearchModal::new(ctx));
+                return Ok(());
+            }
+            event.abandon();
+        }
         match ctx.queue_tab.get() {
             crate::ctx::QueueTabMode::Chapters if Self::chapters_available(ctx) => {
                 return self.handle_chapters_action(event, ctx);
@@ -1896,22 +1978,63 @@ fn truncate_to_width(s: &mut String, max_cols: usize) {
     }
     *s = out;
 }
-/// The queue-table cell of a resolved YouTube-style stream for the Title /
-/// Album / Artist columns: the cached info (title in Title + Album,
-/// channel in Artist — matching the MPRIS tags), ellipsized to the column
-/// width. `None` for the other columns (duration …), which render normally.
+/// The queue-table cell of a YouTube-style stream row for the Title / Album
+/// / Artist / Duration columns: the resolved stream info or the flat
+/// playlist listing (both via `stream_row_meta`) — title in Title, channel
+/// in Artist, the duration in Duration. Ellipsized to the column width.
+/// `None` for every other column, and for a column the row has no value for
+/// (the caller then renders the row's own property, i.e. the column default).
+///
+/// Round 95 (user): the Album cell of such a row is **empty** — the album
+/// only ever repeated the title. The Duration cell shows the spinning frame
+/// while the row's duration is still unknown and its parse is in flight.
 fn stream_column_line(
     prop: &Property<SongProperty>,
-    yt: &crate::shared::ytdlp::YtStreamInfo,
+    meta: Option<&crate::shared::ytdlp::YtListMeta>,
+    song: &Song,
+    spinning: bool,
     max_len: usize,
     symbols: &crate::config::theme::SymbolsConfig,
 ) -> Option<Line<'static>> {
     use crate::config::theme::properties::{PropertyKindOrText, SongProperty};
     let text = match &prop.kind {
-        PropertyKindOrText::Property(SongProperty::Title) => yt.title.clone(),
-        PropertyKindOrText::Property(SongProperty::Album) => yt.title.clone(),
+        PropertyKindOrText::Property(SongProperty::Title) => {
+            let title = meta.map(|meta| meta.title.clone()).unwrap_or_default();
+            if title.is_empty() {
+                return None;
+            }
+            title
+        }
+        // Round 95 (user): never repeat the title as the album of a
+        // YouTube-style stream — the cell stays empty.
+        PropertyKindOrText::Property(SongProperty::Album) => String::new(),
         PropertyKindOrText::Property(SongProperty::Artist) => {
-            yt.channel.clone().unwrap_or_default()
+            let channel = meta
+                .and_then(|meta| meta.channel.clone())
+                .unwrap_or_default();
+            if channel.is_empty() {
+                return None;
+            }
+            channel
+        }
+        PropertyKindOrText::Property(SongProperty::Duration) => {
+            // MPD knows the length of a local file (and of a stream it has
+            // opened) — that always wins.
+            if song.duration.is_some() {
+                return None;
+            }
+            match meta.and_then(|meta| meta.duration) {
+                // The same text a local file's Duration cell shows
+                // (`Song::duration`), so the column reads uniformly:
+                // `m:ss`, and `h:mm:ss` past the hour.
+                Some(seconds) => {
+                    use crate::shared::ext::duration::DurationExt;
+                    std::time::Duration::from_secs(seconds.max(0.0).round() as u64)
+                        .to_string()
+                }
+                None if spinning => spinner_frame().to_owned(),
+                None => return None,
+            }
         }
         _ => return None,
     };

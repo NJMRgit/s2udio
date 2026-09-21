@@ -78,6 +78,12 @@ pub struct UiSettings {
     /// unchanged); the radio favourites name is excluded.
     #[serde(default)]
     pub library_playlist_files: bool,
+    /// Round 96: also offer **NicoVideo** in the Queue tab's YouTube search
+    /// popup (`Shift+S`), alongside YouTube and SoundCloud. Defaults to off
+    /// — the popup's provider cycle is YouTube ⇄ SoundCloud unless this is
+    /// enabled, and the NicoVideo search extractor is not always useful.
+    #[serde(default)]
+    pub yt_search_nicovideo: bool,
 }
 impl Default for UiSettings {
     fn default() -> Self {
@@ -91,6 +97,7 @@ impl Default for UiSettings {
             show_virtual_devices: false,
             mpdris2_notifications: true,
             library_playlist_files: false,
+            yt_search_nicovideo: false,
         }
     }
 }
