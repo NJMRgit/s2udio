@@ -83,8 +83,7 @@ enum RowAction {
 pub struct YtSearchModal {
     id: Id,
     input_buffer_id: BufferId,
-    /// The providers Tab cycles through: YouTube and SoundCloud always,
-    /// NicoVideo only when Settings enables it (round 96).
+    /// The providers Tab cycles through: YouTube and SoundCloud.
     providers: Vec<YtDlpHost>,
     provider_idx: usize,
     results: Vec<YtDlpSearchItem>,
@@ -114,10 +113,11 @@ impl YtSearchModal {
     pub fn new(ctx: &Ctx) -> Self {
         let input_buffer_id = BufferId::new();
         ctx.input.insert_mode(input_buffer_id);
-        let mut providers = vec![YtDlpHost::Youtube, YtDlpHost::Soundcloud];
-        if ctx.config.ui.yt_search_nicovideo {
-            providers.push(YtDlpHost::NicoVideo);
-        }
+        // YouTube ⇄ SoundCloud. NicoVideo is not offered: yt-dlp's
+        // `nicosearch` extractor returned no entries for any query tried, so
+        // the popup did not earn a third stop (round 96 feedback). The host
+        // itself stays supported for pasted NicoVideo links.
+        let providers = vec![YtDlpHost::Youtube, YtDlpHost::Soundcloud];
         Self {
             id: id::new(),
             input_buffer_id,

@@ -259,9 +259,6 @@ enum GeneralRow {
     VideoPlayback,
     AutoChapters,
     Mpdis2Notifications,
-    /// Round 96: also offer NicoVideo in the Queue tab's YouTube search
-    /// popup (`Shift+S`) — YouTube ⇄ SoundCloud is the default cycle.
-    YtSearchNicoVideo,
     CavaHeader,
     AutoSens,
     Sensitivity,
@@ -965,7 +962,6 @@ impl SettingsModal {
                     ContentRow::General(GeneralRow::VideoPlayback),
                     ContentRow::General(GeneralRow::AutoChapters),
                     ContentRow::General(GeneralRow::Mpdis2Notifications),
-                    ContentRow::General(GeneralRow::YtSearchNicoVideo),
                     ContentRow::General(GeneralRow::CavaHeader),
                     ContentRow::General(GeneralRow::AutoSens),
                     ContentRow::General(GeneralRow::Sensitivity),
@@ -1111,9 +1107,6 @@ impl SettingsModal {
             GeneralRow::AutoChapters => self.ui_pending.auto_show_chapters = value,
             GeneralRow::Mpdis2Notifications => {
                 self.ui_pending.mpdris2_notifications = value;
-            }
-            GeneralRow::YtSearchNicoVideo => {
-                self.ui_pending.yt_search_nicovideo = value;
             }
             _ => unreachable!("toggle_ui called with a non-toggle row"),
         }
@@ -1518,8 +1511,7 @@ impl SettingsModal {
                     | GeneralRow::Cava
                     | GeneralRow::Jellyfin
                     | GeneralRow::AutoChapters
-                    | GeneralRow::Mpdis2Notifications
-                    | GeneralRow::YtSearchNicoVideo => {
+                    | GeneralRow::Mpdis2Notifications => {
                         let value = match g {
                             GeneralRow::AlbumArt => !self.ui_pending.show_album_art,
                             GeneralRow::Lyrics => !self.ui_pending.show_lyrics,
@@ -1530,9 +1522,6 @@ impl SettingsModal {
                             }
                             GeneralRow::Mpdis2Notifications => {
                                 !self.ui_pending.mpdris2_notifications
-                            }
-                            GeneralRow::YtSearchNicoVideo => {
-                                !self.ui_pending.yt_search_nicovideo
                             }
                             _ => unreachable!(),
                         };
@@ -1971,7 +1960,6 @@ impl SettingsModal {
                     | GeneralRow::Jellyfin
                     | GeneralRow::AutoChapters
                     | GeneralRow::Mpdis2Notifications
-                    | GeneralRow::YtSearchNicoVideo
                     | GeneralRow::AutoSens
                     | GeneralRow::VirtualDevices
                     | GeneralRow::Monstercat
@@ -1997,12 +1985,6 @@ impl SettingsModal {
                                 (
                                     "mpdris2 desktop notifications",
                                     self.ui_pending.mpdris2_notifications,
-                                )
-                            }
-                            GeneralRow::YtSearchNicoVideo => {
-                                (
-                                    "nicovideo in the youtube search (Shift+S in the queue)",
-                                    self.ui_pending.yt_search_nicovideo,
                                 )
                             }
                             GeneralRow::AutoSens => {
