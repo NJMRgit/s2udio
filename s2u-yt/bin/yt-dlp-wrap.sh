@@ -8,6 +8,12 @@
 #   P2  authenticated (your cookies) — output probed; on 403 falls through.
 #   P3  web_safari HLS safety net (max 1080p60).
 #
+# Every pass whose output carries googlevideo URLs is probed by
+# bin/s2u-yt-probe.py before it is handed over, and probed with the request
+# shape the players actually use: a plain GET (no Range header) through
+# ffprobe / curl. A URL that only answers 206 to a small bounded range but
+# 403s the player's open is caught here instead of dying in MPD (v2026-09-22).
+#
 # v2026-09-10: drops the deprecated `--youtube-skip-dash-manifest` flag from
 # consumer args — with it, the player-response URLs fail googlevideo's redirect
 # validation (302 -> 403) while DASH-manifest URLs answer 206 (A/B verified
@@ -50,7 +56,19 @@ if [ -f "$USER_CONF" ]; then
     "$YTDLP" --ignore-config --config-locations "$ANON_CONF" --config-locations "$CONF" --plugin-dirs "$PLUGINS" "${NEW_ARGS[@]}" >"$TMP"
     status=$?
     if [ "$status" -eq 0 ]; then
-        cat "$TMP"; rm -f "$TMP"; exit 0
+        # P1 is probed like P2 (v2026-09-22): it is the pass that usually
+        # answers here, and an unprobed URL is how a 403-dead stream reached
+        # MPD — the song died and the playlist skipped on to the next rows. A
+        # URL the players cannot open now falls through to P2/P3 instead.
+        if grep -q googlevideo "$TMP"; then
+            "$PROBE" "$TMP" 2>/dev/null; rc=$?
+            if [ "$rc" -ne 1 ]; then
+                cat "$TMP"; rm -f "$TMP"; exit 0
+            fi
+            log "PHASE1_PROBE403 args=$*"
+        else
+            cat "$TMP"; rm -f "$TMP"; exit 0
+        fi
     fi
     rm -f "$TMP"
 

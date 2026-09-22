@@ -7,9 +7,11 @@
 # Client strategy (v2026-09-10 — the wrapper, not this file, picks the client):
 #
 #   P1  anonymous, NO pinned client — the wrapper strips the cookie options
-#       from your config for this pass; yt-dlp's default order applies.
+#       from your config for this pass; yt-dlp's default order applies. Its
+#       output is probed like P2's (a URL the players cannot open is not
+#       handed over; the ladder continues).
 #   P2  authenticated retry (your cookies), DASH-manifest URLs; the wrapper
-#       probes the resolved media URLs (curl -L -r 0-1023) and only then hands
+#       probes the resolved media URLs (ffprobe / plain GET) and only then hands
 #       the output to the consumer.
 #   P3  web_safari (HLS, max 1080p60) — safety net when the passes above fail
 #       or their probe sees 403s. See the SABR note below (yt-dlp #12482): some

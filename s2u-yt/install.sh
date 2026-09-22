@@ -401,8 +401,15 @@ install_wpc() {
 verify() {
     local real="$1"
     if [ "$DRY" -eq 1 ]; then
-        log "would verify: server /ping + plugin registration + live stream test on $TEST_URL"
+        log "would verify: probe self-test + server /ping + plugin registration + live stream test on $TEST_URL"
         return
+    fi
+
+    log "verifying the media-URL probe (self-test)..."
+    if python3 "$DATA_ROOT/bin/s2u-yt-probe.py" --self-test >/dev/null 2>&1; then
+        log "OK: probe self-test passed (open-shape verdicts, retry, payload parsing)"
+    else
+        warn "probe self-test failed — run: python3 $DATA_ROOT/bin/s2u-yt-probe.py --self-test"
     fi
 
     log "verifying token server..."

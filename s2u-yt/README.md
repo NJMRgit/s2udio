@@ -28,7 +28,7 @@ s2u-yt/
 ├── status.sh                        # health check incl. a live HTTP-200 stream test
 ├── conf/config                      # the only yt-dlp config delta (no player_client pin — the wrapper chooses)
 ├── bin/yt-dlp-wrap.sh               # wrapper template rendered into the data root by install.sh
-├── bin/s2u-yt-probe.py              # media-URL probe used by wrapper phases 2/2b
+├── bin/s2u-yt-probe.py              # media-URL probe used by every wrapper phase
 ├── plugins/bgutil-ytdlp-pot-provider/…   # yt-dlp plugins: the bgutil 2.x PO-token provider
 └── README.md
 ```
@@ -88,8 +88,8 @@ the first result whose media URLs it could actually fetch:
 
 | Phase | Client | Output |
 |---|---|---|
-| **P1** anonymous | no pin; cookie options stripped from your config | JSON on success (a failed pass is discarded — its leading `null` corrupts consumers) |
-| **P2** authenticated | no pin; **your cookies** | probed; on HTTP 403 the ladder continues |
+| **P1** anonymous | no pin; cookie options stripped from your config | probed (since v2026-09-22); on a dead URL the ladder continues (a failed pass is discarded — its leading `null` corrupts consumers) |
+| **P2** authenticated | no pin; **your cookies** | probed; on a dead URL the ladder continues |
 | **P3** HLS safety net | `web_safari` (HLS, ≤1080p60) | always playable, lower quality |
 
 Details that matter:
@@ -98,11 +98,20 @@ Details that matter:
   yt-dlp returns *player-response* URLs that fail googlevideo's redirect
   validation (302 → 403) whereas *DASH-manifest* URLs answer 206 to the same
   request (verified 2026-09-09/10: A/B 3/3, wrapper runs 6/6).
-- **Phase 2/2b output is probed** by `bin/s2u-yt-probe.py`: `curl -s -L -r 0-1023`
-  against the best video and audio URL; a 403 means mpv would fail, so the
-  wrapper keeps going instead of handing back a dead URL.
+- **Every pass that returns googlevideo URLs is probed** by
+  `bin/s2u-yt-probe.py` before its output is handed over — the anonymous P1 pass
+  included, which used to be returned unchecked. The probe asks the URLs the
+  **request shape the players use**: a plain GET (no `Range` header) through
+  `ffprobe` (libavformat, the stack mpv and MPD decode with) or `curl` when
+  ffprobe is missing. That is the shape googlevideo's range enforcement answers
+  403 to, while a small bounded `Range: bytes=0-1023` — what an earlier probe
+  sent — can answer 206 for the very same URL (measured 2026-09-22). A URL the
+  players cannot open now makes the ladder continue instead of dying in MPD.
+  A single 403 is retried after 8 s first (a fresh URL can 403 on its first
+  request and 206 seconds later).
 - Decisions are logged (cheaply) to `/tmp/s2u-yt-wrapper.log`
-  (`PHASE2_PROBE403`, `FALLBACK_HLS`, `DROP deprecated …`).
+  (`PHASE1_PROBE403`, `PHASE2_PROBE403`, `FALLBACK_HLS`, `DROP deprecated …`).
+- The probe has a network-free self-test: `bin/s2u-yt-probe.py --self-test`.
 - YouTube's behaviour still **flaps window-to-window** (an open window means
   DASH/206, a closed one means 403s). The ladder means playback keeps working
   instead of failing; which phase answered is visible in the log.
@@ -222,10 +231,10 @@ Tips:
 ```
 s2udio / mpv / CLI ─▶ yt-dlp (wrapper: plugin-dirs + per-phase config-locations)
                           │
-                          ├─ P1 anon  (cookies stripped, unpinned)
-                          ├─ P2 auth  (your cookies) ──▶ probe ─ 403? ─┐
-                          ├─ P3 web_safari HLS  (≤1080p60 safety net)
+                          ├─ P1 anon  (cookies stripped, unpinned) ──▶ probe ─┐
+                          ├─ P2 auth  (your cookies) ────────────────▶ probe ─┤ dead
+                          ├─ P3 web_safari HLS  (≤1080p60 safety net)         │ URL?
                           └─▶ plugins ─▶ bgutil server 127.0.0.1:4416 (native node 2.x)
                                             └─▶ mints GVS PO token
-yt-dlp gets a token + manifest URLs → probe sees 206 → mpv plays → s2udio happy
+yt-dlp gets a token + manifest URLs → probe opens the URL like the player ─▶ plays
 ```
