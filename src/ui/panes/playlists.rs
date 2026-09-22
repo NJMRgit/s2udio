@@ -1717,6 +1717,7 @@ impl PlaylistsPane {
             inner,
             &query,
             self.search_input_focused,
+            None,
             ctx,
         );
         let (list_area, scrollbar_area) = if ctx.config.theme.scrollbar.is_some() {

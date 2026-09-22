@@ -46,6 +46,9 @@ use crate::{
 /// fills the popup without making the single flat yt-dlp call noticeably
 /// slower.
 pub(crate) const SEARCH_LIMIT: usize = 25;
+/// The input's empty-state hint (round 100, user feedback): it lives in the
+/// input row itself and is gone as soon as the first character is typed.
+const INPUT_HINT: &str = "Type a query and press Enter";
 /// The most result rows the popup grows to before the list scrolls.
 const MAX_VISIBLE_ROWS: u16 = 15;
 /// Popup width bounds: about two thirds of the terminal, clamped. The lower
@@ -56,7 +59,8 @@ const MAX_WIDTH: u16 = 96;
 /// What the popup is showing under its input row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Phase {
-    /// Nothing asked yet: one hint row.
+    /// Nothing asked yet: no message row at all — the empty input carries the
+    /// hint (round 100, user feedback).
     Idle,
     /// A request is in flight.
     Searching,
@@ -259,20 +263,22 @@ impl YtSearchModal {
         Ok(())
     }
 
-    /// The popup's height: 6 rows while idle/searching (input, divider, one
-    /// message row, the hints row, two borders), one row per result after
-    /// that, capped so the list scrolls instead of growing past
-    /// [`MAX_VISIBLE_ROWS`].
+    /// The popup's height: two borders, the input row, the connected divider
+    /// and the hints row, plus one message row while there is a message, plus
+    /// one row per result once there are results, capped so the list scrolls
+    /// instead of growing past [`MAX_VISIBLE_ROWS`]. The idle popup has no
+    /// message row (round 100), so it sits one row shorter than before.
     fn popup_height(&self, screen: Rect) -> u16 {
-        let wanted = if self.results.is_empty() {
-            1
-        } else {
-            u16::try_from(self.results.len()).unwrap_or(u16::MAX)
-        };
-        // The cap leaves room for the borders, the input row, the divider and
-        // the hints row, so the popup always fits on screen.
+        // Borders, input, divider, hints.
+        const FRAME_ROWS: u16 = 5;
+        // The cap leaves room for the frame rows, so the popup always fits on
+        // screen.
         let cap = MAX_VISIBLE_ROWS.min(screen.height.saturating_sub(7)).max(1);
-        5 + wanted.clamp(1, cap)
+        if self.results.is_empty() {
+            return FRAME_ROWS + u16::from(self.message().is_some());
+        }
+        let rows = u16::try_from(self.results.len()).unwrap_or(u16::MAX);
+        FRAME_ROWS + rows.clamp(1, cap)
     }
 
     fn popup_width(&self, screen: Rect) -> u16 {
@@ -283,14 +289,14 @@ impl YtSearchModal {
     }
 
     /// The one-row message shown instead of the list while there is nothing
-    /// to select.
-    fn placeholder(&self) -> Line<'static> {
+    /// to select. `None` while idle (the input's own hint covers that state)
+    /// and while results are on screen, so those states have no message row.
+    fn message(&self) -> Option<Line<'static>> {
         match &self.phase {
-            Phase::Idle => Line::from("Type a query and press Enter"),
-            Phase::Searching => Line::from("Searching…"),
-            Phase::Results => Line::from(""),
-            Phase::Empty => Line::from(format!("No results for \"{}\"", self.last_query)),
-            Phase::Failed(err) => Line::from(format!("Search failed: {err}")),
+            Phase::Idle | Phase::Results => None,
+            Phase::Searching => Some(Line::from("Searching…")),
+            Phase::Empty => Some(Line::from(format!("No results for \"{}\"", self.last_query))),
+            Phase::Failed(err) => Some(Line::from(format!("Search failed: {err}"))),
         }
     }
 
@@ -432,10 +438,13 @@ impl Modal for YtSearchModal {
         let query = ctx.input.value(self.input_buffer_id);
         let focused = ctx.input.is_active(self.input_buffer_id);
         let content =
-            crate::ui::render_search_frame_top(frame, inner, &query, focused, ctx);
+            crate::ui::render_search_frame_top(frame, inner, &query, focused, Some(INPUT_HINT), ctx);
         // Round 96 (user feedback): the key hints are their own row at the
         // bottom of the popup, inside the border, with the list above them.
-        let (content, hints_area) = if content.height > 1 {
+        // The row is reserved whenever there is any content row at all — the
+        // idle popup is exactly one content row tall (round 100), and it must
+        // be the hints row.
+        let (content, hints_area) = if content.height >= 1 {
             (
                 Rect { height: content.height - 1, ..content },
                 Rect { y: content.bottom() - 1, height: 1, ..content },
@@ -459,10 +468,10 @@ impl Modal for YtSearchModal {
         };
         self.list_area = list_area;
         self.scrollbar_area = scrollbar_area;
-        if self.results.is_empty() {
+        if let Some(message) = self.message() {
             let style = ctx.config.as_list_text_style().add_modifier(Modifier::DIM);
             frame.render_widget(
-                Paragraph::new(self.placeholder()).style(style),
+                Paragraph::new(message).style(style),
                 Rect {
                     x: list_area.x + 1,
                     y: list_area.y,
@@ -470,6 +479,10 @@ impl Modal for YtSearchModal {
                     height: 1,
                 },
             );
+            return Ok(());
+        }
+        if self.results.is_empty() {
+            // Idle: the input's own hint is the whole empty state.
             return Ok(());
         }
         self.state

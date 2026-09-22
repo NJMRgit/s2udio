@@ -11,7 +11,7 @@ use panes::{PaneContainer, Panes, pane_call};
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Layout, Position, Rect},
-    style::{Color, Style},
+    style::{Color, Modifier, Style},
     widgets::{Block, Clear},
 };
 use tab_screen::TabScreen;
@@ -2219,11 +2219,17 @@ pub(crate) fn connect_box_divider(frame: &mut Frame, outer: Rect, sep_y: u16, ct
 /// content rect. The box's bottom edge carries the `Results` label via
 /// the block's bottom title (`╰─Results───…──╯`). The caller renders the
 /// block first, so the junction glyphs stick at the border cells.
+///
+/// `placeholder` is the input's empty-state hint (round 100, user feedback):
+/// while `query` is empty it is written dim right after the caret, so it
+/// starts exactly where the first typed character lands and is gone the
+/// moment one is typed. `None` for an input without a hint.
 pub(crate) fn render_search_frame_top(
     frame: &mut Frame,
     inner: Rect,
     query: &str,
     focused: bool,
+    placeholder: Option<&str>,
     ctx: &Ctx,
 ) -> Rect {
     let buf = frame.buffer_mut();
@@ -2254,6 +2260,21 @@ pub(crate) fn render_search_frame_top(
         buf[(x, inner.y)]
             .set_symbol("▎")
             .set_style(ctx.config.theme.hovered_item_style);
+        x += 1;
+    }
+    if query.is_empty()
+        && let Some(placeholder) = placeholder
+    {
+        // The hint carries the hint-row weight (dim), so it reads as a
+        // suggestion and never as text the user typed.
+        let style = ctx.config.as_list_text_style().add_modifier(Modifier::DIM);
+        for ch in placeholder.chars() {
+            if x >= inner.right().saturating_sub(1) {
+                break;
+            }
+            buf[(x, inner.y)].set_symbol(&ch.to_string()).set_style(style);
+            x += 1;
+        }
     }
     if inner.height >= 2 {
         let sep_y = inner.y + 1;
