@@ -106,6 +106,14 @@ trait Section {
         false
     }
 
+    /// `Enter` on a row activates the first footer button instead of moving
+    /// the focus onto it (the multi-stream download picker: its rows are
+    /// pre-ticked, so one `Enter` starts the download). False when the
+    /// section takes the normal Enter-on-a-row path.
+    fn confirm_on_enter(&mut self, _ctx: &Ctx) -> Result<bool> {
+        Ok(false)
+    }
+
     /// Moves the button focus (`Left`/`Right`); false when it left the row.
     fn move_button_focus(&mut self, _forward: bool) -> bool {
         false
@@ -364,6 +372,13 @@ impl Section for SectionType<'_> {
         match self {
             SectionType::Menu(s) => s.focus_buttons(),
             _ => false,
+        }
+    }
+
+    fn confirm_on_enter(&mut self, ctx: &Ctx) -> Result<bool> {
+        match self {
+            SectionType::Menu(s) => s.confirm_on_enter(ctx),
+            _ => Ok(false),
         }
     }
 

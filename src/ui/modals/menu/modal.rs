@@ -308,6 +308,11 @@ impl Modal for MenuModal<'_> {
                         } else {
                             ctx.render()?;
                         }
+                    } else if self.active_section_mut().confirm_on_enter(ctx)? {
+                        // The multi-stream download picker: its rows are ticked
+                        // already, so Enter on the list starts the download
+                        // (the activated button always closes the picker).
+                        self.destroy(ctx)?;
                     } else if self.active_section_mut().focus_buttons() {
                         // Enter on a row moves the focus onto `Download`; a
                         // second Enter downloads.

@@ -50,10 +50,11 @@ pub struct ListSection {
     pub current_item_style: Style,
     max_height: Option<usize>,
     /// Checkbox-list confirm callback: receives the ticked row indices in
-    /// list order.
+    /// list order and the index of the activate confirm button (0 for the
+    /// plain `Download`; the multi-choice picker's `Audio`=0 / `Video`=1).
     #[debug(skip)]
     check_confirm: Option<
-        Box<dyn FnOnce(&Ctx, Vec<usize>) -> Result<()> + Send + Sync + 'static>,
+        Box<dyn FnOnce(&Ctx, Vec<usize>, usize) -> Result<()> + Send + Sync + 'static>,
     >,
     /// Footer buttons of a checkbox list (see `add_check_buttons`).
     pub buttons: Vec<ListButton>,
@@ -75,6 +76,9 @@ pub struct ListSection {
     /// paste popup clears its scan state when it is dismissed).
     #[debug(skip)]
     on_close: Option<Box<dyn FnOnce(&Ctx) + Send + Sync + 'static>>,
+    /// `Enter` on a row activates the first footer button instead of moving
+    /// the focus onto it (see `set_confirm_on_enter`).
+    enter_confirms: bool,
 }
 
 #[derive(Copy, Clone, Debug, Enum, Eq, PartialEq, Hash)]
@@ -90,8 +94,10 @@ pub enum ListSectionArea {
 /// `Left`/`Right`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ListButtonKind {
-    /// Runs the checkbox list's confirm callback with the ticked rows.
-    Download,
+    /// Runs the checkbox list's confirm callback with the ticked rows and this
+    /// button's index (0 for the plain `Download`, the multi-choice picker's
+    /// `Audio`=0 / `Video`=1).
+    Confirm(usize),
     /// Closes the picker's modal.
     Cancel,
 }
@@ -138,6 +144,7 @@ impl ListSection {
             state: DirState::default(),
             on_select: None,
             on_close: None,
+            enter_confirms: false,
         }
     }
 
@@ -249,11 +256,12 @@ impl ListSection {
     }
 
     /// Turns the section into a checkbox list (`add_check_item` +
-    /// `add_confirm_item`): `on_confirm` receives the ticked row indices in
-    /// list order when the confirm row is activated.
+    /// `add_check_buttons`/`add_choice_buttons`): `on_confirm` receives the
+    /// ticked row indices in list order and the index of the confirm button
+    /// that was activated.
     pub fn check_list(
         &mut self,
-        on_confirm: impl FnOnce(&Ctx, Vec<usize>) -> Result<()> + Send + Sync + 'static,
+        on_confirm: impl FnOnce(&Ctx, Vec<usize>, usize) -> Result<()> + Send + Sync + 'static,
     ) -> &mut Self {
         self.check_confirm = Some(Box::new(on_confirm));
         self
@@ -329,7 +337,9 @@ impl ListSection {
     /// Adds the footer buttons of a checkbox list (the picker's
     /// `Download` / `Cancel`): `Download` runs the `check_list` callback with
     /// the ticked rows (dim while nothing is ticked), `Cancel` closes the
-    /// picker's modal.
+    /// picker's modal. The dim state follows the rows that are ticked at this
+    /// point, so a picker built with pre-ticked rows (the queue's multi-stream
+    /// download) opens with live buttons.
     pub fn add_check_buttons(
         &mut self,
         download: impl Into<String>,
@@ -338,7 +348,7 @@ impl ListSection {
         self.buttons = vec![
             ListButton {
                 label: download.into(),
-                kind: ListButtonKind::Download,
+                kind: ListButtonKind::Confirm(0),
                 disabled: true,
             },
             ListButton {
@@ -348,12 +358,64 @@ impl ListSection {
             },
         ];
         self.button_focus = None;
+        self.refresh_buttons();
+        self
+    }
+
+    /// The footer buttons of a multi-choice checkbox list (the queue's
+    /// multi-stream download picker: `Audio` / `Video` / `Cancel`). Every
+    /// choice button runs the `check_list` callback with the ticked rows and
+    /// its own index among the choices, so one picker serves several output
+    /// kinds; each is dim while nothing is ticked.
+    pub fn add_choice_buttons(
+        &mut self,
+        choices: &[&str],
+        cancel: impl Into<String>,
+    ) -> &mut Self {
+        self.buttons = choices
+            .iter()
+            .enumerate()
+            .map(|(idx, label)| ListButton {
+                label: (*label).to_owned(),
+                kind: ListButtonKind::Confirm(idx),
+                disabled: true,
+            })
+            .collect();
+        self.buttons.push(ListButton {
+            label: cancel.into(),
+            kind: ListButtonKind::Cancel,
+            disabled: false,
+        });
+        self.button_focus = None;
+        self.refresh_buttons();
         self
     }
 
     /// True for a checkbox list (`add_check_item` rows).
     pub fn is_check_list(&self) -> bool {
         self.items.iter().any(|item| item.checked.is_some())
+    }
+
+    /// Makes `Enter` on a row activate the first footer button directly
+    /// (instead of the usual move-the-focus-onto-it step). The multi-stream
+    /// download picker uses it: every row is ticked already, so one `Enter`
+    /// on the list starts the downloads. The cursor and `Space` behave as in
+    /// any checkbox list.
+    pub fn set_confirm_on_enter(&mut self) -> &mut Self {
+        self.enter_confirms = true;
+        self
+    }
+
+    /// `Enter` on a row activates the first footer button directly (see
+    /// `set_confirm_on_enter`): true when the activation happened and the
+    /// modal should close. False for every other section and while nothing is
+    /// ticked (the confirm buttons are inert then, so `Enter` moves the focus
+    /// onto them the usual way).
+    pub fn confirm_on_enter(&mut self, ctx: &Ctx) -> Result<bool> {
+        if !self.enter_confirms || self.checked_indices().is_empty() {
+            return Ok(false);
+        }
+        Ok(self.activate_button(0, ctx)?.is_some())
     }
 
     /// True while the footer buttons hold the focus.
@@ -444,13 +506,13 @@ impl ListSection {
             return Ok(None);
         }
         match kind {
-            ListButtonKind::Download => {
+            ListButtonKind::Confirm(choice) => {
                 let checked = self.checked_indices();
                 if checked.is_empty() {
                     return Ok(None);
                 }
                 if let Some(cb) = self.check_confirm.take() {
-                    (cb)(ctx, checked)?;
+                    (cb)(ctx, checked, choice)?;
                 }
                 Ok(Some(true))
             }
@@ -651,7 +713,7 @@ impl ListSection {
         }
         let any = !self.checked_indices().is_empty();
         for button in &mut self.buttons {
-            if button.kind == ListButtonKind::Download {
+            if matches!(button.kind, ListButtonKind::Confirm(_)) {
                 button.disabled = !any;
             }
         }

@@ -697,9 +697,11 @@ fn youtube_link_of(item: &PastedItem) -> Option<String> {
         _ => None,
     }
 }
-/// The cached stream info of a pasted link (`apply_resolved_streams` stores it
-/// under both the resolved stream URL and the original link).
-fn stream_info_for(ctx: &Ctx, url: &str) -> Option<YtStreamInfo> {
+/// The cached stream info of a link or resolved stream URL (`apply_resolved_streams`
+/// stores it under both the resolved stream URL and the original link). This is
+/// also what makes a row a **web stream**: a queue/playlist entry whose file is
+/// a cached yt-dlp stream (or a link yt-dlp resolved) can be downloaded.
+pub fn stream_info_for(ctx: &Ctx, url: &str) -> Option<YtStreamInfo> {
     let info = ctx.yt_info.borrow();
     info.get(url)
         .cloned()
@@ -782,7 +784,7 @@ fn download_kind_menu(
         picker.add_check_buttons("Download", "Cancel");
         let picker_url = url;
         let picker_chapters = chapters;
-        picker.check_list(move |ctx, selected| {
+        picker.check_list(move |ctx, selected, _choice| {
             let sections: Vec<ChapterSection> = selected
                 .iter()
                 .filter_map(|idx| picker_chapters.get(*idx))
@@ -909,7 +911,7 @@ fn playlist_item_picker(
                     section.add_check_item(item.display_title().to_owned(), false);
                 }
                 section.add_check_buttons(confirm, "Cancel");
-                section.check_list(move |ctx, selected| {
+                section.check_list(move |ctx, selected, _choice| {
                     let chosen: Vec<YtDlpItem> = selected
                         .iter()
                         .filter_map(|idx| items.get(*idx).cloned())
@@ -3514,6 +3516,24 @@ pub fn queue_stream_download_sections(
         sections,
     );
 }
+/// The yt-dlp item of a downloadable link, or `None` when the link is not one
+/// yt-dlp can save: a playlist-only link (nothing to save on its own) or a
+/// non-YouTube/Soundcloud link. Round 79: a playlist link that names a video
+/// (`watch?v=ID&list=…`) downloads THAT video — the item gets the bare watch
+/// id, not the raw link (which would save the whole playlist into one file).
+fn ytdlp_item_of(original_url: &str) -> Option<YtDlpItem> {
+    match original_url.parse::<YtDlpContent>() {
+        Ok(YtDlpContent::Single(item)) => Some(item),
+        Ok(YtDlpContent::Playlist(_)) => yt_video_id(original_url).map(|id| YtDlpItem {
+            filename: id.clone(),
+            id,
+            kind: YtDlpHost::Youtube,
+            title: None,
+            ..Default::default()
+        }),
+        Err(_) => None,
+    }
+}
 /// The common body of the stream-download requests: yt-dlp needs the original
 /// link, not the resolved stream URL. `sections` is empty for a whole-media
 /// download.
@@ -3530,32 +3550,12 @@ fn queue_stream_download_with(
         status_warn!("Cannot determine the downloads folder (~/Downloads)");
         return;
     };
-    // Round 79: a playlist link that names a video (`watch?v=ID&list=…`)
-    // downloads THAT video — the yt-dlp run gets the bare watch URL (the
-    // raw link would download the whole playlist into one file). A
-    // playlist-only link has nothing to save this way; `Download > All
-    // files` is the row for it.
-    let item = match original_url.parse::<YtDlpContent>() {
-        Ok(YtDlpContent::Single(item)) => item,
-        Ok(YtDlpContent::Playlist(_)) => match yt_video_id(original_url) {
-            Some(id) => YtDlpItem {
-                filename: id.clone(),
-                id,
-                kind: YtDlpHost::Youtube,
-                title: None,
-                ..Default::default()
-            },
-            None => {
-                status_warn!(
-                    "Cannot download a playlist link — use 'Download > All files' to save every track"
-                );
-                return;
-            }
-        },
-        Err(_) => {
-            status_warn!("Cannot download: not a YouTube/Soundcloud/NicoVideo link");
-            return;
-        }
+    let Some(item) = ytdlp_item_of(original_url) else {
+        status_warn!(
+            "Cannot download '{original_url}': not a YouTube/Soundcloud/NicoVideo link \
+             (a playlist-only link needs 'Download > All files')"
+        );
+        return;
     };
     let chapter_count = sections.len();
     let spec = StreamDownloadSpec {
@@ -3573,6 +3573,177 @@ fn queue_stream_download_with(
     } else {
         status_info!("Downloading '{}' to s2udio-downloads", original_url);
     }
+}
+
+/// One downloadable row of the queue/playlist menus (round 97): the link
+/// yt-dlp saves, the label the picker shows and what the file replaces.
+///
+/// The stream does **not** have to be resolved yet. A playlist import queues
+/// intent-tagged links (`watch?v=ID#s2u-audio`) that only resolve when they
+/// are played, so their row has no `yt_info` entry; the link itself is what
+/// yt-dlp needs, and the listing metadata (`yt_list_meta`) carries the title.
+#[derive(Debug, Clone)]
+pub struct StreamDownloadTarget {
+    /// The original link, intent tag stripped: what `yt-dlp` is run on.
+    pub original_url: String,
+    /// The row label for the picker (the cached/resolved title, else the
+    /// listing title, else the link).
+    pub label: String,
+    /// The cached stream info when the row was already resolved (it carries
+    /// the chapters, so the single-row menu can offer the chapter options).
+    pub info: Option<YtStreamInfo>,
+    /// What the downloaded file replaces once it lands.
+    pub replace: ReplaceAction,
+}
+
+impl StreamDownloadTarget {
+    /// The stream info the single-row download menu is built from: the cached
+    /// one, or a link + label pair for a row that was not resolved yet (no
+    /// chapters, so only `Save as audio` / `Save as video`).
+    pub fn info(&self) -> YtStreamInfo {
+        self.info.clone().unwrap_or_else(|| YtStreamInfo {
+            url: self.original_url.clone(),
+            original_url: self.original_url.clone(),
+            title: self.label.clone(),
+            ..Default::default()
+        })
+    }
+}
+
+/// The download target of a queue row or video-playlist entry, or `None` when
+/// yt-dlp cannot save it (a local file, a radio/icecast URL, an unknown host).
+/// `fallback_label` is used when neither the resolve cache nor the playlist
+/// listing knows a title.
+pub fn stream_download_target(
+    ctx: &Ctx,
+    uri: &str,
+    fallback_label: &str,
+    replace: ReplaceAction,
+) -> Option<StreamDownloadTarget> {
+    let (original_url, info, title) = match stream_info_for(ctx, uri).or_else(|| {
+        // A tagged row that was resolved under its untagged link (a stored
+        // playlist entry, or a queue row an intent tag never left): the
+        // resolved info still carries the chapters the menu wants.
+        let link = crate::shared::ytdlp::untag_stream_link(uri);
+        (link != uri).then(|| stream_info_for(ctx, link)).flatten()
+    }) {
+        Some(info) => (info.original_url.clone(), Some(info.clone()), info.title),
+        None => {
+            // Not resolved (yet): a playlist import's tagged link, or a plain
+            // link that was never played. Strip the intent tag and check that
+            // yt-dlp knows the host before offering the row.
+            let link = crate::shared::ytdlp::untag_stream_link(uri);
+            if link == uri && !crate::ui::panes::radio::is_stream_url(uri) {
+                return None;
+            }
+            ytdlp_item_of(link)?;
+            let title = stream_row_meta(ctx, uri).map(|meta| meta.title).unwrap_or_default();
+            (link.to_owned(), None, title)
+        }
+    };
+    let label = if !title.trim().is_empty() {
+        title
+    } else if !fallback_label.trim().is_empty() {
+        fallback_label.to_owned()
+    } else {
+        original_url.clone()
+    };
+    Some(StreamDownloadTarget {
+        original_url,
+        label,
+        info,
+        replace,
+    })
+}
+
+/// Queue the downloads of several web streams at once (the queue's
+/// multi-selection picker): one file per link, in the order they were listed.
+/// Each `ReplaceAction` names what that link's file replaces when it lands
+/// (the marked queue rows), and `audio_only` comes from the picker's
+/// `Audio` / `Video` button. Links yt-dlp cannot save are skipped and
+/// reported once.
+pub fn queue_stream_downloads(
+    ctx: &Ctx,
+    targets: Vec<(String, ReplaceAction)>,
+    audio_only: bool,
+) {
+    use crate::shared::ytdlp::StreamDownloadSpec;
+    let Some(output_dir) = downloads_dir() else {
+        status_warn!("Cannot determine the downloads folder (~/Downloads)");
+        return;
+    };
+    let asked = targets.len();
+    let mut queued = 0usize;
+    for (original_url, replace) in targets {
+        let Some(item) = ytdlp_item_of(&original_url) else {
+            log::warn!(url:% = original_url; "Skipping a link yt-dlp cannot download");
+            continue;
+        };
+        ctx.ytdlp_manager.queue_stream_download(
+            item,
+            StreamDownloadSpec {
+                output_dir: output_dir.clone(),
+                audio_only,
+                split_chapters: false,
+                on_complete: replace,
+                sections: Vec::new(),
+            },
+        );
+        queued += 1;
+    }
+    if queued < asked {
+        status_warn!("{} of {asked} link(s) cannot be downloaded", asked - queued);
+    }
+    if queued > 0 {
+        status_info!(
+            "Downloading {queued} stream(s) to s2udio-downloads as {}",
+            if audio_only { "audio" } else { "video" }
+        );
+    }
+}
+
+/// The multi-stream download picker (the queue's Download row when every
+/// selected row is a web stream): one checkbox row per stream — all ticked,
+/// so the selection is confirmed as-is — and one `Enter` starts the
+/// download. `Up`/`Down` (or `w`/`s`) walk the rows and `Space` ticks them;
+/// the output kind is the footer button that is activated (`Audio` = one
+/// audio file per stream, `Video` = one video file), `Right`/`d` moves along
+/// the buttons and `Esc` closes the picker. Each entry carries the queue row
+/// its file replaces.
+pub fn open_stream_downloads_picker(ctx: &Ctx, streams: Vec<StreamDownloadTarget>) {
+    if streams.is_empty() {
+        status_warn!("No streams selected");
+        return;
+    }
+    let count = streams.len();
+    modal!(
+        ctx,
+        MenuModal::new(ctx)
+            .width(64)
+            .title(format!(" Download {count} stream(s) "))
+            .list_section(ctx, move |mut section| {
+                for stream in &streams {
+                    section.add_check_item(stream.label.clone(), true);
+                }
+                section.add_choice_buttons(&["Audio", "Video"], "Cancel");
+                section.set_confirm_on_enter();
+                section.check_list(move |ctx, selected, choice| {
+                    let targets: Vec<(String, ReplaceAction)> = selected
+                        .iter()
+                        .filter_map(|idx| streams.get(*idx))
+                        .map(|stream| {
+                            (stream.original_url.clone(), stream.replace.clone())
+                        })
+                        .collect();
+                    queue_stream_downloads(ctx, targets, choice == 0);
+                    Ok(())
+                });
+                Some(section)
+            })
+            // `build()` places the cursor on the first row (`modal!` does not
+            // call it), so the picker opens ready to walk and tick.
+            .build()
+    );
 }
 
 /// The save-as menu for a ytdlp stream: audio or video, and — when the

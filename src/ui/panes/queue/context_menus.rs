@@ -12,6 +12,7 @@ use crate::{
         ext::btreeset_ranges::BTreeSetRanges,
         macros::{modal, status_warn},
         mpd_client_ext::MpdClientExt,
+        ytdlp::ReplaceAction,
     },
     ui::{
         UiAppEvent,
@@ -19,7 +20,9 @@ use crate::{
             confirm_modal::ConfirmModal,
             info_list_modal::{InfoListModal, INFO_COLUMN_WIDTHS, song_info},
             input_modal::InputModal,
-            menu::modal::MenuModal, select_modal::SelectModal,
+            menu::modal::MenuModal,
+            paste::StreamDownloadTarget,
+            select_modal::SelectModal,
         },
     },
 };
@@ -61,18 +64,43 @@ impl QueuePane {
             .and_then(|i| playlist.get(i))
             .map(|e| e.title.clone())
             .unwrap_or_else(|| " Video ".to_owned());
-        // A stream entry (resolved YouTube/Soundcloud link): offer Download,
+        // A stream entry (resolved YouTube/Soundcloud link, or a link a
+        // playlist import queued that resolves on playback): offer Download,
         // which saves it into s2udio-downloads and replaces the entry with
         // the file.
         let download_stream = selected_idx
             .and_then(|i| playlist.get(i))
             .and_then(|entry| {
-                let info = ctx.yt_info.borrow();
-                info.get(&entry.url)
-                    .cloned()
-                    .or_else(|| info.values().find(|e| e.original_url == entry.url).cloned())
-            })
-            .map(|info| (info, selected_idx.unwrap_or(0)));
+                crate::ui::modals::paste::stream_download_target(
+                    ctx,
+                    &entry.url,
+                    &entry.title,
+                    ReplaceAction::VideoPlaylist { index: selected_idx.unwrap_or(0) },
+                )
+            });
+        // Multi-selection (round 97): when EVERY marked entry is a web
+        // stream, Download saves all of them — the picker opens with each
+        // entry ticked and each file replaces its own entry. A mixed
+        // selection has no picker; the single-row Download below stays.
+        // Jellyfin sessions are excluded: their list is the live mpv
+        // playlist, whose indices are not the persistent video queue's.
+        let marked_streams: Option<Vec<StreamDownloadTarget>> = if jellyfin {
+            None
+        } else {
+            self.video_marked
+                .iter()
+                .map(|idx| {
+                    let entry = playlist.get(idx)?;
+                    crate::ui::modals::paste::stream_download_target(
+                        ctx,
+                        &entry.url,
+                        &entry.title,
+                        ReplaceAction::VideoPlaylist { index: idx },
+                    )
+                })
+                .collect::<Option<Vec<_>>>()
+                .filter(|streams| !streams.is_empty())
+        };
 
         let menu = MenuModal::new(ctx)
             .width(60)
@@ -102,12 +130,18 @@ impl QueuePane {
                         Ok(())
                     });
                 }
-                if let Some((info, index)) = download_stream {
+                if let Some(streams) = marked_streams {
                     section = section.item("Download", move |ctx| {
+                        crate::ui::modals::paste::open_stream_downloads_picker(ctx, streams);
+                        Ok(())
+                    });
+                } else if let Some(target) = download_stream {
+                    section = section.item("Download", move |ctx| {
+                        let info = target.info();
                         crate::ui::modals::paste::open_stream_download_menu(
                             ctx,
                             &info,
-                            &crate::shared::ytdlp::ReplaceAction::VideoPlaylist { index },
+                            &target.replace,
                         );
                         Ok(())
                     });
@@ -215,15 +249,34 @@ impl QueuePane {
         // A resolved YouTube-style stream row (the queue entry holds the
         // resolved stream URL, or the original link): offer Download, which
         // saves it into s2udio-downloads and replaces the row with the file.
-        let download_ctx = selected_song
-            .as_ref()
-            .and_then(|song| {
-                let info = ctx.yt_info.borrow();
-                info.get(&song.file)
-                    .cloned()
-                    .or_else(|| info.values().find(|e| e.original_url == song.file).cloned())
+        let download_ctx = selected_song.as_ref().and_then(|song| {
+            crate::ui::modals::paste::stream_download_target(
+                ctx,
+                &song.file,
+                "",
+                ReplaceAction::Queue { song_id: selected_song_id.unwrap_or(u32::MAX) },
+            )
+        });
+        // Multi-selection (round 97): when EVERY marked row is a web stream,
+        // Download saves all of them — the picker opens with every stream
+        // ticked and each file replaces its own queue row once it lands. A
+        // selection that also holds local files (or radio rows) has no
+        // picker; the single-row Download below stays.
+        let marked_streams: Option<Vec<StreamDownloadTarget>> = self
+            .queue
+            .marked()
+            .iter()
+            .map(|idx| {
+                let song = self.queue.items.get(*idx)?;
+                crate::ui::modals::paste::stream_download_target(
+                    ctx,
+                    &song.file,
+                    "",
+                    ReplaceAction::Queue { song_id: song.id },
+                )
             })
-            .map(|info| (info, selected_song_id.unwrap_or(u32::MAX)));
+            .collect::<Option<Vec<_>>>()
+            .filter(|streams| !streams.is_empty());
         // Marked ranges are deleted together when the menu's Remove is
         // picked (highest range first, so the indices stay valid).
         let marked_ranges: Vec<std::ops::RangeInclusive<usize>> =
@@ -269,12 +322,18 @@ impl QueuePane {
                     }
                     Ok(())
                 });
-                if let Some((info, song_id)) = download_ctx {
+                if let Some(streams) = marked_streams {
                     section.add_item("Download", move |ctx| {
+                        crate::ui::modals::paste::open_stream_downloads_picker(ctx, streams);
+                        Ok(())
+                    });
+                } else if let Some(target) = download_ctx {
+                    section.add_item("Download", move |ctx| {
+                        let info = target.info();
                         crate::ui::modals::paste::open_stream_download_menu(
                             ctx,
                             &info,
-                            &crate::shared::ytdlp::ReplaceAction::Queue { song_id },
+                            &target.replace,
                         );
                         Ok(())
                     });
