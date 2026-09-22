@@ -70,6 +70,12 @@ pub enum YtAction {
     /// Only refresh the cached stream info (startup re-fetch when a
     /// previously resolved stream is still playing); no queue action.
     Refresh,
+    /// Replace the queue entry `u32` (still a tagged link) with the resolved
+    /// stream at the same position **without** starting playback (round 98).
+    /// Used by the round-95b look ahead: the *next* entry is swapped as soon
+    /// as its stream is known, so MPD's next-song prefetch finds a playable
+    /// URL and the current track is never cut short.
+    ReplaceInPlace(u32),
 }
 /// A single recognized item of a paste.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -2576,6 +2582,27 @@ fn fresh_cached_stream_info(
 }
 
 pub fn resolve_tagged_queue_entry(ctx: &Ctx, file: &str, song_id: u32) -> bool {
+    resolve_tagged_queue_entry_with(ctx, file, song_id, true)
+}
+
+/// Round 98: the same as [`resolve_tagged_queue_entry`], but the replacement
+/// is **not** started: the entry is swapped in place only. The event loop's
+/// MPD-error recovery uses it when MPD named an entry it has not reached yet
+/// (a next-song prefetch failure), where playing the replacement would cut
+/// the current track short.
+pub fn resolve_tagged_queue_entry_in_place(ctx: &Ctx, file: &str, song_id: u32) -> bool {
+    resolve_tagged_queue_entry_with(ctx, file, song_id, false)
+}
+
+/// The shared body of the two entry points above; `play` decides whether the
+/// replacement starts playing ([`YtAction::ReplaceAndPlay`]) or is only put
+/// in place ([`YtAction::ReplaceInPlace`]).
+fn resolve_tagged_queue_entry_with(
+    ctx: &Ctx,
+    file: &str,
+    song_id: u32,
+    play: bool,
+) -> bool {
     let Some((link, intent)) = tagged_stream_entry(file) else {
         return false;
     };
@@ -2594,10 +2621,17 @@ pub fn resolve_tagged_queue_entry(ctx: &Ctx, file: &str, song_id: u32) -> bool {
     }
     // Round 91b: reuse a fresh resolve (the paste popup already resolved
     // this link, or an earlier play did) so the stream starts at once.
+    let action = if play {
+        YtAction::ReplaceAndPlay(song_id)
+    } else {
+        YtAction::ReplaceInPlace(song_id)
+    };
     if let Some(info) = fresh_cached_stream_info(ctx, &link) {
         log::debug!(link = link.as_str(); "Reusing the cached stream resolve for a queued entry");
-        status_info!("Playing the resolved stream…");
-        apply_resolved_streams(ctx, vec![info], YtAction::ReplaceAndPlay(song_id), Vec::new());
+        if play {
+            status_info!("Playing the resolved stream…");
+        }
+        apply_resolved_streams(ctx, vec![info], action, Vec::new());
         return true;
     }
     // Round 95: the queue's Duration column spins for this row until the
@@ -2605,12 +2639,14 @@ pub fn resolve_tagged_queue_entry(ctx: &Ctx, file: &str, song_id: u32) -> bool {
     mark_stream_parse_pending(ctx, std::slice::from_ref(&link));
     if let Err(err) = ctx.work_sender.send(WorkRequest::ResolveYtStreams {
         urls: vec![link],
-        action: YtAction::ReplaceAndPlay(song_id),
+        action,
     }) {
         log::error!(error:? = err; "Failed to request stream resolution");
         return false;
     }
-    status_info!("Resolving the stream…");
+    if play {
+        status_info!("Resolving the stream…");
+    }
     true
 }
 /// Round 74 (74-1): remember the start offsets carried by the pasted links
@@ -2798,6 +2834,31 @@ pub fn apply_resolved_streams(
                     "Stream URL expired — re-resolved from the original link"
                 }
             );
+        }
+        YtAction::ReplaceInPlace(song_id) => {
+            // Round 98 (round-95b follow-up): swap the *next* queue entry for
+            // its resolved stream and leave playback alone. MPD prefetches
+            // the next song before the current one ends; an unplayable link
+            // there fails that prefetch, and the app's error recovery then
+            // played the entry, cutting the current track short. With the row
+            // swapped ahead of time MPD finds a playable URL and simply plays
+            // it when the current track reaches its end.
+            let url = urls[0].clone();
+            let logged = url.clone();
+            ctx.command(move |client| {
+                let position = client
+                    .playlist_info()?
+                    .and_then(|songs| songs.iter().position(|song| song.id == song_id));
+                // The entry is already gone (a second resolve, or the user
+                // removed it): never append a stray copy.
+                let Some(position) = position else {
+                    return Ok(());
+                };
+                let _ = client.delete_id(song_id);
+                let _ = client.add_id(&url, Some(QueuePosition::Absolute(position)))?;
+                Ok(())
+            });
+            log::debug!(song_id, url = logged.as_str(); "Prepared the next queue entry's stream");
         }
         YtAction::AddToVideoQueue
         | YtAction::AppendVideoQueue
@@ -2992,23 +3053,45 @@ pub fn stream_row_meta(ctx: &Ctx, file: &str) -> Option<YtListMeta> {
 /// only when nothing is known for it yet: a fresh cached resolve, a resolve
 /// already in flight, or a non-link entry all leave the queue alone.
 pub fn warm_next_queue_link(ctx: &Ctx) {
-    let Some((idx, _)) = ctx.find_current_song_in_queue() else { return };
+    let Some((idx, current)) = ctx.find_current_song_in_queue() else { return };
     let Some(next) = ctx.queue.get(idx + 1) else { return };
+    // One look ahead per (current, next) pair: the swap below refreshes the
+    // queue, and without this marker each refresh would warm the entry after
+    // the one just warmed (a slow crawl through the whole playlist).
+    if ctx.warmed_next_for.get() == Some((current.id, next.id)) {
+        return;
+    }
     let Some((link, intent)) = tagged_stream_entry(&next.file) else { return };
     if !intent.is_audio() {
         return;
     }
-    if fresh_cached_stream_info(ctx, &link).is_some() {
+    // Let a resolve that is already in flight land first; the next queue
+    // update retries (the marker is only set once something is done).
+    if stream_parse_pending(ctx, &next.file) && fresh_cached_stream_info(ctx, &link).is_none() {
         return;
     }
-    if stream_parse_pending(ctx, &next.file) {
+    ctx.warmed_next_for.set(Some((current.id, next.id)));
+    // Round 98: already resolved (the paste popup, an earlier play, a stored
+    // playlist entry): swap the row right away, no yt-dlp run.
+    if let Some(info) = fresh_cached_stream_info(ctx, &link) {
+        apply_resolved_streams(
+            ctx,
+            vec![info],
+            YtAction::ReplaceInPlace(next.id),
+            Vec::new(),
+        );
         return;
     }
     log::debug!(link = link.as_str(); "Warming the next queue entry's stream while the current one plays");
     mark_stream_parse_pending(ctx, std::slice::from_ref(&link));
+    // Round 98: the resolve **swaps the row in place** instead of only
+    // caching the info. MPD prefetches the next song before the current one
+    // ends; while the row is still a tagged link that prefetch fails and the
+    // app's error recovery used to play the entry early, cutting the current
+    // track short. A swapped row is a playable URL by then.
     if let Err(err) = ctx.work_sender.send(WorkRequest::ResolveYtStreams {
         urls: vec![link],
-        action: YtAction::Refresh,
+        action: YtAction::ReplaceInPlace(next.id),
     }) {
         log::error!(error:? = err; "Failed to request the next entry's stream resolution");
     }

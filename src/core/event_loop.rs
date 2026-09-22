@@ -1718,12 +1718,29 @@ fn main_task<B: Backend + std::io::Write>(
                                         .find(|song| song.file == uri)
                                         .map(|song| (uri.clone(), song.id))
                                 });
-                            if let Some((uri, song_id)) = tagged_error_link
-                                && crate::ui::modals::paste::resolve_tagged_queue_entry(
-                                    &ctx, &uri, song_id,
-                                )
-                            {
-                                last_reported_mpd_error = ctx.status.error.clone();
+                            if let Some((uri, song_id)) = tagged_error_link {
+                                // Round 98: play the replacement only when MPD
+                                // is actually stuck on this entry (it is the
+                                // current song, or playback is stopped). A
+                                // next-song **prefetch** failure names an
+                                // entry MPD has not reached yet; playing it
+                                // there cut the current track short, so such
+                                // an entry is only swapped in place and MPD
+                                // plays it when it gets there.
+                                let stuck = ctx.status.songid == Some(song_id)
+                                    || ctx.status.state == State::Stop;
+                                let resolved = if stuck {
+                                    crate::ui::modals::paste::resolve_tagged_queue_entry(
+                                        &ctx, &uri, song_id,
+                                    )
+                                } else {
+                                    crate::ui::modals::paste::resolve_tagged_queue_entry_in_place(
+                                        &ctx, &uri, song_id,
+                                    )
+                                };
+                                if resolved {
+                                    last_reported_mpd_error = ctx.status.error.clone();
+                                }
                             }
                             let new_playlist = ctx.status.lastloadedplaylist.as_ref();
                             let mut song_changed = false;
@@ -1943,6 +1960,15 @@ fn main_task<B: Backend + std::io::Write>(
                                 ctx.metadata_processed_song = ctx.status.songid;
                             }
 
+                            // Round 98: the look ahead is re-evaluated on
+                            // every queue update. A ReplaceAndPlay (the
+                            // resolution of the current entry) changes MPD's
+                            // song id first and refreshes the queue a moment
+                            // later, so the status handler's song-change call
+                            // ran while the new entry was not in `ctx.queue`
+                            // yet and did nothing. The helper is cheap and
+                            // guards itself (one look ahead per current song).
+                            crate::ui::modals::paste::warm_next_queue_link(&ctx);
                             ctx.last_status_update = Instant::now();
                             render_wanted = true;
                         }
@@ -2010,6 +2036,13 @@ fn main_task<B: Backend + std::io::Write>(
                                     log::error!(error:? = err; "Failed to re-arm the album art after the queue refresh");
                                 }
                             }
+                            // Round 98: the queue is fresh now, so the look
+                            // ahead can run for the current song even when the
+                            // song-change path ran against the previous queue
+                            // (a ReplaceAndPlay changes the song id before the
+                            // refreshed queue arrives). The helper is cheap and
+                            // runs at most once per current song.
+                            crate::ui::modals::paste::warm_next_queue_link(&ctx);
                         }
                         (
                             EXTERNAL_COMMAND,

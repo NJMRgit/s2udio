@@ -361,6 +361,13 @@ pub struct Ctx {
     /// one background fetch per link — a failed resolve must not be retried on
     /// every popup refresh. Cleared when the popup closes.
     pub(crate) paste_chapter_warm: RefCell<HashSet<String>>,
+    /// Round 98: `(current, next)` song ids the round-95b look ahead has
+    /// already run for. The look ahead swaps the next entry in place, and that
+    /// swap refreshes the queue, so without this marker each swap would warm
+    /// the entry after it and crawl the whole playlist. The pair (rather than
+    /// the current song alone) lets a *different* entry become the next one
+    /// (the user removed the warmed entry) and be warmed as usual.
+    pub(crate) warmed_next_for: Cell<Option<(u32, u32)>>,
     /// The open paste popup's modal id (so a nested flow — e.g. the
     /// "Select files…" picker — can close it once playback starts;
     /// `PopModal` drops the modal without running its close hook, so the
@@ -485,6 +492,7 @@ impl Ctx {
             paste_modal_items: RefCell::new(None),
             paste_modal_id: Cell::new(None),
             paste_chapter_warm: RefCell::new(HashSet::new()),
+            warmed_next_for: Cell::new(None),
             mpd_music_directory,
         };
         if let Some((_, song)) = ctx.find_current_song_in_queue() {
