@@ -2673,6 +2673,71 @@ fn arm_start_offsets(ctx: &Ctx, info: &[crate::shared::ytdlp::YtStreamInfo]) {
         }
     }
 }
+/// Round 103 (user report): a queued stream entry that yt-dlp refuses for good
+/// — a DRM-protected SoundCloud track, an unavailable or private video — can
+/// never play. Left in the queue, MPD fails the decode when it reaches the row
+/// and skips on. The row is therefore dropped and the reason reported once.
+/// Returns whether the failure was handled here; a transient failure is
+/// deliberately not: the MPD decode-error recovery resolves a tagged row again
+/// when MPD reaches it, and that retry can succeed.
+pub fn drop_unresolvable_queue_entry(ctx: &Ctx, action: &YtAction, failures: &[String]) -> bool {
+    let (YtAction::ReplaceAndPlay(song_id) | YtAction::ReplaceInPlace(song_id)) = action else {
+        return false;
+    };
+    if !is_permanent_resolve_failure(failures) {
+        return false;
+    }
+    let song_id = *song_id;
+    // The row may already be gone (a repeated resolve, a queue edit).
+    if !ctx.queue.iter().any(|song| song.id == song_id) {
+        return true;
+    }
+    let reason = unresolvable_reason(failures);
+    ctx.command(move |client| {
+        let _ = client.delete_id(song_id);
+        Ok(())
+    });
+    status_warn!("Cannot play this stream ({reason}) — removed it from the queue");
+    true
+}
+/// Whether yt-dlp's error is final for this entry. Everything else (a network
+/// hiccup, a throttled resolve, an expired token) is left alone: the entry is
+/// retried when MPD reaches it.
+fn is_permanent_resolve_failure(failures: &[String]) -> bool {
+    const FATAL: [&str; 8] = [
+        "drm",
+        "private video",
+        "unavailable",
+        "not available",
+        "removed",
+        "terminated",
+        "does not exist",
+        "no video formats found",
+    ];
+    let raw = failures.first().map_or("", String::as_str).to_lowercase();
+    FATAL.iter().any(|needle| raw.contains(needle))
+}
+/// The user-facing reason, without yt-dlp's `ERROR:` prefix or the URL the row
+/// was queued with (the common cases are named plainly).
+fn unresolvable_reason(failures: &[String]) -> String {
+    let raw = failures.first().map_or("", String::as_str);
+    let error = raw.split_once(": ").map_or(raw, |(_, error)| error);
+    let error = error.trim().trim_start_matches("ERROR:").trim();
+    let lower = error.to_lowercase();
+    if lower.contains("drm") {
+        return "the track is DRM protected".to_owned();
+    }
+    if lower.contains("private") {
+        return "it is private".to_owned();
+    }
+    if lower.contains("unavailable") || lower.contains("not available") {
+        return "it is unavailable".to_owned();
+    }
+    if lower.contains("removed") || lower.contains("terminated") || lower.contains("does not exist") {
+        return "it is no longer on the service".to_owned();
+    }
+    if error.is_empty() { "it could not be resolved".to_owned() } else { error.to_owned() }
+}
 /// Apply the resolved YouTube streams: play the first one as a temporary
 /// entry, or add them to the queue (order preserved).
 pub fn apply_resolved_streams(

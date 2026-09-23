@@ -1105,7 +1105,15 @@ fn main_task<B: Backend + std::io::Write>(
                             status_warn!("Failed to resolve stream: {failure}");
                         }
                         if info.is_empty() {
-                            status_warn!("No stream could be resolved");
+                            // Round 103: an entry yt-dlp refuses for good
+                            // (DRM-protected, private, removed) is dropped from
+                            // the queue instead of being left for MPD to fail
+                            // on; a transient failure keeps its row.
+                            if !crate::ui::modals::paste::drop_unresolvable_queue_entry(
+                                &ctx, &action, &failures,
+                            ) {
+                                status_warn!("No stream could be resolved");
+                            }
                         } else {
                             crate::ui::modals::paste::apply_resolved_streams(
                                 &ctx, info, action, failures,
