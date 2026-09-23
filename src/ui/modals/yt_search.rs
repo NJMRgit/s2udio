@@ -535,10 +535,11 @@ impl Modal for YtSearchModal {
     fn handle_insert_mode(&mut self, kind: InputResultEvent, ctx: &Ctx) -> Result<()> {
         match kind {
             InputResultEvent::Confirm => self.search(ctx)?,
-            // Esc in the input only leaves it: the platform restores normal
-            // mode, so the results stay selectable and a second Esc closes
-            // the popup (the search bars' staged-exit shape).
-            InputResultEvent::Cancel => {}
+            // Round 102 (user feedback): `Esc` in the input closes the popup
+            // outright. It used to only leave the input (the platform restores
+            // normal mode) and a second `Esc` was needed to close it; the
+            // popup's own `Esc close` hint always read as one press.
+            InputResultEvent::Cancel => self.close(ctx)?,
             InputResultEvent::Push
             | InputResultEvent::Pop
             | InputResultEvent::NoChange
