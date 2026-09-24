@@ -193,6 +193,45 @@ fn play_queue_song(song: &crate::mpd::commands::Song, ctx: &Ctx) {
         Ok(())
     });
 }
+
+/// Round 104: start playback from a stopped queue without ever handing MPD a
+/// raw stream link. MPD's plain `play` starts at the current song (or the
+/// first queue entry); for a queue of pasted YouTube links that row is an
+/// unresolvable `#s2u-audio` link, MPD fails to open it and advances through
+/// the following links faster than the app's per-error recovery can resolve
+/// them (four links rejected in two seconds in the user's MPD log, each
+/// followed by a `No such song` as the recovery raced a row MPD had already
+/// abandoned). Double-clicking a row already resolves it first
+/// ([`play_queue_song`]); starting playback now does the same, so the two
+/// paths behave consistently. Only a stream link is intercepted - a plain
+/// queue keeps MPD's exact `play` semantics (random, consume).
+pub(crate) fn play_from_stop(ctx: &Ctx) {
+    // The entry MPD's `play` would start at: the current song when one is
+    // known (a stopped queue resumes it), else the first queue row.
+    let song = ctx
+        .status
+        .songid
+        .and_then(|id| ctx.queue.iter().find(|song| song.id == id))
+        .or_else(|| ctx.queue.first())
+        .cloned();
+    let Some(song) = song else {
+        ctx.command(move |client| {
+            client.play()?;
+            Ok(())
+        });
+        return;
+    };
+    let needs_resolve = crate::shared::ytdlp::tagged_stream_entry(&song.file).is_some()
+        || resolved_stream_expired(&song.file);
+    if needs_resolve {
+        play_queue_song(&song, ctx);
+    } else {
+        ctx.command(move |client| {
+            client.play()?;
+            Ok(())
+        });
+    }
+}
 impl QueuePane {
     /// Drop the multi-selected (marked) set, e.g. after the context-menu
     /// Remove deleted the items.

@@ -907,10 +907,11 @@ impl Ui {
                             Ok(())
                         });
                     } else {
-                        ctx.command(move |client| {
-                            client.play()?;
-                            Ok(())
-                        });
+                        // Round 104: a stopped queue of stream links starts
+                        // the same way a double-click does - resolve the
+                        // entry playback would start with first, so MPD is
+                        // never handed a raw link to fail and skip.
+                        crate::ui::panes::queue::play_from_stop(ctx);
                     }
                 }
                 GlobalAction::VolumeUp => {
