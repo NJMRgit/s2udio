@@ -115,7 +115,7 @@ fn draw_line(buf: &mut Buffer, x: u16, y: u16, width: u16, line: &Line, style: S
 }
 /// Draw `spans` starting `skip` columns in, for up to `max` columns,
 /// patching each span's style over `style`. Returns the columns drawn.
-fn draw_spans(
+pub(crate) fn draw_spans(
     buf: &mut Buffer,
     x: u16,
     y: u16,
@@ -159,4 +159,84 @@ fn draw_spans(
         }
     }
     drawn
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use ratatui::{layout::Rect, style::Style, text::Line};
+
+    use super::*;
+
+    /// During the wrap the tail is still visible while the head copy
+    /// enters at the right edge, with the wrap gap between them — a
+    /// continuous news-ticker, never a blank exit.
+    #[test]
+    fn marquee_wrap_shows_tail_gap_and_head_together() {
+        let p = 20u16;
+        let w = 10u16;
+        let ms_per_col = 10_000 / CAROUSEL_SPEED_X10;
+        let wrap_ms_per_col = (ms_per_col / 3).max(1);
+        let scroll_ms = ((p - w) as u64) * ms_per_col;
+        let t0 = 2 * CAROUSEL_PAUSE_MS + scroll_ms;
+        // offset o = p - 4: the tail's last 4 columns are visible and the
+        // head is entering at the right edge, 5 columns after the tail.
+        let o = p as i64 - 4;
+        let t = t0 + (o - (p - w) as i64) as u64 * wrap_ms_per_col;
+
+        let mut buf = ratatui::buffer::Buffer::empty(Rect::new(0, 0, w, 1));
+        let line = Line::from("ABCDEFGHIJKLMNOPQRST"); // 20 chars
+        super::draw_marquee(&mut buf, 0, 0, w, &line, Style::new(), t);
+
+        let row: String =
+            (0..w).map(|x| buf[(x, 0)].symbol().chars().next().unwrap_or(' ')).collect();
+        assert_eq!(
+            row, "QRST     A",
+            "tail (QRST), a {}-column gap, then the head (A)",
+            CAROUSEL_WRAP_GAP
+        );
+    }
+
+    #[test]
+    fn marquee_offset_holds_at_both_ends_and_wraps_forward() {
+        let p = 40u16; // panel (title) width
+        let w = 20u16; // window width
+        let ms_per_col = 10_000 / CAROUSEL_SPEED_X10;
+        let scroll_ms = ((p - w) as u64) * ms_per_col; // scroll to the tail
+        // The wrap runs 3x faster than the reveal; the cycle covers
+        // w + CAROUSEL_WRAP_GAP columns (tail exit + head-copy arrival).
+        let wrap_ms_per_col = (ms_per_col / 3).max(1);
+        let wrap_ms = ((w + CAROUSEL_WRAP_GAP) as u64) * wrap_ms_per_col;
+        let cycle_ms = 2 * CAROUSEL_PAUSE_MS + scroll_ms + wrap_ms;
+
+        // Hold at the start.
+        assert_eq!(super::marquee_offset(0, p, w), 0);
+        assert_eq!(super::marquee_offset(CAROUSEL_PAUSE_MS - 1, p, w), 0);
+        // Scroll left to the tail (window at the last columns of the title).
+        assert_eq!(super::marquee_offset(CAROUSEL_PAUSE_MS + scroll_ms, p, w), (p - w) as i64);
+        // Hold at the end.
+        assert_eq!(super::marquee_offset(CAROUSEL_PAUSE_MS + scroll_ms + 1, p, w), (p - w) as i64);
+        assert_eq!(
+            super::marquee_offset(2 * CAROUSEL_PAUSE_MS + scroll_ms - 1, p, w),
+            (p - w) as i64
+        );
+        // The wrap keeps scrolling left (3x faster than the reveal) and
+        // stays non-negative: the offset grows past the tail so the head
+        // copy (drawn by the caller at o - (p + CAROUSEL_WRAP_GAP)) follows
+        // with a 5-column slack and lands back at 0.
+        let t0 = 2 * CAROUSEL_PAUSE_MS + scroll_ms;
+        assert_eq!(super::marquee_offset(t0 + wrap_ms_per_col, p, w), (p - w + 1) as i64);
+        assert!(
+            super::marquee_offset(t0 + w as u64 * wrap_ms_per_col, p, w) >= p as i64,
+            "the wrap continues past the tail (no negative offsets)"
+        );
+        assert_eq!(
+            super::marquee_offset(t0 + wrap_ms - 1, p, w),
+            i64::from(p) + i64::from(CAROUSEL_WRAP_GAP) - 1,
+            "the wrap runs up to p + gap (the head copy lands back at 0)"
+        );
+        // The cycle repeats from the start hold.
+        assert_eq!(super::marquee_offset(cycle_ms, p, w), 0);
+        assert_eq!(super::marquee_offset(cycle_ms + CAROUSEL_PAUSE_MS / 2, p, w), 0);
+    }
 }

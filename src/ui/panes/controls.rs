@@ -432,54 +432,7 @@ impl ControlsPane {
             }
             return;
         }
-        Self::draw_spans(buf, x, y, &line.spans, 0, width, style);
-    }
-    /// Draw `spans` starting `skip` columns in, for up to `max` columns,
-    /// patching each span's style over `style`. Returns the columns drawn.
-    fn draw_spans(
-        buf: &mut Buffer,
-        x: u16,
-        y: u16,
-        spans: &[Span],
-        skip: usize,
-        max: u16,
-        style: Style,
-    ) -> u16 {
-        let mut drawn = 0u16;
-        let mut skip = skip;
-        for span in spans {
-            if drawn >= max {
-                break;
-            }
-            let span_w = span.width();
-            if skip >= span_w {
-                skip -= span_w;
-                continue;
-            }
-            let span_style = style.patch(span.style);
-            let mut taken = String::new();
-            let mut w = 0u16;
-            for ch in span.content.chars() {
-                let cw = ch.to_string().width();
-                if skip > 0 {
-                    if skip >= cw {
-                        skip -= cw;
-                        continue;
-                    }
-                    skip = 0;
-                }
-                if w + cw as u16 > max - drawn {
-                    break;
-                }
-                taken.push(ch);
-                w += cw as u16;
-            }
-            if !taken.is_empty() {
-                buf.set_string(x + drawn, y, taken, span_style);
-                drawn += w;
-            }
-        }
-        drawn
+        crate::ui::widgets::marquee::draw_spans(buf, x, y, &line.spans, 0, width, style);
     }
     /// Draw a box divider row with junction glyphs: `left_glyph` at the
     /// left border column, `right_glyph` at the right border column, `─`
@@ -1210,3 +1163,7 @@ impl Pane for ControlsPane {
         Ok(())
     }
 }
+
+
+
+

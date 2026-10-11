@@ -15,6 +15,10 @@ pub struct AlbumArtPane {
     /// The file the paused/stopped art box fetched last (selection-driven;
     /// avoids refetching every frame).
     paused_art_file: Option<String>,
+    /// Round 107: the resolved thumbnail of the selected stream row, when
+    /// one is known. Compared (not just the file) so the box picks the
+    /// thumbnail up the moment the selection-time metadata resolve lands.
+    paused_art_yt: Option<String>,
 }
 const ALBUM_ART: &str = "album_art";
 /// Result id of a YouTube thumbnail download (shown as album art while the
@@ -30,6 +34,7 @@ impl AlbumArtPane {
             is_modal_open: false,
             fetch_needed: false,
             paused_art_file: None,
+            paused_art_yt: None,
         }
     }
     /// The YouTube info of the current song when it is a resolved
@@ -196,12 +201,38 @@ impl AlbumArtPane {
             .get()
             .and_then(|id| ctx.queue.iter().find(|song| song.id == id))
     }
+    /// Round 107: the resolved thumbnail of the merely-selected queue row
+    /// while nothing is playing. `None` when the row is not a resolved
+    /// stream (yet) or playback owns the box.
+    fn selected_yt_thumbnail(ctx: &Ctx) -> Option<String> {
+        if ctx.status.state == State::Play {
+            return None;
+        }
+        let song = Self::selected_queue_song(ctx)?;
+        crate::ui::modals::paste::song_stream_info(ctx, &song.file)?.thumbnail
+    }
     /// Paused/stopped: the box follows the queue selection. Refetches only
     /// when the selection's file changes, re-places the art it already
     /// holds when the pane comes back on screen without the selection
     /// having changed, and collapses on a cleared selection.
     fn check_selected_art(&mut self, ctx: &Ctx) -> Result<()> {
         let file = Self::selected_queue_song(ctx).map(|song| song.file.clone());
+        // Round 107: a selected stream row shows its resolved thumbnail. The
+        // selection-time warm may land after the row was selected, so the
+        // comparison is on the thumbnail, not only the file: when it appears
+        // (or changes) the box fetches it even though the file did not
+        // change. A `None` here just falls through to the MPD album-art path.
+        let yt_thumb = Self::selected_yt_thumbnail(ctx);
+        if yt_thumb.is_some() && yt_thumb != self.paused_art_yt {
+            self.paused_art_yt = yt_thumb.clone();
+            self.paused_art_file = file;
+            ctx.album_art_collapsed.set(false);
+            if let Some(thumbnail) = yt_thumb {
+                Self::fetch_yt_thumbnail(ctx, thumbnail);
+            }
+            return Ok(());
+        }
+        self.paused_art_yt = yt_thumb;
         // Round 78 follow-up (user, 2026-09-14): with no queue selection *and*
         // nothing playing there is nothing the box could legitimately show —
         // clearing the queue (or stopping an empty one) used to leave the last
@@ -501,3 +532,5 @@ impl Pane for AlbumArtPane {
         Ok(())
     }
 }
+
+

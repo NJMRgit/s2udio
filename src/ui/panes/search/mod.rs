@@ -953,10 +953,6 @@ impl SearchPane {
             .build();
         modal!(ctx, modal);
     }
-    fn scrollbar_area(&self) -> Option<Rect> {
-        let area = self.column_areas[BrowserArea::Scrollbar];
-        if area.width > 0 { Some(area) } else { None }
-    }
     fn handle_scrollbar_interaction(
         &mut self,
         event: MouseEvent,
@@ -968,45 +964,7 @@ impl SearchPane {
         let Some(_) = ctx.config.theme.scrollbar else {
             return Ok(false);
         };
-        let Some(scrollbar_area) = self.scrollbar_area() else {
-            return Ok(false);
-        };
-        if !matches!(
-            event.kind, MouseEventKind::LeftClick | MouseEventKind::Drag { .. }
-        ) {
-            return Ok(false);
-        }
-        let content_len = self.songs_dir.items.len();
-        let viewport_len = self
-            .songs_dir
-            .state
-            .viewport_len()
-            .unwrap_or(scrollbar_area.height as usize);
-        let content_len = content_len
-            .saturating_sub(viewport_len)
-            .saturating_add(1)
-            .max(1);
-        let position = self.songs_dir.state.inner.offset();
-        let (begin_len, end_len) = ctx.config.scrollbar_ends_width();
-        if let Some(perc) = self
-            .songs_dir
-            .state
-            .scrollbar_drag
-            .handle(
-                event,
-                scrollbar_area,
-                content_len,
-                viewport_len,
-                position,
-                begin_len,
-                end_len,
-            )
-        {
-            self.songs_dir.scroll_to(perc, ctx.config.scrolloff);
-            ctx.render()?;
-            return Ok(true);
-        }
-        Ok(false)
+        SongListCore::handle_scrollbar_interaction(self, event, ctx)
     }
 }
 impl SongListCore<Song, ListState> for SearchPane {
@@ -1015,6 +973,10 @@ impl SongListCore<Song, ListState> for SearchPane {
     }
     fn list_mut(&mut self) -> &mut Dir<Song, ListState> {
         &mut self.songs_dir
+    }
+    fn scrollbar_area(&self) -> Option<Rect> {
+        let area = self.column_areas[BrowserArea::Scrollbar];
+        if area.width > 0 { Some(area) } else { None }
     }
     /// The song column is the band's list area (Round 46).
     fn list_area(&self) -> Option<Rect> {
@@ -1438,3 +1400,7 @@ enum Phase {
     Search,
     BrowseResults,
 }
+
+
+
+

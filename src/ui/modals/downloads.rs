@@ -41,6 +41,11 @@ use crate::{
     },
 };
 
+/// Longest torrent display name shown in the downloads table before it is
+/// shortened with an ellipsis. Counted in characters, not bytes, so a name
+/// with multi-byte characters can never panic the render.
+const TORRENT_NAME_MAX_CHARS: usize = 40;
+
 #[derive(Debug)]
 pub struct DownloadsModal {
     id: Id,
@@ -105,12 +110,10 @@ impl Modal for DownloadsModal {
             if let Some(state) = jobs.as_ref() {
                 let daemon_offline = !crate::core::dlctl::daemon_running(state);
                 for job in &state.jobs {
-                    let name = if job.torrent_name.len() > 40 {
-                        let (head, _) = job.torrent_name.split_at(40);
-                        format!("{head}…")
-                    } else {
-                        job.torrent_name.clone()
-                    };
+                    let name = crate::shared::string_util::truncate_chars(
+                        &job.torrent_name,
+                        TORRENT_NAME_MAX_CHARS,
+                    );
                     // The round-54 status rendering, moved into the State
                     // column (round 56 (56-1): a finished download shows a
                     // distinct done row while the daemon keeps it in the

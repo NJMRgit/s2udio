@@ -21,4 +21,12 @@ pub mod socket;
 pub mod torrent;
 /// Auth-injecting loopback proxy for the rqbit web UI (round 42 fix).
 pub mod torrent_proxy;
+/// Localhost caching proxy for web audio/video streams (round 107): a
+/// stable local URL handed to MPD/mpv, with a 1 GiB audio / 2 GiB video
+/// on-disk LRU so an already-played item replays instantly.
+pub mod stream_cache;
+/// Local resume positions for every video played in mpv (Jellyfin keeps
+/// its own server-side copy; this is the store for local files, torrents
+/// and resolved YouTube links, and the fallback when the server has none).
+pub mod video_resume;
 pub mod work;

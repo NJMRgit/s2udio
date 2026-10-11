@@ -1,6 +1,6 @@
 // Video-mode handling of the Queue tab: the mpv playlist list (render,
 // navigation, marks, load/remove, scrollbar) plus the "follow the playing
-// video" mode switch. Split out of the queue module root (queue.rs) so the
+// video" mode switch. Split out of the queue module root (queue/mod.rs) so the
 // pane keeps its inherent-method surface while each focus area lives in its
 // own file.
 use anyhow::Result;

@@ -424,3 +424,75 @@ impl Pane for QueueHeaderPane {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::*;
+    use crate::mpd::commands::Song;
+
+    fn song(id: u32, album: &str, title: &str, disc: &str, track: &str) -> Song {
+        let mut metadata = HashMap::new();
+        if !album.is_empty() {
+            metadata.insert("album".into(), album.into());
+        }
+        if !title.is_empty() {
+            metadata.insert("title".into(), title.into());
+        }
+        if !disc.is_empty() {
+            metadata.insert("disc".into(), disc.into());
+        }
+        if !track.is_empty() {
+            metadata.insert("track".into(), track.into());
+        }
+        Song { id, metadata, ..Default::default() }
+    }
+
+    #[test]
+    fn track_order_sorts_numerically_within_album() {
+        // Track 2 must sort before track 10 in album track order.
+        let a = song(1, "Album", "T", "1", "2");
+        let b = song(2, "Album", "T", "1", "10");
+        let ka = QueueHeaderPane::album_sort_key(&a, 0);
+        let kb = QueueHeaderPane::album_sort_key(&b, 0);
+        assert!(ka < kb, "track 2 should sort before track 10: {ka:?} vs {kb:?}");
+    }
+
+    #[test]
+    fn a_z_sorts_by_title_within_album() {
+        let early = song(1, "Album", "Apple", "1", "2");
+        let late = song(2, "Album", "Zebra", "1", "1");
+        let k_early = QueueHeaderPane::album_sort_key(&early, 1);
+        let k_late = QueueHeaderPane::album_sort_key(&late, 1);
+        assert!(k_early < k_late, "titles should sort a-z: {k_early:?} vs {k_late:?}");
+    }
+
+    #[test]
+    fn z_a_reverses_the_title_order() {
+        let early = song(1, "Album", "Apple", "1", "2");
+        let late = song(2, "Album", "Zebra", "1", "1");
+        let k_early = QueueHeaderPane::album_sort_key(&early, 2);
+        let k_late = QueueHeaderPane::album_sort_key(&late, 2);
+        assert!(k_early > k_late, "titles should sort z-a: {k_early:?} vs {k_late:?}");
+    }
+
+    #[test]
+    fn album_column_detection() {
+        use crate::config::theme::properties::{Property, SongProperty};
+        let album = Property::<SongProperty> {
+            kind: PropertyKindOrText::Property(SongProperty::Album),
+            style: None,
+            default: None,
+        };
+        let title = Property::<SongProperty> {
+            kind: PropertyKindOrText::Property(SongProperty::Title),
+            style: None,
+            default: None,
+        };
+        let formats = vec![album, title];
+        assert!(QueueHeaderPane::is_album_column(&formats, 0));
+        assert!(!QueueHeaderPane::is_album_column(&formats, 1));
+    }
+}

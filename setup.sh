@@ -380,6 +380,7 @@ cava_step() { # $1 = version fallback command ("" = none); $2 = missing hint
 # every install.
 ensure_mpd_conf() {
     if [[ -f "$MPD_CONF" ]]; then
+        ensure_mpd_stream_buffer
         return 0
     fi
     if confirm "Create a user-level MPD config at $MPD_CONF (system mpd is stopped on this distro; s2udio runs a user instance)?"; then
@@ -397,8 +398,43 @@ follow_inside_symlinks "yes"
 auto_update "yes"
 EOF
         ok "mpd.conf created at $MPD_CONF (user-level instance)"
+        ensure_mpd_stream_buffer
     else
         warn "no MPD config at $MPD_CONF - set MPD_CONF=/path/to/mpd.conf and re-run"
+    fi
+}
+
+# Round 105: a sane stream buffer. YouTube single-file streams are ~2-4 MB
+# and can slightly exceed MPD's 4 MiB default audio ring; the curl input then
+# has to resume an idle connection for the tail, the CDN resets it, and MPD
+# cuts the last seconds of every song ("File ended prematurely" + "Recv
+# failure: Connection reset by peer"; a seek near the end evades it because it
+# issues a fresh range request). With a ring that holds a whole stream the
+# file is fetched to EOF in one pass. Idempotent and non-destructive: never
+# shrinks an existing larger value, and never touches a config this user
+# cannot write (a root-owned /etc/mpd.conf is left for the distro to manage).
+ensure_mpd_stream_buffer() {
+    [[ -f "$MPD_CONF" ]] || return 0
+    [[ -w "$MPD_CONF" ]] || {
+        warn "mpd.conf not writable by this user - leaving audio_buffer_size untouched"
+        return 0
+    }
+    local current
+    current="$(sed -n 's/^[[:space:]]*audio_buffer_size[[:space:]]*"\([0-9]*\)".*/\1/p' "$MPD_CONF" | head -1 || true)"
+    if [[ -n "$current" ]]; then
+        if (( current >= 16384 )); then
+            return 0
+        fi
+        sed -i "s/^\([[:space:]]*audio_buffer_size[[:space:]]*\"\)[0-9]*\"/\116384\"/" "$MPD_CONF"
+        ok "audio_buffer_size raised $current -> 16384 in $MPD_CONF (whole stream files fetch to EOF in one pass)"
+    else
+        cat >> "$MPD_CONF" <<EOF
+
+# s2udio (round 105): a whole single-file stream must fit the audio ring,
+# or MPD resumes an idle connection for the tail and the CDN reset cuts it.
+audio_buffer_size "16384"
+EOF
+        ok "audio_buffer_size 16384 added to $MPD_CONF (whole stream files fetch to EOF in one pass)"
     fi
 }
 
@@ -1060,6 +1096,7 @@ run_arch() {
         other_conf="${other_conf/#\~/$HOME}"
         if [[ -n "$other_conf" && -r "$other_conf" ]] && mpd_conf_state_user_writable "$other_conf"; then
             ok "mpd.service (user) already targets $other_conf (user-writable state) - keeping it"
+            MPD_CONF="$other_conf" ensure_mpd_stream_buffer
             keep=1
         else
             warn "mpd.service (user) exists but does not target $MPD_CONF (or its state dirs are not user-writable) - overwriting with the s2udio template"

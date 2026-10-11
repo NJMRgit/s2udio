@@ -912,6 +912,72 @@ pub fn files_downloaded(
 pub fn is_torrent_stream_url(url: &str) -> bool {
     url.starts_with("http://") && url.contains("/torrents/")
 }
+/// Split a `http://user:pass@host/…` URL into the plain URL and its
+/// `Authorization: Basic …` header value (the engines' auth is URL userinfo
+/// for mpv; `ureq` does not read userinfo itself).
+fn split_userinfo(url: &str) -> (String, Option<String>) {
+    let Some(rest) = url.strip_prefix("http://") else { return (url.to_owned(), None) };
+    let Some((authority, tail)) = rest.split_once('/') else { return (url.to_owned(), None) };
+    let Some((userinfo, host)) = authority.rsplit_once('@') else {
+        return (url.to_owned(), None);
+    };
+    let auth = format!("Basic {}", base64_encode(userinfo.as_bytes()));
+    (format!("http://{host}/{tail}"), Some(auth))
+}
+/// A minimal base64 encoder for the probe's Authorization header (the
+/// codebase has no base64 dependency and the token is tiny).
+fn base64_encode(input: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+        out.push(TABLE[(n >> 18) as usize & 63] as char);
+        out.push(TABLE[(n >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 { TABLE[(n >> 6) as usize & 63] as char } else { '=' });
+        out.push(if chunk.len() > 2 { TABLE[n as usize & 63] as char } else { '=' });
+    }
+    out
+}
+/// Probe an engine stream URL for playability BEFORE handing it to mpv.
+///
+/// The daemon's response carries the URL of the engine that was live when it
+/// answered; an engine that has since been replaced, stopped or forgotten
+/// answers `401`/`404`/`500` — and mpv then fails within ~1 s and **silently**
+/// (it runs `--no-terminal`), which is the round-110 "Stream and download
+/// never started the stream" report.
+///
+/// A healthy engine sends its response headers immediately even while the
+/// torrent is still fetching pieces (rqbit blocks the *body*, not the response
+/// line): measured 2026-10-08 on a freshly added magnet — `Range: bytes=0-0`
+/// answers `206 Partial Content` in <1 ms, a wrong token `401`, a bad file
+/// index `500`, all immediately. This reads no body, so it cannot stall on a
+/// slow torrent.
+pub fn probe_stream_url(url: &str) -> Result<(), String> {
+    let (plain, auth) = split_userinfo(url);
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_secs(5))
+        .timeout_read(Duration::from_secs(5))
+        .build();
+    let mut request = agent.get(&plain).set("Range", "bytes=0-0");
+    if let Some(auth) = auth {
+        request = request.set("Authorization", &auth);
+    }
+    match request.call() {
+        Ok(response) => {
+            let status = response.status();
+            if (200..300).contains(&status) {
+                Ok(())
+            } else {
+                Err(format!("the torrent stream answered HTTP {status}"))
+            }
+        }
+        Err(ureq::Error::Status(status, _)) => {
+            Err(format!("the torrent stream answered HTTP {status}"))
+        }
+        Err(err) => Err(format!("the torrent stream is unreachable: {err}")),
+    }
+}
 /// The on-disk source path of a kept file, laid out the way rqbit v9
 /// actually wrote it (round 55 F2): `output_folder.join(components…)`.
 /// rqbit stores SINGLE-file torrents FLAT — `output_folder` IS the cache
@@ -989,5 +1055,904 @@ pub fn move_completed_file(
             Ok(target)
         }
         Err(err) => Err(format!("Cannot move {}: {err}", source.display())),
+    }
+}
+
+
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{LazyLock, Mutex};
+
+    use std::net::TcpListener;
+
+    use super::{
+        Torrent, TorrentSource, add_torrent, start_engine, torrent_details,
+        torrent_stats,
+    };
+
+    /// The tests mutate `S2UDIO_RQBIT_BIN` and spawn fake servers; serialize
+    /// them so a parallel run can't cross wires.
+    pub(crate) static RQBIT_ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+    /// A fake rqbit: serves `GET /stats`, `POST /torrents`, `GET
+    /// /torrents/{id}` and `GET /torrents/{id}/stats/v1`, echoing the
+    /// received `Authorization` header to a request log next to the script
+    /// so tests can assert the auth flow.
+    const FAKE_SCRIPT: &str = r#"#!/bin/sh
+port=""
+prev=""
+for arg in "$@"; do
+    case "$arg" in
+        --http-api-listen-addr=*) port="${arg#*=}" ;;
+        --http-api-listen-addr) prev="$arg" ;;
+        127.0.0.1:*) [ "$prev" = "--http-api-listen-addr" ] && port="$arg" ;;
+    esac
+    [ "$arg" != "--http-api-listen-addr" ] && prev=""
+done
+# port arrives as 127.0.0.1:PORT
+port="${port##*:}"
+log="$(dirname "$0")/requests.log"
+printf '%s\n' "SPAWN $*" >> "$log"
+exec python3 - "$port" "$log" <<'PY'
+import http.server, os, sys, time
+
+port = int(sys.argv[1])
+log = sys.argv[2]
+
+class H(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+    def _record(self):
+        with open(log, "a") as f:
+            f.write(self.command + " " + self.path + " " + str(self.headers.get("Authorization", "")) + "\n")
+    def do_GET(self):
+        self._record()
+        if self.path == "/stats":
+            body = b"{}"
+        elif self.path.startswith("/torrents/") and self.path.endswith("/stats/v1"):
+            # The "not-live" marker simulates a re-added torrent whose
+            # cache files are being checksum-validated (rqbit
+            # `Initializing`): the scan must keep waiting, not offer play.
+            if os.path.exists(os.path.join(os.path.dirname(log), "not-live")):
+                body = b'{"state":"initializing","progress_bytes":0,"total_bytes":100,"finished":false,"live":{"download_speed":{"mbps":0.0,"human_readable":"0.00 MiB/s"}}}'
+            else:
+                body = b'{"state":"live","progress_bytes":0,"total_bytes":100,"finished":false,"live":{"download_speed":{"mbps":0.0,"human_readable":"0.00 MiB/s"}}}'
+        elif self.path.startswith("/torrents/"):
+            if os.path.exists(os.path.join(os.path.dirname(log), "no-files")):
+                body = b'{"name":"fake.torrent","files":[]}'
+            else:
+                body = b'{"name":"fake.torrent","files":[{"name":"movie.mkv","length":100,"included":true}]}'
+        else:
+            body = b"{}"
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def do_POST(self):
+        self._record()
+        length = int(self.headers.get("Content-Length", 0))
+        data = self.rfile.read(length)
+        if self.path.endswith("/delete"):
+            body = b"{}"
+        else:
+            # Round-18 regression (host finding 2026-08-09): rqbit's real
+            # add POST blocks until a magnet's metainfo resolves — the
+            # "slow-add" marker makes the fake hold the response for N
+            # seconds so the scan must tick its wait window and stay
+            # cancellable instead of failing on a short HTTP timeout.
+            slow = os.path.join(os.path.dirname(log), "slow-add")
+            if os.path.exists(slow):
+                try:
+                    time.sleep(float(open(slow).read().strip()))
+                except ValueError:
+                    pass
+            # rqbit v8+ add response: object with a numeric id.
+            body = b'{"id":1,"details":{},"output_folder":"","seen_peers":null}'
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+http.server.ThreadingHTTPServer(("127.0.0.1", port), H).serve_forever()
+PY
+"#;
+
+    pub(crate) fn fake_engine_bin(tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("rqbit-{tag}-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let bin = dir.join("rqbit");
+        let log = dir.join("requests.log");
+        std::fs::write(&bin, FAKE_SCRIPT).unwrap();
+        std::process::Command::new("chmod").arg("+x").arg(&bin).status().unwrap();
+        (bin, log)
+    }
+
+    pub(crate) fn test_config(port: u16) -> Torrent {
+        Torrent {
+            enabled: true,
+            port,
+            min_download_speed_kbps: 500,
+            warmup_secs: 5,
+            max_wait_secs: 15,
+            no_peers_timeout_secs: 30,
+            cache_dir: std::env::temp_dir().join(format!("rqbit-cache-{}", std::process::id())),
+            auto_pick_file: true,
+            keep_after_play: false,
+            socks_proxy: None,
+        }
+    }
+
+    #[test]
+    fn missing_binary_reports_install_hint() {
+        let _guard = RQBIT_ENV_LOCK.lock().unwrap();
+        let missing = std::env::temp_dir().join("rqbit-definitely-missing");
+        unsafe {
+            std::env::set_var("S2UDIO_RQBIT_BIN", &missing);
+        }
+        let err = super::ensure_engine_binary().unwrap_err();
+        unsafe {
+            std::env::remove_var("S2UDIO_RQBIT_BIN");
+        }
+        assert!(err.contains("rqbit"), "{err}");
+        assert!(err.contains("install"), "{err}");
+    }
+
+    #[test]
+    fn start_engine_spawns_fake_and_waits_for_stats() {
+        let _guard = RQBIT_ENV_LOCK.lock().unwrap();
+        let (bin, log) = fake_engine_bin("start");
+        let port = 31030;
+        unsafe {
+            std::env::set_var("S2UDIO_RQBIT_BIN", &bin);
+        }
+        let config = test_config(port);
+        let engine = start_engine(&config).expect("engine must start");
+        unsafe {
+            std::env::remove_var("S2UDIO_RQBIT_BIN");
+        }
+        assert_eq!(engine.base_url(), format!("http://127.0.0.1:{port}"));
+        assert_eq!(engine.cache_dir, config.cache_dir);
+        let mut engine = engine;
+        assert!(engine.is_running());
+        // Round-18 host finding (2026-08-09): the engine must run with a
+        // clean per-engine session (`--disable-persistence`). Without it,
+        // rqbit restores the shared session DB and checksum-validates
+        // previously added torrents at startup — the added torrent stays
+        // `Initializing` and its stream endpoint errors, so mpv exits 2.
+        let spawn = std::fs::read_to_string(&log).expect("spawn log");
+        let spawn_line = spawn.lines().find(|l| l.starts_with("SPAWN ")).expect("spawn recorded");
+        assert!(
+            spawn_line.contains("--disable-persistence"),
+            "engine must run with a clean session: {spawn_line}"
+        );
+        assert!(
+            spawn_line.contains("--listen-port"),
+            "engine must have its own peer listen port: {spawn_line}"
+        );
+        engine.kill().expect("kill must succeed");
+    }
+
+    #[test]
+    fn socks_proxy_is_passed_to_the_engine_spawn() {
+        let _guard = RQBIT_ENV_LOCK.lock().unwrap();
+        let (bin, log) = fake_engine_bin("socks");
+        unsafe {
+            std::env::set_var("S2UDIO_RQBIT_BIN", &bin);
+        }
+        let mut config = test_config(31330);
+        config.socks_proxy = Some("socks5://127.0.0.1:1080".to_owned());
+        let mut engine = start_engine(&config).expect("engine must start");
+        unsafe {
+            std::env::remove_var("S2UDIO_RQBIT_BIN");
+        }
+        let spawn = std::fs::read_to_string(&log).expect("spawn log");
+        let spawn_line = spawn.lines().find(|l| l.starts_with("SPAWN ")).expect("spawn recorded");
+        assert!(
+            spawn_line.contains("--socks-url") && spawn_line.contains("socks5://127.0.0.1:1080"),
+            "engine must route through the configured proxy: {spawn_line}"
+        );
+        assert!(
+            spawn_line.contains("--disable-tcp-listen"),
+            "a proxied engine must not listen for incoming connections: {spawn_line}"
+        );
+        // The web UI URL points at the auth-injecting loopback proxy (no
+        // credentials in the URL — browsers do not replay userinfo auth
+        // on the SPA's fetch() calls).
+        let web_url = engine.web_url();
+        assert!(web_url.starts_with("http://127.0.0.1:"), "{web_url}");
+        assert!(web_url.ends_with("/web/"), "{web_url}");
+        assert!(!web_url.contains('@'), "no credentials in the web UI URL: {web_url}");
+        engine.kill().expect("kill must succeed");
+    }
+
+    #[test]
+    fn web_ui_proxy_injects_auth_and_reaches_the_engine() {
+        let _guard = RQBIT_ENV_LOCK.lock().unwrap();
+        let (bin, log) = fake_engine_bin("webui-proxy");
+        unsafe {
+            std::env::set_var("S2UDIO_RQBIT_BIN", &bin);
+        }
+        let config = test_config(31430);
+        let mut engine = start_engine(&config).expect("engine must start");
+        unsafe {
+            std::env::remove_var("S2UDIO_RQBIT_BIN");
+        }
+        // The engine's own port stays auth-protected: no credentials ->
+        // 401 from the REAL server (the fake always 200s, so this
+        // assertion is about the URL shape only here; the proxy test
+        // below proves header injection against the fake's request log).
+        let url = engine.web_url();
+        // The proxy serves the API at the ROOT (the SPA strips `/web/`
+        // from its base URL): request /stats and /web/ WITHOUT
+        // credentials — the proxy injects the Authorization header, so
+        // both must answer.
+        let proxy_port = url.trim_start_matches("http://127.0.0.1:").trim_end_matches("/web/");
+        let proxy_port: u16 = proxy_port.parse().expect("proxy port in web_url");
+        for path in ["/stats", "/web/"] {
+            let response = ureq::get(&format!("http://127.0.0.1:{proxy_port}{path}"))
+                .call()
+                .map_err(|err| format!("GET through proxy: {err}"))
+                .expect("proxy must forward");
+            assert_eq!(response.status(), 200, "proxy path {path}");
+        }
+        // The engine saw the injected Authorization header on every
+        // request. The fake records `METHOD path <Authorization>` (no
+        // header name) — a missing header would log an empty tail. The
+        // readiness poll's own GET /stats is authed by the engine client
+        // too, so the assertion is: every request line carries ` Basic `
+        // (the proxied /web/ + /stats ones prove injection, since the
+        // proxy client sends no credentials).
+        let reqs = std::fs::read_to_string(&log).expect("request log");
+        let requests: Vec<&str> = reqs.lines().filter(|l| !l.starts_with("SPAWN ")).collect();
+        assert!(
+            requests.len() >= 3 && requests.iter().all(|l| l.contains(" Basic ")),
+            "every engine request must carry auth: {reqs}"
+        );
+        assert!(
+            requests.iter().any(|l| l.starts_with("GET /web/ Basic")),
+            "the proxied web UI request must be authed: {reqs}"
+        );
+        engine.kill().expect("kill must succeed");
+    }
+
+    #[test]
+    fn web_ui_proxy_serves_the_real_rqbit_web_ui_without_credentials() {
+        // End-to-end against the REAL rqbit (skipped when not on PATH):
+        // the browser-visible URL has no credentials, yet /web/ and the
+        // API answer — exactly what the SPA needs (verified live in
+        // Chromium 2026-08-15).
+        let _guard = RQBIT_ENV_LOCK.lock().unwrap();
+        if which::which("rqbit").is_err() {
+            eprintln!("rqbit not on PATH — skipping real-engine web UI test");
+            return;
+        }
+        let config = test_config(31440);
+        let mut engine = start_engine(&config).expect("engine must start");
+        let url = engine.web_url();
+        assert!(!url.contains('@'), "clean browser URL expected: {url}");
+        let page = ureq::get(&url).call().expect("web UI page through proxy");
+        assert_eq!(page.status(), 200);
+        let proxy_port: u16 = url
+            .trim_start_matches("http://127.0.0.1:")
+            .trim_end_matches("/web/")
+            .parse()
+            .expect("proxy port in web_url");
+        let stats = ureq::get(&format!("http://127.0.0.1:{proxy_port}/stats"))
+            .call()
+            .expect("stats through proxy");
+        assert_eq!(stats.status(), 200);
+        engine.kill().expect("kill must succeed");
+    }
+
+    #[test]
+    fn port_falls_back_when_configured_port_is_taken() {
+        let _guard = RQBIT_ENV_LOCK.lock().unwrap();
+        let (bin, _log) = fake_engine_bin("port");
+        let occupied = 31130;
+        let _listener = TcpListener::bind(("127.0.0.1", occupied)).expect("bind must succeed");
+        unsafe {
+            std::env::set_var("S2UDIO_RQBIT_BIN", &bin);
+        }
+        let config = test_config(occupied);
+        let mut engine = start_engine(&config).expect("engine must fall back to a free port");
+        unsafe {
+            std::env::remove_var("S2UDIO_RQBIT_BIN");
+        }
+        assert_ne!(engine.base_url(), format!("http://127.0.0.1:{occupied}"));
+        engine.kill().expect("kill must succeed");
+    }
+
+    #[test]
+    fn auth_header_is_sent_on_every_request() {
+        let _guard = RQBIT_ENV_LOCK.lock().unwrap();
+        let (bin, log) = fake_engine_bin("auth");
+        unsafe {
+            std::env::set_var("S2UDIO_RQBIT_BIN", &bin);
+        }
+        let config = test_config(31230);
+        let mut engine = start_engine(&config).expect("engine must start");
+        unsafe {
+            std::env::remove_var("S2UDIO_RQBIT_BIN");
+        }
+        let id = add_torrent(&engine, TorrentSource::Magnet("magnet:?xt=urn:btih:aaaa"))
+            .expect("add must work");
+        assert_eq!(id, "1"); // rqbit v8+ returns a numeric id in an object
+        let details = torrent_details(&engine, &id).expect("details must parse");
+        assert_eq!(details.name.as_deref(), Some("fake.torrent"));
+        assert_eq!(details.files.len(), 1);
+        assert_eq!(details.files[0].length, 100); // real v9 field name
+        let stats = torrent_stats(&engine, &id).expect("stats must parse");
+        assert!(stats.live.is_some());
+        super::delete_torrent(&engine, &id).expect("delete must work");
+        engine.kill().expect("kill must succeed");
+
+        let lines = std::fs::read_to_string(&log).expect("request log must exist");
+        assert!(lines.contains("GET /stats"), "{lines}");
+        assert!(lines.contains("GET /torrents/1"), "{lines}");
+        assert!(lines.contains("GET /torrents/1/stats/v1"), "{lines}");
+        assert!(lines.contains("POST /torrents/1/delete"), "{lines}");
+        // The add carries `overwrite=true` so a re-added torrent adopts
+        // its already-existing cache files instead of a 400 "File exists".
+        assert!(lines.contains("POST /torrents?overwrite=true"), "{lines}");
+        for line in lines.lines() {
+            // The `SPAWN …` line is the fake engine's argv echo (no HTTP
+            // request) — every actual request must carry Basic auth.
+            if line.starts_with("SPAWN ") {
+                continue;
+            }
+            assert!(line.contains("Basic "), "expected Basic auth on {line:?}");
+        }
+    }
+
+    #[test]
+    fn engine_drop_kills_the_child() {
+        let _guard = RQBIT_ENV_LOCK.lock().unwrap();
+        let (bin, _log) = fake_engine_bin("drop");
+        unsafe {
+            std::env::set_var("S2UDIO_RQBIT_BIN", &bin);
+        }
+        let port = 31330;
+        let config = test_config(port);
+        let engine = start_engine(&config).expect("engine must start");
+        unsafe {
+            std::env::remove_var("S2UDIO_RQBIT_BIN");
+        }
+        let mut engine = engine;
+        assert!(engine.is_running());
+        drop(engine);
+        // After the drop the child is gone: the port must be free again.
+        let listener = TcpListener::bind(("127.0.0.1", port));
+        assert!(listener.is_ok(), "port {port} must be released after the engine is dropped");
+    }
+
+    #[test]
+    fn engine_restart_reuses_a_freed_port() {
+        let _guard = RQBIT_ENV_LOCK.lock().unwrap();
+        let (bin, _log) = fake_engine_bin("reuse");
+        unsafe {
+            std::env::set_var("S2UDIO_RQBIT_BIN", &bin);
+        }
+        let port = 31430;
+        let mut engine = start_engine(&test_config(port)).expect("engine must start");
+        engine.kill().expect("kill must succeed");
+        let mut engine2 =
+            start_engine(&test_config(port)).expect("engine must restart on the same port");
+        assert_eq!(engine2.base_url(), format!("http://127.0.0.1:{port}"));
+        engine2.kill().expect("kill must succeed");
+        unsafe {
+            std::env::remove_var("S2UDIO_RQBIT_BIN");
+        }
+    }
+
+    #[test]
+    fn two_engines_coexist_with_distinct_listen_ports() {
+        // Round-18 host finding (2026-08-09): rqbit `server start` binds a
+        // FIXED peer port (4240) and a persisted DHT port when unset, so a
+        // second engine (a second paste/play while the first engine is
+        // alive) died with "Address in use" → "rqbit api not reachable".
+        // `start_engine` now passes a per-engine `--listen-port` and
+        // `--disable-dht-persistence`, so two engines must run together.
+        let _guard = RQBIT_ENV_LOCK.lock().unwrap();
+        let (bin, log) = fake_engine_bin("two-engines");
+        unsafe {
+            std::env::set_var("S2UDIO_RQBIT_BIN", &bin);
+        }
+        let mut engine_a = start_engine(&test_config(31530)).expect("first engine starts");
+        let mut engine_b = start_engine(&test_config(31540))
+            .expect("second engine starts while the first is alive");
+        assert_ne!(engine_a.base_url(), engine_b.base_url(), "distinct API ports");
+        assert!(engine_a.is_running() && engine_b.is_running(), "both engines alive");
+        // The fake records each engine's spawn: the listen-port flags must
+        // be distinct so real rqbit does not collide on 4240.
+        let lines = std::fs::read_to_string(&log).expect("request log must exist");
+        engine_a.kill().expect("kill a");
+        engine_b.kill().expect("kill b");
+        unsafe {
+            std::env::remove_var("S2UDIO_RQBIT_BIN");
+        }
+        assert!(lines.contains("GET /stats"), "{lines}");
+    }
+
+    #[test]
+    fn pick_playable_file_prefers_largest_video() {
+        let files = vec![
+            super::TorrentFileInfo {
+                name: "song.mp3".to_owned(),
+                length: 5_000_000,
+                components: vec![],
+                included: true,
+            },
+            super::TorrentFileInfo {
+                name: "movie.mkv".to_owned(),
+                length: 50_000_000,
+                components: vec![],
+                included: true,
+            },
+            super::TorrentFileInfo {
+                name: "trailer.mkv".to_owned(),
+                length: 10_000_000,
+                components: vec![],
+                included: true,
+            },
+        ];
+        let (idx, file) = super::pick_playable_file(&files).expect("a playable file");
+        assert_eq!(idx, 1, "the largest video file wins");
+        assert_eq!(file.name, "movie.mkv");
+    }
+
+    #[test]
+    fn pick_playable_file_falls_back_to_audio() {
+        let files = vec![
+            super::TorrentFileInfo { name: "readme.txt".to_owned(), length: 1_000, components: vec![],
+                included: true },
+            super::TorrentFileInfo {
+                name: "album.flac".to_owned(),
+                length: 30_000_000,
+                components: vec![],
+                included: true,
+            },
+            super::TorrentFileInfo {
+                name: "single.mp3".to_owned(),
+                length: 4_000_000,
+                components: vec![],
+                included: true,
+            },
+        ];
+        let (idx, file) = super::pick_playable_file(&files).expect("an audio file");
+        assert_eq!(idx, 1, "the largest audio file wins when there is no video");
+        assert_eq!(file.name, "album.flac");
+    }
+
+    #[test]
+    fn pick_playable_file_returns_none_without_media() {
+        let files = vec![
+            super::TorrentFileInfo { name: "readme.txt".to_owned(), length: 1_000, components: vec![],
+                included: true },
+            super::TorrentFileInfo {
+                name: "data.bin".to_owned(),
+                length: 1_000_000,
+                components: vec![],
+                included: true,
+            },
+        ];
+        assert!(super::pick_playable_file(&files).is_none());
+    }
+
+    #[test]
+    fn torrent_item_source_maps_to_engine_sources() {
+        use std::path::Path;
+        let magnet = super::TorrentItem::Magnet("magnet:?xt=urn:btih:abc".to_owned());
+        assert!(matches!(magnet.source(), TorrentSource::Magnet("magnet:?xt=urn:btih:abc")));
+        let url = super::TorrentItem::Torrent("https://example.com/movie.torrent".to_owned());
+        assert!(matches!(url.source(), TorrentSource::Http("https://example.com/movie.torrent")));
+        let local = super::TorrentItem::Torrent("/tmp/movie.torrent".to_owned());
+        assert!(
+            matches!(local.source(), TorrentSource::Local(p) if p == Path::new("/tmp/movie.torrent"))
+        );
+    }
+
+    #[test]
+    fn torrent_item_label_uses_file_name_or_infohash() {
+        let url = super::TorrentItem::Torrent("https://example.com/movie.torrent".to_owned());
+        assert_eq!(url.label(), "movie.torrent");
+        let magnet = super::TorrentItem::Magnet(
+            "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567".to_owned(),
+        );
+        assert_eq!(magnet.label(), "magnet:01234567");
+    }
+
+    #[test]
+    fn stats_parses_the_real_rqbit_v9_shape() {
+        // A real `GET /torrents/{id}/stats/v1` response from rqbit
+        // 9.0.0-beta.2 (observed live): `file_progress` is a per-file byte
+        // array aligned with `files[]`, `live.download_speed` is the
+        // `{mbps, human_readable}` object.
+        let json = r#"{"state":"live","file_progress":[1652,1514,1554,1618,1546,129241752,1537,1536,1551,2016,46115],"progress_bytes":129302391,"total_bytes":129302391,"finished":true,"error":null,"live":{"download_speed":{"mbps":0.03,"human_readable":"0.03 MiB/s"},"upload_speed":{"mbps":0.0,"human_readable":"0.00 MiB/s"},"num_peers":3,"num_seeds":5}}"#;
+        let stats: super::TorrentStats = serde_json::from_str(json).unwrap();
+        assert!(stats.finished);
+        assert_eq!(stats.progress_bytes, 129302391);
+        assert_eq!(stats.file_progress.len(), 11);
+        assert_eq!(stats.file_progress[5], 129241752);
+        let speed = stats.live.and_then(|l| l.download_speed).unwrap();
+        assert_eq!(speed.mbps, Some(0.03));
+        assert_eq!(speed.human_readable.as_deref(), Some("0.03 MiB/s"));
+    }
+
+
+    #[test]
+    fn is_torrent_stream_url_matches_rqbit_streams_only() {
+        assert!(super::is_torrent_stream_url(
+            "http://s2u:token@127.0.0.1:3030/torrents/3/stream/1"
+        ));
+        assert!(!super::is_torrent_stream_url("http://127.0.0.1:3030/stats"));
+        assert!(!super::is_torrent_stream_url("https://youtube.com/watch?v=x"));
+        assert!(!super::is_torrent_stream_url("/home/user/movie.mp4"));
+    }
+
+    /// Round 110: the pre-launch probe must speak the engine's auth shape —
+    /// mpv gets the token as URL userinfo, `ureq` does not read userinfo, so
+    /// the probe has to split it out and send `Authorization: Basic …`.
+    #[test]
+    fn split_userinfo_moves_the_token_into_an_authorization_header() {
+        let (plain, auth) = super::split_userinfo(
+            "http://s2u:934e5fe30de5cd1d2b090563a1271a9a@127.0.0.1:3030/torrents/0/stream/0",
+        );
+        assert_eq!(plain, "http://127.0.0.1:3030/torrents/0/stream/0");
+        assert_eq!(
+            auth.as_deref(),
+            Some("Basic czJ1OjkzNGU1ZmUzMGRlNWNkMWQyYjA5MDU2M2ExMjcxYTlh")
+        );
+        // No userinfo (a plain URL): nothing to authenticate with.
+        assert_eq!(
+            super::split_userinfo("http://127.0.0.1:3030/torrents/0/stream/0"),
+            ("http://127.0.0.1:3030/torrents/0/stream/0".to_owned(), None)
+        );
+    }
+
+    #[test]
+    fn base64_matches_the_reference_encoding() {
+        // RFC 4648 vectors, plus the padding cases the token shapes hit.
+        assert_eq!(super::base64_encode(b""), "");
+        assert_eq!(super::base64_encode(b"f"), "Zg==");
+        assert_eq!(super::base64_encode(b"fo"), "Zm8=");
+        assert_eq!(super::base64_encode(b"foo"), "Zm9v");
+        assert_eq!(super::base64_encode(b"foobar"), "Zm9vYmFy");
+        assert_eq!(super::base64_encode(b"s2u:abc"), "czJ1OmFiYw==");
+    }
+
+    #[test]
+    fn move_completed_file_moves_and_avoids_collisions() {
+        let dir = std::env::temp_dir().join(format!("s2u-torrent-move-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        let file = src.join("movie.mp4");
+        std::fs::write(&file, b"content").unwrap();
+        let dest = dir.join("dest");
+        std::fs::create_dir_all(&dest).unwrap();
+
+        // Fresh move.
+        let target = super::move_completed_file(&file, &dest).unwrap();
+        assert_eq!(target, dest.join("movie.mp4"));
+        assert!(target.is_file());
+        assert!(!file.exists());
+        // The source is gone, so a second move of the same path errors.
+        assert!(super::move_completed_file(&file, &dest).is_err());
+
+        // Collision: an existing file gets a " (1)" suffix.
+        let again = src.join("movie.mp4");
+        std::fs::write(&again, b"more").unwrap();
+        let target = super::move_completed_file(&again, &dest).unwrap();
+        assert_eq!(target, dest.join("movie (1).mp4"));
+        assert!(target.is_file());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn move_completed_file_reports_missing_source() {
+        let dir =
+            std::env::temp_dir().join(format!("s2u-torrent-move-missing-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let err = super::move_completed_file(&dir.join("nope.mp4"), &dir).unwrap_err();
+        assert!(err.contains("not found"), "error was {err:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Build a fake scanned torrent with the given files (a real fake-rqbit
+    /// engine runs behind it; Drop kills it at test end).
+    fn fake_scan(files: &[(&str, u64)]) -> super::TorrentScan {
+        let _guard = RQBIT_ENV_LOCK.lock().unwrap();
+        let (bin, _log) = fake_engine_bin("scan");
+        let port = 31040;
+        unsafe {
+            std::env::set_var("S2UDIO_RQBIT_BIN", &bin);
+        }
+        let engine = start_engine(&test_config(port)).expect("fake engine starts");
+        let files = files
+            .iter()
+            .enumerate()
+            .map(|(index, (name, length))| super::ScannedFile {
+                index,
+                name: name.to_string(),
+                length: *length,
+            })
+            .collect();
+        unsafe {
+            std::env::remove_var("S2UDIO_RQBIT_BIN");
+        }
+        super::TorrentScan {
+            engine: std::sync::Arc::new(engine),
+            torrent_id: "1".to_owned(),
+            torrent_name: "Fake Pack".to_owned(),
+            info_hash: None,
+            files,
+        }
+    }
+
+    #[test]
+    fn scan_videos_keeps_positional_indices() {
+        let scan = fake_scan(&[
+            ("readme.txt", 10),
+            ("ep01.mkv", 1000),
+            ("ep02.mkv", 900),
+            ("ep03.mkv", 800),
+        ]);
+        let videos = scan.videos();
+        let indices: Vec<usize> = videos.iter().map(|f| f.index).collect();
+        assert_eq!(indices, vec![1, 2, 3], "the positional indices survive the classification");
+        assert_eq!(videos[0].name, "ep01.mkv");
+    }
+
+    #[test]
+    fn scan_detects_multi_video_and_audio_fallback() {
+        // Multi-video (a season pack).
+        let multi =
+            fake_scan(&[("ep01.mkv", 1000), ("ep02.mkv", 900), ("ep03.mkv", 800), ("subs.srt", 5)]);
+        assert_eq!(multi.videos().len(), 3);
+        assert!(multi.audios().is_empty());
+        assert_eq!(multi.pick_playable().map(|f| f.name.clone()).as_deref(), Some("ep01.mkv"));
+
+        // Audio-only (an album) falls back to the largest audio file.
+        let album = fake_scan(&[
+            ("cover.jpg", 50),
+            ("song1.flac", 300),
+            ("song2.flac", 500),
+            ("song3.flac", 400),
+        ]);
+        assert!(album.videos().is_empty());
+        assert_eq!(album.audios().len(), 3);
+        assert_eq!(album.pick_playable().map(|f| f.name.clone()).as_deref(), Some("song2.flac"));
+
+        // A data torrent has no playable media.
+        let data = fake_scan(&[("readme.txt", 10), ("data.bin", 1000)]);
+        assert!(data.videos().is_empty());
+        assert!(data.audios().is_empty());
+        assert!(data.pick_playable().is_none());
+    }
+
+    #[test]
+    fn scan_torrent_runs_the_engine_and_reads_the_file_list() {
+        let _guard = RQBIT_ENV_LOCK.lock().unwrap();
+        let (bin, _log) = fake_engine_bin("scan-flow");
+        let port = 31050;
+        unsafe {
+            std::env::set_var("S2UDIO_RQBIT_BIN", &bin);
+        }
+        let config = test_config(port);
+        let (cancel_tx, cancel_rx) = crossbeam::channel::unbounded();
+        let (progress_tx, _progress_rx) = crossbeam::channel::unbounded();
+        // The fake serves a single movie.mkv file list for any torrent id.
+        let scan = super::scan_torrent(
+            &super::TorrentItem::Magnet("magnet:?xt=urn:btih:0123456789abcdef".to_owned()),
+            &config,
+            &cancel_rx,
+            &progress_tx,
+        )
+        .expect("scan succeeds against the fake engine");
+        drop(cancel_tx);
+        unsafe {
+            std::env::remove_var("S2UDIO_RQBIT_BIN");
+        }
+        assert_eq!(scan.torrent_name, "fake.torrent");
+        assert_eq!(scan.torrent_id, "1");
+        assert_eq!(scan.files.len(), 1);
+        assert_eq!(scan.files[0].index, 0);
+        assert_eq!(scan.files[0].name, "movie.mkv");
+        assert!(scan.files[0].is_video());
+        // The stream URL of the scanned file addresses it by index.
+        let url = scan.engine.stream_url(&scan.torrent_id, scan.files[0].index as u64);
+        assert!(url.contains("/torrents/1/stream/0"), "{url}");
+    }
+
+    #[test]
+    fn scan_torrent_waits_open_ended_reports_progress_and_cancels() {
+        let _guard = RQBIT_ENV_LOCK.lock().unwrap();
+        let (bin, log) = fake_engine_bin("open-wait");
+        let marker = log.with_file_name("no-files");
+        std::fs::write(&marker, "").unwrap();
+        let port = 31060;
+        unsafe {
+            std::env::set_var("S2UDIO_RQBIT_BIN", &bin);
+        }
+        let config = test_config(port);
+        let (cancel_tx, cancel_rx) = crossbeam::channel::unbounded();
+        let (progress_tx, progress_rx) = crossbeam::channel::unbounded();
+        let item = super::TorrentItem::Magnet("magnet:?xt=urn:btih:0123456789abcdef".to_owned());
+        let item_key = item.source_key();
+        let handle = std::thread::spawn(move || {
+            super::scan_torrent(&item, &config, &cancel_rx, &progress_tx)
+        });
+
+        // Round 18: the wait is alive and reports progress (the fake never
+        // delivers a file list while the marker exists) — and it does NOT
+        // give up on its own, so no error fires after any N seconds.
+        let first = progress_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("a progress event arrives while waiting");
+        match first {
+            crate::shared::events::AppEvent::WorkDone(Ok(
+                crate::shared::events::WorkDone::TorrentScanProgress { key, progress },
+            )) => {
+                assert_eq!(key, item_key, "progress is keyed by the item");
+                assert!(progress.elapsed_secs >= 1, "counter ticks");
+                assert_eq!(progress.download_speed_kbps, 0.0, "fake reports 0 Mbps");
+            }
+            other => panic!("expected a progress event, got {other:?}"),
+        }
+        // Another tick arrives a second later (the counter keeps moving).
+        progress_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("a second progress event arrives");
+
+        // The user cancels (Esc/close): the wait aborts promptly and the
+        // scan reports the cancellation instead of waiting forever.
+        cancel_tx.send(()).unwrap();
+        let result = handle.join().expect("scan thread joins");
+        let err = result.expect_err("cancel aborts the scan");
+        assert!(err.contains("cancelled"), "{err}");
+        unsafe {
+            std::env::remove_var("S2UDIO_RQBIT_BIN");
+        }
+        let _ = std::fs::remove_file(&marker);
+    }
+
+    #[test]
+    fn scan_torrent_waits_for_the_torrent_to_be_live_before_offering_play() {
+        // Round-18 host finding (2026-08-09): a re-added torrent whose
+        // cache files already exist is adopted with `overwrite=true` and
+        // spends some seconds `Initializing` (checksum validation) — its
+        // stream endpoint errors during that window, so the scan must not
+        // return (and the popup must not offer play) until rqbit reports
+        // `state == "live"`.
+        let _guard = RQBIT_ENV_LOCK.lock().unwrap();
+        let (bin, log) = fake_engine_bin("not-live");
+        let not_live = log.with_file_name("not-live");
+        std::fs::write(&not_live, "").unwrap();
+        let port = 31060;
+        unsafe {
+            std::env::set_var("S2UDIO_RQBIT_BIN", &bin);
+        }
+        let config = test_config(port);
+        let (_cancel_tx, cancel_rx) = crossbeam::channel::unbounded();
+        let (progress_tx, progress_rx) = crossbeam::channel::unbounded();
+        let item = super::TorrentItem::Magnet("magnet:?xt=urn:btih:0123456789abcdef".to_owned());
+        let handle = std::thread::spawn(move || {
+            super::scan_torrent(&item, &config, &cancel_rx, &progress_tx)
+        });
+
+        // The fake serves files but reports `state: initializing`: the
+        // scan must keep waiting and ticking progress — NOT return Ok.
+        let first = progress_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("progress arrives while initializing");
+        assert!(matches!(
+            first,
+            crate::shared::events::AppEvent::WorkDone(Ok(
+                crate::shared::events::WorkDone::TorrentScanProgress { .. }
+            ))
+        ));
+        assert!(!handle.is_finished(), "scan waits while the torrent initializes");
+
+        // The torrent goes live: the scan completes with the file list.
+        std::fs::remove_file(&not_live).unwrap();
+        let scan = handle.join().expect("scan completes").expect("Ok scan");
+        assert_eq!(scan.files.len(), 1);
+        assert_eq!(scan.files[0].name, "movie.mkv");
+        unsafe {
+            std::env::remove_var("S2UDIO_RQBIT_BIN");
+        }
+    }
+
+    #[test]
+    fn wait_for_files_aborts_on_cancel_without_a_deadline() {
+        let _guard = RQBIT_ENV_LOCK.lock().unwrap();
+        let (bin, log) = fake_engine_bin("no-peers-cancel");
+        let marker = log.with_file_name("no-files");
+        std::fs::write(&marker, "").unwrap();
+        let port = 31060;
+        unsafe {
+            std::env::set_var("S2UDIO_RQBIT_BIN", &bin);
+        }
+        let config = test_config(port);
+        let engine = start_engine(&config).expect("fake engine starts");
+        let id = add_torrent(
+            &engine,
+            super::TorrentItem::Magnet("magnet:?xt=urn:btih:0123456789abcdef".to_owned()).source(),
+        )
+        .expect("add succeeds");
+        let (cancel_tx, cancel_rx) = crossbeam::channel::unbounded();
+        let handle =
+            std::thread::spawn(move || super::wait_for_files(&engine, &id, Some(&cancel_rx)));
+        // Give the wait a moment — it must NOT fire an error on its own
+        // (there is no deadline anymore).
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        cancel_tx.send(()).unwrap();
+        let err = match handle.join().expect("wait thread joins") {
+            Ok(_) => panic!("expected the wait to be cancelled"),
+            Err(err) => err,
+        };
+        assert!(err.contains("cancelled"), "{err}");
+        unsafe {
+            std::env::remove_var("S2UDIO_RQBIT_BIN");
+        }
+        let _ = std::fs::remove_file(&marker);
+    }
+
+    #[test]
+    fn scan_torrent_survives_a_slow_add_and_cancels_mid_add() {
+        // Round-18 regression (host finding 2026-08-09): rqbit's real
+        // `POST /torrents` blocks until a cold magnet's metainfo resolves —
+        // sometimes for minutes. The old code ran the add on the scan
+        // thread with the 5 s HTTP agent timeout, so the scan failed at the
+        // add step ("loading stops after a set period") before the
+        // open-ended wait ever started. The fake's `slow-add` marker holds
+        // the add response for 8 s: the scan must (1) not give up, (2) keep
+        // ticking the wait window, and (3) abort promptly on cancel.
+        let _guard = RQBIT_ENV_LOCK.lock().unwrap();
+        let (bin, log) = fake_engine_bin("slow-add");
+        let marker = log.with_file_name("slow-add");
+        std::fs::write(&marker, "8").unwrap();
+        let port = 31060;
+        unsafe {
+            std::env::set_var("S2UDIO_RQBIT_BIN", &bin);
+        }
+        let config = test_config(port);
+        let (cancel_tx, cancel_rx) = crossbeam::channel::unbounded();
+        let (progress_tx, progress_rx) = crossbeam::channel::unbounded();
+        let item = super::TorrentItem::Magnet("magnet:?xt=urn:btih:0123456789abcdef".to_owned());
+        let item_key = item.source_key();
+        let handle = std::thread::spawn(move || {
+            super::scan_torrent(&item, &config, &cancel_rx, &progress_tx)
+        });
+
+        // The wait window keeps ticking while the add is in flight (the
+        // fake does not answer for 8 s): a progress event arrives within a
+        // couple of seconds and the scan has NOT failed.
+        let first = progress_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("progress arrives while the add is still pending");
+        match first {
+            crate::shared::events::AppEvent::WorkDone(Ok(
+                crate::shared::events::WorkDone::TorrentScanProgress { key, .. },
+            )) => assert_eq!(key, item_key),
+            other => panic!("expected progress during the add, got {other:?}"),
+        }
+
+        // The user cancels mid-add: the scan aborts promptly instead of
+        // waiting out the 8 s add (or erroring at a 5 s deadline).
+        cancel_tx.send(()).unwrap();
+        let result = handle.join().expect("scan thread joins");
+        let err = result.expect_err("cancel aborts the scan");
+        assert!(err.contains("cancelled"), "{err}");
+        unsafe {
+            std::env::remove_var("S2UDIO_RQBIT_BIN");
+        }
+        let _ = std::fs::remove_file(&marker);
     }
 }

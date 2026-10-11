@@ -23,6 +23,30 @@ pub fn init_console() -> Result<LoggerHandle, FlexiLoggerError> {
         .start()
 }
 
+/// The downloader daemon's logger (`s2udio dl serve`, round 110).
+///
+/// The daemon runs detached with its **stderr set to `/dev/null`** and no
+/// TUI/status-bar channel, and `dl serve` never installed a logger — so every
+/// decision it made (which engine it started, which stream URL it handed out,
+/// when it moved a completed download) was invisible. That is why the round-110
+/// report ("Stream and download never started the stream") could not be
+/// root-caused after the fact. It logs to its own file, appended, so a daemon
+/// restart never truncates the record.
+pub fn init_daemon() -> Result<LoggerHandle, FlexiLoggerError> {
+    let uid = rustix::process::geteuid();
+    flexi_logger::Logger::try_with_env_or_str("debug")?
+        .log_to_file(
+            FileSpec::default()
+                .directory(std::env::temp_dir())
+                .basename(format!("s2udio_dl_{}", uid.as_raw()))
+                .suppress_timestamp(),
+        )
+        .append()
+        .format_for_files(structured_detailed_format)
+        .set_palette("1;3;15;4;13".to_string())
+        .start()
+}
+
 #[allow(dead_code)]
 fn init_release(tx: Sender<AppEvent>) -> Result<LoggerHandle, FlexiLoggerError> {
     let uid = rustix::process::geteuid();

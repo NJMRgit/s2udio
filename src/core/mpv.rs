@@ -79,14 +79,27 @@ pub struct MpvSession {
     /// mpv's volume (0-100), read by the poll. `None` until the first
     /// read; the volume bar falls back to the MPD volume meanwhile.
     pub volume: Option<u8>,
-    /// Resume seek requested before the mpv IPC socket was reachable;
-    /// applied by the poll once the socket is live. A `Cell` so the
-    /// `&Ctx` paths that arm it can write it — same as `playlist_pos`.
-    pub pending_seek: std::cell::Cell<Option<f64>>,
+    /// A resume seek the Continue button armed: `(seconds, attempts, when
+    /// the last attempt was made)`. mpv drops a seek aimed at an entry it
+    /// has not finished loading, so the poll retries it until playback has
+    /// passed the target (see [`apply_pending_resume_seek`]). A `Cell` so
+    /// the `&Ctx` paths that arm it can write it — same as `playlist_pos`.
+    pub resume_seek: std::cell::Cell<Option<(f64, u8, Option<std::time::Instant>)>>,
+    /// The entry key a Continue / Start over prompt was already shown for,
+    /// so the same entry never prompts twice (set when the prompt opens,
+    /// cleared when the session starts or mpv advances to another entry).
+    /// A `RefCell` (not a `Cell`: `String` is not `Copy`, and `MpvSession`
+    /// derives `Clone`).
+    pub resume_prompted_for: std::cell::RefCell<Option<String>>,
+    /// The Jellyfin item whose saved resume position is being fetched. The
+    /// `JF_RESUME` handler only acts on a response while the item playing
+    /// now is still the one it was asked for, so a request that lost a race
+    /// with a playlist advance cannot prompt for the wrong entry.
+    pub resume_fetch_item: std::cell::RefCell<Option<String>>,
     /// Round 74 (74-3): start offset still to apply to the entry mpv is on
     /// now — `(playlist position, attempts, when the last one was made)`.
     /// A session that is already running cannot take `--start=` (a launch
-    /// argument), and arming `pending_seek` does not work either: the
+    /// argument), and arming `resume_seek` does not work either: the
     /// `MpvItemChanged` event the same action sends clears it before the
     /// poll runs. So the poll applies the offset itself, while the position
     /// is still short of it (see `apply_entry_start_seek`).
@@ -225,7 +238,9 @@ fn detect_mpv_session_at(ctx: &mut Ctx, socket: std::path::PathBuf) -> bool {
     ctx.mpv.position = position;
     ctx.mpv.paused = paused;
     ctx.mpv.volume = volume;
-    ctx.mpv.pending_seek.set(None);
+    ctx.mpv.resume_seek.set(None);
+    *ctx.mpv.resume_prompted_for.borrow_mut() = None;
+    *ctx.mpv.resume_fetch_item.borrow_mut() = None;
     log::info!(
         title:? = ctx.mpv.title, item_id:? = ctx.mpv.item_id, position:? = ctx.mpv
         .position, duration:? = ctx.mpv.duration; "Reattached to a running mpv session"
@@ -561,13 +576,9 @@ pub fn read_mpv_playlist(socket: &Path) -> Vec<MpvPlaylistEntry> {
     }
     entries
 }
-/// Read the URL/file mpv is currently playing (`path` property). Used to
-/// verify a recorded playlist entry is the entry mpv actually plays before
-/// the poll adopts it (a `loadfile … replace` splice can leave mpv's real
-/// playlist diverging from the recorded one).
-pub fn read_mpv_path(socket: &Path) -> Option<String> {
-    let lines = mpv_exchange(socket, r#"{"command":["get_property","path"]}"#, 1)
-        .unwrap_or_default();
+fn read_mpv_string_property(socket: &Path, property: &str) -> Option<String> {
+    let command = format!(r#"{{"command":["get_property","{property}"]}}"#);
+    let lines = mpv_exchange(socket, &command, 1).unwrap_or_default();
     lines
         .first()
         .and_then(|line| {
@@ -576,6 +587,14 @@ pub fn read_mpv_path(socket: &Path) -> Option<String> {
                 .then(|| value.get("data")?.as_str().map(str::to_owned))
                 .flatten()
         })
+}
+
+/// Read the URL/file mpv is currently playing (`path` property). Used to
+/// verify a recorded playlist entry is the entry mpv actually plays before
+/// the poll adopts it (a `loadfile … replace` splice can leave mpv's real
+/// playlist diverging from the recorded one).
+pub fn read_mpv_path(socket: &Path) -> Option<String> {
+    read_mpv_string_property(socket, "path")
 }
 /// The recorded playlist entry the poll should adopt for mpv's reported
 /// `playlist-pos`, or `None` when it cannot be confirmed as what mpv is
@@ -610,16 +629,7 @@ pub fn recorded_entry_for_mpv_pos(
 }
 /// Read mpv's media-title (may be the raw URL for streams).
 pub fn read_mpv_title(socket: &Path) -> Option<String> {
-    let lines = mpv_exchange(socket, r#"{"command":["get_property","media-title"]}"#, 1)
-        .unwrap_or_default();
-    lines
-        .first()
-        .and_then(|line| {
-            let value: serde_json::Value = serde_json::from_str(line).ok()?;
-            (value.get("error").and_then(|e| e.as_str()) == Some("success"))
-                .then(|| value.get("data")?.as_str().map(str::to_owned))
-                .flatten()
-        })
+    read_mpv_string_property(socket, "media-title")
 }
 /// Whether a title still looks like the raw URL — or mpv's provisional
 /// title (the URL with the scheme stripped, e.g. `watch?v=…`) — rather
@@ -709,17 +719,18 @@ pub fn mpv_append_load(socket: &Path, url: &str) {
 pub fn write_mpv_m3u(entries: &[MpvPlaylistEntry]) -> PathBuf {
     // A private subdirectory keeps the launch directory clean: mpv v0.41
     // appends ANY sibling .m3u files found next to the playlist file as
-    // untitled extra entries (verified), so a shared /tmp would pollute
-    // every launch with the previous sessions' playlist files. The stale
-    // files of older instances are removed here so a fresh launch sees
-    // exactly one .m3u.
+    // untitled extra entries (verified 2026-10-08: with a stray sibling the
+    // launch plays the extra entry and exits 3 — "some files played, some
+    // didn't"), so a fresh launch must see exactly one .m3u. Round 110: empty
+    // EVERY .m3u in the directory, not just this app's own name prefix — a
+    // second instance, a crashed run or a hand-placed file would otherwise
+    // still pollute the playlist.
     let dir = std::env::temp_dir().join("s2u-mpv");
     let _ = std::fs::create_dir_all(&dir);
     if let Ok(entries) = std::fs::read_dir(&dir) {
         for entry in entries.flatten() {
             let name = entry.file_name();
-            let name = name.to_string_lossy();
-            if name.starts_with("s2u-mpv-playlist-") && name.ends_with(".m3u") {
+            if name.to_string_lossy().ends_with(".m3u") {
                 let _ = std::fs::remove_file(entry.path());
             }
         }
@@ -742,6 +753,50 @@ pub fn write_mpv_m3u(entries: &[MpvPlaylistEntry]) -> PathBuf {
     }
     path
 }
+/// A process-unique serial for per-launch files (the mpv log).
+fn child_serial() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SERIAL: AtomicU64 = AtomicU64::new(0);
+    SERIAL.fetch_add(1, Ordering::Relaxed)
+}
+
+/// The first useful error line of mpv's `--log-file`, for the status notice
+/// shown when mpv exits without playing. mpv's own log is the only place a
+/// stream failure is described: `--no-terminal` (which s2udio always passes)
+/// suppresses those messages on stderr.
+fn mpv_log_reason(path: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    // Strip mpv's `[ 1.234][e][component] ` prefix and keep the message.
+    let strip = |line: &str| {
+        line.split_once("] ")
+            .map(|(_, rest)| rest)
+            .unwrap_or(line)
+            .trim()
+            .to_owned()
+    };
+    // mpv's *error* level wins over a line that merely mentions a failure: a
+    // healthy launch logs benign `[v] … Failed sending hook command
+    // auto_profiles/…` noise before the real `[e][ffmpeg] … Connection
+    // refused`, and the notice must name the latter (host-verified 2026-10-08).
+    let error_level = text
+        .lines()
+        .filter(|line| line.contains("[e]"))
+        .map(strip)
+        .find(|line| !line.is_empty());
+    let mentions_failure = text
+        .lines()
+        .filter(|line| {
+            let lower = line.to_ascii_lowercase();
+            lower.contains("error")
+                || lower.contains("failed")
+                || lower.contains("unrecognized")
+                || lower.contains("could not")
+        })
+        .map(strip)
+        .find(|line| !line.is_empty());
+    error_level.or(mentions_failure)
+}
+
 /// Replace the running mpv's whole playlist with a titled `.m3u` written by
 /// [`write_mpv_m3u`]: `loadfile <m3u> replace` expands the file into its
 /// entries, each carrying its `#EXTINF` title.
@@ -826,7 +881,7 @@ pub fn play_video_entries(ctx: &Ctx, entries: Vec<MpvPlaylistEntry>) {
         // Round 74 (74-3): a pasted link's start offset for the entry mpv
         // just switched to is applied by the poll (see
         // `apply_entry_start_seek`): a live session cannot take `--start=`,
-        // and `pending_seek` is cleared by the `MpvItemChanged` event this
+        // and `resume_seek` is cleared by the `MpvItemChanged` event this
         // function sends a few lines below.
         ctx.mpv.start_seek.set(None);
     } else {
@@ -863,7 +918,7 @@ const START_SEEK_RETRY_INTERVAL: Duration = Duration::from_millis(500);
 ///
 /// `--start=` covers a fresh launch, but not a session that is already
 /// running: `play_video_entries` switches such a session with
-/// `loadlist … replace`, and neither `pending_seek` (cleared by the
+/// `loadlist … replace`, and neither `resume_seek` (cleared by the
 /// `MpvItemChanged` event the same action sends) nor an immediate seek (mpv
 /// drops it while the entry is still loading) can do it. The offset stays on
 /// the playlist entry, so the poll applies it here:
@@ -931,6 +986,52 @@ pub fn apply_entry_start_seek(
     }
     ctx.mpv.start_seek.set(Some((pos, attempts + 1, Some(Instant::now()))));
     log::debug!(seconds = secs, attempts = attempts + 1; "Applying the pasted link's start offset in mpv");
+    mpv_seek(socket, secs);
+}
+
+/// Apply the resume position the Continue button armed (`resume_seek`).
+///
+/// Same reason as [`apply_entry_start_seek`]: mpv drops a seek aimed at an
+/// entry it has not finished loading, so a single seek sent when the socket
+/// merely answers is lost and the video restarts from the beginning. The
+/// poll therefore applies the target itself, while the entry is loading and
+/// its position is still short of it:
+///
+/// - `position <= 0.0` means mpv is still opening the entry (a seek now is
+///   dropped): wait, without spending an attempt;
+/// - once playback has passed the target (or come within 5 s of it) the seek
+///   landed (or the viewer got there first): done;
+/// - a target at or past the entry's known end is dropped;
+/// - rate-limited and attempt-bounded, so a stream that never reaches the
+///   target is not fought indefinitely.
+pub fn apply_pending_resume_seek(ctx: &Ctx, socket: &Path, position: f64, duration: f64) {
+    let Some((secs, attempts, last)) = ctx.mpv.resume_seek.get() else {
+        return;
+    };
+    if position > 0.0 && position >= secs - 5.0 {
+        ctx.mpv.resume_seek.set(None);
+        return;
+    }
+    if position <= 0.0 {
+        // Still opening the entry: a seek sent now is dropped. Position 0 is
+        // also what a stream that never starts reports, so the attempt
+        // budget is not spent here.
+        return;
+    }
+    if duration > 0.0 && secs >= duration - 5.0 {
+        log::debug!(seconds = secs, duration = duration; "Dropping a resume position past the end of the video");
+        ctx.mpv.resume_seek.set(None);
+        return;
+    }
+    if attempts >= MAX_START_SEEK_ATTEMPTS {
+        ctx.mpv.resume_seek.set(None);
+        return;
+    }
+    if last.is_some_and(|at| at.elapsed() < START_SEEK_RETRY_INTERVAL) {
+        return;
+    }
+    ctx.mpv.resume_seek.set(Some((secs, attempts + 1, Some(Instant::now()))));
+    log::debug!(seconds = secs, attempts = attempts + 1; "Applying the saved resume position in mpv");
     mpv_seek(socket, secs);
 }
 
@@ -1204,7 +1305,7 @@ pub fn run_mpv_playlist(
         // mpv inject a startup seek from its saved state, which is invisible
         // to s2udio and - on a YouTube HLS (m3u8) video stream - makes the
         // video end at once: the window never opens while the audio plays.
-        // s2udio applies the resume position itself (`pending_seek`, the
+        // s2udio applies the resume position itself (`resume_seek`, the
         // tracker's state file), so mpv's copy is redundant as well.
         cmd.arg("--no-resume-playback");
         cmd.arg(format!("--volume={volume}"));
@@ -1240,6 +1341,14 @@ pub fn run_mpv_playlist(
                 .map(std::process::Stdio::from)
                 .unwrap_or(std::process::Stdio::null()),
         );
+        // Round 110: mpv runs `--no-terminal`, so its OWN messages (the
+        // reason a stream failed) go nowhere — the stderr file above only
+        // ever carries library noise. `--log-file` writes them regardless,
+        // and the exit handler below reports the first error line, so a
+        // failed stream stops being silent (see the round-108 known gap).
+        let mpv_log = std::env::temp_dir().join(format!("s2u-mpv-{}.log", child_serial()));
+        let _ = std::fs::remove_file(&mpv_log);
+        cmd.arg(format!("--log-file={}", mpv_log.display()));
         unsafe { detach_child(&mut cmd) };
         let mut child = match cmd.spawn() {
             Ok(child) => child,
@@ -1284,6 +1393,25 @@ pub fn run_mpv_playlist(
             .as_ref()
             .map(|s| !s.success())
             .unwrap_or(true);
+        if failed {
+            // Round 110: say WHY. A stream URL the engine rejects (401/404/500)
+            // or a player-side load error used to end in a silent one-second
+            // mpv exit with no window and no message.
+            let reason = mpv_log_reason(&mpv_log).unwrap_or_else(|| "no reason logged".to_owned());
+            let code = status
+                .as_ref()
+                .ok()
+                .and_then(|s| s.code())
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "?".to_owned());
+            log::warn!(
+                status:? = status, url:? = start_url.as_str(), reason:? = reason.as_str();
+                "mpv exited without playing the stream"
+            );
+            crate::shared::macros::status_warn!(
+                "mpv exited (code {code}) without playing: {reason}"
+            );
+        }
         if failed && crate::shared::bgutil::is_youtube_url(&start_url) {
             match crate::shared::bgutil::maybe_heal() {
                 crate::shared::bgutil::HealOutcome::Restarted => {
@@ -1442,3 +1570,8 @@ pub fn set_volume(ctx: &Ctx, new_volume: u32) {
         });
     }
 }
+
+
+
+
+

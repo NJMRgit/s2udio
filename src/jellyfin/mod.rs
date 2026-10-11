@@ -499,6 +499,27 @@ impl Jellyfin {
             .context("Cannot report playback progress")?;
         Ok(())
     }
+    /// Report the start of playback (creates the session the progress and
+    /// stop reports belong to; without it the server has no playback
+    /// session and stores no resume position).
+    pub fn report_playing_start(&self, item_id: &str, position_secs: f64) -> Result<()> {
+        let url = format!("{}/Sessions/Playing", self.base);
+        let body = serde_json::json!(
+            { "ItemId" : item_id, "PositionTicks" : (position_secs * 10_000_000.0) as
+            i64, "PlayMethod" : "DirectPlay", }
+        );
+        Self::agent()
+            .post(&url)
+            .set(
+                "Authorization",
+                &media_browser_auth(DEVICE_NAME, DEVICE_ID, Some(&self.token)),
+            )
+            // legacy header for servers that predate the standard one
+            .set("X-Emby-Token", &self.token)
+            .send_json(body)
+            .context("Cannot report playback start")?;
+        Ok(())
+    }
     /// Report the end of playback (saves the final position for resume).
     pub fn report_playing_stopped(
         &self,
@@ -796,5 +817,106 @@ pub fn item_id_from_url(url: &str) -> Option<String> {
         Some(id.to_owned())
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn parses_jellytui_config() {
+        let dir = std::env::temp_dir().join(format!("jellyfin-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("config.toml");
+        std::fs::write(
+            &path,
+            "server_url = \"http://127.0.0.1:8086\"\naccess_token = \"abc123\"\nuser_id = \"u1\"\n",
+        )
+        .unwrap();
+        let jf = Jellyfin::from_config_file(&path).expect("config to parse");
+        assert_eq!(jf.base, "http://127.0.0.1:8086");
+        assert_eq!(jf.token, "abc123");
+        assert_eq!(jf.user_id, "u1");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn missing_config_yields_none() {
+        assert!(Jellyfin::from_config_file(Path::new("/nonexistent/nope.toml")).is_none());
+    }
+
+    #[test]
+    fn item_from_value_extracts_fields() {
+        let v = json!({
+            "Id": "item-1",
+            "Name": "Dark Side",
+            "Type": "MusicAlbum",
+            "AlbumArtist": "Pink Floyd",
+            "ProductionYear": 1973,
+            "RunTimeTicks": 42_000_000_000_i64,
+            "ChildCount": 10,
+        });
+        let item = item_from_value(&v, false).unwrap();
+        assert_eq!(item.name, "Dark Side");
+        assert_eq!(item.kind, "MusicAlbum");
+        assert_eq!(item.album_artist.as_deref(), Some("Pink Floyd"));
+        assert_eq!(item.year, Some(1973));
+        assert_eq!(item.runtime_secs, Some(4200));
+        assert_eq!(item.child_count, Some(10));
+    }
+
+    #[test]
+    fn episode_item_keeps_its_season_and_index() {
+        let v = json!({
+            "Id": "ep-3",
+            "Name": "Chapter Three",
+            "Type": "Episode",
+            "SeriesName": "The Show",
+            "SeasonId": "season-1",
+            "IndexNumber": 3,
+            "RunTimeTicks": 45_000_000_000_i64,
+        });
+        let item = item_from_value(&v, false).unwrap();
+        assert_eq!(item.kind, "Episode");
+        assert_eq!(item.series_name.as_deref(), Some("The Show"));
+        assert_eq!(item.season_id.as_deref(), Some("season-1"));
+        assert_eq!(item.index_number, Some(3));
+        assert_eq!(item.runtime_secs, Some(4500));
+    }
+
+    #[test]
+    fn season_episodes_filter_and_sort() {
+        // The API returns episodes with the season as their parent;
+        // season_episodes keeps only Episodes and orders them by number.
+        let json = json!({ "Items": [
+            { "Id": "e2", "Name": "Two", "Type": "Episode", "IndexNumber": 2 },
+            { "Id": "a1", "Name": "An Extra", "Type": "Video", "IndexNumber": 1 },
+            { "Id": "e1", "Name": "One", "Type": "Episode", "IndexNumber": 1 },
+            { "Id": "e10", "Name": "Ten", "Type": "Episode", "IndexNumber": 10 },
+        ] });
+        // The exact filtering/sorting season_episodes applies.
+        let mut items: Vec<JfItem> = json
+            .get("Items")
+            .and_then(serde_json::Value::as_array)
+            .unwrap()
+            .iter()
+            .filter_map(|v| item_from_value(v, false))
+            .collect();
+        items.retain(|i| i.kind == "Episode");
+        items.sort_by_key(|i| i.index_number.unwrap_or(i32::MAX));
+        let names: Vec<&str> = items.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(names, vec!["One", "Two", "Ten"]);
+    }
+
+    #[test]
+    fn stream_url_builds_with_api_key() {
+        let jf = Jellyfin {
+            base: "http://x:8086".to_owned(),
+            token: "tok".to_owned(),
+            user_id: "u".to_owned(),
+        };
+        assert_eq!(jf.stream_url("abc"), "http://x:8086/Audio/abc/stream?static=true&api_key=tok");
     }
 }

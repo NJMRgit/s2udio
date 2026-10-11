@@ -123,7 +123,9 @@ pub struct Ctx {
     pub(crate) config: std::sync::Arc<Config>,
     pub(crate) status: Status,
     pub(crate) queue: Vec<Song>,
-    stickers: HashMap<String, HashMap<String, String>>,
+    /// Test fixtures build `Ctx` by struct literal, so every field is at
+    /// least `pub(crate)`.
+    pub(crate) stickers: HashMap<String, HashMap<String, String>>,
     pub(crate) active_tab: TabName,
     pub(crate) supported_commands: HashSet<String>,
     /// The id of the song currently selected in the queue pane (kept in sync
@@ -361,12 +363,18 @@ pub struct Ctx {
     /// one background fetch per link — a failed resolve must not be retried on
     /// every popup refresh. Cleared when the popup closes.
     pub(crate) paste_chapter_warm: RefCell<HashSet<String>>,
-    /// Round 98: `(current, next)` song ids the round-95b look ahead has
-    /// already run for. The look ahead swaps the next entry in place, and that
-    /// swap refreshes the queue, so without this marker each swap would warm
-    /// the entry after it and crawl the whole playlist. The pair (rather than
-    /// the current song alone) lets a *different* entry become the next one
-    /// (the user removed the warmed entry) and be warmed as usual.
+    /// Round 107: the original links whose stream metadata was already
+    /// requested for a merely-selected queue row (nothing playing). One
+    /// request per link, so a selection that rests does not re-resolve on
+    /// every render/debounce tick.
+    pub(crate) queue_info_warm: RefCell<HashSet<String>>,
+    /// Round 95b (restored 105e): `(current, next)` song ids the one-entry
+    /// look ahead has already run for. The look ahead swaps the next entry in
+    /// place, and that swap refreshes the queue, so without this marker each
+    /// swap would warm the entry after it and crawl the whole playlist. The
+    /// pair (rather than the current song alone) lets a *different* entry
+    /// become the next one (the user removed the warmed entry) and be warmed
+    /// as usual.
     pub(crate) warmed_next_for: Cell<Option<(u32, u32)>>,
     /// The open paste popup's modal id (so a nested flow — e.g. the
     /// "Select files…" picker — can close it once playback starts;
@@ -380,6 +388,35 @@ pub struct Ctx {
     /// when MPD serves over TCP, or reports no music directory.
     pub(crate) mpd_music_directory: Option<String>,
 }
+/// Round 107: rewrite every buffered queue row that points at a proxy port
+/// other than this run's, preserving its position. Returns the refreshed
+/// queue when anything changed.
+fn repair_buffered_queue_ports(
+    client: &mut Client<'_>,
+    queue: &[Song],
+) -> Result<Option<Vec<Song>>> {
+    let Some(port) = crate::core::stream_cache::current_port() else {
+        return Ok(None);
+    };
+    let mut changed = false;
+    for (index, song) in queue.iter().enumerate() {
+        let Some(fixed) = crate::core::stream_cache::url_with_port(&song.file, port) else {
+            continue;
+        };
+        let _ = client.delete_id(song.id);
+        client.add_id(&fixed, Some(crate::mpd::QueuePosition::Absolute(index)))?;
+        changed = true;
+    }
+    if !changed {
+        return Ok(None);
+    }
+    log::info!(
+        port, rows = queue.len();
+        "Repaired buffered queue URLs to this run's proxy port"
+    );
+    Ok(Some(client.playlist_info()?.unwrap_or_default()))
+}
+
 #[bon]
 impl Ctx {
     pub(crate) fn try_new(
@@ -408,7 +445,28 @@ impl Ctx {
             supported_commands:? = supported_commands; "Supported commands by server"
         );
         let status = client.get_status()?;
-        let queue = client.playlist_info()?.unwrap_or_default();
+        // Round 107: start the stream buffer before the queue is inspected so
+        // its on-disk index (and the key -> original-link map) is loaded, and
+        // so a buffered row pointing at a previous run's proxy port can be
+        // repaired below.
+        crate::core::stream_cache::init(config.cache_dir.as_deref());
+        let mut queue = client.playlist_info()?.unwrap_or_default();
+        // A buffered row whose URL points at another run's proxy port is dead
+        // (MPD fails forward through it). While nothing plays, rewrite each to
+        // this run's port in place — the cache key is unchanged, so a
+        // completed entry plays from disk and an incomplete one re-resolves
+        // through the normal error recovery. Skipped while MPD plays, where
+        // deleting the current song would interrupt playback; the error
+        // recovery handles the row MPD is on instead.
+        if status.state != crate::mpd::commands::State::Play {
+            match repair_buffered_queue_ports(client, &queue) {
+                Ok(Some(fixed)) => queue = fixed,
+                Ok(None) => {}
+                Err(err) => {
+                    log::warn!(error:? = err; "Failed to repair buffered queue URLs");
+                }
+            }
+        }
         let cached_queue_time_total = queue.iter().filter_map(|s| s.duration).sum();
         if !supported_commands.contains("albumart")
             || !supported_commands.contains("readpicture")
@@ -492,6 +550,7 @@ impl Ctx {
             paste_modal_items: RefCell::new(None),
             paste_modal_id: Cell::new(None),
             paste_chapter_warm: RefCell::new(HashSet::new()),
+            queue_info_warm: RefCell::new(HashSet::new()),
             warmed_next_for: Cell::new(None),
             mpd_music_directory,
         };
@@ -890,3 +949,5 @@ impl From<StickersSupport> for bool {
         }
     }
 }
+
+

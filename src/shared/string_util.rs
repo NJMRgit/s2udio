@@ -38,6 +38,17 @@ impl StringExt for String {
     }
 }
 
+/// Shorten `value` to at most `max_chars` characters, appending `…` when
+/// something was dropped. Character-aware on purpose: a byte-index
+/// truncation (`str::split_at`) panics when the cut lands inside a
+/// multi-byte character, which a torrent or track title can easily do.
+pub(crate) fn truncate_chars(value: &str, max_chars: usize) -> String {
+    match value.char_indices().nth(max_chars) {
+        Some((cut, _)) => format!("{}…", &value[..cut]),
+        None => value.to_owned(),
+    }
+}
+
 impl CharExt for char {
     fn is_regex_special_char(&self) -> bool {
         matches!(
@@ -60,5 +71,35 @@ impl CharExt for char {
                 | '-'
                 | '~'
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::truncate_chars;
+
+    #[test]
+    fn a_short_string_is_unchanged() {
+        assert_eq!(truncate_chars("short", 40), "short");
+    }
+
+    #[test]
+    fn exactly_at_the_limit_is_unchanged() {
+        let value = "a".repeat(40);
+        assert_eq!(truncate_chars(&value, 40), value);
+    }
+
+    #[test]
+    fn ascii_is_truncated_at_the_limit_with_an_ellipsis() {
+        let value = "a".repeat(60);
+        assert_eq!(truncate_chars(&value, 40), format!("{}…", "a".repeat(40)));
+    }
+
+    #[test]
+    fn a_cut_inside_a_multibyte_character_does_not_panic() {
+        // Byte 40 lands inside the 'é' (its bytes are at 39..41), which is
+        // exactly the input that used to abort in the downloads modal.
+        let value = format!("{}é{}", "a".repeat(39), "b".repeat(10));
+        assert_eq!(truncate_chars(&value, 40), format!("{}é…", "a".repeat(39)));
     }
 }

@@ -158,6 +158,26 @@ enum DownloadRow {
         progress: f64,
     },
 }
+/// Round 107: what a double click or `Right` does on a downloads row. The
+/// in-progress yt-dlp / torrent rows used to fall through to a silent
+/// no-op; they now stream exactly as their context menu does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PrimaryAction {
+    PlayFile,
+    StreamYt(DownloadId),
+    StreamTorrent(String),
+    None,
+}
+
+fn primary_action(row: &DownloadRow) -> PrimaryAction {
+    match row {
+        DownloadRow::File(DirOrSong::Song(_)) => PrimaryAction::PlayFile,
+        DownloadRow::Yt { id, .. } => PrimaryAction::StreamYt(*id),
+        DownloadRow::Torrent { job_id, .. } => PrimaryAction::StreamTorrent(job_id.clone()),
+        DownloadRow::File(DirOrSong::Dir { .. }) => PrimaryAction::None,
+    }
+}
+
 impl DirStackItem for DownloadRow {
     fn as_path(&self) -> &str {
         match self {
@@ -318,17 +338,7 @@ impl DownloadsPane {
                     .list_section(ctx, |section| {
                         let stream_id = id;
                         Some(section.item("Stream (mpv)", move |ctx| {
-                            let Some(item) = ctx.ytdlp_manager.get(stream_id) else {
-                                return Ok(());
-                            };
-                            if let Err(err) = ctx.work_sender.send(
-                                WorkRequest::ResolveYtStreams {
-                                    urls: vec![item.inner.to_url()],
-                                    action: YtAction::PlayVideo,
-                                },
-                            ) {
-                                status_warn!("{err}");
-                            }
+                            Self::stream_yt_row(ctx, stream_id);
                             Ok(())
                         }))
                     })
@@ -345,21 +355,7 @@ impl DownloadsPane {
                     .list_section(ctx, |section| {
                         let stream_job_id = job_id.clone();
                         Some(section.item("Stream (mpv)", move |ctx| {
-                            let job = ctx
-                                .dl_state
-                                .borrow()
-                                .as_ref()
-                                .and_then(|state| {
-                                    state
-                                        .jobs
-                                        .iter()
-                                        .find(|job| job.job_id == stream_job_id)
-                                })
-                                .cloned();
-                            if let Some(job) = job {
-                                crate::ui::modals::paste::stream_daemon_job(ctx, &job)?;
-                            }
-                            Ok(())
+                            Self::stream_torrent_row(ctx, &stream_job_id)
                         }))
                     })
                     .list_section(ctx, |section| {
@@ -757,17 +753,53 @@ impl DownloadsPane {
         ctx.render()?;
         Ok(())
     }
+    /// Round 107: the row's primary action, shared by a double click and
+    /// `Right` — a settled file plays in mpv, an in-progress yt-dlp or
+    /// torrent row streams exactly as its context menu's "Stream (mpv)"
+    /// row does, and a directory row stays a no-op.
     fn play_selected(&mut self, ctx: &Ctx) -> Result<()> {
         let Some(item) = self.list.selected().cloned() else { return Ok(()) };
-        // Round 64: in-progress rows have no playable file — Enter /
-        // double-click stays safe (their context menu streams instead).
-        let DownloadRow::File(DirOrSong::Song(song)) = item else { return Ok(()) };
-        let title = song_title(&song);
-        let file = song.file.clone();
-        crate::core::mpv::play_video_entries(
-            ctx,
-            vec![crate::core::mpv::MpvPlaylistEntry::new(title, file, None)],
-        );
+        match primary_action(&item) {
+            PrimaryAction::PlayFile => {
+                let DownloadRow::File(DirOrSong::Song(song)) = &item else { return Ok(()) };
+                let title = song_title(song);
+                let file = song.file.clone();
+                crate::core::mpv::play_video_entries(
+                    ctx,
+                    vec![crate::core::mpv::MpvPlaylistEntry::new(title, file, None)],
+                );
+            }
+            PrimaryAction::StreamYt(id) => Self::stream_yt_row(ctx, id),
+            PrimaryAction::StreamTorrent(job_id) => Self::stream_torrent_row(ctx, &job_id)?,
+            PrimaryAction::None => {}
+        }
+        Ok(())
+    }
+
+    /// Stream an in-progress yt-dlp row through mpv: the same request the
+    /// row's context menu "Stream (mpv)" item sends.
+    fn stream_yt_row(ctx: &Ctx, id: DownloadId) {
+        let Some(item) = ctx.ytdlp_manager.get(id) else { return };
+        if let Err(err) = ctx.work_sender.send(WorkRequest::ResolveYtStreams {
+            urls: vec![item.inner.to_url()],
+            action: YtAction::PlayVideo,
+        }) {
+            status_warn!("{err}");
+        }
+    }
+
+    /// Stream an in-progress daemon torrent row: the same call the row's
+    /// context menu "Stream (mpv)" item makes.
+    fn stream_torrent_row(ctx: &Ctx, job_id: &str) -> Result<()> {
+        let job = ctx
+            .dl_state
+            .borrow()
+            .as_ref()
+            .and_then(|state| state.jobs.iter().find(|job| job.job_id == job_id))
+            .cloned();
+        if let Some(job) = job {
+            crate::ui::modals::paste::stream_daemon_job(ctx, &job)?;
+        }
         Ok(())
     }
     fn render_info(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) {
@@ -807,5 +839,49 @@ impl DownloadsPane {
         );
         frame.render_widget(block, area);
         self.info_area = inner;
+    }
+}
+
+#[cfg(test)]
+mod primary_action_tests {
+    use super::*;
+
+    fn yt_row() -> DownloadRow {
+        DownloadRow::Yt {
+            key: "ytdlp:1".to_owned(),
+            id: DownloadId::new(),
+            label: "a track".to_owned(),
+            downloading: true,
+        }
+    }
+
+    fn torrent_row() -> DownloadRow {
+        DownloadRow::Torrent {
+            key: "torrent:job-1".to_owned(),
+            job_id: "job-1".to_owned(),
+            label: "a torrent".to_owned(),
+            progress: 12.5,
+        }
+    }
+
+    #[test]
+    fn an_in_progress_ytdlp_row_streams_instead_of_no_op() {
+        let row = yt_row();
+        let DownloadRow::Yt { id, .. } = &row else { unreachable!() };
+        assert_eq!(primary_action(&row), PrimaryAction::StreamYt(*id));
+    }
+
+    #[test]
+    fn an_in_progress_torrent_row_streams_instead_of_no_op() {
+        assert_eq!(
+            primary_action(&torrent_row()),
+            PrimaryAction::StreamTorrent("job-1".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_directory_row_has_no_primary_action() {
+        let row = DownloadRow::File(DirOrSong::name_only("a folder".to_owned()));
+        assert_eq!(primary_action(&row), PrimaryAction::None);
     }
 }

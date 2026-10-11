@@ -461,6 +461,11 @@ pub(crate) enum AppEvent {
         request_id: String,
         elapsed_secs: u64,
     },
+    /// Round 107: the queue selection settled and nothing is playing — warm
+    /// the highlighted row's stream metadata (description/artwork) into the
+    /// cache, so selecting a track resolves it without playing it. The queue
+    /// pane debounces the request so scrolling does not resolve per row.
+    WarmQueueSelection,
     KeyTimeout,
     ActionResolved(ActionEvent),
     InsertModeFlush((Option<ActionEvent>, Vec<Key>)),

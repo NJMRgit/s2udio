@@ -23,10 +23,32 @@ USER_CONF="$HOME/.config/yt-dlp/config"
 CONF="$ROOT/conf/config"
 PLUGINS="$ROOT/plugins"
 PROBE="$ROOT/bin/s2u-yt-probe.py"
-LOG="/tmp/s2u-yt-wrapper.log"
+LOG="${S2U_YT_LOG:-/tmp/s2u-yt-wrapper.log}"
 YTDLP="@REAL_YTDLP@"
 
 log() { echo "$(date -Is) $*" >> "$LOG" 2>/dev/null || true; }
+
+# --- foreign-interpreter defence (2026-10-06) ------------------------------
+# SVP4's mpv launcher (mpv-svp) exports its portable CPython 3.12 through
+# LD_PRELOAD (plus PYTHONPATH/PYTHONHOME) so SVP's embedded vsscript can import
+# vapoursynth from the system mpv. mpv passes its whole environment to every
+# child it spawns, and mpv's built-in ytdl_hook spawns *this* wrapper: the
+# preloaded foreign libpython interposes the interpreter's own initialisation,
+# so the real yt-dlp dies with
+#     ModuleNotFoundError: No module named 'yt_dlp'
+# before it reads a single argument. mpv then opens the watch URL as HTML,
+# fails with "unrecognized file format" and exits — the video window never
+# opens and s2udio reports nothing (measured 2026-10-06, mpv v0.41.0 launched
+# through mpv-svp + yt-dlp 2026.08.19 in a pipx venv; the identical call
+# succeeds with a clean environment).
+#
+# Nothing here is a Python program that wants SVP's runtime — the probe is a
+# Python script too — so drop the leaked variables before any pass runs. The
+# wrapper's parent (mpv) keeps its own copy, which is what SVP needs.
+if [ -n "$LD_PRELOAD" ] || [ -n "$PYTHONPATH" ] || [ -n "$PYTHONHOME" ]; then
+    log "ENV_CLEANSED LD_PRELOAD=${LD_PRELOAD:-} PYTHONPATH=${PYTHONPATH:-} PYTHONHOME=${PYTHONHOME:-}"
+fi
+unset LD_PRELOAD PYTHONHOME PYTHONPATH
 
 # strip the deprecated skip-dash-manifest flag; every other argument passes
 # through byte-for-byte (no reordering, no insertion).
@@ -69,6 +91,10 @@ if [ -f "$USER_CONF" ]; then
         else
             cat "$TMP"; rm -f "$TMP"; exit 0
         fi
+    else
+        # Mirrors PHASE2_FAIL: a broken real yt-dlp (missing module, bad
+        # interpreter) used to leave no trace at all in this log.
+        log "PHASE1_FAIL exit=$status args=$*"
     fi
     rm -f "$TMP"
 

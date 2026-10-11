@@ -72,10 +72,32 @@ const DAEMON_READY_TIMEOUT: Duration = Duration::from_secs(15);
 const SPOOL_POLL_INTERVAL: Duration = Duration::from_millis(300);
 /// Stats/progress poll interval for active jobs.
 const JOB_POLL_INTERVAL: Duration = Duration::from_secs(1);
-/// R2.5 bounded wait: after a completed download has waited this long for
-/// a stream to end, the daemon moves the files anyway (rename-first, then
-/// forget — a continued stream tail may break; mpv is gone in practice).
-const MOVE_DEFER_LIMIT: Duration = Duration::from_secs(10 * 60);
+/// R2.5 bounded wait: a completed download defers its move/forget/engine
+/// drop for as long as a live stream still references it, so a download
+/// that finishes mid-playback never yanks the bytes (or kills the rqbit
+/// engine) out from under mpv (round 107: the old fixed 10-minute window
+/// cut any video longer than that). This is the hard ceiling from the
+/// first completion — after it the move runs even if a probe still looks
+/// live, so a stale `/proc` match can never defer a download forever.
+const MOVE_DEFER_BACKSTOP: Duration = Duration::from_secs(6 * 60 * 60);
+
+/// Round 107: whether a completed job's move is still held for a live
+/// stream. `deferred` is the current marker/probe result, `since` is when
+/// the job first completed. A live stream holds the move until the
+/// backstop, which exists only to stop a stale probe from deferring a
+/// download forever.
+fn stream_move_deferred(deferred: bool, since: Option<Instant>) -> bool {
+    deferred && since.is_none_or(|first| first.elapsed() < MOVE_DEFER_BACKSTOP)
+}
+/// Round 110: whether a response may be built from a runtime's engine. A live
+/// engine plus an **in-flight add** means `start_add` is replacing it: the
+/// engine still in `runtime.engine` is the previous one, and its port/token —
+/// which is what a response would embed — is exactly what the new engine
+/// rejects (`401`/`404`/`500`), killing mpv inside a second. Such a request is
+/// queued and answered by `on_add_ready` instead.
+fn ready_to_respond(has_engine: bool, add_in_flight: bool) -> bool {
+    has_engine && !add_in_flight
+}
 /// A spool file that fails to parse is retried for this long before it is
 /// dropped with a warning (guards against a torn write).
 const SPOOL_PARSE_RETRY: Duration = Duration::from_secs(30);
@@ -765,8 +787,11 @@ struct JobRuntime {
     add_result: Option<crossbeam::channel::Receiver<AddOutcome>>,
     add_cancel: Option<crossbeam::channel::Sender<()>>,
     pending_responses: Vec<PendingResponse>,
-    /// When the completed job first tried its (possibly deferred) move.
-    move_started: Option<Instant>,
+    /// When the completed job first deferred its (possibly deferred)
+    /// move. Round 107: the anchor for `MOVE_DEFER_BACKSTOP` — the move is
+    /// held while a live stream references the job's files, and forced
+    /// once the backstop has elapsed.
+    move_defer_since: Option<Instant>,
 }
 
 /// The daemon: owns the engines, consumes the spool, writes the state.
@@ -812,7 +837,7 @@ impl Daemon {
                     add_result: None,
                     add_cancel: None,
                     pending_responses: Vec::new(),
-                    move_started: None,
+                    move_defer_since: None,
                 });
                 let len = self.runtimes.len();
                 self.start_add(len - 1);
@@ -824,7 +849,7 @@ impl Daemon {
                     add_result: None,
                     add_cancel: None,
                     pending_responses: Vec::new(),
-                    move_started: None,
+                    move_defer_since: None,
                 });
             }
         }
@@ -1021,7 +1046,7 @@ impl Daemon {
                     add_result: None,
                     add_cancel: None,
                     pending_responses: Vec::new(),
-                    move_started: None,
+                    move_defer_since: None,
                 });
                 let len = self.runtimes.len();
                 self.start_add(len - 1);
@@ -1052,7 +1077,7 @@ impl Daemon {
                     request_id: id,
                     kind: ResponseKind::Stream(file_indices),
                 };
-                if self.runtimes[idx].engine.is_some() {
+                if self.engine_ready(idx) {
                     self.respond(idx, pending);
                 } else if self.runtimes[idx].job.status.active()
                     || self.runtimes[idx].add_result.is_some()
@@ -1096,6 +1121,20 @@ impl Daemon {
         }
     }
 
+    /// Whether the runtime's engine may be handed out as a stream URL right
+    /// now: it is live **and** no add is in flight. `start_add` (a revive of a
+    /// stopped/failed/still-moving job) replaces the engine asynchronously and
+    /// leaves the previous one in place until the new add finishes, so a
+    /// response built in that window carries the OLD engine's port and token —
+    /// a URL mpv opens and the new engine rejects (`401`/`404`/`500`), which
+    /// kills the stream inside a second. Requests answered while an add is in
+    /// flight are queued and answered by `on_add_ready` instead.
+    fn engine_ready(&self, idx: usize) -> bool {
+        self.runtimes
+            .get(idx)
+            .is_some_and(|r| ready_to_respond(r.engine.is_some(), r.add_result.is_some()))
+    }
+
     /// A second committed action on a torrent that already has a job:
     /// extend the kept-file list (union by index) and answer any
     /// play/stream requests against the existing engine.
@@ -1133,7 +1172,7 @@ impl Daemon {
                 request_id: request_id.to_owned(),
                 kind: ResponseKind::EnqueuePlay,
             };
-            if self.runtimes[idx].engine.is_some() {
+            if self.engine_ready(idx) {
                 self.respond(idx, pending);
             } else {
                 self.runtimes[idx].pending_responses.push(pending);
@@ -1375,7 +1414,7 @@ impl Daemon {
         // Re-resolve the survivor by id (indices may have shifted).
         let Some(dup) = self.index_of(&dup_job_id) else { return };
         for pending in new_pending {
-            if self.runtimes[dup].engine.is_some() {
+            if self.engine_ready(dup) {
                 self.respond(dup, pending);
             } else {
                 self.runtimes[dup].pending_responses.push(pending);
@@ -1483,12 +1522,12 @@ impl Daemon {
                         .collect();
                     if crate::core::torrent::files_downloaded(&stats, &kept_pairs) {
                         runtime.job.status = DlStatus::Moving;
-                        if runtime.move_started.is_none() {
-                            runtime.move_started = Some(Instant::now());
+                        if runtime.move_defer_since.is_none() {
+                            runtime.move_defer_since = Some(Instant::now());
                         }
                     } else if runtime.job.status == DlStatus::Moving {
                         runtime.job.status = DlStatus::Downloading;
-                        runtime.move_started = None;
+                        runtime.move_defer_since = None;
                     }
                     self.dirty = true;
                 }
@@ -1507,22 +1546,32 @@ impl Daemon {
         }
     }
 
-    /// Move the completed kept files to `s2udio-downloads`, unless the
-    /// TUI is still streaming them (marker + /proc probe; bounded by
-    /// `MOVE_DEFER_LIMIT`), then forget the torrent and drop the job.
+    /// Move the completed kept files to `s2udio-downloads`, unless a live
+    /// stream still references them (marker + /proc probe), then forget
+    /// the torrent and drop the job. Round 107: the wait re-arms for as
+    /// long as the stream is live (a download completing mid-playback no
+    /// longer cuts a video longer than the old fixed window); only
+    /// `MOVE_DEFER_BACKSTOP` forces the move through.
     fn try_move(&mut self, idx: usize) {
-        let (job_id, torrent_id, torrent_name, kept, move_started) = {
+        let (job_id, torrent_id, torrent_name, kept, move_defer_since) = {
             let runtime = &self.runtimes[idx];
             (
                 runtime.job.job_id.clone(),
                 runtime.job.torrent_id.clone().unwrap_or_default(),
                 runtime.job.torrent_name.clone(),
                 runtime.job.kept_files.clone(),
-                runtime.move_started.unwrap_or_else(Instant::now),
+                runtime.move_defer_since,
             )
         };
-        if move_started.elapsed() < MOVE_DEFER_LIMIT && self.move_deferred(&job_id, &torrent_id, &kept) {
+        let deferred = self.move_deferred(&job_id, &torrent_id, &kept);
+        if stream_move_deferred(deferred, move_defer_since) {
             return;
+        }
+        if deferred {
+            log::warn!(
+                job_id:? = job_id;
+                "A completed download's move hit its defer backstop while a stream still looked live"
+            );
         }
         let Some(dest_dir) = downloads_dir() else {
             self.runtimes[idx].job.status = DlStatus::Failed;
@@ -1902,6 +1951,60 @@ fn mpv_references_stream(torrent_id: &str, kept: &[DlKeptFile]) -> bool {
 /// `s2udio dl serve` — the daemon main entry (hidden; spawned by the TUI
 /// or `dl start`).
 fn serve() -> Result<(), String> {
+    // Round 110: the daemon's stderr goes to /dev/null and it has no TUI, so
+    // without a logger every decision it makes is invisible (see
+    // `logging::init_daemon`).
+    let _logger = crate::shared::logging::init_daemon();
     let daemon = Daemon::new()?;
     daemon.run()
+}
+
+#[cfg(test)]
+mod move_defer_tests {
+    use super::*;
+
+    /// Round 110: a stream response may only use an engine that is not being
+    /// replaced. `start_add` (a revive) leaves the *previous* engine in place
+    /// while the new one is added, and answering from it hands mpv a URL whose
+    /// port/token belong to an engine the caller no longer owns — mpv fails on
+    /// it within a second, silently.
+    #[test]
+    fn a_response_is_only_built_from_a_settled_engine() {
+        assert!(ready_to_respond(true, false), "a live, settled engine answers");
+        assert!(
+            !ready_to_respond(true, true),
+            "an add in flight means the engine is being replaced — queue instead"
+        );
+        assert!(!ready_to_respond(false, false), "no engine, nothing to answer from");
+        assert!(!ready_to_respond(false, true), "no engine and an add in flight");
+    }
+
+    #[test]
+    fn an_unstreamed_completion_moves_immediately() {
+        assert!(!stream_move_deferred(false, Some(Instant::now())));
+    }
+
+    #[test]
+    fn a_live_stream_holds_the_move_past_the_old_ten_minute_window() {
+        // The round-107 report: a download completing while a long video
+        // still streams was moved (and its engine killed) after the old
+        // fixed window. A live stream must keep holding it.
+        let eleven_minutes_ago = Instant::now()
+            .checked_sub(Duration::from_secs(11 * 60))
+            .expect("the clock is monotonic");
+        assert!(stream_move_deferred(true, Some(eleven_minutes_ago)));
+    }
+
+    #[test]
+    fn a_missing_anchor_still_defers_while_a_stream_is_live() {
+        assert!(stream_move_deferred(true, None));
+    }
+
+    #[test]
+    fn the_backstop_forces_the_move_through() {
+        let past_backstop = Instant::now()
+            .checked_sub(MOVE_DEFER_BACKSTOP + Duration::from_secs(1))
+            .expect("the clock is monotonic");
+        assert!(!stream_move_deferred(true, Some(past_backstop)));
+    }
 }

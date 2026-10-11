@@ -1,6 +1,6 @@
 // Context menus of the Queue tab: the audio queue menu and the video
 // queue menu (plus the dispatcher between them). Split out of the queue
-// module root (queue.rs) so the pane keeps its inherent-method surface
+// module root (queue/mod.rs) so the pane keeps its inherent-method surface
 // while each focus area lives in its own file.
 use itertools::Itertools;
 

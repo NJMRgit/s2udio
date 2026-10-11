@@ -1,6 +1,6 @@
 // Chapters-mode handling of the Queue tab: the chapter list (render,
 // navigation, click-seek) plus the seek helper. Split out of the queue
-// module root (queue.rs) so the pane keeps its inherent-method surface
+// module root (queue/mod.rs) so the pane keeps its inherent-method surface
 // while each focus area lives in its own file.
 use anyhow::Result;
 use ratatui::{
