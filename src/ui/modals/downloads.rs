@@ -516,6 +516,7 @@ impl DownloadsModal {
                                         WorkRequest::ResolveYtStreams {
                                             urls: vec![item.inner.to_url()],
                                             action: crate::ui::modals::paste::YtAction::PlayVideo,
+                                            meta_only: false,
                                         },
                                     ) {
                                         status_warn!("{err}");

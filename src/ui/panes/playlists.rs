@@ -480,7 +480,7 @@ fn resolve_stored_entries(ctx: &Ctx, links: Vec<String>, play: bool, replace: bo
     };
     let _ = ctx
         .work_sender
-        .send(WorkRequest::ResolveYtStreams { urls: links, action })
+        .send(WorkRequest::ResolveYtStreams { urls: links, action, meta_only: false })
         .map_err(|err| log::error!(error:? = err; "Failed to request stream resolution"));
     status_info!("Resolving {count} playlist entry/entries…");
 }
@@ -496,6 +496,7 @@ fn play_stored_stream_entry(ctx: &Ctx, link: &str, intent: StreamIntent, entry_u
             .send(WorkRequest::ResolveYtStreams {
                 urls: vec![link.to_owned()],
                 action: crate::ui::modals::paste::YtAction::AddAfterCurrentAndPlay,
+                meta_only: false,
             })
             .map_err(|err| log::error!(error:? = err; "Failed to request stream resolution"));
         status_info!("Resolving the playlist entry…");

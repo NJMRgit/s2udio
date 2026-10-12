@@ -562,6 +562,7 @@ impl Ctx {
                         .send(WorkRequest::ResolveYtStreams {
                             urls: vec![entry.original_url.clone()],
                             action: crate::ui::modals::paste::YtAction::Refresh,
+                            meta_only: true,
                         });
                 }
                 if !entry.chapters.is_empty() {
@@ -949,5 +950,3 @@ impl From<StickersSupport> for bool {
         }
     }
 }
-
-

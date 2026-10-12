@@ -134,6 +134,14 @@ pub(crate) enum WorkRequest {
         urls: Vec<String>,
         /// What to do with the resolved streams once they are known.
         action: crate::ui::modals::paste::YtAction,
+        /// Round 111: fetch only the display metadata (title, channel,
+        /// duration, thumbnail) with `yt-dlp --print`, skipping the stream
+        /// URL, the chapters and the description — ~1.6 s instead of the full
+        /// resolve's ~2.6 s, and kilobytes instead of megabytes. The
+        /// selection-time warm uses this: a merely-selected row needs its
+        /// description/artwork, not a playable URL. Everything that is about
+        /// to play passes `false` and gets the full resolve.
+        meta_only: bool,
     },
 
     /// Fetch the Jellyfin library tree (views of the server).

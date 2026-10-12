@@ -102,6 +102,119 @@ pub fn resolve_audio_urls(urls: &[String]) -> (Vec<YtStreamInfo>, Vec<String>) {
     }
     (resolved, failures)
 }
+/// Round 111: the **metadata-only** of one link — the fields the info box and
+/// the album-art pane need (title, channel, duration, thumbnail), without the
+/// stream URL or the chapters.
+///
+/// A full `-J` resolve costs ~2.6 s measured on this machine (it emits every
+/// audio format, the format list, the heatmap and the description, i.e.
+/// megabytes of JSON). `--print` with only these fields costs ~1.6 s and a few
+/// hundred bytes, which is what the selection-time warm uses: a merely-selected
+/// queue row needs its description/artwork, and neither the signed stream URL
+/// nor the chapter list is wanted until the row actually plays (that is when
+/// the full resolve runs).
+///
+/// Fields yt-dlp does not know print as `NA`; each is mapped to `None` rather
+/// than leaking that sentinel into the UI.
+pub fn resolve_meta_urls(urls: &[String]) -> (Vec<YtStreamInfo>, Vec<String>) {
+    let bin = std::env::var("S2UDIO_YTDLP_BIN").unwrap_or_else(|_| "yt-dlp".to_owned());
+    let mut resolved: Vec<YtStreamInfo> = Vec::new();
+    let mut failures = Vec::new();
+    if urls.iter().any(|u| crate::shared::bgutil::is_youtube_url(u)) {
+        let _ = crate::shared::bgutil::maybe_heal();
+    }
+    for url in urls {
+        match resolve_meta_one(&bin, url) {
+            Ok(info) => resolved.push(info),
+            Err(err) => {
+                if crate::shared::bgutil::is_youtube_url(url)
+                    && crate::shared::bgutil::maybe_heal()
+                        == crate::shared::bgutil::HealOutcome::Restarted
+                {
+                    match resolve_meta_one(&bin, url) {
+                        Ok(info) => {
+                            resolved.push(info);
+                            continue;
+                        }
+                        Err(retry_err) => {
+                            failures.push(format!("{url}: {retry_err} (after bgutil renewal)"));
+                            continue;
+                        }
+                    }
+                }
+                failures.push(format!("{url}: {err}"));
+            }
+        }
+    }
+    (resolved, failures)
+}
+/// One link's metadata through `--print`, parsed from the `|`-separated line
+/// (see [`resolve_meta_urls`]).
+fn resolve_meta_one(bin: &str, input_url: &str) -> anyhow::Result<YtStreamInfo> {
+    // The separator must not occur in a title; `\x1f` (unit separator) cannot
+    // come out of yt-dlp's templating for these fields and keeps a title with
+    // a literal `|` intact.
+    const SEP: &str = "\u{1f}";
+    let out = Command::new(bin)
+        .args([
+            "--print",
+            "%(title)s\u{1f}%(channel)s\u{1f}%(duration)s\u{1f}%(thumbnail)s\u{1f}%(channel_follower_count)s\u{1f}%(description)s",
+            "--no-playlist",
+            "--no-warnings",
+            "--",
+            input_url,
+        ])
+        .output()?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let line = stderr
+            .lines()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("yt-dlp failed")
+            .trim()
+            .to_owned();
+        anyhow::bail!(line);
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    if stdout.trim().is_empty() {
+        anyhow::bail!("yt-dlp produced no metadata");
+    }
+    // The **description is last and holds newlines**, so the line is split on
+    // at most `FIELD_COUNT - 1` separators: everything after the last one is
+    // the description verbatim, newlines and all (`lines()` would truncate it
+    // at the first blank line, which is what a YouTube description starts
+    // with).
+    const FIELD_COUNT: usize = 6;
+    let mut fields = stdout.trim_end().splitn(FIELD_COUNT, SEP);
+    // yt-dlp prints `NA` for a field the video does not have.
+    let field = |value: Option<&str>| {
+        value.map(str::trim).filter(|v| !v.is_empty() && *v != "NA").map(str::to_owned)
+    };
+    let title = field(fields.next()).unwrap_or_default();
+    let channel = field(fields.next());
+    let duration = field(fields.next()).and_then(|d| d.parse::<f64>().ok());
+    let thumbnail = field(fields.next());
+    let subscribers = field(fields.next()).and_then(|s| s.parse::<u64>().ok());
+    let description = field(fields.next());
+    if title.is_empty() && thumbnail.is_none() {
+        anyhow::bail!("yt-dlp produced no metadata");
+    }
+    Ok(YtStreamInfo {
+        // The stream URL arrives with the full resolve, when the row plays.
+        url: String::new(),
+        original_url: input_url.to_owned(),
+        title,
+        channel,
+        subscribers,
+        thumbnail,
+        description,
+        duration,
+        chapters: Vec::new(),
+        start_secs: parse_start_offset(input_url),
+        resolved_at: None,
+    })
+}
 /// A subset of yt-dlp's `-J` JSON for the fields the app uses.
 #[derive(Deserialize)]
 struct YtDlpJson {
@@ -260,4 +373,214 @@ fn parse_timestamp(s: &str) -> Option<f64> {
         _ => return None,
     };
     (secs >= 0.0).then_some(secs)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{LazyLock, Mutex};
+
+    use super::YtStreamInfo;
+
+    /// The two resolve tests mutate the shared `S2UDIO_YTDLP_BIN` env var;
+    /// serialize them so a parallel run can't spawn the other test's fake
+    /// script.
+    static YTDLP_ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+    /// A fake yt-dlp that echoes a minimal `-J` JSON document.
+    const JSON: &str = "{\"title\":\"Rick Astley - Never Gonna Give You Up\",\
+                        \"url\":\"https://rr4.example/audio.m4a\",\
+                        \"thumbnail\":\"https://i.ytimg.com/vi/x/hqdefault.jpg\",\
+                        \"channel\":\"Rick Astley\",\
+                        \"channel_follower_count\":15200000,\
+                        \"description\":\"Never gonna give you up.\"}";
+
+    fn fake_bin(script: &str, tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("ytdlp-{tag}-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let bin = dir.join("yt-dlp");
+        std::fs::write(&bin, script).unwrap();
+        let _ = std::process::Command::new("chmod").arg("+x").arg(&bin).status();
+        bin
+    }
+
+    #[test]
+    fn resolve_parses_json_fields() {
+        let _guard = YTDLP_ENV_LOCK.lock().unwrap();
+        let script = format!("#!/bin/sh\necho '{JSON}'\n");
+        let bin = fake_bin(&script, "ok");
+        unsafe {
+            std::env::set_var("S2UDIO_YTDLP_BIN", &bin);
+        }
+        let (entries, failures) = super::resolve_audio_urls(&["https://youtu.be/x".to_owned()]);
+        unsafe {
+            std::env::remove_var("S2UDIO_YTDLP_BIN");
+        }
+
+        assert!(failures.is_empty(), "{failures:?}");
+        assert_eq!(
+            entries,
+            vec![YtStreamInfo {
+                url: "https://rr4.example/audio.m4a".to_owned(),
+                original_url: "https://youtu.be/x".to_owned(),
+                title: "Rick Astley - Never Gonna Give You Up".to_owned(),
+                channel: Some("Rick Astley".to_owned()),
+                subscribers: Some(15_200_000),
+                thumbnail: Some("https://i.ytimg.com/vi/x/hqdefault.jpg".to_owned()),
+                description: Some("Never gonna give you up.".to_owned()),
+                start_secs: None,
+                resolved_at: None,
+                duration: None,
+                chapters: Vec::new(),
+            }]
+        );
+    }
+
+    #[test]
+    fn meta_resolve_parses_printed_fields() {
+        // Round 111: the selection-time warm's cheap call. `--print` emits one
+        // unit-separator line instead of a multi-megabyte JSON document.
+        let _guard = YTDLP_ENV_LOCK.lock().unwrap();
+        let script = format!(
+            "#!/bin/sh\necho 'Rick Astley - Never Gonna Give You Up\u{1f}Rick Astley\u{1f}213\u{1f}https://i.ytimg.com/vi/x/maxresdefault.jpg\u{1f}15200000\u{1f}Never gonna give you up.'\n"
+        );
+        let bin = fake_bin(&script, "meta");
+        unsafe {
+            std::env::set_var("S2UDIO_YTDLP_BIN", &bin);
+        }
+        let (entries, failures) = super::resolve_meta_urls(&["https://youtu.be/x".to_owned()]);
+        unsafe {
+            std::env::remove_var("S2UDIO_YTDLP_BIN");
+        }
+
+        assert!(failures.is_empty(), "{failures:?}");
+        assert_eq!(entries.len(), 1);
+        let info = &entries[0];
+        assert_eq!(info.title, "Rick Astley - Never Gonna Give You Up");
+        assert_eq!(info.channel.as_deref(), Some("Rick Astley"));
+        assert_eq!(info.duration, Some(213.0));
+        assert_eq!(info.thumbnail.as_deref(), Some("https://i.ytimg.com/vi/x/maxresdefault.jpg"));
+        assert_eq!(info.subscribers, Some(15_200_000));
+        // The description lands with the selection warm: the info box shows it
+        // before the row plays.
+        assert_eq!(info.description.as_deref(), Some("Never gonna give you up."));
+        // The stream URL and chapters belong to the full resolve, which runs
+        // when the row actually plays.
+        assert!(info.url.is_empty());
+        assert!(info.chapters.is_empty());
+        assert_eq!(info.original_url, "https://youtu.be/x");
+    }
+
+    #[test]
+    fn meta_resolve_maps_missing_fields_to_none() {
+        // yt-dlp prints `NA` for a field the video does not have; it must not
+        // reach the UI as a literal "NA" channel or duration.
+        let _guard = YTDLP_ENV_LOCK.lock().unwrap();
+        let script = "#!/bin/sh\necho 'Some Video\u{1f}NA\u{1f}NA\u{1f}https://i.ytimg.com/vi/x/hqdefault.jpg\u{1f}NA\u{1f}NA'\n";
+        let bin = fake_bin(&script, "meta-na");
+        unsafe {
+            std::env::set_var("S2UDIO_YTDLP_BIN", &bin);
+        }
+        let (entries, failures) = super::resolve_meta_urls(&["https://youtu.be/x".to_owned()]);
+        unsafe {
+            std::env::remove_var("S2UDIO_YTDLP_BIN");
+        }
+
+        assert!(failures.is_empty(), "{failures:?}");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].channel, None);
+        assert_eq!(entries[0].duration, None);
+        assert_eq!(entries[0].subscribers, None);
+        assert_eq!(entries[0].description, None);
+        assert_eq!(entries[0].title, "Some Video");
+    }
+
+    #[test]
+    fn meta_resolve_keeps_a_multiline_description() {
+        // A YouTube description is multi-paragraph and starts with a blank
+        // line; the parser must take everything after the last separator
+        // verbatim instead of stopping at the first newline.
+        let _guard = YTDLP_ENV_LOCK.lock().unwrap();
+        let script = "#!/bin/sh\nprintf 'Some Video\u{1f}Some Channel\u{1f}120\u{1f}https://i.ytimg.com/vi/x/hqdefault.jpg\u{1f}42\u{1f}\nProvided to YouTube by X\n\nLine two\nLine three\n'\n";
+        let bin = fake_bin(&script, "meta-multiline");
+        unsafe {
+            std::env::set_var("S2UDIO_YTDLP_BIN", &bin);
+        }
+        let (entries, failures) = super::resolve_meta_urls(&["https://youtu.be/x".to_owned()]);
+        unsafe {
+            std::env::remove_var("S2UDIO_YTDLP_BIN");
+        }
+
+        assert!(failures.is_empty(), "{failures:?}");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].subscribers, Some(42));
+        let description = entries[0].description.as_deref().unwrap_or_default();
+        assert!(description.contains("Provided to YouTube by X"), "{description:?}");
+        assert!(description.contains("Line two"), "{description:?}");
+        assert!(description.contains("Line three"), "{description:?}");
+    }
+
+    #[test]
+    fn meta_resolve_reports_a_failure() {
+        let _guard = YTDLP_ENV_LOCK.lock().unwrap();
+        let script = "#!/bin/sh\necho 'ERROR: Video unavailable' >&2\nexit 1\n";
+        let bin = fake_bin(&script, "meta-fail");
+        unsafe {
+            std::env::set_var("S2UDIO_YTDLP_BIN", &bin);
+        }
+        let (entries, failures) = super::resolve_meta_urls(&["https://youtu.be/x".to_owned()]);
+        unsafe {
+            std::env::remove_var("S2UDIO_YTDLP_BIN");
+        }
+
+        assert!(entries.is_empty());
+        assert_eq!(failures.len(), 1);
+        assert!(failures[0].contains("Video unavailable"), "{failures:?}");
+    }
+
+    #[test]
+    fn description_timestamps_become_chapters() {
+        let description = "0:00 Intro\n2:34 Second part\n1:02:03 Finale\nsome other text\n";
+        let chapters = super::chapters_from_description(description, 3600.0);
+        assert_eq!(chapters.len(), 3);
+        assert_eq!(chapters[0].title, "Intro");
+        assert_eq!(chapters[0].start_secs, 0.0);
+        assert_eq!(chapters[1].title, "Second part");
+        assert_eq!(chapters[1].start_secs, 154.0);
+        assert_eq!(chapters[1].end_secs, 3723.0);
+        assert_eq!(chapters[2].title, "Finale");
+        assert_eq!(chapters[2].start_secs, 3723.0);
+        assert_eq!(chapters[2].end_secs, 3600.0); // clamped to duration
+    }
+
+    #[test]
+    fn description_without_timestamps_has_no_chapters() {
+        assert!(super::chapters_from_description("no timestamps here", 100.0).is_empty());
+        assert!(super::chapters_from_description("12:34", 100.0).is_empty());
+    }
+
+    #[test]
+    fn parse_timestamp_formats() {
+        assert_eq!(super::parse_timestamp("0:00"), Some(0.0));
+        assert_eq!(super::parse_timestamp("2:34"), Some(154.0));
+        assert_eq!(super::parse_timestamp("1:02:03"), Some(3723.0));
+        assert_eq!(super::parse_timestamp("12"), None);
+        assert_eq!(super::parse_timestamp("abc"), None);
+    }
+
+    #[test]
+    fn resolve_fails_on_missing_url() {
+        let _guard = YTDLP_ENV_LOCK.lock().unwrap();
+        let script = "#!/bin/sh\necho '{\"title\":\"x\"}'\n";
+        let bin = fake_bin(&script, "nourl");
+        unsafe {
+            std::env::set_var("S2UDIO_YTDLP_BIN", &bin);
+        }
+        let (entries, failures) = super::resolve_audio_urls(&["https://youtu.be/x".to_owned()]);
+        unsafe {
+            std::env::remove_var("S2UDIO_YTDLP_BIN");
+        }
+
+        assert!(!failures.is_empty());
+        assert!(entries.is_empty());
+    }
 }

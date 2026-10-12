@@ -783,6 +783,7 @@ impl DownloadsPane {
         if let Err(err) = ctx.work_sender.send(WorkRequest::ResolveYtStreams {
             urls: vec![item.inner.to_url()],
             action: YtAction::PlayVideo,
+            meta_only: false,
         }) {
             status_warn!("{err}");
         }

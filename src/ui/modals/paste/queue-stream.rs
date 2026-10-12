@@ -81,6 +81,7 @@ pub(super) fn play_video_now(ctx: &Ctx, vids: &[PastedItem]) {
             .send(WorkRequest::ResolveYtStreams {
                 urls: yt_urls(vids),
                 action: YtAction::PlayVideo,
+                meta_only: false,
             });
         return;
     }
@@ -104,6 +105,7 @@ pub(super) fn queue_videos(ctx: &Ctx, vids: &[PastedItem], after_current: bool, 
             .send(WorkRequest::ResolveYtStreams {
                 urls: yt_urls(vids),
                 action,
+                meta_only: false,
             });
         return;
     }
@@ -137,7 +139,7 @@ pub(super) fn queue_videos(ctx: &Ctx, vids: &[PastedItem], after_current: bool, 
         };
         let _ = ctx
             .work_sender
-            .send(WorkRequest::ResolveYtStreams { urls: links, action });
+            .send(WorkRequest::ResolveYtStreams { urls: links, action, meta_only: false });
     }
 }
 /// The stored-playlist URIs of the given video items: local files keep
@@ -232,6 +234,7 @@ fn yt_play_audio(ctx: &Ctx, url: &str) -> Result<()> {
         .send(WorkRequest::ResolveYtStreams {
             urls: vec![url.to_owned()],
             action: YtAction::Play,
+            meta_only: false,
         })
         .map_err(|err| anyhow::anyhow!("Failed to request stream resolution: {err}"))?;
     status_info!("Resolving YouTube link…");

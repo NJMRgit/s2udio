@@ -129,6 +129,29 @@ impl YtDlpHost {
         }
     }
 
+    /// Round 111: the thumbnail URL of a video, derived from its **id alone**.
+    ///
+    /// YouTube serves `i.ytimg.com/vi/<id>/<name>.jpg` for every public video,
+    /// so the artwork of a merely-selected queue row can be shown *before*
+    /// any resolve runs — the id is already in the tagged link, while
+    /// `yt-dlp -J` costs seconds (a measured 3-5 s per row, so the box used to
+    /// sit empty for that long). The resolved info's own `thumbnail` still
+    /// wins when it lands; this is the immediate placeholder that keeps the
+    /// pane from looking broken while it is fetched.
+    ///
+    /// `maxresdefault` is the 1280x720 artwork and `hqdefault` the 480x360
+    /// fallback every video has — the artwork URL the app already fetches for
+    /// a playing stream is this same shape. `SoundCloud` and `NicoVideo` have
+    /// no such derivable pattern and return `None`.
+    pub fn derived_thumbnail(self, id: &str) -> Option<String> {
+        match self {
+            Self::Youtube if !id.is_empty() => {
+                Some(format!("https://i.ytimg.com/vi/{id}/hqdefault.jpg"))
+            }
+            _ => None,
+        }
+    }
+
     /// Round 96: the provider's name as the search modal labels it — the
     /// title on the popup's top border and the provider row itself. The
     /// variant name is close but not right ("Youtube" / "Soundcloud").

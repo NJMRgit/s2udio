@@ -538,11 +538,31 @@ pub(crate) mod browser {
             result.push(metadata_group);
             result.push(tags_group);
             result.push(file_group);
-            if let Some(yt) = ctx.yt_info.borrow().get(&self.file) {
-                let mut yt_group = PreviewGroup::new(
-                    Some(" [YouTube] "),
-                    Some(group_style),
+            let yt_info = crate::ui::modals::paste::song_stream_info(ctx, &self.file);
+            if yt_info.is_none() && crate::ui::modals::paste::stream_parse_pending(ctx, &self.file)
+            {
+                // Round 111: the row's metadata resolve is in flight — a
+                // `yt-dlp` call costs seconds, so without this the group was
+                // simply absent and the box looked finished-but-empty. The
+                // spinner says the row is being resolved rather than having
+                // nothing to show.
+                let mut pending_group = PreviewGroup::new(Some(" [YouTube] "), Some(group_style));
+                pending_group.push(
+                    Line::from(vec![
+                        spacer.clone(),
+                        Span::styled("Resolving", key_style),
+                        separator.clone(),
+                        Span::styled(
+                            crate::ui::panes::queue::spinner_frame().to_owned(),
+                            ratatui::style::Style::default(),
+                        ),
+                    ])
+                    .into(),
                 );
+                result.push(pending_group);
+            }
+            if let Some(yt) = yt_info {
+                let mut yt_group = PreviewGroup::new(Some(" [YouTube] "), Some(group_style));
                 if !yt.title.is_empty() {
                     yt_group
                         .push(
@@ -1869,5 +1889,43 @@ impl SizedPaneOrSplit {
                         .unwrap_or(0)
             }
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod hovered_item_tests {
+    use super::hovered_item;
+    use ratatui::layout::{Position, Rect};
+
+    #[test]
+    fn maps_mouse_row_to_item_with_offset() {
+        let inner = Rect::new(10, 5, 20, 10);
+        let mouse = Some(Position { x: 12, y: 7 });
+        // offset 3, rows are 1 tall: y 7 -> row 2 -> item 3 + 2 = 5.
+        assert_eq!(hovered_item(mouse, inner, 3, 20, 1), Some(5));
+    }
+
+    #[test]
+    fn two_line_items_map_both_rows() {
+        let inner = Rect::new(0, 0, 40, 20);
+        let mouse = Some(Position { x: 5, y: 3 });
+        // item rows are 2 tall: y 3 -> item 1 (rows 2-3).
+        assert_eq!(hovered_item(mouse, inner, 0, 20, 2), Some(1));
+        let mouse = Some(Position { x: 5, y: 2 });
+        assert_eq!(hovered_item(mouse, inner, 0, 20, 2), Some(1));
+    }
+
+    #[test]
+    fn no_hover_outside_list_or_past_end() {
+        let inner = Rect::new(10, 5, 20, 10);
+        // Left of the list.
+        assert_eq!(hovered_item(Some(Position { x: 5, y: 6 }), inner, 0, 20, 1), None);
+        // Below the list.
+        assert_eq!(hovered_item(Some(Position { x: 15, y: 16 }), inner, 0, 20, 1), None);
+        // Past the last item.
+        assert_eq!(hovered_item(Some(Position { x: 15, y: 14 }), inner, 0, 3, 1), None);
+        // No mouse at all.
+        assert_eq!(hovered_item(None, inner, 0, 20, 1), None);
     }
 }

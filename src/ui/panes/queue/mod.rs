@@ -61,7 +61,7 @@ pub(crate) use play::resolved_stream_expired;
 #[allow(unused_imports)]
 use render::truncate_to_width;
 #[allow(unused_imports)]
-pub(crate) use render::{SPINNER_FRAME_MS, SPINNER_FRAMES};
+pub(crate) use render::{SPINNER_FRAME_MS, SPINNER_FRAMES, spinner_frame};
 
 #[derive(Debug)]
 pub struct QueuePane {
@@ -103,6 +103,13 @@ pub struct QueuePane {
     /// moving while a queued stream resolve is in flight. Armed only while
     /// such a row is on screen, so the animation costs nothing otherwise.
     loading_tick: Option<crate::shared::id::Id>,
+    /// Round 111: the queue row the selection-time metadata warm was last
+    /// scheduled for. The warm is driven from the render pass — the one
+    /// place every selection route funnels through (`w`/`s`, the arrows, a
+    /// mouse click, the wheel, a scrollbar drag, a queue restore) — so this
+    /// records the id it was scheduled for, and a render that did not
+    /// actually move the selection does not restart the debounce forever.
+    warmed_selection_id: Option<u32>,
 }
 #[derive(Debug, Enum)]
 enum Areas {
@@ -289,6 +296,7 @@ impl QueuePane {
             video_band: crate::ui::band::BandState::default(),
             toggle_areas: [Rect::default(); 4],
             loading_tick: None,
+            warmed_selection_id: None,
         }
     }
     pub fn init(ctx: &Ctx) -> (Vec<Constraint>, Vec<Property<SongProperty>>) {
@@ -935,10 +943,11 @@ impl SongListCore<Song, TableState> for QueuePane {
     fn list_area(&self) -> Option<Rect> {
         Some(self.areas[Areas::Table])
     }
-    /// Round 107: the selection changed — schedule the debounced metadata
-    /// warm for the resting row (see [`schedule_selection_warm`]).
-    fn fetch_data_internal(&mut self, ctx: &Ctx) -> Result<()> {
-        schedule_selection_warm(ctx);
+    /// Round 111: the selection-time metadata warm is driven from the render
+    /// pass (see [`schedule_selection_warm`] and `render.rs`) because this
+    /// hook is only reached by `SongListCore`'s `CommonAction` arms, which
+    /// the Queue pane's own `w`/`s` and mouse paths never claim.
+    fn fetch_data_internal(&mut self, _ctx: &Ctx) -> Result<()> {
         Ok(())
     }
     fn list_songs_in_item(
@@ -955,11 +964,18 @@ impl SongListCore<Song, TableState> for QueuePane {
 }
 
 /// Round 107: fire the selection-time metadata warm after the selection has
-/// settled. `SongListCore::fetch_data_internal` runs on every selection
-/// change, so a long scroll would otherwise run yt-dlp once per row;
+/// settled. A long scroll would otherwise run yt-dlp once per row;
 /// `schedule_replace` with one fixed job id restarts the timer on each
 /// change and only the resting selection resolves.
-fn schedule_selection_warm(ctx: &Ctx) {
+///
+/// Round 111: called from the render pass (`render.rs`) on the selected id
+/// changing, not from `SongListCore::fetch_data_internal`. The Queue pane
+/// claims `DirectoriesActions::FolderUp/FolderDown` itself — which is what
+/// `w`/`s` are bound to — and its mouse paths call `select_idx` directly, so
+/// neither ever reached `fetch_data_internal` and the warm never ran at all
+/// on this tab (the info box and album art stayed empty for a selected
+/// stream row). The render pass sees every route.
+pub(super) fn schedule_selection_warm(ctx: &Ctx) {
     use std::sync::OnceLock;
     static WARM_JOB: OnceLock<crate::shared::id::Id> = OnceLock::new();
     let id = *WARM_JOB.get_or_init(crate::shared::id::new);

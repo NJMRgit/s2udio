@@ -170,9 +170,11 @@ fn resolve_queue_entry_with(ctx: &Ctx, file: &str, song_id: u32, play: bool) -> 
     // Round 95: the queue's Duration column spins for this row until the
     // resolve lands (its duration is unknown until then).
     mark_stream_parse_pending(ctx, std::slice::from_ref(&object));
-    if let Err(err) =
-        ctx.work_sender.send(WorkRequest::ResolveYtStreams { urls: vec![object], action })
-    {
+    if let Err(err) = ctx.work_sender.send(WorkRequest::ResolveYtStreams {
+        urls: vec![object],
+        action,
+        meta_only: false,
+    }) {
         log::error!(error:? = err; "Failed to request stream resolution");
         return false;
     }
@@ -250,9 +252,18 @@ pub fn warm_selected_queue_info(ctx: &Ctx) {
         return;
     }
     log::debug!(link = link.as_str(); "Warming the selected queue row's stream metadata");
+    // Round 111: mark the resolve in flight, which is what the info box's
+    // `[YouTube] Resolving <spinner>` row renders off. Without this the marker
+    // was only ever set on the play and look-ahead paths, so the spinner never
+    // appeared for a merely-selected row.
+    mark_stream_parse_pending(ctx, std::slice::from_ref(&link));
     if let Err(err) = ctx.work_sender.send(WorkRequest::ResolveYtStreams {
         urls: vec![link],
         action: YtAction::Refresh,
+        // Round 111: display metadata only — a merely-selected row needs its
+        // title/artwork, not a playable URL. The full resolve runs when the
+        // row actually plays.
+        meta_only: true,
     }) {
         log::error!(error:? = err; "Failed to request the selected row's stream metadata");
     }

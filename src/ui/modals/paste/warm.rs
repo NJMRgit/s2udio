@@ -35,7 +35,12 @@ pub(super) fn warm_chapters(ctx: &Ctx, downloads: &[PastedItem]) {
     // Round 95: a queued row for one of these links has no duration yet -
     // its cell spins until the info lands.
     mark_stream_parse_pending(ctx, &urls);
-    let _ = ctx.work_sender.send(WorkRequest::ResolveYtStreams { urls, action: YtAction::Refresh });
+    let _ = ctx.work_sender.send(WorkRequest::ResolveYtStreams {
+        urls,
+        action: YtAction::Refresh,
+        // The chapters/download options only need display metadata.
+        meta_only: true,
+    });
 }
 
 /// Round 95b (user, restored 105e): while a track plays, resolve the queue
@@ -87,6 +92,7 @@ pub fn warm_next_queue_link(ctx: &Ctx) {
         if let Err(err) = ctx.work_sender.send(WorkRequest::ResolveYtStreams {
             urls: vec![original],
             action: YtAction::ReplaceInPlace(next.id),
+            meta_only: false,
         }) {
             log::error!(error:? = err; "Failed to request the next entry's stream resolution");
         }
@@ -117,6 +123,7 @@ pub fn warm_next_queue_link(ctx: &Ctx) {
     if let Err(err) = ctx.work_sender.send(WorkRequest::ResolveYtStreams {
         urls: vec![link],
         action: YtAction::ReplaceInPlace(next.id),
+        meta_only: false,
     }) {
         log::error!(error:? = err; "Failed to request the next entry's stream resolution");
     }

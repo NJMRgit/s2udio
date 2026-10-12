@@ -41,7 +41,25 @@ pub fn init(
             let cli_config = config.as_ref().into();
             let torrent_config = config.torrent.clone();
             let jellyfin_config_file = config.jellyfin.config_file.clone();
+            // Round 111: yt-dlp resolves run on their own small pool instead
+            // of inline on this single thread. Each resolve is a `yt-dlp`
+            // subprocess costing seconds, so running them here made every
+            // request queue behind them - measured live, a merely-selected
+            // row's metadata warm waited 22.6 s behind unrelated resolves.
+            let resolves = ResolvePool::new(&event_tx);
             while let Ok(req) = work_rx.recv() {
+                // The resolve requests are handed to the pool and answer with
+                // their own `WorkDone`, so this thread stays free for
+                // everything else.
+                if let WorkRequest::ResolveYtStreams {
+                    urls,
+                    action,
+                    meta_only,
+                } = req
+                {
+                    resolves.submit(urls, action, meta_only);
+                    continue;
+                }
                 let result = handle_work_request(
                     req,
                     &client_tx,
@@ -57,6 +75,76 @@ pub fn init(
                 );
             }
         })
+}
+/// Round 111: how many `yt-dlp` resolves may run at once. Each is a network
+/// call costing seconds, and they are independent of one another, so a couple
+/// of workers remove the head-of-line blocking without stampeding YouTube (or
+/// the user's connection) - a queue of playlist rows still resolves in order,
+/// just not strictly one-at-a-time behind a selection warm.
+const RESOLVE_WORKERS: usize = 2;
+
+/// A bounded pool for `yt-dlp` resolves.
+///
+/// The `work` thread submits a job and immediately returns to its own queue;
+/// the pool's workers answer with `AppEvent::WorkDone(YtStreamsResolved)`, the
+/// same message a synchronous resolve produced, so the event loop and every
+/// downstream action are unchanged.
+struct ResolvePool {
+    tx: crossbeam::channel::Sender<ResolveJob>,
+}
+
+/// One queued resolve.
+struct ResolveJob {
+    urls: Vec<String>,
+    action: crate::ui::modals::paste::YtAction,
+    meta_only: bool,
+}
+
+impl ResolvePool {
+    fn new(event_tx: &Sender<AppEvent>) -> Self {
+        let (tx, rx) = crossbeam::channel::unbounded::<ResolveJob>();
+        for idx in 0..RESOLVE_WORKERS {
+            let rx = rx.clone();
+            let event_tx = event_tx.clone();
+            let spawned = std::thread::Builder::new()
+                .name(format!("yt-resolve-{idx}"))
+                .spawn(move || {
+                    while let Ok(job) = rx.recv() {
+                        let (info, failures) = if job.meta_only {
+                            crate::shared::ytdlp::resolve_meta_urls(&job.urls)
+                        } else {
+                            crate::shared::ytdlp::resolve_audio_urls(&job.urls)
+                        };
+                        let result = Ok(WorkDone::YtStreamsResolved {
+                            info,
+                            action: job.action,
+                            failures,
+                        });
+                        try_skip!(
+                            event_tx.send(AppEvent::WorkDone(result)),
+                            "Failed to send a resolved stream"
+                        );
+                    }
+                });
+            if let Err(err) = spawned {
+                log::error!(error:? = err; "Failed to start a yt-dlp resolve worker");
+            }
+        }
+        Self { tx }
+    }
+    /// Queue a resolve. A closed pool (the app is shutting down) simply drops
+    /// the job: the row keeps its tagged link and resolves again when played.
+    fn submit(
+        &self,
+        urls: Vec<String>,
+        action: crate::ui::modals::paste::YtAction,
+        meta_only: bool,
+    ) {
+        try_skip!(
+            self.tx.send(ResolveJob { urls, action, meta_only }),
+            "Failed to queue a stream resolve"
+        );
+    }
 }
 fn handle_work_request(
     request: WorkRequest,
@@ -123,8 +211,14 @@ fn handle_work_request(
                 ),
             })
         }
-        WorkRequest::ResolveYtStreams { urls, action } => {
-            let (info, failures) = crate::shared::ytdlp::resolve_audio_urls(&urls);
+        // Round 111: reached only if a caller bypasses the pool (the `work`
+        // thread intercepts these); kept as the full, synchronous resolve.
+        WorkRequest::ResolveYtStreams { urls, action, meta_only } => {
+            let (info, failures) = if meta_only {
+                crate::shared::ytdlp::resolve_meta_urls(&urls)
+            } else {
+                crate::shared::ytdlp::resolve_audio_urls(&urls)
+            };
             Ok(WorkDone::YtStreamsResolved {
                 info,
                 action,
@@ -759,4 +853,27 @@ fn jellyfin_handle(
             )
         })?;
     f(&jf)
+}
+
+#[cfg(test)]
+mod mpris_art_guard_tests {
+    use super::{is_expected_mpris_art, set_expected_mpris_art};
+
+    #[test]
+    fn only_the_expected_source_writes() {
+        // No stream: nothing is current.
+        set_expected_mpris_art(None);
+        assert!(!is_expected_mpris_art("https://i.ytimg.com/vi/a/maxresdefault.jpg"));
+
+        // The current stream's art is expected...
+        set_expected_mpris_art(Some("https://i.ytimg.com/vi/b/maxresdefault.jpg".to_owned()));
+        assert!(is_expected_mpris_art("https://i.ytimg.com/vi/b/maxresdefault.jpg"));
+        // ...a previous stream's art is stale and must be skipped.
+        assert!(!is_expected_mpris_art("https://i.ytimg.com/vi/a/maxresdefault.jpg"));
+
+        // Jellyfin streams are keyed by their item id.
+        set_expected_mpris_art(Some("jellyfin:abcdef0123456789abcdef0123456789".to_owned()));
+        assert!(is_expected_mpris_art("jellyfin:abcdef0123456789abcdef0123456789"));
+        assert!(!is_expected_mpris_art("https://i.ytimg.com/vi/b/maxresdefault.jpg"));
+    }
 }

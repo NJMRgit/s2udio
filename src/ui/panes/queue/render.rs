@@ -30,8 +30,10 @@ pub(crate) const SPINNER_FRAMES: [&str; 10] =
 pub(crate) const SPINNER_FRAME_MS: u64 = 120;
 
 /// The frame to draw right now (wall clock, so the animation is shared by
-/// every spinning row and survives a missing tick).
-fn spinner_frame() -> &'static str {
+/// every spinning row and survives a missing tick). Also used by the info
+/// box's `[YouTube] Resolving` row (round 111), so a pending resolve reads
+/// as in-progress there too.
+pub(crate) fn spinner_frame() -> &'static str {
     let step = (std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| elapsed.as_millis() as u64)
@@ -332,7 +334,20 @@ impl QueuePane {
                 &mut self.queue.state,
             );
         let _ = std::mem::replace(self.queue.marked_mut(), marked);
-        ctx.queue_selected_id.set(self.queue.selected().map(|s| s.id));
+        let selected_id = self.queue.selected().map(|s| s.id);
+        // Round 111: the render pass is the one place every selection route
+        // funnels through, so the selection-time metadata warm is driven from
+        // here — it used to hang off `SongListCore::fetch_data_internal`,
+        // which the Queue pane never reaches (`w`/`s` are
+        // `DirectoriesActions::FolderUp/FolderDown`, claimed by this pane's own
+        // handler, and the mouse paths call `select_idx` directly), so a merely
+        // selected stream row never had its description or artwork resolved.
+        // Only a selection that actually moved reschedules the debounce.
+        if selection_moved(self.warmed_selection_id, selected_id) {
+            self.warmed_selection_id = selected_id;
+            super::schedule_selection_warm(ctx);
+        }
+        ctx.queue_selected_id.set(selected_id);
         if let Some(scrollbar) = config.as_styled_scrollbar()
             && self.areas[Areas::Scrollbar].width > 0
         {
@@ -509,4 +524,13 @@ impl QueueRow {
     }
 }
 
-
+/// Round 111: whether the queue selection actually moved since the warm was
+/// last scheduled. Only a real move restarts the debounce, so a render that
+/// merely repaints (a spinner tick, a resize, a mouse hover) does not keep
+/// pushing the warm back and no stream row can starve it.
+///
+/// A move **to** `None` (the queue was cleared) is not a move: there is
+/// nothing to resolve, so it just records the new state.
+fn selection_moved(previous: Option<u32>, current: Option<u32>) -> bool {
+    current.is_some() && previous != current
+}

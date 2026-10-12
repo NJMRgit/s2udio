@@ -159,10 +159,19 @@ impl AlbumArtPane {
     /// Dispatch an album-art query for `song_uri` (replace_id dedupes
     /// overlapping fetches). Returns None when art is disabled for the
     /// method/protocol — the caller collapses the box in that case.
+    ///
+    /// Round 111: a **tagged stream link** (`watch?v=…#s2u-audio`) is not an
+    /// art source MPD can answer, and its `https` scheme is usually on the
+    /// disabled-protocol list, so the box collapsed for a selected-but-not-
+    /// playing stream row. When the row's resolve is known, the link is
+    /// swapped for the resolved thumbnail first; with no resolve yet the
+    /// selection-time warm (queue render → `WarmQueueSelection`) fills it in
+    /// and the art lands on the next render.
     fn fetch_art_query(ctx: &Ctx, song_uri: String) -> Option<()> {
         if matches!(ctx.config.album_art.method, ImageMethod::None) {
             return None;
         }
+        let song_uri = Self::resolved_art_uri(ctx, song_uri);
         if ctx
             .config
             .album_art
@@ -190,8 +199,39 @@ impl AlbumArtPane {
                     .len()); "Found album art"
                 );
                 Ok(MpdQueryResult::AlbumArt(result))
-            });
+            },
+        );
         Some(())
+    }
+    /// Round 111: the URI to ask MPD for art with.
+    ///
+    /// A **resolved** stream row's thumbnail wins when the resolve is known
+    /// (its `https` image URL is fetched by the caller's `disabled_protocols`
+    /// check, which is why the raw link could never work). With no resolve
+    /// yet, a YouTube link's thumbnail is **derived from its video id** — the
+    /// pattern needs no yt-dlp call, so the row's artwork appears immediately
+    /// instead of after the 3-5 s resolve. Every other URI is passed through
+    /// to the MPD album-art path.
+    fn resolved_art_uri(ctx: &Ctx, song_uri: String) -> String {
+        if let Some(thumb) = crate::ui::modals::paste::song_stream_info(ctx, &song_uri)
+            .and_then(|info| info.thumbnail)
+            .filter(|thumb| !thumb.is_empty())
+        {
+            return thumb;
+        }
+        Self::derived_stream_thumbnail(&song_uri).unwrap_or(song_uri)
+    }
+    /// The thumbnail a **tagged stream link** implies without any resolve:
+    /// the video id is in the link, so `i.ytimg.com/vi/<id>/hqdefault.jpg`
+    /// is known up front. `None` for anything that is not a YouTube link
+    /// (a local file, a radio URL, a SoundCloud/NicoVideo link).
+    fn derived_stream_thumbnail(song_uri: &str) -> Option<String> {
+        use crate::shared::ytdlp::YtDlpContent;
+        let (link, _) = crate::shared::ytdlp::tagged_stream_entry(song_uri)?;
+        match link.parse::<YtDlpContent>().ok()? {
+            YtDlpContent::Single(item) => item.kind.derived_thumbnail(&item.id),
+            YtDlpContent::Playlist(_) => None,
+        }
     }
     /// The song currently selected in the queue list. The queue pane syncs
     /// its id into `ctx.queue_selected_id` on every render (same channel
@@ -221,8 +261,18 @@ impl AlbumArtPane {
         // selection-time warm may land after the row was selected, so the
         // comparison is on the thumbnail, not only the file: when it appears
         // (or changes) the box fetches it even though the file did not
-        // change. A `None` here just falls through to the MPD album-art path.
-        let yt_thumb = Self::selected_yt_thumbnail(ctx);
+        // change.
+        //
+        // Round 111: with no resolve yet, a YouTube row's thumbnail is
+        // **derived from its video id** (`i.ytimg.com/vi/<id>/…`) and fetched
+        // through the same direct downloader, so the artwork appears
+        // immediately instead of after the row's 3-5 s resolve. It is
+        // replaced by the resolved `thumbnail` when that lands (the value
+        // changes, so the comparison below refetches).
+        let yt_thumb = Self::selected_yt_thumbnail(ctx).or_else(|| {
+            let uri = Self::selected_queue_song(ctx)?.file.clone();
+            Self::derived_stream_thumbnail(&uri)
+        });
         if yt_thumb.is_some() && yt_thumb != self.paused_art_yt {
             self.paused_art_yt = yt_thumb.clone();
             self.paused_art_file = file;
@@ -532,5 +582,3 @@ impl Pane for AlbumArtPane {
         Ok(())
     }
 }
-
-
