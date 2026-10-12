@@ -13,29 +13,24 @@ pub fn init(event_tx: Sender<AppEvent>) -> std::io::Result<std::thread::JoinHand
     std::thread::Builder::new().name("input".to_owned()).spawn(move || input_poll_task(&event_tx))
 }
 
-/// Read the system clipboard (or primary selection for middle-click) and
-/// feed it through the paste pipeline. Runs on a background thread so a
-/// slow clipboard owner never blocks the UI; the clipboard tool is wrapped
-/// in a timeout for the same reason.
-fn read_clipboard_and_paste(event_tx: Sender<AppEvent>, primary: bool) {
+/// Read the system clipboard and feed it through the paste pipeline. Runs
+/// on a background thread so a slow clipboard owner never blocks the UI;
+/// the clipboard tool is wrapped in a timeout for the same reason.
+///
+/// Every paste gesture — middle click, Ctrl+V, Ctrl+Shift+V — goes through
+/// this same function, so they always paste the same text: the clipboard
+/// when it holds something the paste pipeline recognizes, the primary
+/// selection only as a fallback. A middle click must not silently paste a
+/// *different* selection than Ctrl+V: in practice the primary selection
+/// holds whatever the user last selected elsewhere (a label, a file path),
+/// while the clipboard holds what they actually copied — a middle click
+/// pasting that file path instead of the copied web stream is the bug this
+/// ordering exists to prevent.
+fn read_clipboard_and_paste(event_tx: Sender<AppEvent>) {
     std::thread::Builder::new()
         .name("clipboard".to_owned())
         .spawn(move || {
-            let mut text = read_clipboard(primary);
-            // Middle-click pastes the primary selection — but a link is
-            // usually *copied* (Ctrl+C fills the clipboard, not the primary
-            // selection) and selecting a hyperlink grabs its label ("this
-            // page"), not its URL. When the primary selection holds nothing
-            // pasteable, use the clipboard instead, so a middle click works
-            // for a link the user just copied.
-            if primary {
-                let pasteable = text
-                    .as_deref()
-                    .is_some_and(|t| !crate::ui::modals::paste::parse_paste(t).is_empty());
-                if !pasteable {
-                    text = read_clipboard(false);
-                }
-            }
+            let text = read_clipboard_for_paste();
             if let Some(text) = text
                 && !text.trim().is_empty()
             {
@@ -43,6 +38,37 @@ fn read_clipboard_and_paste(event_tx: Sender<AppEvent>, primary: bool) {
             }
         })
         .ok();
+}
+
+/// The text a paste gesture pastes: the clipboard, with the primary
+/// selection as a fallback when the clipboard holds nothing the paste
+/// pipeline recognizes. The decision is a single order for every gesture
+/// (see `read_clipboard_and_paste` for why), so the two gestures can never
+/// disagree about what "the clipboard" holds.
+fn read_clipboard_for_paste() -> Option<String> {
+    choose_text(read_clipboard(false), read_clipboard(true))
+}
+
+/// The selection decision, split out from the shelling out so it can be
+/// tested: the clipboard when it holds something pasteable (a copied link
+/// lives there — Ctrl+C fills the clipboard, not the primary selection),
+/// the primary selection when it does not, and the clipboard's text when
+/// neither is pasteable (so the caller's emptiness check is the only thing
+/// that decides).
+fn choose_text(clipboard: Option<String>, primary: Option<String>) -> Option<String> {
+    if is_pasteable(clipboard.as_deref()) {
+        return clipboard;
+    }
+    if is_pasteable(primary.as_deref()) {
+        return primary;
+    }
+    clipboard.or(primary)
+}
+
+/// Whether the text holds at least one item the paste pipeline recognizes.
+/// `None` (no selection) is not pasteable.
+fn is_pasteable(text: Option<&str>) -> bool {
+    text.is_some_and(|t| !crate::ui::modals::paste::parse_paste(t).is_empty())
 }
 
 /// Fetch the clipboard contents: Wayland (`wl-paste`), then X11
@@ -114,17 +140,19 @@ fn input_poll_task(event_tx: &Sender<AppEvent>) {
         match crossterm::event::poll(timeout) {
             Ok(true) => match crossterm::event::read() {
                 Ok(Event::Mouse(mouse)) => {
-                    // Middle-click pastes the primary selection: with mouse
+                    // Middle click pastes the same text as Ctrl+V: with mouse
                     // capture enabled the terminal no longer does its own
                     // middle-click paste, so read the clipboard and feed the
-                    // same paste pipeline (the event is consumed here).
+                    // same paste pipeline (the event is consumed here). The
+                    // primary selection is only a fallback — see
+                    // `read_clipboard_and_paste`.
                     if matches!(
                         mouse.kind,
                         crossterm::event::MouseEventKind::Down(
                             crossterm::event::MouseButton::Middle
                         )
                     ) {
-                        read_clipboard_and_paste(event_tx.clone(), true);
+                        read_clipboard_and_paste(event_tx.clone());
                         continue;
                     }
                     if let Some(ev) = mouse_event_tracker.track_and_get(mouse)
@@ -137,12 +165,16 @@ fn input_poll_task(event_tx: &Sender<AppEvent>) {
                     // Ctrl+V pastes the clipboard (kitty does not remap it
                     // by default, and with raw mode the terminal sends the
                     // bare control code): read the clipboard and feed the
-                    // paste pipeline.
+                    // paste pipeline. Ctrl+Shift+V is matched here too — it
+                    // arrives as `Char('V')` with SHIFT (or as the bare
+                    // `\x16` control code) — so the gesture has the same
+                    // source as Ctrl+V instead of depending on whether the
+                    // terminal happens to turn it into a bracketed paste.
                     let ctrl = key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL);
-                    let is_ctrl_v =
-                        ctrl && matches!(key.code, crossterm::event::KeyCode::Char('v' | '\x16'));
+                    let is_ctrl_v = ctrl
+                        && matches!(key.code, crossterm::event::KeyCode::Char('v' | 'V' | '\x16'));
                     if is_ctrl_v {
-                        read_clipboard_and_paste(event_tx.clone(), false);
+                        read_clipboard_and_paste(event_tx.clone());
                         continue;
                     }
                     if let Err(err) = event_tx.send(AppEvent::UserKeyInput(key)) {
@@ -216,5 +248,58 @@ fn input_poll_task(event_tx: &Sender<AppEvent>) {
 fn drain_crossterm_events() {
     while crossterm::event::poll(Duration::from_millis(0)).unwrap_or(false) {
         let _ = crossterm::event::read();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{choose_text, is_pasteable};
+
+    // URLs/paths the paste pipeline recognizes, so "pasteable" is true.
+    // A bare local path needs a real file on disk; a URL with an audio
+    // extension classifies without touching the disk.
+    const YT: &str = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
+    const AUDIO: &str = "https://example.com/song.mp3";
+    const MAGNET: &str = "magnet:?xt=urn:btih:deadbeef";
+
+    fn s(v: &str) -> Option<String> {
+        Some(v.to_owned())
+    }
+
+    #[test]
+    fn clipboard_wins_when_pasteable() {
+        // The user's reported case: the clipboard holds the copied web
+        // stream and the primary selection holds a file path — a paste
+        // gesture must paste the clipboard, never the primary selection.
+        assert_eq!(choose_text(s(YT), s(AUDIO)), s(YT));
+        assert_eq!(choose_text(s(MAGNET), s(YT)), s(MAGNET));
+    }
+
+    #[test]
+    fn falls_back_to_primary_when_clipboard_is_not_pasteable() {
+        // Clipboard junk (a label, plain text, whitespace) or empty: the
+        // primary selection is the fallback.
+        assert_eq!(choose_text(s("this page"), s(YT)), s(YT));
+        assert_eq!(choose_text(None, s(YT)), s(YT));
+        assert_eq!(choose_text(s("  \n  "), s(YT)), s(YT));
+    }
+
+    #[test]
+    fn neither_pasteable_keeps_clipboard_text() {
+        // Both selections junk: the clipboard's text wins, because the
+        // caller's emptiness check is the only gate; the paste pipeline
+        // drops it anyway.
+        assert_eq!(choose_text(s("this page"), s("another label")), s("this page"));
+        assert_eq!(choose_text(None, None), None);
+    }
+
+    #[test]
+    fn is_pasteable_recognizes_real_items() {
+        assert!(is_pasteable(s(YT).as_deref()));
+        assert!(is_pasteable(s(AUDIO).as_deref()));
+        assert!(is_pasteable(s(MAGNET).as_deref()));
+        assert!(!is_pasteable(s("this page").as_deref()));
+        assert!(!is_pasteable(s("  ").as_deref()));
+        assert!(!is_pasteable(None));
     }
 }
