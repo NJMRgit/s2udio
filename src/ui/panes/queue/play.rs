@@ -27,6 +27,25 @@ pub(crate) fn resolved_stream_expired(file: &str) -> bool {
     expire < now
 }
 
+/// Stop MPD so it cannot advance past a row that is still being resolved.
+///
+/// A play request on an unresolved link is a **wait**, not a skip: MPD would
+/// fail the row and move on, and the app's recovery would then resolve wherever
+/// it landed. Holding the player gives the resolve time to land, and
+/// `ReplaceAndPlay` starts the row by id afterwards. Already-stopped MPD is
+/// left alone (nothing to hold); a playing or paused player is stopped, which
+/// is what makes the row the user chose the one that plays.
+pub(crate) fn hold_mpd_while_resolving(ctx: &Ctx, song_id: u32) {
+    if ctx.status.state == crate::mpd::commands::State::Stop {
+        return;
+    }
+    log::debug!(song_id; "Holding MPD while the requested row resolves");
+    ctx.command(move |client| {
+        client.stop()?;
+        Ok(())
+    });
+}
+
 /// Play a queue song. Round 91: a pasted stream **link**
 /// (`watch?v=ID#s2u-audio`) is queued as the link and has no stream URL yet,
 /// so playing it resolves the link and replaces the entry in place - the
@@ -40,6 +59,15 @@ pub(super) fn play_queue_song(song: &Song, ctx: &Ctx) {
     // request for it - the guard inside the helper absorbs a second one from
     // the event loop's MPD-driven path).
     if crate::shared::ytdlp::tagged_stream_entry(&song.file).is_some() {
+        // **Hold MPD while the row resolves (2026-10-15).** MPD cannot open an
+        // unresolved `#s2u-audio` link, so a running player fails the row and
+        // advances — and the status-driven recovery then resolves whichever row
+        // MPD landed on, chasing the queue instead of playing the row the user
+        // chose ("it skips through multiple entries"). Stopping MPD first means
+        // it has nowhere to skip to; `ReplaceAndPlay` starts the resolved row by
+        // id when the stream lands, so playback begins exactly once, on the
+        // right row.
+        hold_mpd_while_resolving(ctx, song.id);
         crate::ui::modals::paste::resolve_tagged_queue_entry(ctx, &song.file, song.id);
         return;
     }
@@ -272,7 +300,7 @@ pub(crate) fn issue_next(ctx: &Ctx) {
 
 #[cfg(test)]
 mod play_from_stop_tests {
-    use super::play_from_stop;
+    use super::{play_from_stop, play_queue_song};
     use crate::mpd::commands::{Song, State};
     use crate::shared::events::{ClientRequest, WorkRequest};
     use crate::ui::modals::paste::YtAction;

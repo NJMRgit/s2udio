@@ -4,10 +4,12 @@ use crate::{
     shared::{events::WorkRequest, ytdlp::tagged_stream_entry},
 };
 
+use std::collections::HashSet;
+
 use super::{
     PastedItem, YtAction, apply_resolved_streams, expired_stream_original_url,
     fresh_cached_stream_info, mark_stream_parse_pending, s2udio_cache_path, stream_info_for,
-    stream_parse_pending, youtube_link_of,
+    stream_meta_key, stream_parse_pending, youtube_link_of,
 };
 
 /// How many queue rows ahead of the current song the look ahead keeps
@@ -87,13 +89,46 @@ pub(super) fn warm_chapters(ctx: &Ctx, downloads: &[PastedItem]) {
 /// reports no `nextsong` (a stopped player, or the end of the queue).
 pub fn warm_next_queue_link(ctx: &Ctx) {
     let Some((idx, current)) = ctx.find_current_song_in_queue() else { return };
-    // The window is per current song: a new track means a new run of rows after it.
-    if ctx.warmed_ahead_for.get() != Some(current.id) {
-        ctx.warmed_ahead_for.set(Some(current.id));
-        ctx.warmed_ahead_ids.borrow_mut().clear();
+    // The remembered rows are **not** cleared when the song changes. A row that
+    // has been resolved stays resolved, so forgetting it only re-resolves it;
+    // and under `random` MPD advances every ~0.9 s while a resolve takes
+    // 5.5-7.6 s, so clearing on each advance threw away work still in flight and
+    // started a fresh set — measured live as 20 warms over 20 distinct rows with
+    // zero repeats, the ever-growing backlog that is the reported storm.
+    //
+    // The set is keyed by the row's **stable stream identity**, not its song id:
+    // the warm swaps the row in place, which gives it a new id, so an id-keyed
+    // set would drop every row it had just resolved and warm it again.
+    //
+    // It is pruned against the queue by that same identity, so a row the user
+    // removed (or one MPD consumed) drops out and the set cannot grow unbounded.
+    ctx.warmed_ahead_for.set(Some(current.id));
+    {
+        let queued: HashSet<String> =
+            ctx.queue.iter().map(|song| warm_row_key(ctx, &song.file)).collect();
+        ctx.warmed_ahead_ids.borrow_mut().retain(|key| queued.contains(key));
     }
-    for song in look_ahead_rows(ctx, idx) {
-        if ctx.warmed_ahead_ids.borrow().contains(&song.id) {
+    let window = look_ahead_rows(ctx, idx);
+    // Instrumentation kept deliberately: four rounds of this storm were
+    // debugged by inferring intent from timing, and every inference was wrong.
+    // This states the decision — which row, which key, and why it was or was
+    // not warmed — so the log answers it directly.
+    let window_ids: Vec<u32> = window.iter().map(|s| s.id).collect();
+    let remembered_now = ctx.warmed_ahead_ids.borrow().len();
+    log::debug!(
+        current = current.id,
+        idx,
+        random = ctx.status.random,
+        nextsongid:? = ctx.status.nextsongid,
+        queue_len = ctx.queue.len(),
+        window:? = window_ids,
+        remembered = remembered_now;
+        "Look ahead: window computed"
+    );
+    for song in window {
+        let key = warm_row_key(ctx, &song.file);
+        if ctx.warmed_ahead_ids.borrow().contains(&key) {
+            log::debug!(song_id = song.id, key = key.as_str(); "Look ahead: row already warmed; skipping");
             continue;
         }
         // Only a row the warm actually acted on is remembered. Marking the
@@ -101,9 +136,35 @@ pub fn warm_next_queue_link(ctx: &Ctx) {
         // leaves alone (a plain file, a video row), which must stay eligible
         // when a later poll sees them in the window.
         if !warm_row(ctx, &song) {
+            log::debug!(song_id = song.id, key = key.as_str(); "Look ahead: row is not warmable; not remembered");
             continue;
         }
-        ctx.warmed_ahead_ids.borrow_mut().insert(song.id);
+        log::debug!(song_id = song.id, key = key.as_str(); "Look ahead: warming and remembering this row");
+        ctx.warmed_ahead_ids.borrow_mut().insert(key);
+    }
+}
+
+/// The identity of a queue row for the warm bookkeeping: the **original link**
+/// when the row has been resolved (the `yt_info` cache keys a player/proxy URL
+/// back to the link it came from), else the row's own stable stream key.
+///
+/// The warm swaps a row in place, which gives it a new song id *and* replaces
+/// its file with a player URL — so bookkeeping keyed on either the id or the raw
+/// file loses the row it just warmed and warms it again on the next poll. The
+/// original link is the one string that is the same before and after.
+pub(crate) fn warm_row_key(ctx: &Ctx, file: &str) -> String {
+    let original = ctx
+        .yt_info
+        .borrow()
+        .get(file)
+        .map(|info| info.original_url.clone())
+        .filter(|link| !link.is_empty());
+    // Both sides go through `stream_meta_key` so the key space is one space: a
+    // raw link and its resolved row must produce the *same* key, or the retained
+    // set always misses and the row is re-warmed.
+    match original {
+        Some(link) => stream_meta_key(&link),
+        None => stream_meta_key(file),
     }
 }
 
@@ -116,6 +177,16 @@ pub fn warm_next_queue_link(ctx: &Ctx) {
 /// keeps a batch-imported playlist ahead of playback. Non-audio rows (the video
 /// list, plain files) are skipped rather than counted, so the window is a
 /// window of *resolvable stream rows*, not of arbitrary queue entries.
+///
+/// **In `random` mode only MPD's pick is warmed (2026-10-15).** MPD keeps its
+/// own shuffled sequence, so the rows after the current one in *queue order*
+/// are usually not the rows that play next — warming them spends a full
+/// `yt-dlp` resolve on rows playback will never reach, and because the window
+/// resets per song it re-warms a fresh set of them at every advance. Measured
+/// from the live log with random on: **14 warms, only 3 of them rows that ever
+/// played** — the rest were `current + 1` neighbours MPD skipped over. MPD
+/// states its next pick, and states the one after that when it arrives, so one
+/// row is the correct depth when the order is MPD's to decide.
 fn look_ahead_rows(ctx: &Ctx, idx: usize) -> Vec<crate::mpd::commands::Song> {
     let mut rows: Vec<crate::mpd::commands::Song> = Vec::with_capacity(LOOK_AHEAD_WINDOW);
     let mpd_next = ctx
@@ -131,6 +202,17 @@ fn look_ahead_rows(ctx: &Ctx, idx: usize) -> Vec<crate::mpd::commands::Song> {
     if let Some(song) = &mpd_next {
         push(song, &mut rows);
     }
+    // MPD's pick is warmed **first** either way: under shuffle it is the only
+    // row the app can be sure about, so it must never be crowded out of the
+    // window by guessed ones.
+    //
+    // The rows after the current one then fill the rest of the window. Under
+    // shuffle they are not "the next rows" — but they are still rows MPD will
+    // reach: measured live, a 65-row shuffled queue had ~19 distinct rows
+    // played (or skipped) in 20 s, so they are queued work, not waste. What
+    // made the earlier storm was not warming them; it was *forgetting* them at
+    // every track change and starting a fresh set while the previous set's
+    // resolves were still in flight.
     for song in ctx.queue.iter().skip(idx + 1) {
         push(song, &mut rows);
     }
@@ -444,6 +526,19 @@ pub fn ensure_mpris_metadata(ctx: &Ctx) {
 /// MPD's next-song prefetch from meeting an unplayable link.
 #[cfg(test)]
 mod warm_next_tests {
+    #[cfg(test)]
+    impl crate::ctx::Ctx {
+        /// Whether the row with this song id is remembered as warmed. The set is
+        /// keyed by the row's **stable stream identity** (the swap renames the
+        /// id), so tests ask by id and this resolves it through the queue.
+        fn warmed_row(&self, song_id: u32) -> bool {
+            self.queue.iter().any(|song| {
+                song.id == song_id
+                    && self.warmed_ahead_ids.borrow().contains(&warm_row_key(self, &song.file))
+            })
+        }
+    }
+
     use super::*;
     use crate::mpd::commands::{Song, State};
     use crate::shared::events::WorkRequest;
@@ -494,10 +589,7 @@ mod warm_next_tests {
 
         warm_next_queue_link(&rig.ctx);
         assert_eq!(rig.ctx.warmed_ahead_for.get(), Some(1), "the window belongs to the current song");
-        assert!(
-            rig.ctx.warmed_ahead_ids.borrow().contains(&2),
-            "the warmed row is remembered"
-        );
+        assert!(rig.ctx.warmed_row(2), "the warmed row is remembered");
         assert_eq!(requests(&rig.work_rx), 1, "one resolve was asked for");
         assert!(
             stream_parse_pending(&rig.ctx, link),
@@ -527,7 +619,7 @@ mod warm_next_tests {
         );
 
         warm_next_queue_link(&rig.ctx);
-        assert!(rig.ctx.warmed_ahead_ids.borrow().contains(&2));
+        assert!(rig.ctx.warmed_row(2));
         assert_eq!(requests(&rig.work_rx), 0, "a cached resolve runs no yt-dlp");
         assert_eq!(
             rig.client_rx.try_iter().count(),
@@ -595,7 +687,7 @@ mod warm_next_tests {
 
         warm_next_queue_link(&rig.ctx);
 
-        assert!(rig.ctx.warmed_ahead_ids.borrow().contains(&2));
+        assert!(rig.ctx.warmed_row(2));
         assert!(
             rig.work_rx.try_iter().any(|request| matches!(
                 request,

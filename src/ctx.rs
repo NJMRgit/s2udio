@@ -377,7 +377,14 @@ pub struct Ctx {
     /// (measured live: 53 warms in 61 s, median 2.46 s apart). Remembering the
     /// whole window lets the look ahead keep several rows resolved ahead
     /// without re-warming a row it already asked for.
-    pub(crate) warmed_ahead_ids: RefCell<HashSet<u32>>,
+    /// Keyed by the row's **stable stream identity** (`stream_meta_key`: the
+    /// YouTube video id, or the link itself), *not* by its song id. A warm
+    /// swaps the row in place — `delete_id` + `add_id` — which gives it a new
+    /// id, so an id-keyed set loses every row it just warmed and re-warms it on
+    /// the next poll. That was measured live: 10 warms over 10 distinct rows
+    /// though only 2 tracks advanced, because the set was pruned empty as fast
+    /// as it filled.
+    pub(crate) warmed_ahead_ids: RefCell<HashSet<String>>,
     /// The `current` song id the window in [`Self::warmed_ahead_ids`] belongs
     /// to. The window is per current song: when playback moves on, the set is
     /// cleared so the new next rows are warmed.

@@ -55,7 +55,7 @@ mod render;
 mod video;
 
 #[allow(unused_imports)]
-pub(crate) use play::play_from_stop;
+pub(crate) use play::{hold_mpd_while_resolving, play_from_stop};
 use play::play_queue_song;
 #[allow(unused_imports)]
 pub(crate) use play::resolved_stream_expired;

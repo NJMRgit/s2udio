@@ -70,6 +70,8 @@ pub use warm::{
     ensure_mpris_metadata, mpris_art_path, mpv_mpris_art_path, mpv_mpris_state_path, mpv_yt_info,
     warm_next_queue_link, write_mpv_mpris_state,
 };
+#[cfg(test)]
+pub(crate) use warm::LOOK_AHEAD_WINDOW;
 
 use download::{commit_to_daemon, download_submenu, playlist_download_menu, stream_via_daemon};
 use playlist::{

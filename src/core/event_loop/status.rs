@@ -631,6 +631,27 @@ fn resolve_current_song(ctx: &Ctx) {
     let Some(song) = ctx.queue.iter().find(|song| song.id == songid) else {
         return;
     };
+    let needs_resolve = crate::shared::ytdlp::tagged_stream_entry(&song.file).is_some()
+        || crate::ui::modals::paste::expired_stream_original_url(ctx, &song.file).is_some();
+    if !needs_resolve {
+        return;
+    }
+    // **Hold MPD before resolving (2026-10-15).** A playing player cannot open
+    // an unresolved row: it fails it and advances, and this function then
+    // resolves whichever row it landed on — the app walks the queue behind the
+    // player instead of playing the row the user asked for. Stopping first
+    // means the player has nowhere to skip to; the resolve's `ReplaceAndPlay`
+    // starts the row by id once the stream lands, so playback resumes on that
+    // row. This is the general guard: it covers every way playback can be
+    // running on an unresolved row (Space, Enter, a restored queue, a media
+    // key), not only the play paths that remember to hold.
+    if ctx.status.state == State::Play {
+        log::debug!(song_id = song.id; "Holding MPD: the current row still needs its stream");
+        ctx.command(move |client| {
+            client.stop()?;
+            Ok(())
+        });
+    }
     if crate::shared::ytdlp::tagged_stream_entry(&song.file).is_some() {
         crate::ui::modals::paste::resolve_tagged_queue_entry(ctx, &song.file, song.id);
     } else {

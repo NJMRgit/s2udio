@@ -388,6 +388,12 @@ pub(super) fn enqueue_stream_links(
         });
         match inserted {
             Ok(Some(song_id)) => {
+                // Hold MPD while the first row resolves, exactly as a play
+                // request does: a running player cannot open the link, fails it
+                // and advances, which is the reported "it skips through
+                // multiple entries" on a freshly imported playlist. The
+                // replacement starts this row by id once the stream lands.
+                crate::ui::panes::queue::hold_mpd_while_resolving(ctx, song_id);
                 resolve_tagged_queue_entry(ctx, &link, song_id);
             }
             _ => status_warn!("Cannot find the queued stream entry to resolve"),
