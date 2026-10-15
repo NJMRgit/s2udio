@@ -558,10 +558,10 @@ impl ControlsPane {
             }
             Transport::Next => {
                 if state != State::Stop {
-                    ctx.command(move |client| {
-                        client.next_keep_state(keep_state, state)?;
-                        Ok(())
-                    });
+                    // Round 112: step without handing MPD a raw stream link —
+                    // MPD cannot decode one, so it skipped on through the
+                    // queue and playback landed on the wrong row.
+                    crate::ui::panes::queue::next_track_resolving(ctx);
                     ctx.render()?;
                 }
             }
@@ -1163,7 +1163,3 @@ impl Pane for ControlsPane {
         Ok(())
     }
 }
-
-
-
-

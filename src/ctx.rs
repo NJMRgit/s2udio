@@ -376,6 +376,15 @@ pub struct Ctx {
     /// become the next one (the user removed the warmed entry) and be warmed
     /// as usual.
     pub(crate) warmed_next_for: Cell<Option<(u32, u32)>>,
+    /// Round 112: the queue entry a `▶▶` / `>` step is waiting on, when the
+    /// row it would land on is an unresolved stream link. `▶▶` cannot simply
+    /// ask MPD to step: MPD lands on the raw link, cannot decode it and skips
+    /// on, so the highlight ran down the list and playback ended up on
+    /// whichever row's `yt-dlp` resolve finished first (reported 2026-10-11).
+    /// The step therefore resolves the target row and issues `next` once it is
+    /// playable. This holds that pending step's song id so repeated presses
+    /// **coalesce** into one step instead of piling up resolves.
+    pub(crate) pending_next_step: Cell<Option<u32>>,
     /// The open paste popup's modal id (so a nested flow — e.g. the
     /// "Select files…" picker — can close it once playback starts;
     /// `PopModal` drops the modal without running its close hook, so the
@@ -552,6 +561,7 @@ impl Ctx {
             paste_chapter_warm: RefCell::new(HashSet::new()),
             queue_info_warm: RefCell::new(HashSet::new()),
             warmed_next_for: Cell::new(None),
+            pending_next_step: Cell::new(None),
             mpd_music_directory,
         };
         if let Some((_, song)) = ctx.find_current_song_in_queue() {

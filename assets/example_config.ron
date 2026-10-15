@@ -19,6 +19,15 @@
     lyrics_source: LocalFirst,
     on_song_change: ["rmpc-fetch-lyrics"],
     exec_on_song_change_at_start: true,
+    // The Queue tab's selection follows the newly playing track and lands it
+    // at the TOP of the visible list, so watching the queue shows the playing
+    // track with the upcoming rows under it. Defaults **on** (upstream rmpc
+    // defaulted it off). Scrolling or moving the queue within 5 seconds of a
+    // track change leaves the selection where the user put it.
+    select_current_song_on_change: true,
+    // Restore the older placement: the followed row lands mid-viewport
+    // instead of at the top.
+    center_current_song_on_change: false,
     cava: (
         framerate: 90,
         autosens: true,
@@ -39,6 +48,15 @@
         playlist: "radio",
         location: None,
         max_favourites: 10,
+    ),
+    album_art: (
+        // Trim the solid letterbox bars off YouTube stream thumbnails.
+        // hqdefault.jpg is 480x360 — a 16:9 picture with ~45 px of black bar
+        // top and bottom — so without this the cover renders with visible
+        // bars. Defaults on. Only stream thumbnails are cropped; library
+        // artwork (embedded covers, the cover search, Jellyfin posters) is
+        // never touched.
+        crop_letterbox: true,
     ),
     jellyfin: (
         config_file: None,

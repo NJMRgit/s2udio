@@ -314,7 +314,11 @@ impl ConfigFile {
             enable_lyrics_hot_reload: false,
             lyrics_source: LyricsSource::default(),
             image_method: None,
-            select_current_song_on_change: false,
+            // This fork defaults the follow-the-track jump **on** (upstream
+            // rmpc defaulted it off): watching the queue shows the playing
+            // track at the top with the upcoming rows under it. Setting it
+            // false keeps the selection exactly where the user left it.
+            select_current_song_on_change: true,
             center_current_song_on_change: false,
             album_art_max_size_px: Size::default(),
             album_art: AlbumArtConfigFile {

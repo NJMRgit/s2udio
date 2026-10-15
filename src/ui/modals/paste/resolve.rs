@@ -647,6 +647,22 @@ pub fn apply_resolved_streams(
                 Ok(())
             });
             log::debug!(song_id, url = logged.as_str(); "Prepared the next queue entry's stream");
+            // Round 112: this resolve may be the target of a `▶▶` / `>` step,
+            // which resolves the row it would land on and issues `next` only
+            // once the row is playable (asking MPD to step onto the raw link
+            // is what made the highlight run down the list and playback land
+            // on the wrong row). The step is issued here, after the swap, and
+            // only when it is still the step the user is waiting on — a later
+            // press targets a different row and clears this one.
+            //
+            // 2026-10-15: the step **re-reads MPD's `nextsongid`** at this
+            // moment rather than trusting the press-time pick. In `random`
+            // mode MPD re-picks during the ~1.3 s resolve, so the remembered
+            // row is routinely stale and stepping onto it landed on an
+            // unresolved link — the resolve storm.
+            if ctx.pending_next_step.get() == Some(song_id) {
+                crate::ui::panes::queue::issue_next_if_still_target(ctx, song_id);
+            }
             // Round 107: use the buffer system for the look ahead — begin
             // filling the next row's bytes now, so the transition is
             // gap-free without relying on MPD's `audio_buffer_size` ring.

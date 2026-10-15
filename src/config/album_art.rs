@@ -13,6 +13,11 @@ pub struct AlbumArtConfigFile {
     pub disabled_protocols: Vec<String>,
     pub vertical_align: VerticalAlignFile,
     pub horizontal_align: HorizontalAlignFile,
+    /// Trim the letterbox bars off YouTube stream thumbnails. Defaults **on**:
+    /// `hqdefault.jpg` is a 4:3 letterbox of a 16:9 picture, so without the
+    /// crop the cover sits in a 16:9 box with black bars top and bottom.
+    /// Library artwork is never cropped — only the stream-thumbnail path.
+    pub crop_letterbox: bool,
 }
 
 impl Default for AlbumArtConfigFile {
@@ -24,6 +29,7 @@ impl Default for AlbumArtConfigFile {
             disabled_protocols: vec!["http://".to_string(), "https://".to_string()],
             vertical_align: VerticalAlignFile::default(),
             horizontal_align: HorizontalAlignFile::default(),
+            crop_letterbox: true,
         }
     }
 }
@@ -36,6 +42,7 @@ pub struct AlbumArtConfig {
     pub disabled_protocols: Vec<String>,
     pub vertical_align: VerticalAlign,
     pub horizontal_align: HorizontalAlign,
+    pub crop_letterbox: bool,
 }
 
 #[derive(Default, Display, Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
@@ -120,6 +127,7 @@ impl From<AlbumArtConfigFile> for AlbumArtConfig {
             disabled_protocols: value.disabled_protocols,
             vertical_align: value.vertical_align.into(),
             horizontal_align: value.horizontal_align.into(),
+            crop_letterbox: value.crop_letterbox,
         }
     }
 }

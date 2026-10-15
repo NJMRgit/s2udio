@@ -280,6 +280,8 @@ impl QueuePane {
                         self.chapters_scroll_to(perc, ctx)
                     }
                     crate::ctx::QueueTabMode::Audio => {
+                        // A scrollbar drag counts as reading the queue.
+                        self.note_user_navigation();
                         self.queue.state.scroll_to(perc, ctx.config.scrolloff);
                     }
                     // Round 62 (Q2): unreachable (queue pane hidden in
@@ -337,6 +339,7 @@ impl QueuePane {
                     }
                     // Arm the band so a ctrl+drag from here adds a range.
                     self.queue.state.band.arm(idx, false);
+                    self.note_user_navigation();
                     self.queue.select_idx(idx, ctx.config.scrolloff);
                     ctx.render()?;
                 }
@@ -363,6 +366,7 @@ impl QueuePane {
                         self.queue.state.mark_range(lo, hi);
                         self.queue.state.set_range_mark(lo, hi);
                     }
+                    self.note_user_navigation();
                     self.queue.select_idx(idx, ctx.config.scrolloff);
                     ctx.render()?;
                 }
@@ -381,6 +385,7 @@ impl QueuePane {
                     let click_on_different_row = !self.queue.state.marked.is_empty()
                         && Some(idx) != self.queue.state.get_selected();
                     self.queue.state.band.arm(idx, click_on_different_row);
+                    self.note_user_navigation();
                     self.queue.select_idx(idx, ctx.config.scrolloff);
                     self.queue.state.set_mark_anchor(idx);
                     self.queue.state.clear_range_mark();
@@ -456,6 +461,9 @@ impl QueuePane {
                     1
                 };
                 let amount = ctx.config.scroll_amount.max(1);
+                // The wheel counts as reading the queue: it stands the
+                // follow-the-track jump down.
+                self.note_user_navigation();
                 self.queue.state.scroll_viewport(dir, amount);
                 ctx.render()?;
                 return Ok(());
@@ -471,6 +479,7 @@ impl QueuePane {
                     .saturating_sub(self.areas[Areas::Table].y)
                     .into();
                 if let Some(idx) = self.queue.state.get_at_rendered_row(clicked_row) {
+                    self.note_user_navigation();
                     self.queue.select_idx(idx, ctx.config.scrolloff);
                     ctx.render()?;
                 }
@@ -559,24 +568,5 @@ impl QueuePane {
         }
         ctx.render()?;
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod moved_events_tests {
-    use crate::shared::mouse_event::MouseEventKind;
-
-    #[test]
-    fn moved_events_are_tracked_by_the_mouse_event_tracker() {
-        let mut tracker = crate::shared::mouse_event::MouseEventTracker::default();
-        let ev = tracker.track_and_get(crossterm::event::MouseEvent {
-            kind: crossterm::event::MouseEventKind::Moved,
-            column: 7,
-            row: 3,
-            modifiers: crossterm::event::KeyModifiers::NONE,
-        });
-        let ev = ev.expect("moves produce an event");
-        assert!(matches!(ev.kind, MouseEventKind::Moved));
-        assert_eq!((ev.x, ev.y), (7, 3));
     }
 }

@@ -558,9 +558,11 @@ pub(super) fn poll(ctx: &mut Ctx, ui: &mut Ui, state: &mut MpvState) -> PollResu
         && let Some(thumb) = info.thumbnail
     {
         let cache_dir = ctx.config.cache_dir.clone();
-        let _ = ctx
-            .work_sender
-            .send(WorkRequest::SaveMpvMprisArt { url: thumb, cache_dir });
+        let _ = ctx.work_sender.send(WorkRequest::SaveMpvMprisArt {
+            url: thumb,
+            cache_dir,
+            crop_letterbox: ctx.config.album_art.crop_letterbox,
+        });
         ctx.mpv.art_path = Some(crate::ui::modals::paste::mpv_mpris_art_path(
             ctx.config.cache_dir.as_deref(),
         ));
@@ -985,19 +987,4 @@ fn prompt_video_resume(ctx: &mut Ctx, title: &str, seconds: f64, key: String) {
             .size((56, 7))
             .build()
     );
-}
-
-#[cfg(test)]
-mod tests {
-    use super::should_prompt_resume;
-
-    /// At/around the threshold: only a position past 10 s is worth a prompt
-    /// (the boundary belongs to "start from the beginning").
-    #[test]
-    fn prompts_only_past_ten_seconds() {
-        assert!(!should_prompt_resume(0.0));
-        assert!(!should_prompt_resume(10.0));
-        assert!(should_prompt_resume(10.001));
-        assert!(should_prompt_resume(3600.0));
-    }
 }

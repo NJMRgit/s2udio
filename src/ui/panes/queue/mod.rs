@@ -48,6 +48,7 @@ use ratatui::{
 
 mod chapters;
 mod context_menus;
+mod follow;
 mod mouse_events;
 mod play;
 mod render;
@@ -58,6 +59,7 @@ pub(crate) use play::play_from_stop;
 use play::play_queue_song;
 #[allow(unused_imports)]
 pub(crate) use play::resolved_stream_expired;
+pub(crate) use play::{issue_next_if_still_target, next_track_resolving};
 #[allow(unused_imports)]
 use render::truncate_to_width;
 #[allow(unused_imports)]
@@ -110,6 +112,18 @@ pub struct QueuePane {
     /// records the id it was scheduled for, and a render that did not
     /// actually move the selection does not restart the debounce forever.
     warmed_selection_id: Option<u32>,
+    /// The selection follows the newly playing track, standing down while the
+    /// user is reading the queue (see [`follow::FollowGate`]).
+    follow: follow::FollowGate,
+    /// The track the follow decision was last made for, so a repeated
+    /// `SongChanged` for the same track (a re-render, a resume, a second
+    /// status update) does not re-run the jump and yank a selection the user
+    /// has since moved.
+    followed_song_id: Option<u32>,
+    /// A follow-the-track jump that landed while this pane was off screen,
+    /// where the viewport height is stale. Re-applied by the next
+    /// `before_show`, which knows the real area.
+    pending_follow_to_top: Option<usize>,
 }
 #[derive(Debug, Enum)]
 enum Areas {
@@ -137,6 +151,15 @@ impl QueuePane {
         self.queue.state.clear_mark_anchor();
         self.video_marked.clear();
         self.video_marked.clear_anchor();
+    }
+    /// Record that the user just moved the Audio list's selection or scrolled
+    /// it, so the automatic "follow the new track" jump stands down while they
+    /// are reading the queue ([`follow::FollowGate`]). Every user-driven route
+    /// calls this: the movement keys, the mouse wheel, a click or right-click
+    /// on a row, and a scrollbar drag. Typing elsewhere in the app does not
+    /// count as navigation.
+    pub(super) fn note_user_navigation(&mut self) {
+        self.follow.note_user_navigation(std::time::Instant::now());
     }
     /// The queue the pane shows. Radio stations and Jellyfin audio streams
     /// are played through a temporary MPD playlist entry (required to play
@@ -297,6 +320,9 @@ impl QueuePane {
             toggle_areas: [Rect::default(); 4],
             loading_tick: None,
             warmed_selection_id: None,
+            follow: follow::FollowGate::default(),
+            followed_song_id: None,
+            pending_follow_to_top: None,
         }
     }
     pub fn init(ctx: &Ctx) -> (Vec<Constraint>, Vec<Property<SongProperty>>) {
@@ -367,6 +393,11 @@ impl Pane for QueuePane {
                 .or(Some(0));
             self.queue.select_idx_opt(to_select, usize::MAX);
             self.should_center_cursor_on_current = false;
+        } else if let Some(idx) = self.pending_follow_to_top.take() {
+            // A follow-the-track jump landed while this pane was off screen,
+            // where the viewport height is stale. Now that the real area is
+            // known, place the row at the top of the visible list.
+            self.queue.select_at_top(idx);
         } else if self
             .queue
             .selected_with_idx()
@@ -432,22 +463,45 @@ impl Pane for QueuePane {
                 // A track without markers replaced a chaptered one: the
                 // Chapters view falls back to the audio list.
                 self.follow_mpd_chapters(ctx);
-                if let Some((idx, _)) = ctx.find_current_song_in_queue()
-                    && ctx.config.select_current_song_on_change
-                {
-                    match (is_visible, ctx.config.center_current_song_on_change) {
-                        (true, true) => {
-                            self.queue.select_idx(idx, usize::MAX);
-                        }
-                        (false, true) => {
-                            self.queue.select_idx(idx, usize::MAX);
-                            self.should_center_cursor_on_current = true;
-                        }
-                        (true, false) | (false, false) => {
-                            self.queue.select_idx(idx, ctx.config.scrolloff);
-                        }
+                if let Some((idx, song)) = ctx.find_current_song_in_queue() {
+                    // One decision per track change: a repeated SongChanged
+                    // for the same track (a re-render, a resume, a second
+                    // status update) must not re-run the jump and yank a
+                    // selection the user has since moved.
+                    let new_track = self.followed_song_id != Some(song.id);
+                    if new_track {
+                        self.followed_song_id = Some(song.id);
+                        self.follow.begin_track_change();
                     }
-                    ctx.render()?;
+                    if new_track
+                        && ctx.config.select_current_song_on_change
+                        && self.follow.should_follow(std::time::Instant::now())
+                    {
+                        let to_select = idx;
+                        match (is_visible, ctx.config.center_current_song_on_change) {
+                            // The default: land the new track at the **top**
+                            // of the visible list, as close as the viewport
+                            // allows — watching the queue then shows the
+                            // playing track with the upcoming rows under it.
+                            (true, false) => self.queue.select_at_top(to_select),
+                            (false, false) => {
+                                self.queue.select_at_top(to_select);
+                                // The pane is off screen, so the viewport
+                                // height is stale; re-apply on the next show.
+                                self.pending_follow_to_top = Some(to_select);
+                            }
+                            // The older centering placement, kept for anyone
+                            // who prefers it.
+                            (true, true) => {
+                                self.queue.select_idx(to_select, usize::MAX);
+                            }
+                            (false, true) => {
+                                self.queue.select_idx(to_select, usize::MAX);
+                                self.should_center_cursor_on_current = true;
+                            }
+                        }
+                        ctx.render()?;
+                    }
                 }
             }
             UiEvent::Reconnected => {
@@ -596,6 +650,7 @@ impl Pane for QueuePane {
             return match action {
                 DirectoriesActions::FolderUp => {
                     if !self.queue.is_empty() {
+                        self.note_user_navigation();
                         self.queue.prev(ctx.config.scrolloff, ctx.config.wrap_navigation);
                     }
                     ctx.render()?;
@@ -603,6 +658,7 @@ impl Pane for QueuePane {
                 }
                 DirectoriesActions::FolderDown => {
                     if !self.queue.is_empty() {
+                        self.note_user_navigation();
                         self.queue.next(ctx.config.scrolloff, ctx.config.wrap_navigation);
                     }
                     ctx.render()?;
@@ -897,7 +953,30 @@ impl Pane for QueuePane {
                     self.open_context_menu(ctx, None);
                 }
                 CommonAction::Right | CommonAction::Left => {}
-                other => self.handle_claimed_common_action(other, event, ctx)?,
+                other => {
+                    // The generic movement/selection arms (Up/Down, PageUp/
+                    // PageDown, Top/Bottom, half-page, SelectUp/Down) live in
+                    // `SongListCore`; note the navigation before delegating so
+                    // every one of them counts as user activity and stands the
+                    // follow-the-track jump down.
+                    if matches!(
+                        other,
+                        CommonAction::Up
+                            | CommonAction::Down
+                            | CommonAction::PageUp
+                            | CommonAction::PageDown
+                            | CommonAction::UpHalf
+                            | CommonAction::DownHalf
+                            | CommonAction::Top
+                            | CommonAction::Bottom
+                            | CommonAction::Select
+                            | CommonAction::SelectUp
+                            | CommonAction::SelectDown
+                    ) {
+                        self.note_user_navigation();
+                    }
+                    self.handle_claimed_common_action(other, event, ctx)?
+                }
             }
         } else if let Some(action) = event.claim_global() {
             match action {

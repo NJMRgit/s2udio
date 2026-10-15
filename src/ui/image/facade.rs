@@ -109,6 +109,30 @@ impl AlbumArtFacade {
         self.show(current_album_art, ctx)?;
         return Ok(());
     }
+    /// Show a **YouTube stream thumbnail**, trimming its letterbox bars first.
+    ///
+    /// `hqdefault.jpg` is 480x360 — a 16:9 picture with 43-45 px of solid bar
+    /// top and bottom — so in a 16:9 art box it renders with visible bars.
+    /// The crop happens here, on the **bytes**, before they become
+    /// `current_album_art`: a later resize re-place then re-encodes the
+    /// already-cropped image instead of cropping a cropped image.
+    ///
+    /// Only this path crops. Embedded covers, the cover search, the Jellyfin
+    /// poster and radio icons keep the plain [`Self::show`], because they are
+    /// not letterboxed stream thumbnails.
+    pub fn show_stream_thumbnail(
+        &mut self,
+        data: impl Into<Arc<Vec<u8>>>,
+        ctx: &Ctx,
+    ) -> Result<()> {
+        let data = data.into();
+        let cropped =
+            crate::shared::image::crop_letterbox_bytes(&data, ctx.config.album_art.crop_letterbox);
+        if cropped == *data {
+            return self.show(data, ctx);
+        }
+        self.show(Arc::new(cropped), ctx)
+    }
     pub fn show(&mut self, data: impl Into<Arc<Vec<u8>>>, ctx: &Ctx) -> Result<()> {
         self.is_showing = true;
         let max_size = ctx.config.album_art.max_size_px;

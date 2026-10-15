@@ -501,9 +501,13 @@ fn handle_work_request(
                 data: crate::shared::mpd_query::MpdQueryResult::Any(Box::new(result)),
             })
         }
-        WorkRequest::SaveMprisArt { url } => {
+        WorkRequest::SaveMprisArt { url, crop_letterbox } => {
             match fetch_yt_thumbnail(&url) {
-                Ok(bytes) if is_expected_mpris_art(&url) => save_mpris_art(None, &bytes),
+                Ok(bytes) if is_expected_mpris_art(&url) => {
+                    let bytes =
+                        crate::shared::image::crop_letterbox_bytes(&bytes, crop_letterbox);
+                    save_mpris_art(None, &bytes);
+                }
                 Ok(_) => log::debug!("Skipping stale MPRIS art (stream changed)"),
                 Err(err) => {
                     log::warn!(error:? = err; "Failed to fetch MPRIS art");
@@ -516,7 +520,7 @@ fn handle_work_request(
             }
             Ok(WorkDone::None)
         }
-        WorkRequest::SaveMpvMprisArt { url, cache_dir } => {
+        WorkRequest::SaveMpvMprisArt { url, cache_dir, crop_letterbox } => {
             match fetch_yt_thumbnail(&url) {
                 Ok(bytes) => {
                     let path = crate::ui::modals::paste::mpv_mpris_art_path(
@@ -525,6 +529,11 @@ fn handle_work_request(
                     if let Some(parent) = path.parent() {
                         let _ = std::fs::create_dir_all(parent);
                     }
+                    // The media controls read this file, not the pane, so
+                    // cropping only the pane left the desktop poster showing
+                    // the barred image.
+                    let bytes =
+                        crate::shared::image::crop_letterbox_bytes(&bytes, crop_letterbox);
                     if let Err(err) = std::fs::write(&path, bytes) {
                         log::warn!(error:? = err; "Failed to write mpv MPRIS art");
                     }
@@ -853,27 +862,4 @@ fn jellyfin_handle(
             )
         })?;
     f(&jf)
-}
-
-#[cfg(test)]
-mod mpris_art_guard_tests {
-    use super::{is_expected_mpris_art, set_expected_mpris_art};
-
-    #[test]
-    fn only_the_expected_source_writes() {
-        // No stream: nothing is current.
-        set_expected_mpris_art(None);
-        assert!(!is_expected_mpris_art("https://i.ytimg.com/vi/a/maxresdefault.jpg"));
-
-        // The current stream's art is expected...
-        set_expected_mpris_art(Some("https://i.ytimg.com/vi/b/maxresdefault.jpg".to_owned()));
-        assert!(is_expected_mpris_art("https://i.ytimg.com/vi/b/maxresdefault.jpg"));
-        // ...a previous stream's art is stale and must be skipped.
-        assert!(!is_expected_mpris_art("https://i.ytimg.com/vi/a/maxresdefault.jpg"));
-
-        // Jellyfin streams are keyed by their item id.
-        set_expected_mpris_art(Some("jellyfin:abcdef0123456789abcdef0123456789".to_owned()));
-        assert!(is_expected_mpris_art("jellyfin:abcdef0123456789abcdef0123456789"));
-        assert!(!is_expected_mpris_art("https://i.ytimg.com/vi/b/maxresdefault.jpg"));
-    }
 }

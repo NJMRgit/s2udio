@@ -480,7 +480,10 @@ impl Pane for AlbumArtPane {
                                 return Ok(());
                             }
                             ctx.album_art_collapsed.set(false);
-                            self.album_art.show(bytes.clone(), ctx)?;
+                            // The stream-thumbnail path is the only one that
+                            // trims letterbox bars; every other branch below
+                            // and above keeps the plain `show`.
+                            self.album_art.show_stream_thumbnail(bytes.clone(), ctx)?;
                         }
                         Ok(_) => self.collapse(ctx)?,
                         Err(err) => {

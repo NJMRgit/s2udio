@@ -192,12 +192,18 @@ pub(crate) enum WorkRequest {
     /// (mpDris2 serves it as the album art of the current stream).
     SaveMprisArt {
         url: String,
+        /// Trim the letterbox bars off the downloaded stream thumbnail, so
+        /// the desktop media controls match the (cropped) album-art pane.
+        /// Follows `album_art.crop_letterbox`.
+        crop_letterbox: bool,
     },
     /// Download a YouTube video's thumbnail to the mpv-mpris poster file so
     /// the MPRIS bridge shows it while the video plays in mpv.
     SaveMpvMprisArt {
         url: String,
         cache_dir: Option<PathBuf>,
+        /// See [`Self::SaveMprisArt`]'s field of the same name.
+        crop_letterbox: bool,
     },
     /// Fetch a Jellyfin item's metadata + primary image so the MPRIS bridge
     /// can show the episode/movie title and thumbnail for a playing stream.

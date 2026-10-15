@@ -2,8 +2,8 @@ use std::io::Cursor;
 
 use anyhow::{Context, Result};
 use image::{
-    AnimationDecoder, DynamicImage, ImageDecoder,
-    codecs::{gif::GifDecoder, jpeg::JpegEncoder},
+    AnimationDecoder, DynamicImage, ImageDecoder, ImageEncoder,
+    codecs::{gif::GifDecoder, jpeg::JpegEncoder, png::PngEncoder},
 };
 use ratatui::layout::Rect;
 
@@ -194,6 +194,162 @@ pub fn jpg_encode(img: &DynamicImage) -> Result<Vec<u8>> {
     let mut jpg = Vec::new();
     JpegEncoder::new(&mut jpg).encode_image(img)?;
     Ok(jpg)
+}
+
+/// Per-channel tolerance for "this pixel is the same colour as the bar".
+/// JPEG ringing across a flat bar leaves it a few levels off the corner
+/// pixel, and a byte-exact scan measures the bars inconsistently — measured
+/// on real thumbnails, byte-exact widths came out 31/39 on a sample whose
+/// true bars are 43/40, which then failed the pair-similarity test and left
+/// the letterbox in place.
+const LETTERBOX_BAR_TOLERANCE: i32 = 20;
+/// The two bars of a pair may differ in size by at most this ratio. A real
+/// letterbox is roughly even; a picture that merely happens to have a flat
+/// edge is not. Measured on `hqdefault.jpg`: 43/40 … 45/45 (0.93 … 1.00).
+const LETTERBOX_PAIR_SIMILARITY: f64 = 0.80;
+/// A bar pair below this fraction of its axis is noise, not letterboxing.
+const LETTERBOX_MIN_FRACTION: f64 = 0.02;
+
+/// Whether two colours are the same within [`LETTERBOX_BAR_TOLERANCE`].
+fn same_bar_colour(a: [u8; 3], b: [u8; 3]) -> bool {
+    a.iter().zip(b.iter()).all(|(x, y)| (*x as i32 - *y as i32).abs() <= LETTERBOX_BAR_TOLERANCE)
+}
+
+/// The bar widths at the two ends of one axis.
+///
+/// A row/column counts as bar only when it is uniform across its **whole
+/// extent** and matches the corner colour that seeds the run. Scanning the
+/// full row (not a single sample pixel) is what keeps ordinary artwork out:
+/// real covers contain flat runs inside the picture, and a sampled scan
+/// reports those as borders.
+///
+/// `lines[y]` yields the pixels of line `y` along the axis being measured.
+fn uniform_edges(
+    lines: impl Iterator<Item = Vec<[u8; 3]>>,
+    len: usize,
+) -> (usize, usize) {
+    let lines: Vec<Vec<[u8; 3]>> = lines.collect();
+    if lines.is_empty() {
+        return (0, 0);
+    }
+    let Some(first_seed) = lines[0].first().copied() else { return (0, 0) };
+    let mut start = 0usize;
+    for line in &lines {
+        let Some(px) = line.first().copied() else { break };
+        // Uniform across the row AND matching the seed: a bar spans the full
+        // width, so any picture content in the row ends the run.
+        if same_bar_colour(px, first_seed) && line.iter().all(|p| same_bar_colour(*p, first_seed)) {
+            start += 1;
+        } else {
+            break;
+        }
+    }
+    let Some(last_seed) = lines.last().and_then(|l| l.first().copied()) else {
+        return (0, 0);
+    };
+    let mut end = 0usize;
+    for line in lines.iter().rev() {
+        let Some(px) = line.first().copied() else { break };
+        if same_bar_colour(px, last_seed) && line.iter().all(|p| same_bar_colour(*p, last_seed)) {
+            end += 1;
+        } else {
+            break;
+        }
+    }
+    // A fully uniform axis is a solid image, not a letterbox.
+    if start >= len || end >= len || start + end >= len {
+        return (0, 0);
+    }
+    (start, end)
+}
+
+/// Whether a pair of bars is a *symmetric* letterbox/pillarbox pair worth
+/// trimming. Requiring **both** bars is what protects genuine artwork: a real
+/// cover can easily have a uniform run on one edge only (measured:
+/// `maxresdefault.jpg` has 69 uniform columns on its right edge and none on
+/// its left), and trimming that would silently crop the picture.
+fn is_crop_pair(lead: usize, trail: usize, len: usize) -> bool {
+    if lead == 0 || trail == 0 {
+        return false;
+    }
+    let (small, large) = (lead.min(trail) as f64, lead.max(trail) as f64);
+    if large <= 0.0 || small / large < LETTERBOX_PAIR_SIMILARITY {
+        return false;
+    }
+    ((lead + trail) as f64) / (len as f64) >= LETTERBOX_MIN_FRACTION
+}
+
+/// Crop the symmetric letterbox (top/bottom) or pillarbox (left/right) bars
+/// off a stream thumbnail, returning the encoded PNG bytes.
+///
+/// YouTube thumbnails are 4:3 letterboxes of a 16:9 picture — `hqdefault.jpg`
+/// is 480x360 with 43-45 px of solid bar top and bottom — so the picture does
+/// not fill a 16:9 art box. Trimming the bars yields the true ratio.
+///
+/// Undecodable bytes, bar-free artwork and one-sided uniform edges are
+/// returned **byte-identically** untouched; the caller can therefore apply
+/// this unconditionally.
+pub fn crop_letterbox_bytes(data: &[u8], enabled: bool) -> Vec<u8> {
+    if !enabled {
+        return data.to_vec();
+    }
+    let Ok(image) = image::ImageReader::new(Cursor::new(data))
+        .with_guessed_format()
+        .and_then(|reader| reader.decode().map_err(std::io::Error::other))
+    else {
+        return data.to_vec();
+    };
+    let Some(cropped) = crop_letterbox(&image) else {
+        return data.to_vec();
+    };
+    let mut png = Vec::new();
+    let encoder = PngEncoder::new(&mut png);
+    if encoder
+        .write_image(
+            cropped.as_bytes(),
+            cropped.width(),
+            cropped.height(),
+            cropped.color().into(),
+        )
+        .is_err()
+    {
+        return data.to_vec();
+    }
+    png
+}
+
+/// The image-level crop behind [`crop_letterbox_bytes`]. `None` when nothing
+/// worth cropping was found (so the caller keeps the original bytes).
+pub fn crop_letterbox(image: &DynamicImage) -> Option<DynamicImage> {
+    let rgb = image.to_rgb8();
+    let (w, h) = (rgb.width() as usize, rgb.height() as usize);
+    if w < 3 || h < 3 {
+        return None;
+    }
+    // Top/bottom bars: each row is measured across its **whole width**, so
+    // flat runs inside the picture never read as a bar.
+    let (top, bottom) = uniform_edges(
+        (0..h as u32).map(|y| {
+            (0..w as u32).map(|x| rgb.get_pixel(x, y).0).collect::<Vec<[u8; 3]>>()
+        }),
+        h,
+    );
+    if is_crop_pair(top, bottom, h) {
+        let new_h = u32::try_from(h - top - bottom).ok()?;
+        return Some(image.crop_imm(0, u32::try_from(top).ok()?, image.width(), new_h));
+    }
+    // Left/right bars: each column is measured across its whole height.
+    let (left, right) = uniform_edges(
+        (0..w as u32).map(|x| {
+            (0..h as u32).map(|y| rgb.get_pixel(x, y).0).collect::<Vec<[u8; 3]>>()
+        }),
+        w,
+    );
+    if is_crop_pair(left, right, w) {
+        let new_w = u32::try_from(w - left - right).ok()?;
+        return Some(image.crop_imm(u32::try_from(left).ok()?, 0, new_w, image.height()));
+    }
+    None
 }
 
 pub struct GifData<'frames> {

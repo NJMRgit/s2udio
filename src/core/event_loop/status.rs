@@ -34,7 +34,25 @@ pub(super) struct StatusState {
     last_reported_mpd_error: Option<String>,
     update_loop_guard: Option<StatusGuard>,
     update_db_loop_guard: Option<StatusGuard>,
+    /// 2026-10-15: bounded MPD decode-error recovery. MPD reports one decode
+    /// failure per unresolved row it skips, and each report used to start
+    /// another `yt-dlp` resolve for the row it named. A run of unresolved rows
+    /// therefore spawned an unbounded chain of resolves — the "resolve storm"
+    /// the user saw as the selection hopping down the queue with spinners
+    /// before playback finally settled (measured live: three resolves in 1.4 s
+    /// and 5.1 s to playback). The window bounds how many recoveries may run
+    /// back to back, so a pathological queue degrades to MPD's own skipping
+    /// with one explained message instead of hammering yt-dlp.
+    decode_recoveries: Vec<std::time::Instant>,
 }
+
+/// How many MPD decode-error recoveries may run inside
+/// [`DECODE_RECOVERY_WINDOW`] before the app stops resolving and lets MPD skip.
+const DECODE_RECOVERY_LIMIT: usize = 4;
+/// The window the recovery budget is measured over. Roughly the time a run of
+/// skips takes to walk a few unresolved rows, and long enough that an ordinary
+/// one-off recovery (a stale URL mid-track) never accumulates.
+const DECODE_RECOVERY_WINDOW: Duration = Duration::from_secs(10);
 
 impl StatusState {
     pub(super) fn new() -> Self {
@@ -44,7 +62,21 @@ impl StatusState {
             last_reported_mpd_error: None,
             update_loop_guard: None,
             update_db_loop_guard: None,
+            decode_recoveries: Vec::new(),
         }
+    }
+
+    /// Whether another decode-error recovery may start now, recording this one
+    /// if so. A `false` answer means the budget is spent: the caller leaves the
+    /// row to MPD and says so once, instead of starting yet another resolve.
+    fn may_recover_decode_error(&mut self, now: std::time::Instant) -> bool {
+        self.decode_recoveries
+            .retain(|at| now.saturating_duration_since(*at) < DECODE_RECOVERY_WINDOW);
+        if self.decode_recoveries.len() >= DECODE_RECOVERY_LIMIT {
+            return false;
+        }
+        self.decode_recoveries.push(now);
+        true
     }
 
     pub(super) fn start_update_loop(&mut self, ctx: &Ctx) {
@@ -188,34 +220,53 @@ pub(super) fn handle_mpd_command_finished(
                         .map(|song| (uri.clone(), song.id))
                 });
             if let Some((uri, song_id)) = error_link {
-                // Round 98: play the replacement only when MPD
-                // is actually stuck on this entry (it is the
-                // current song, or playback is stopped). A
-                // next-song **prefetch** failure names an
-                // entry MPD has not reached yet; playing it
-                // there cut the current track short, so such
-                // an entry is only swapped in place and MPD
-                // plays it when it gets there.
-                let stuck = ctx.status.songid == Some(song_id) || ctx.status.state == State::Stop;
-                // Round 105: a row the error names that is
-                // neither a tagged link nor an expired stream
-                // (a radio URL, a plain http URL) resolves to
-                // `false` and keeps today's behavior.
-                let resolved = if crate::shared::ytdlp::tagged_stream_entry(&uri).is_some() {
-                    if stuck {
-                        crate::ui::modals::paste::resolve_tagged_queue_entry(ctx, &uri, song_id)
-                    } else {
-                        crate::ui::modals::paste::resolve_tagged_queue_entry_in_place(
-                            ctx, &uri, song_id,
-                        )
-                    }
-                } else {
-                    crate::ui::modals::paste::re_resolve_expired_queue_entry(
-                        ctx, &uri, song_id, stuck,
-                    )
-                };
-                if resolved {
+                // 2026-10-15: the recovery budget. Every entry MPD skips spawns
+                // a full `yt-dlp` resolve, so a run of unresolved rows turns
+                // into an unbounded chain (the resolve storm). Once the budget
+                // is spent the row is left to MPD and said once: the queue
+                // degrades to skipping instead of stalling on resolves.
+                if !state.may_recover_decode_error(std::time::Instant::now()) {
+                    log::warn!(
+                        song_id, uri = uri.as_str();
+                        "Too many stream decode failures in a row; leaving the rest to MPD"
+                    );
+                    status_warn!(
+                        "Several queued streams failed to open; skipping them instead of resolving each one"
+                    );
                     state.last_reported_mpd_error = ctx.status.error.clone();
+                } else {
+                    // Round 98: play the replacement only when MPD
+                    // is actually stuck on this entry (it is the
+                    // current song, or playback is stopped). A
+                    // next-song **prefetch** failure names an
+                    // entry MPD has not reached yet; playing it
+                    // there cut the current track short, so such
+                    // an entry is only swapped in place and MPD
+                    // plays it when it gets there.
+                    let stuck =
+                        ctx.status.songid == Some(song_id) || ctx.status.state == State::Stop;
+                    // Round 105: a row the error names that is
+                    // neither a tagged link nor an expired stream
+                    // (a radio URL, a plain http URL) resolves to
+                    // `false` and keeps today's behavior.
+                    let resolved = if crate::shared::ytdlp::tagged_stream_entry(&uri).is_some() {
+                        if stuck {
+                            crate::ui::modals::paste::resolve_tagged_queue_entry(
+                                ctx, &uri, song_id,
+                            )
+                        } else {
+                            crate::ui::modals::paste::resolve_tagged_queue_entry_in_place(
+                                ctx, &uri, song_id,
+                            )
+                        }
+                    } else {
+                        crate::ui::modals::paste::re_resolve_expired_queue_entry(
+                            ctx, &uri, song_id, stuck,
+                        )
+                    };
+                    if resolved {
+                        state.last_reported_mpd_error = ctx.status.error.clone();
+                    }
                 }
             }
             let new_playlist = ctx.status.lastloadedplaylist.as_ref();

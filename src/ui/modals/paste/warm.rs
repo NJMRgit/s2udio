@@ -55,9 +55,22 @@ pub(super) fn warm_chapters(ctx: &Ctx, downloads: &[PastedItem]) {
 /// Only the **next** entry is warmed (never the rest of the playlist), and
 /// only when nothing is known for it yet: a fresh cached resolve, a resolve
 /// already in flight, or a non-link entry all leave the queue alone.
+///
+/// **Which row is "next" comes from MPD** (`status.nextsongid`), not from
+/// `current + 1`: in `random` mode MPD plays its own shuffled sequence, so the
+/// row after the current one is usually not the row that plays next, and
+/// warming it left the real next row unresolved (and the round-104 storm in
+/// place) for random playback. The index is only the fallback for when MPD
+/// reports no `nextsong` (a stopped player, or the end of the queue).
 pub fn warm_next_queue_link(ctx: &Ctx) {
     let Some((idx, current)) = ctx.find_current_song_in_queue() else { return };
-    let Some(next) = ctx.queue.get(idx + 1) else { return };
+    let next = ctx
+        .status
+        .nextsongid
+        .and_then(|id| ctx.queue.iter().find(|song| song.id == id))
+        .or_else(|| ctx.queue.get(idx + 1))
+        .cloned();
+    let Some(next) = next else { return };
     // One look ahead per (current, next) pair: the swap below refreshes the
     // queue, and without this marker each refresh would warm the entry after
     // the one just warmed (a slow crawl through the whole playlist).
@@ -337,7 +350,10 @@ pub fn ensure_mpris_metadata(ctx: &Ctx) {
         if let Some(thumb) = thumb {
             let _ = ctx
                 .work_sender
-                .send(WorkRequest::SaveMprisArt { url: thumb })
+                .send(WorkRequest::SaveMprisArt {
+                    url: thumb,
+                    crop_letterbox: ctx.config.album_art.crop_letterbox,
+                })
                 .map_err(|err| log::error!(error:? = err; "Failed to request MPRIS art"));
         }
         return;
