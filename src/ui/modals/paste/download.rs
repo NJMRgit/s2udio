@@ -1002,3 +1002,145 @@ pub fn open_stream_download_menu(
         .build();
     modal!(ctx, menu);
 }
+
+/// Round 97/98 regression cover: which queue/playlist rows the Download action
+/// may target, and how a not-yet-resolved playlist row is labelled.
+#[cfg(test)]
+mod download_target_tests {
+    use super::*;
+    use crate::shared::ytdlp::{ReplaceAction, YtListMeta, YtStreamInfo};
+
+    /// Round 110: a failed stream probe retries **once**, and only while the
+    /// job still has an engine to re-register (`active`). A finished, stopped
+    /// or vanished job is reported instead of retried.
+    #[test]
+    fn only_an_active_job_is_stream_retried_and_only_once() {
+        let job = |status: crate::core::dlctl::DlStatus| crate::core::dlctl::DlJob {
+            job_id: "dl-test".to_owned(),
+            request_id: "req-test".to_owned(),
+            infohash: None,
+            source_key: "key".to_owned(),
+            torrent_item: crate::core::dlctl::DlTorrentItem::Magnet(
+                "magnet:?xt=urn:btih:x".to_owned(),
+            ),
+            torrent_name: "name".to_owned(),
+            kept_files: Vec::new(),
+            status,
+            progress_percent: 0.0,
+            engine: None,
+            torrent_id: None,
+            error: None,
+            updated_at: 0,
+            done_at: None,
+            moved_to: None,
+        };
+        use crate::core::dlctl::DlStatus;
+        assert!(should_retry_daemon_stream(false, Some(&job(DlStatus::Downloading))));
+        assert!(should_retry_daemon_stream(false, Some(&job(DlStatus::Queued))));
+        assert!(
+            !should_retry_daemon_stream(true, Some(&job(DlStatus::Downloading))),
+            "the retry itself cannot fail into another retry"
+        );
+        assert!(!should_retry_daemon_stream(false, Some(&job(DlStatus::Completed))));
+        assert!(!should_retry_daemon_stream(false, Some(&job(DlStatus::Stopped))));
+        assert!(!should_retry_daemon_stream(false, None), "a vanished job is not retried");
+    }
+
+    fn ctx() -> Ctx {
+        // The receivers are leaked: the code under test sends work requests,
+        // and a dropped receiver would make every send fail.
+        let app = crossbeam::channel::unbounded();
+        let work = crossbeam::channel::unbounded();
+        let client = crossbeam::channel::unbounded();
+        Box::leak(Box::new(app.1.clone()));
+        Box::leak(Box::new(work.1.clone()));
+        Box::leak(Box::new(client.1.clone()));
+        crate::tests::fixtures::ctx(app, work, client)
+    }
+
+    fn info(url: &str, original: &str, title: &str) -> YtStreamInfo {
+        YtStreamInfo {
+            url: url.to_owned(),
+            original_url: original.to_owned(),
+            title: title.to_owned(),
+            ..Default::default()
+        }
+    }
+
+    fn target(ctx: &Ctx, uri: &str) -> Option<StreamDownloadTarget> {
+        stream_download_target(ctx, uri, "Row title", ReplaceAction::None)
+    }
+
+    #[test]
+    fn resolved_stream_url_is_a_target_and_carries_its_info() {
+        let ctx = ctx();
+        let resolved = "https://rr1.example/videoplayback?sig=a";
+        ctx.yt_info.borrow_mut().insert(
+            resolved.to_owned(),
+            info(resolved, "https://www.youtube.com/watch?v=AAA", "Alpha"),
+        );
+
+        let found = target(&ctx, resolved).expect("a resolved stream row is download target");
+        assert_eq!(found.original_url, "https://www.youtube.com/watch?v=AAA");
+        assert_eq!(found.label, "Alpha");
+        assert!(found.info.is_some(), "the resolved row keeps its info (chapters)");
+    }
+
+    #[test]
+    fn a_tagged_row_resolved_under_its_link_is_a_target() {
+        // Round 98: a queue row still carrying the intent tag is downloadable
+        // when the resolve was stored under the untagged link.
+        let ctx = ctx();
+        let link = "https://www.youtube.com/watch?v=BBB";
+        ctx.yt_info
+            .borrow_mut()
+            .insert(link.to_owned(), info("https://rr2.example/vb", link, "Beta"));
+
+        let found = target(&ctx, &format!("{link}#s2u-audio")).expect("tagged row is a target");
+        assert_eq!(found.original_url, link);
+        assert_eq!(found.label, "Beta");
+        assert!(found.info.is_some(), "the untagged resolve is picked up");
+    }
+
+    #[test]
+    fn an_unresolved_playlist_row_is_a_target_with_the_listing_title() {
+        let ctx = ctx();
+        let link = "https://www.youtube.com/watch?v=CCC";
+        ctx.yt_list_meta.borrow_mut().insert(
+            "CCC".to_owned(),
+            YtListMeta {
+                title: "Gamma Listed".to_owned(),
+                channel: None,
+                duration: Some(120.0),
+            },
+        );
+
+        let found = target(&ctx, &format!("{link}#s2u-audio")).expect("a linked row is a target");
+        assert_eq!(found.original_url, link, "yt-dlp gets the untagged link");
+        assert_eq!(found.label, "Gamma Listed");
+        assert!(found.info.is_none(), "nothing has resolved it yet");
+        // The single-row menu needs an info to build itself from.
+        assert_eq!(found.info().title, "Gamma Listed");
+        assert_eq!(found.info().original_url, link);
+    }
+
+    #[test]
+    fn a_local_file_is_not_a_target() {
+        let ctx = ctx();
+        assert!(target(&ctx, "/home/someone/Music/track.flac").is_none());
+    }
+
+    #[test]
+    fn a_radio_url_is_not_a_target() {
+        let ctx = ctx();
+        assert!(target(&ctx, "https://radio.example:8000/stream").is_none());
+    }
+
+    #[test]
+    fn the_fallback_label_is_used_when_nothing_knows_a_title() {
+        let ctx = ctx();
+        let link = "https://www.youtube.com/watch?v=DDD";
+        let found = target(&ctx, &format!("{link}#s2u-audio")).expect("linked row is a target");
+        assert_eq!(found.label, "Row title");
+    }
+}

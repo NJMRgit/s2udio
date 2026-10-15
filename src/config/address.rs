@@ -127,3 +127,73 @@ impl MpdAddress {
         }
     }
 }
+
+#[cfg(test)]
+#[rustfmt::skip]
+#[allow(clippy::unwrap_used, clippy::too_many_arguments, clippy::needless_pass_by_value)]
+mod tests {
+    use std::sync::{LazyLock, Mutex};
+
+    use test_case::test_case;
+    use crate::shared::env::ENV;
+    use super::{MpdAddress, MpdPassword};
+
+    static TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+    //               CLI Arg              Cli Pass           Config addr     Config pw            MPD_HOST          MPD_PORT                    Expected                          Description
+    #[test_case(Some("127.0.0.1:6600"),           None, "127.0.0.1:7600", None,              Some("192.168.0.1"), Some("6601"), MpdAddress::IpAndPort("127.0.0.1:6600".to_string()),                       None ; "prefer CLI over all")]
+    #[test_case(                  None,           None, "127.0.0.1:7600", None,              Some("192.168.0.1"), Some("6601"), MpdAddress::IpAndPort("192.168.0.1:6601".to_string()),                     None ; "prefer ENV over config")]
+    #[test_case(                  None,           None, "127.0.0.1:7600", None,                             None, Some("6601"), MpdAddress::IpAndPort("127.0.0.1:7600".to_string()),                       None ; "use config when only MPD_PORT")]
+    #[test_case(Some("127.0.0.1:6600"),           None, "127.0.0.1:7600", None,                             None,         None, MpdAddress::IpAndPort("127.0.0.1:6600".to_string()),                       None ; "prefer CLI over config")]
+    #[test_case(                  None,           None, "127.0.0.1:7600", None,              Some("/tmp/socket"),         None, MpdAddress::SocketPath("/tmp/socket".to_string()),                         None ; "assume socket path when only MPD_HOST")]
+    #[test_case(                  None,           None, "127.0.0.1:7600", None,                 Some("~/socket"),         None, MpdAddress::SocketPath("/home/u123/socket".to_string()),                   None ; "assume socket path when only MPD_HOST with tilde")]
+    #[test_case(                  None,           None, "127.0.0.1:7600", None,                     Some("@mpd"),         None, MpdAddress::AbstractSocket("mpd".to_string()),                             None ; "abstract socket in MPD_HOST")]
+    #[test_case(                  None,           None, "127.0.0.1:7600", None,              Some("192.168.0.1"),         None, MpdAddress::IpAndPort("192.168.0.1:6600".to_string()),                     None ; "use 6600 as default port with only MPD_HOST")]
+    #[test_case(                  None,           None, "127.0.0.1:7600", None,              Some("/tmp/socket"), Some("6601"), MpdAddress::SocketPath("/tmp/socket".to_string()),                         None ; "assume socket path with both MPD_HOST and MPD_PORT")]
+    #[test_case(                  None,           None, "127.0.0.1:7600", None,                 Some("~/socket"), Some("6601"), MpdAddress::SocketPath("/home/u123/socket".to_string()),                   None ; "assume socket path with both MPD_HOST and MPD_PORT with tilde")]
+    #[test_case(                  None,           None, "127.0.0.1:7600", None,                     Some("@mpd"), Some("6601"), MpdAddress::AbstractSocket("mpd".to_string()),                             None ; "assume abstract socket with both MPD_HOST and MPD_PORT")]
+    #[test_case( Some("/tmp/cli_sock"),           None, "127.0.0.1:7600", None,                             None,         None, MpdAddress::SocketPath("/tmp/cli_sock".to_string()),                       None ; "prefer CLI with socket path over all")]
+    #[test_case(                  None,           None, "/tmp/cfg_sock",  None,                             None,         None, MpdAddress::SocketPath("/tmp/cfg_sock".to_string()),                       None ; "socket path from config")]
+    #[test_case(                  None,           None, "@mpd",           None,                             None,         None, MpdAddress::AbstractSocket("mpd".to_string()),                             None ; "abstract socket path from config")]
+    #[test_case(Some("127.0.0.1:6600"), Some("secret"), "127.0.0.1:7600", None,              Some("192.168.0.1"), Some("6601"), MpdAddress::IpAndPort("127.0.0.1:6600".to_string()),      Some("secret".into()) ; "CLI password")]
+    #[test_case( Some("/tmp/cli_sock"), Some("secret"), "127.0.0.1:7600", None,              Some("192.168.0.1"), Some("6601"), MpdAddress::SocketPath("/tmp/cli_sock".to_string()),      Some("secret".into()) ; "CLI with socket path and password")]
+    #[test_case(                  None,           None, "127.0.0.1:7600", None,       Some("secret@192.168.0.1"), Some("6601"), MpdAddress::IpAndPort("192.168.0.1:6601".to_string()),    Some("secret".into()) ; "ENV password")]
+    #[test_case(                  None,           None, "127.0.0.1:7600", None,       Some("secret@/tmp/socket"), Some("6601"), MpdAddress::SocketPath("/tmp/socket".to_string()),        Some("secret".into()) ; "ENV with socket path and password")]
+    #[test_case(                  None,           None, "/tmp/cfg_sock",  Some("secret"),                   None,         None, MpdAddress::SocketPath("/tmp/cfg_sock".to_string()),      Some("secret".into()) ; "socket path from config with password")]
+    #[test_case(                  None,           None, "@mpd",           Some("secret"),                   None,         None, MpdAddress::AbstractSocket("mpd".to_string()),            Some("secret".into()) ; "abstract socket path from config with password")]
+    #[test_case(                  None,           None, "127.0.0.1:7600", None,              Some("secret@@mpd"),         None, MpdAddress::AbstractSocket("mpd".to_string()),            Some("secret".into()) ; "abstract socket path from ENV with password")]
+    #[test_case(                  None,           None, "127.0.0.1:7600", Some("secret"),                   None,         None, MpdAddress::IpAndPort("127.0.0.1:7600".to_string()),      Some("secret".into()) ; "ip and port from config with password")]
+    fn resolves(
+        cli_addr: Option<&str>,
+        cli_pw: Option<&str>,
+        config_addr: &str,
+        config_pw: Option<&str>,
+        host: Option<&str>,
+        port: Option<&str>,
+        expected_addr: MpdAddress,
+        expected_pw: Option<MpdPassword>
+    ) {
+        let _guard = TEST_LOCK.lock().unwrap();
+
+        ENV.clear();
+        ENV.set("HOME".to_string(), "/home/u123".to_string());
+        if let Some(host) = host {
+            ENV.set("MPD_HOST".to_string(), host.to_string());
+        }
+        if let Some(port) = port {
+            ENV.set("MPD_PORT".to_string(), port.to_string());
+        }
+
+        let result = MpdAddress::resolve(cli_addr.map(|v| v.to_string()), cli_pw.map(|v| v.to_string()), config_addr.to_string(), config_pw.map(|v| v.to_string()));
+
+        assert_eq!(result.0, expected_addr);
+        assert_eq!(result.1, expected_pw);
+    }
+
+    #[test]
+    fn password_is_obfuscated() {
+        let pw: MpdPassword = "verysecretpassword".to_string().into();
+
+        assert_eq!(format!("{pw:?}"), "*****");
+    }
+}

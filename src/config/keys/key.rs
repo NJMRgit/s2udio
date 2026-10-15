@@ -368,3 +368,180 @@ fn parse_special_key(
     };
     parser.parse_next(input).map(|key| (KeyModifiers::NONE, key))
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use itertools::Itertools;
+    use rstest::rstest;
+
+    use super::*;
+
+    #[rstest]
+    #[case("a",            Key { key: KeyCode::Char('a'), modifiers: KeyModifiers::NONE })]
+    #[case("A",            Key { key: KeyCode::Char('A'), modifiers: KeyModifiers::SHIFT })]
+    #[case("c",            Key { key: KeyCode::Char('c'), modifiers: KeyModifiers::NONE })]
+    #[case("C",            Key { key: KeyCode::Char('C'), modifiers: KeyModifiers::SHIFT })]
+    #[case("<C-a>",        Key { key: KeyCode::Char('a'), modifiers: KeyModifiers::CONTROL })]
+    #[case("<C-A>",        Key { key: KeyCode::Char('A'), modifiers: KeyModifiers::CONTROL | KeyModifiers::SHIFT })]
+    #[case("<C-S-Tab>",    Key { key: KeyCode::BackTab,   modifiers: KeyModifiers::CONTROL | KeyModifiers::SHIFT })]
+    #[case("<S-Tab>",      Key { key: KeyCode::BackTab,   modifiers: KeyModifiers::SHIFT })]
+    #[case("<C-Tab>",      Key { key: KeyCode::Tab,       modifiers: KeyModifiers::CONTROL })]
+    #[case("<Tab>",        Key { key: KeyCode::Tab,       modifiers: KeyModifiers::NONE })]
+    #[case("5",            Key { key: KeyCode::Char('5'), modifiers: KeyModifiers::NONE })]
+    #[case("<C-A-S-5>",    Key { key: KeyCode::Char('5'), modifiers: KeyModifiers::CONTROL | KeyModifiers::SHIFT | KeyModifiers::ALT })]
+    #[case("<C-Space>",    Key { key: KeyCode::Char(' '), modifiers: KeyModifiers::CONTROL })]
+    #[case("<Space>",      Key { key: KeyCode::Char(' '), modifiers: KeyModifiers::NONE })]
+    #[case("<C-S-Space>",  Key { key: KeyCode::Char(' '), modifiers: KeyModifiers::CONTROL | KeyModifiers::SHIFT })]
+    #[case("<C-S-F11>",    Key { key: KeyCode::F(11),     modifiers: KeyModifiers::CONTROL | KeyModifiers::SHIFT })]
+    #[case("<F11>",        Key { key: KeyCode::F(11),     modifiers: KeyModifiers::NONE })]
+    #[case("<BS>",         Key { key: KeyCode::Backspace, modifiers: KeyModifiers::NONE })]
+    #[case("<C-BS>",       Key { key: KeyCode::Backspace, modifiers: KeyModifiers::CONTROL })]
+    #[case("<CR>",         Key { key: KeyCode::Enter,     modifiers: KeyModifiers::NONE })]
+    #[case("<C-CR>",       Key { key: KeyCode::Enter,     modifiers: KeyModifiers::CONTROL })]
+    #[case("<Left>",       Key { key: KeyCode::Left,      modifiers: KeyModifiers::NONE })]
+    #[case("<C-Left>",     Key { key: KeyCode::Left,      modifiers: KeyModifiers::CONTROL })]
+    #[case("<Right>",      Key { key: KeyCode::Right,     modifiers: KeyModifiers::NONE })]
+    #[case("<C-Right>",    Key { key: KeyCode::Right,     modifiers: KeyModifiers::CONTROL })]
+    #[case("<Up>",         Key { key: KeyCode::Up,        modifiers: KeyModifiers::NONE })]
+    #[case("<C-Up>",       Key { key: KeyCode::Up,        modifiers: KeyModifiers::CONTROL })]
+    #[case("<Down>",       Key { key: KeyCode::Down,      modifiers: KeyModifiers::NONE })]
+    #[case("<C-Down>",     Key { key: KeyCode::Down,      modifiers: KeyModifiers::CONTROL })]
+    #[case("<Home>",       Key { key: KeyCode::Home,      modifiers: KeyModifiers::NONE })]
+    #[case("<C-Home>",     Key { key: KeyCode::Home,      modifiers: KeyModifiers::CONTROL })]
+    #[case("<End>",        Key { key: KeyCode::End,       modifiers: KeyModifiers::NONE })]
+    #[case("<C-End>",      Key { key: KeyCode::End,       modifiers: KeyModifiers::CONTROL })]
+    #[case("<PageUp>",     Key { key: KeyCode::PageUp,    modifiers: KeyModifiers::NONE })]
+    #[case("<C-PageUp>",   Key { key: KeyCode::PageUp,    modifiers: KeyModifiers::CONTROL })]
+    #[case("<PageDown>",   Key { key: KeyCode::PageDown,  modifiers: KeyModifiers::NONE })]
+    #[case("<C-PageDown>", Key { key: KeyCode::PageDown,  modifiers: KeyModifiers::CONTROL })]
+    #[case("<Del>",        Key { key: KeyCode::Delete,    modifiers: KeyModifiers::NONE })]
+    #[case("<C-Del>",      Key { key: KeyCode::Delete,    modifiers: KeyModifiers::CONTROL })]
+    #[case("<Esc>",        Key { key: KeyCode::Esc,       modifiers: KeyModifiers::NONE })]
+    #[case("<C-Esc>",      Key { key: KeyCode::Esc,       modifiers: KeyModifiers::CONTROL })]
+    #[case(">",            Key { key: KeyCode::Char('>'), modifiers: KeyModifiers::NONE })]
+    #[case("<",            Key { key: KeyCode::Char('<'), modifiers: KeyModifiers::NONE })]
+    #[case("<C-S-<>",      Key { key: KeyCode::Char('<'), modifiers: KeyModifiers::CONTROL | KeyModifiers::SHIFT })]
+    #[case("_",            Key { key: KeyCode::Char('_'), modifiers: KeyModifiers::NONE })]
+    #[case("-",            Key { key: KeyCode::Char('-'), modifiers: KeyModifiers::NONE })]
+    #[case("<C-S-->",      Key { key: KeyCode::Char('-'), modifiers: KeyModifiers::CONTROL | KeyModifiers::SHIFT })]
+    #[case("5",            Key { key: KeyCode::Char('5'), modifiers: KeyModifiers::NONE })]
+    #[case("%",            Key { key: KeyCode::Char('%'), modifiers: KeyModifiers::NONE })]
+    fn serialization_round_trip(#[case] expected_str: &str, #[case] input: Key) {
+        let serialized = input.to_string();
+        assert_eq!(expected_str, serialized);
+
+        let deserialized: KeySequence = serialized.parse().unwrap();
+        assert_eq!(deserialized.0[0], input);
+    }
+
+    #[rstest]
+    #[case("acd",                  vec![Key { key: KeyCode::Char('a'), modifiers: KeyModifiers::NONE }, Key { key: KeyCode::Char('c'), modifiers: KeyModifiers::NONE }, Key { key: KeyCode::Char('d'), modifiers: KeyModifiers::NONE }].into())]
+    #[case("d<C-A>f",              vec![Key { key: KeyCode::Char('d'), modifiers: KeyModifiers::NONE }, Key { key: KeyCode::Char('A'), modifiers: KeyModifiers::CONTROL | KeyModifiers::SHIFT }, Key { key: KeyCode::Char('f'), modifiers: KeyModifiers::NONE } ].into())]
+    #[case("<C-<><C-a><C->>",      vec![Key { key: KeyCode::Char('<'), modifiers: KeyModifiers::CONTROL }, Key { key: KeyCode::Char('a'), modifiers: KeyModifiers::CONTROL }, Key { key: KeyCode::Char('>'), modifiers: KeyModifiers::CONTROL } ].into())]
+    #[case("d<C-<>a<C-a>f<C->>t",  vec![Key { key: KeyCode::Char('d'), modifiers: KeyModifiers::NONE }, Key { key: KeyCode::Char('<'), modifiers: KeyModifiers::CONTROL }, Key { key: KeyCode::Char('a'), modifiers: KeyModifiers::NONE }, Key { key: KeyCode::Char('a'), modifiers: KeyModifiers::CONTROL }, Key { key: KeyCode::Char('f'), modifiers: KeyModifiers::NONE }, Key { key: KeyCode::Char('>'), modifiers: KeyModifiers::CONTROL }, Key { key: KeyCode::Char('t'), modifiers: KeyModifiers::NONE } ].into())]
+    fn sequence_round_trip(#[case] expected_str: &str, #[case] input: KeySequence) {
+        let serialized = input.iter().join("");
+        assert_eq!(expected_str, serialized);
+
+        let deserialized: KeySequence = serialized.parse().unwrap();
+        assert_eq!(deserialized, input);
+    }
+
+    #[rstest]
+    #[case("BS")]
+    #[case("Backspace")]
+    #[case("CR")]
+    #[case("Enter")]
+    #[case("Left")]
+    #[case("Right")]
+    #[case("Up")]
+    #[case("Down")]
+    #[case("Home")]
+    #[case("End")]
+    #[case("PageUp")]
+    #[case("PageDown")]
+    #[case("Tab")]
+    #[case("Del")]
+    #[case("Insert")]
+    #[case("Esc")]
+    #[case("Space")]
+    #[case("F10")]
+    #[case("F11")]
+    #[case("F12")]
+    #[case("F1")]
+    #[case("F2")]
+    #[case("F3")]
+    #[case("F4")]
+    #[case("F5")]
+    #[case("F6")]
+    #[case("F7")]
+    #[case("F8")]
+    #[case("F9")]
+    fn lone_special_keys_without_brackets_should_deser_as_sequence(#[case] mut input: &str) {
+        let input_len = input.chars().count();
+        let deserialized = parse_sequence(&mut input).unwrap();
+        assert_eq!(deserialized.len(), input_len);
+
+        for (i, mut c) in input.chars().enumerate() {
+            let mut modifiers = KeyModifiers::NONE;
+            if c.is_uppercase() {
+                modifiers |= KeyModifiers::SHIFT;
+                c = c.to_ascii_uppercase();
+            }
+
+            let key = Key { key: KeyCode::Char(c), modifiers };
+            assert_eq!(deserialized[i], key);
+        }
+    }
+
+    #[rstest]
+    #[case("<BS>",        Key { key: KeyCode::Backspace, modifiers: KeyModifiers::NONE })]
+    #[case("<Backspace>", Key { key: KeyCode::Backspace, modifiers: KeyModifiers::NONE })]
+    #[case("<CR>",        Key { key: KeyCode::Enter,     modifiers: KeyModifiers::NONE })]
+    #[case("<Enter>",     Key { key: KeyCode::Enter,     modifiers: KeyModifiers::NONE })]
+    #[case("<Left>",      Key { key: KeyCode::Left,      modifiers: KeyModifiers::NONE })]
+    #[case("<Right>",     Key { key: KeyCode::Right,     modifiers: KeyModifiers::NONE })]
+    #[case("<Up>",        Key { key: KeyCode::Up,        modifiers: KeyModifiers::NONE })]
+    #[case("<Down>",      Key { key: KeyCode::Down,      modifiers: KeyModifiers::NONE })]
+    #[case("<Home>",      Key { key: KeyCode::Home,      modifiers: KeyModifiers::NONE })]
+    #[case("<End>",       Key { key: KeyCode::End,       modifiers: KeyModifiers::NONE })]
+    #[case("<PageUp>",    Key { key: KeyCode::PageUp,    modifiers: KeyModifiers::NONE })]
+    #[case("<PageDown>",  Key { key: KeyCode::PageDown,  modifiers: KeyModifiers::NONE })]
+    #[case("<Tab>",       Key { key: KeyCode::Tab,       modifiers: KeyModifiers::NONE })]
+    #[case("<Del>",       Key { key: KeyCode::Delete,    modifiers: KeyModifiers::NONE })]
+    #[case("<Insert>",    Key { key: KeyCode::Insert,    modifiers: KeyModifiers::NONE })]
+    #[case("<Esc>",       Key { key: KeyCode::Esc,       modifiers: KeyModifiers::NONE })]
+    #[case("<Space>",     Key { key: KeyCode::Char(' '), modifiers: KeyModifiers::NONE })]
+    #[case("<F10>",       Key { key: KeyCode::F(10),     modifiers: KeyModifiers::NONE })]
+    #[case("<F11>",       Key { key: KeyCode::F(11),     modifiers: KeyModifiers::NONE })]
+    #[case("<F12>",       Key { key: KeyCode::F(12),     modifiers: KeyModifiers::NONE })]
+    #[case("<F1>",        Key { key: KeyCode::F(1),      modifiers: KeyModifiers::NONE })]
+    #[case("<F2>",        Key { key: KeyCode::F(2),      modifiers: KeyModifiers::NONE })]
+    #[case("<F3>",        Key { key: KeyCode::F(3),      modifiers: KeyModifiers::NONE })]
+    #[case("<F4>",        Key { key: KeyCode::F(4),      modifiers: KeyModifiers::NONE })]
+    #[case("<F5>",        Key { key: KeyCode::F(5),      modifiers: KeyModifiers::NONE })]
+    #[case("<F6>",        Key { key: KeyCode::F(6),      modifiers: KeyModifiers::NONE })]
+    #[case("<F7>",        Key { key: KeyCode::F(7),      modifiers: KeyModifiers::NONE })]
+    #[case("<F8>",        Key { key: KeyCode::F(8),      modifiers: KeyModifiers::NONE })]
+    #[case("<F9>",        Key { key: KeyCode::F(9),      modifiers: KeyModifiers::NONE })]
+    fn lone_special(#[case] mut expected_str: &str, #[case] input: Key) {
+        let deserialized = parse_sequence(&mut expected_str).unwrap();
+        assert_eq!(deserialized[0], input);
+    }
+
+    #[test]
+    fn ctrl_builder_adds_the_control_modifier_to_the_last_key() {
+        let seq = KeySequence::new().tab().ctrl();
+        assert_eq!(
+            seq.0[0],
+            Key { key: KeyCode::Tab, modifiers: KeyModifiers::CONTROL },
+            "tab().ctrl() yields Ctrl+Tab"
+        );
+        assert_eq!(seq.to_string(), "<C-Tab>");
+        // The modifier applies to the last key only (multi-key sequences).
+        let seq = KeySequence::new().char('g').char('g').ctrl();
+        assert_eq!(seq.0[1], Key { key: KeyCode::Char('g'), modifiers: KeyModifiers::CONTROL });
+        assert_eq!(seq.0[0].modifiers, KeyModifiers::NONE);
+    }
+}

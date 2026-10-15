@@ -55,3 +55,17 @@ impl<const LEN: usize, T> From<RingVec<LEN, T>> for VecDeque<T> {
         buffer.inner
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::RingVec;
+
+    #[test]
+    fn removes_last_element_when_full() {
+        let mut input = RingVec::<3, usize>::from(vec![1, 2, 3]);
+
+        input.push(4);
+
+        assert_eq!(Vec::<_>::from(input), vec![2, 3, 4]);
+    }
+}

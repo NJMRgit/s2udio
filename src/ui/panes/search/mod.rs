@@ -1403,4 +1403,507 @@ enum Phase {
 
 
 
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
 
+    use crossterm::event::KeyModifiers;
+    use ratatui::prelude::Rect;
+
+    use super::{BrowserArea, Phase, SearchPane};
+    use crate::{
+        config::keys::CommonAction,
+        mpd::commands::Song,
+        shared::{
+            keys::{ActionEvent, Actions},
+            mouse_event::{MouseEvent, MouseEventKind},
+        },
+        ui::{dirstack::Dir, panes::Pane},
+    };
+
+    fn act(pane: &mut SearchPane, ctx: &mut crate::ctx::Ctx, actions: Vec<Actions>) {
+        let mut event = ActionEvent::from(std::sync::Arc::new(actions));
+        pane.handle_action(&mut event, ctx).unwrap();
+    }
+
+    fn songs() -> Vec<Song> {
+        (0..5)
+            .map(|i| Song {
+                id: i as u32,
+                file: format!("/mnt/music/{i}.flac"),
+                duration: Some(Duration::from_secs(10)),
+                ..Default::default()
+            })
+            .collect()
+    }
+
+    fn click(pane: &mut SearchPane, x: u16, y: u16, ctx: &mut crate::ctx::Ctx) {
+        click_mod(pane, x, y, crossterm::event::KeyModifiers::NONE, ctx);
+    }
+
+    fn click_mod(
+        pane: &mut SearchPane,
+        x: u16,
+        y: u16,
+        modifiers: KeyModifiers,
+        ctx: &mut crate::ctx::Ctx,
+    ) {
+        pane.handle_mouse_event(
+            MouseEvent { x, y, kind: MouseEventKind::LeftClick, modifiers },
+            ctx,
+        )
+        .unwrap();
+    }
+
+    /// Click row `row` of the results list (5 columns in, past the border).
+    fn click_row(
+        pane: &mut SearchPane,
+        current: Rect,
+        row: u16,
+        modifiers: KeyModifiers,
+        ctx: &mut crate::ctx::Ctx,
+    ) {
+        click_mod(pane, current.x + 5, current.y + row, modifiers, ctx);
+    }
+
+    fn make_ctx() -> crate::ctx::Ctx {
+        let (app_tx, _app_rx) = crossbeam::channel::unbounded();
+        crate::tests::fixtures::ctx(
+            (app_tx, _app_rx),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+        )
+    }
+
+    fn marks(pane: &SearchPane) -> Vec<usize> {
+        pane.songs_dir.marked().iter().copied().collect()
+    }
+
+    fn row_bg(
+        pane: &mut SearchPane,
+        ctx: &crate::ctx::Ctx,
+        row: u16,
+    ) -> Option<ratatui::style::Color> {
+        let backend = ratatui::backend::TestBackend::new(100, 40);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|frame| pane.render(frame, Rect::new(0, 0, 100, 40), ctx).unwrap()).unwrap();
+        let buf = terminal.backend().buffer();
+        let current = pane.column_areas[BrowserArea::Current];
+        buf[(current.x, current.y + row)].style().bg
+    }
+
+    fn input_bg(
+        pane: &mut SearchPane,
+        ctx: &crate::ctx::Ctx,
+        area: Rect,
+        row: u16,
+    ) -> Option<ratatui::style::Color> {
+        let backend = ratatui::backend::TestBackend::new(100, 40);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|frame| pane.render(frame, Rect::new(0, 0, 100, 40), ctx).unwrap()).unwrap();
+        let buf = terminal.backend().buffer();
+        buf[(area.x, area.y + row)].style().bg
+    }
+
+    /// Render the pane at a given size and return the buffer.
+    fn render_buf(
+        pane: &mut SearchPane,
+        ctx: &crate::ctx::Ctx,
+        w: u16,
+        h: u16,
+    ) -> ratatui::buffer::Buffer {
+        let backend = ratatui::backend::TestBackend::new(w, h);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|frame| pane.render(frame, Rect::new(0, 0, w, h), ctx).unwrap()).unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    fn rendered_pane(ctx: &mut crate::ctx::Ctx) -> SearchPane {
+        let mut pane = SearchPane::new(ctx);
+        let backend = ratatui::backend::TestBackend::new(100, 40);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|frame| pane.render(frame, Rect::new(0, 0, 100, 40), ctx).unwrap()).unwrap();
+        pane
+    }
+
+    #[test]
+    fn clicking_a_result_selects_it_and_enters_browse_results() {
+        let (app_tx, _app_rx) = crossbeam::channel::unbounded();
+        let mut ctx = crate::tests::fixtures::ctx(
+            (app_tx, _app_rx),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+        );
+        let mut pane = rendered_pane(&mut ctx);
+        pane.songs_dir = Dir::new(songs());
+        assert!(matches!(pane.phase, Phase::Search));
+
+        // Click a results row (right pane, second row).
+        let current = pane.column_areas[BrowserArea::Current];
+        click(&mut pane, current.x + 5, current.y + 1, &mut ctx);
+
+        assert!(matches!(pane.phase, Phase::BrowseResults));
+        assert_eq!(pane.songs_dir.state.get_selected(), Some(1));
+    }
+
+
+    #[test]
+    fn test_search_pane_scrollbar_calculation() {
+        let scrollbar_height: u16 = 10;
+        let total_items: usize = 50;
+
+        let clicked_y = scrollbar_height.saturating_sub(1);
+        let target_idx = if clicked_y >= scrollbar_height.saturating_sub(1) {
+            total_items.saturating_sub(1)
+        } else {
+            let position_ratio =
+                f64::from(clicked_y) / f64::from(scrollbar_height.saturating_sub(1));
+            ((position_ratio * (total_items.saturating_sub(1)) as f64) as usize)
+                .min(total_items.saturating_sub(1))
+        };
+
+        assert_eq!(target_idx, total_items - 1);
+
+        let clicked_y = 0;
+        let position_ratio = f64::from(clicked_y) / f64::from(scrollbar_height.saturating_sub(1));
+        let target_idx = ((position_ratio * (total_items.saturating_sub(1)) as f64) as usize)
+            .min(total_items.saturating_sub(1));
+
+        assert_eq!(target_idx, 0);
+
+        let clicked_y = 5;
+        let position_ratio = f64::from(clicked_y) / f64::from(scrollbar_height.saturating_sub(1));
+        let target_idx = ((position_ratio * (total_items.saturating_sub(1)) as f64) as usize)
+            .min(total_items.saturating_sub(1));
+
+        // should be roughly in the middle (around 25-27)
+        assert!((20..=30).contains(&target_idx));
+    }
+
+
+    #[test]
+    fn ctrl_a_marks_every_result_in_browse_results_phase() {
+        let mut ctx = make_ctx();
+        let mut pane = rendered_pane(&mut ctx);
+        pane.songs_dir = Dir::new(songs());
+        pane.phase = Phase::BrowseResults;
+
+        act(&mut pane, &mut ctx, vec![Actions::Common(CommonAction::SelectAll)]);
+        assert_eq!(marks(&pane), (0..5).collect::<Vec<_>>());
+
+        // Ctrl+A again keeps everything marked.
+        act(&mut pane, &mut ctx, vec![Actions::Common(CommonAction::SelectAll)]);
+        assert_eq!(marks(&pane).len(), 5);
+    }
+
+    #[test]
+    fn ctrl_a_in_the_filter_phase_is_a_no_op() {
+        let mut ctx = make_ctx();
+        let mut pane = rendered_pane(&mut ctx);
+        pane.songs_dir = Dir::new(songs());
+        pane.phase = Phase::Search;
+
+        act(&mut pane, &mut ctx, vec![Actions::Common(CommonAction::SelectAll)]);
+        assert!(
+            pane.songs_dir.marked().is_empty(),
+            "the MPD search filter pane is excluded from ctrl+a"
+        );
+    }
+
+    #[test]
+    fn alt_click_ranges_from_the_anchor() {
+        let mut ctx = make_ctx();
+        let mut pane = rendered_pane(&mut ctx);
+        pane.songs_dir = Dir::new(songs());
+        pane.phase = Phase::BrowseResults;
+        let current = pane.column_areas[BrowserArea::Current];
+
+        // A plain click sets the anchor (row 0).
+        click_row(&mut pane, current, 0, KeyModifiers::NONE, &mut ctx);
+        // alt+click on row 3 range-marks [0..3].
+        click_row(&mut pane, current, 3, KeyModifiers::ALT, &mut ctx);
+        assert_eq!(marks(&pane), vec![0, 1, 2, 3]);
+        // alt+clicking closer to the anchor replaces the range.
+        click_row(&mut pane, current, 1, KeyModifiers::ALT, &mut ctx);
+        assert_eq!(marks(&pane), vec![0, 1]);
+    }
+
+    #[test]
+    fn marked_rows_render_with_the_marked_style() {
+        let mut ctx = make_ctx();
+        let mut pane = rendered_pane(&mut ctx);
+        pane.songs_dir = Dir::new(songs());
+        pane.phase = Phase::BrowseResults;
+        let current = pane.column_areas[BrowserArea::Current];
+
+        // Plain-click row 2, then ctrl+click row 4: both marked (the
+        // initially selected row stays marked); the cursor lands on row 4.
+        click_row(&mut pane, current, 2, KeyModifiers::NONE, &mut ctx);
+        click_row(&mut pane, current, 4, KeyModifiers::CONTROL, &mut ctx);
+        assert_eq!(marks(&pane), vec![2, 4]);
+
+        // The marked row that is not the cursor renders with the lighter
+        // marked highlight; the cursor row keeps the List's accent
+        // highlight (the directories convention).
+        let marked = ctx.config.theme.marked_item_style.bg;
+        assert_eq!(
+            row_bg(&mut pane, &ctx, 2),
+            marked,
+            "the marked row renders with the marked highlight"
+        );
+    }
+
+    #[test]
+    fn row_under_mouse_gets_the_hover_highlight() {
+        let mut ctx = make_ctx();
+        let mut pane = rendered_pane(&mut ctx);
+        pane.songs_dir = Dir::new(songs());
+        pane.phase = Phase::BrowseResults;
+        let current = pane.column_areas[BrowserArea::Current];
+
+        // No mouse: the row background is the plain list text (a Reset bg).
+        assert_eq!(row_bg(&mut pane, &ctx, 2), Some(ratatui::style::Color::Reset));
+
+        // Point the mouse at row 2: the row gets the hover highlight.
+        ctx.set_mouse_pos(Some(ratatui::layout::Position { x: current.x + 1, y: current.y + 2 }));
+        let hovered = ctx.config.theme.hovered_item_style.bg;
+        assert_eq!(row_bg(&mut pane, &ctx, 2), hovered);
+
+        // The other rows stay plain.
+        assert_eq!(row_bg(&mut pane, &ctx, 3), Some(ratatui::style::Color::Reset));
+        ctx.set_mouse_pos(None);
+    }
+
+
+    #[test]
+    fn keyboard_d_and_arrows_switch_between_filters_and_results() {
+        use std::sync::Arc;
+
+        use crate::shared::keys::{ActionEvent, Actions};
+
+        let mut ctx = make_ctx();
+        let mut pane = rendered_pane(&mut ctx);
+        pane.songs_dir = Dir::new(songs());
+        assert!(matches!(pane.phase, Phase::Search));
+
+        // `d` (the directories FolderExpand key) enters the results.
+        let mut ev = ActionEvent::from(Arc::new(vec![Actions::Directories(
+            crate::config::keys::DirectoriesActions::FolderExpand,
+        )]));
+        pane.handle_action(&mut ev, &mut ctx).unwrap();
+        assert!(matches!(pane.phase, Phase::BrowseResults), "d enters the results");
+
+        // `a` (FolderCollapse) returns to the filters.
+        let mut ev = ActionEvent::from(Arc::new(vec![Actions::Directories(
+            crate::config::keys::DirectoriesActions::FolderCollapse,
+        )]));
+        pane.handle_action(&mut ev, &mut ctx).unwrap();
+        assert!(matches!(pane.phase, Phase::Search), "a returns to the filters");
+
+        // `→` (PlayFile) enters again; `←` (FolderCollapse) leaves again.
+        let mut ev = ActionEvent::from(Arc::new(vec![Actions::Directories(
+            crate::config::keys::DirectoriesActions::PlayFile,
+        )]));
+        pane.handle_action(&mut ev, &mut ctx).unwrap();
+        assert!(matches!(pane.phase, Phase::BrowseResults), "→ enters the results");
+        let mut ev = ActionEvent::from(Arc::new(vec![Actions::Directories(
+            crate::config::keys::DirectoriesActions::FolderCollapse,
+        )]));
+        pane.handle_action(&mut ev, &mut ctx).unwrap();
+        assert!(matches!(pane.phase, Phase::Search), "← returns to the filters");
+
+        // With no results, `d` stays in the filters.
+        pane.songs_dir = Dir::default();
+        let mut ev = ActionEvent::from(Arc::new(vec![Actions::Directories(
+            crate::config::keys::DirectoriesActions::FolderExpand,
+        )]));
+        pane.handle_action(&mut ev, &mut ctx).unwrap();
+        assert!(matches!(pane.phase, Phase::Search), "d with no results stays put");
+    }
+
+    #[test]
+    fn filter_row_under_the_mouse_gets_the_hover_highlight() {
+        let mut ctx = make_ctx();
+        let mut pane = rendered_pane(&mut ctx);
+        let hovered = ctx.config.theme.hovered_item_style.bg;
+        let inputs_area = pane.inputs.area;
+
+        // Hover the second filter row: it gets the hover highlight.
+        ctx.set_mouse_pos(Some(ratatui::layout::Position {
+            x: inputs_area.x + 1,
+            y: inputs_area.y + 1,
+        }));
+        assert_eq!(
+            input_bg(&mut pane, &ctx, inputs_area, 1),
+            hovered,
+            "the hovered filter row uses the hover highlight"
+        );
+
+        // The hover wins over the keyboard selection on the focused row.
+        assert_eq!(
+            input_bg(&mut pane, &ctx, inputs_area, 0),
+            hovered,
+            "hover wins over the keyboard selection"
+        );
+
+        // A row that is not under the mouse stays plain.
+        ctx.set_mouse_pos(Some(ratatui::layout::Position {
+            x: inputs_area.x + 1,
+            y: inputs_area.y + 3,
+        }));
+        assert_ne!(
+            input_bg(&mut pane, &ctx, inputs_area, 1),
+            hovered,
+            "a non-hovered row keeps its plain style"
+        );
+
+        // No mouse position: nothing is hovered.
+        ctx.set_mouse_pos(None);
+        assert_ne!(input_bg(&mut pane, &ctx, inputs_area, 1), hovered, "no pointer, no hover");
+    }
+
+    #[test]
+    fn narrow_pane_keeps_the_filter_values_visible() {
+        let mut ctx = make_ctx();
+        let mut pane = rendered_pane(&mut ctx);
+        let buf = render_buf(&mut pane, &ctx, 80, 40);
+        let inner = pane.column_areas[BrowserArea::Previous];
+
+        // The first filter row's label ends with a colon; the cells after
+        // it are the value column. On an 80-column terminal the pane must
+        // keep that column wide enough to read a query, instead of cutting
+        // it to zero (the round-26 regression).
+        let mut colon = None;
+        for x in inner.x..inner.x.saturating_add(inner.width) {
+            if buf[(x, inner.y)].symbol() == ":" {
+                colon = Some(x);
+                break;
+            }
+        }
+        let colon = colon.expect("the first filter row renders its label colon");
+        let value_width = (inner.x + inner.width).saturating_sub(colon + 1);
+        assert!(
+            value_width >= 10,
+            "the filter value column stays usable on a narrow pane (got {value_width} cells)"
+        );
+    }
+
+    /// A ctx that keeps the app-event receiver, so tests can observe the
+    /// modals the pane opens.
+    fn make_ctx_with_rx()
+    -> (crate::ctx::Ctx, crossbeam::channel::Receiver<crate::shared::events::AppEvent>) {
+        let (app_tx, app_rx) = crossbeam::channel::unbounded();
+        let ctx = crate::tests::fixtures::ctx(
+            (app_tx, app_rx.clone()),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+        );
+        (ctx, app_rx)
+    }
+
+    #[test]
+    fn enter_opens_the_options_menu_in_browse_results() {
+        use std::sync::Arc;
+
+        use crate::config::keys::CommonAction;
+        use crate::shared::keys::{ActionEvent, Actions};
+
+        let (mut ctx, app_rx) = make_ctx_with_rx();
+        let mut pane = rendered_pane(&mut ctx);
+        pane.songs_dir = Dir::new(songs());
+        pane.phase = Phase::BrowseResults;
+
+        let mut ev = ActionEvent::from(Arc::new(vec![Actions::Common(CommonAction::Confirm)]));
+        pane.handle_action(&mut ev, &mut ctx).unwrap();
+
+        let got = app_rx.try_recv();
+        assert!(
+            matches!(
+                got,
+                Ok(crate::shared::events::AppEvent::UiEvent(crate::ui::UiAppEvent::Modal(_)))
+            ),
+            "Enter in the results opens the options menu (got {got:?})"
+        );
+    }
+
+    #[test]
+    fn space_with_multiple_marks_opens_the_menu_instead_of_pausing() {
+        use std::sync::Arc;
+
+        use crate::config::keys::GlobalAction;
+        use crate::shared::keys::{ActionEvent, Actions};
+
+        let (mut ctx, app_rx) = make_ctx_with_rx();
+        let mut pane = rendered_pane(&mut ctx);
+        pane.songs_dir = Dir::new(songs());
+        pane.phase = Phase::BrowseResults;
+        pane.songs_dir.state.toggle_mark(0);
+        pane.songs_dir.state.toggle_mark(2);
+        assert_eq!(pane.songs_dir.marked().len(), 2);
+
+        let mut ev = ActionEvent::from(Arc::new(vec![Actions::Global(GlobalAction::TogglePause)]));
+        pane.handle_action(&mut ev, &mut ctx).unwrap();
+
+        let got = app_rx.try_recv();
+        assert!(
+            matches!(
+                got,
+                Ok(crate::shared::events::AppEvent::UiEvent(crate::ui::UiAppEvent::Modal(_)))
+            ),
+            "Space with a multi-selection opens the options menu (got {got:?})"
+        );
+    }
+
+    #[test]
+    fn space_with_single_or_no_marks_keeps_playback() {
+        use std::sync::Arc;
+
+        use crate::config::keys::GlobalAction;
+        use crate::shared::keys::{ActionEvent, Actions};
+
+        let (mut ctx, app_rx) = make_ctx_with_rx();
+        let mut pane = rendered_pane(&mut ctx);
+        pane.songs_dir = Dir::new(songs());
+        pane.phase = Phase::BrowseResults;
+
+        // No marks: Space keeps the transport.
+        let mut ev = ActionEvent::from(Arc::new(vec![Actions::Global(GlobalAction::TogglePause)]));
+        pane.handle_action(&mut ev, &mut ctx).unwrap();
+        assert!(app_rx.try_recv().is_err(), "no marks: Space keeps the transport");
+
+        // A single mark: Space still controls playback.
+        pane.songs_dir.state.toggle_mark(1);
+        let mut ev = ActionEvent::from(Arc::new(vec![Actions::Global(GlobalAction::TogglePause)]));
+        pane.handle_action(&mut ev, &mut ctx).unwrap();
+        assert!(app_rx.try_recv().is_err(), "single mark: Space keeps the transport");
+    }
+
+    #[test]
+    fn expanded_filter_labels_keep_the_margin_and_value_spacing() {
+        let mut ctx = make_ctx();
+        let mut pane = rendered_pane(&mut ctx);
+        // A wide terminal renders the expanded label form (" : ").
+        let buf = render_buf(&mut pane, &ctx, 140, 40);
+        let inner = pane.column_areas[BrowserArea::Previous];
+
+        let mut colon = None;
+        for x in inner.x..inner.x.saturating_add(inner.width) {
+            if buf[(x, inner.y)].symbol() == ":" {
+                colon = Some(x);
+                break;
+            }
+        }
+        let colon = colon.expect("the first filter row renders its label colon");
+        // One space separates the colon from the value.
+        assert_eq!(
+            buf[(colon + 1, inner.y)].symbol(),
+            " ",
+            "the value is separated from the colon by a space"
+        );
+        let value_width = (inner.x + inner.width).saturating_sub(colon + 2);
+        assert!(
+            value_width >= 10,
+            "the value column stays wide on the expanded pane (got {value_width})"
+        );
+    }
+}

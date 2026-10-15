@@ -710,3 +710,257 @@ impl Pane for CavaPane {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_ctx() -> Ctx {
+        crate::tests::fixtures::ctx(
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+        )
+    }
+
+    /// The cava bars are a terminal-side overlay: while any modal (the
+    /// Settings panel, paste popup, …) is open they must never start
+    /// drawing — the overlay would paint over the modal's full-window view.
+    #[test]
+    fn run_is_suppressed_while_a_modal_is_open() {
+        let mut ctx = test_ctx();
+        let mut pane = CavaPane::new(&ctx);
+
+        // The settings panel opened while playing: the bars stop.
+        pane.area = Rect::new(0, 0, 40, 12);
+        pane.on_event(&mut UiEvent::ModalOpened, true, &ctx).unwrap();
+        assert!(pane.is_modal_open);
+
+        // Any run() attempt while the modal is open must not start the bars.
+        pane.run(&ctx).unwrap();
+        assert_eq!(pane.sent_area, Rect::default(), "bars must not start under a modal");
+
+        // Closing the modal (still playing) clears the flag and restarts.
+        ctx.status.state = State::Play;
+        pane.on_event(&mut UiEvent::ModalClosed, true, &ctx).unwrap();
+        assert!(!pane.is_modal_open);
+        assert_eq!(pane.sent_area, pane.area, "bars restart after the modal closes");
+    }
+
+    /// Closing the modal while paused must still clear the flag, so a later
+    /// playback start (PlaybackStateChanged) draws the bars again instead of
+    /// being stuck behind a stale is_modal_open.
+    #[test]
+    fn modal_closed_clears_the_flag_when_paused_too() {
+        let mut ctx = test_ctx();
+        let mut pane = CavaPane::new(&ctx);
+
+        pane.on_event(&mut UiEvent::ModalOpened, true, &ctx).unwrap();
+        assert!(pane.is_modal_open);
+
+        // The modal closes while the player is paused.
+        ctx.status.state = State::Pause;
+        pane.on_event(&mut UiEvent::ModalClosed, true, &ctx).unwrap();
+        assert!(!pane.is_modal_open, "the flag clears even when paused");
+
+        // Playback resumes: the bars start again.
+        pane.area = Rect::new(0, 0, 40, 12);
+        ctx.status.state = State::Play;
+        pane.on_event(&mut UiEvent::PlaybackStateChanged, true, &ctx).unwrap();
+        assert_eq!(pane.sent_area, pane.area, "playback start redraws the bars");
+    }
+
+    /// Lyrics edit mode swaps the visualizer for the edit-controls
+    /// legend: rendering with the flag set draws the legend and pauses the
+    /// bars; clearing the flag (while playing) restarts them.
+    #[test]
+    fn edit_mode_renders_the_legend_and_pauses_the_bars() {
+        let mut ctx = test_ctx();
+        let mut pane = CavaPane::new(&ctx);
+        pane.area = Rect::new(0, 0, 60, 12);
+        ctx.status.state = State::Play;
+        ctx.lyrics_edit_mode.set(true);
+
+        let backend = ratatui::backend::TestBackend::new(60, 12);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|f| pane.render(f, pane.area, &ctx).unwrap()).unwrap();
+        assert!(pane.legend_shown, "edit mode shows the legend");
+        let buf = terminal.backend().buffer();
+        let text: String = buf.content().iter().map(|c| c.symbol()).collect();
+        assert!(text.contains("Lyrics edit mode"), "legend title: {text}");
+        assert!(text.contains("delete word"), "delete-word entry: {text}");
+        assert!(text.contains("insert word"), "insert-word entry: {text}");
+        assert!(text.contains("add line"), "add-line entry: {text}");
+        assert!(text.contains("nudge"), "nudge entry: {text}");
+        assert!(text.contains("save + exit"), "ctrl+c entry: {text}");
+        assert!(text.contains("discard"), "esc-discard entry: {text}");
+        assert!(text.contains("save in place"), "ctrl+s entry: {text}");
+
+        // Leaving edit mode while playing restores the visualizer.
+        ctx.lyrics_edit_mode.set(false);
+        terminal.draw(|f| pane.render(f, pane.area, &ctx).unwrap()).unwrap();
+        assert!(!pane.legend_shown, "legend goes away after edit mode");
+        assert_eq!(pane.sent_area, pane.area, "bars restart after leaving edit mode");
+    }
+
+    /// The bars must never start while lyrics edit mode is on, even via
+    /// the deferred/geometry paths (before_show's pending start, area
+    /// reinit) — the legend owns the pane for the duration.
+    #[test]
+    fn edit_mode_suppresses_deferred_and_geometry_starts() {
+        let mut ctx = test_ctx();
+        let mut pane = CavaPane::new(&ctx);
+        pane.area = Rect::new(0, 0, 40, 12);
+        ctx.status.state = State::Play;
+        ctx.lyrics_edit_mode.set(true);
+
+        pane.run(&ctx).unwrap();
+        assert_eq!(pane.sent_area, Rect::default(), "run suppressed during edit mode");
+        pane.reinit_if_area_changed(&ctx);
+        assert_eq!(pane.sent_area, Rect::default(), "geometry reinit suppressed");
+    }
+
+    /// The first Start is deferred until the frame after `before_show`
+    /// (feedback: the bars painted before the UI). `before_show` only arms
+    /// `pending_start`; `maybe_start` (called by the UI after the frame is
+    /// flushed) actually starts the bars — and only when playing, with no
+    /// modal open.
+    #[test]
+    fn start_is_deferred_until_after_the_first_frame() {
+        let mut ctx = test_ctx();
+        let mut pane = CavaPane::new(&ctx);
+        pane.area = Rect::new(0, 0, 40, 12);
+        ctx.status.state = State::Play;
+
+        // before_show arms the pending start but must not send it yet.
+        pane.before_show(&ctx).unwrap();
+        assert!(pane.pending_start, "before_show arms the deferred start");
+        assert_eq!(pane.sent_area, Rect::default(), "bars must not start yet");
+
+        // The post-frame hook starts them.
+        pane.maybe_start(&ctx).unwrap();
+        assert!(!pane.pending_start, "maybe_start consumes the pending start");
+        assert_eq!(pane.sent_area, pane.area, "bars start after the frame");
+    }
+
+    /// Respawns are the expensive (audio-graph-churning) part of the cava
+    /// visualizer: with the pipewire input killing and respawning the
+    /// process makes the USB DAC stop and renegotiate its
+    /// ALSA period, dropping the audio for a moment. The process must only
+    /// be (re)spawned when it is missing, when the bar count changed (a
+    /// resize crossing a bar-width boundary), or when the cava config
+    /// changed (Settings Save).
+    #[test]
+    fn respawns_only_when_necessary() {
+        // First Start with no process: spawn.
+        assert!(CavaPane::needs_respawn(false, 0, 20, false));
+        // Same bar count with a running process: reuse it (pause/resume,
+        // modal close, tab re-show, resize within the same bar-width slot).
+        assert!(!CavaPane::needs_respawn(true, 20, 20, false));
+        // Bar count changed: respawn (the bars cannot grow/shrink without
+        // a new cava config).
+        assert!(CavaPane::needs_respawn(true, 20, 21, false));
+        assert!(CavaPane::needs_respawn(true, 20, 19, false));
+        // Config changed (Settings Save): respawn even with the same bars.
+        assert!(CavaPane::needs_respawn(true, 20, 20, true));
+    }
+
+    /// While a terminal resize is in progress (the event loop's 500 ms
+    /// debounce window) the pane must not restart the visualizer on every
+    /// frame: each restart churns the audio graph and drops the audio for a
+    /// moment with the pipewire input. The settled resize that follows
+    /// re-initializes the bars.
+    #[test]
+    fn no_restart_while_resizing() {
+        let mut ctx = test_ctx();
+        let mut pane = CavaPane::new(&ctx);
+        pane.area = Rect::new(0, 0, 40, 12);
+        ctx.status.state = State::Play;
+        pane.sent_area = Rect::new(0, 0, 20, 12);
+
+        // Resize in progress: geometry changes are ignored.
+        ctx.resizing.set(true);
+        pane.calculate_areas(Rect::new(0, 0, 40, 12), &ctx).unwrap();
+        assert_eq!(
+            pane.sent_area,
+            Rect::new(0, 0, 20, 12),
+            "no restart while the resize is in progress"
+        );
+
+        // Resize settled: the new geometry is applied.
+        ctx.resizing.set(false);
+        pane.calculate_areas(Rect::new(0, 0, 40, 12), &ctx).unwrap();
+        assert_eq!(pane.sent_area, pane.area, "settled resize re-initializes the bars");
+    }
+
+    /// Round 29: only a configured, non-empty node name triggers the
+    /// LD_PRELOAD rename env (empty/absent = cava's own "cava" node).
+    #[test]
+    fn node_name_rename_env_filters_empty_names() {
+        assert_eq!(CavaPane::node_name_rename_env(None), None);
+        assert_eq!(CavaPane::node_name_rename_env(Some("")), None);
+        assert_eq!(CavaPane::node_name_rename_env(Some("s2udio-cava")), Some("s2udio-cava"));
+    }
+
+    /// A pipewire `source` naming a sink is rewritten to its `.monitor` form
+    /// (the capture cava can actually visualize); sources, `auto` and existing
+    /// monitors are left alone.
+    #[test]
+    fn pipewire_source_normalizes_sink_names_to_monitors() {
+        // pactl short-sinks lines (name is the second tab column) and a
+        // bare name both match.
+        let sinks = [
+            "83\talsa_output.usb-FiiO_FiiO_KA3_FiiO_KA3-00.analog-stereo\tPipeWire",
+            "easyeffects_sink",
+        ];
+        let norm = |s: &str| CavaPane::normalize_pipewire_source_with(s, sinks.iter().copied());
+
+        // A sink name becomes its monitor form (cava capture.sink semantics).
+        assert_eq!(
+            norm("alsa_output.usb-FiiO_FiiO_KA3_FiiO_KA3-00.analog-stereo"),
+            "alsa_output.usb-FiiO_FiiO_KA3_FiiO_KA3-00.analog-stereo.monitor"
+        );
+        assert_eq!(norm("easyeffects_sink"), "easyeffects_sink.monitor");
+        // Already a monitor / auto / empty: untouched.
+        assert_eq!(norm("Media.monitor"), "Media.monitor");
+        assert_eq!(norm("auto"), "auto");
+        assert_eq!(norm(""), "");
+        // A mic source that is not a sink: untouched.
+        assert_eq!(
+            norm(
+                "alsa_input.usb-BurrBrown_from_Texas_Instruments_USB_AUDIO_CODEC-00.analog-stereo"
+            ),
+            "alsa_input.usb-BurrBrown_from_Texas_Instruments_USB_AUDIO_CODEC-00.analog-stereo"
+        );
+        // Round 30: a leftover MPD-fifo path falls back to the PipeWire
+        // default capture source.
+        assert_eq!(norm("/tmp/mpd-cava.fifo"), "auto");
+        assert_eq!(norm("mpd-cava.fifo"), "auto");
+    }
+
+    /// A deferred start while paused (or with a modal open) is dropped
+    /// instead of drawing: the playback/modal event handlers will start the
+    /// bars at the right moment.
+    #[test]
+    fn deferred_start_is_dropped_when_paused() {
+        let mut ctx = test_ctx();
+        let mut pane = CavaPane::new(&ctx);
+        pane.area = Rect::new(0, 0, 40, 12);
+
+        // Paused: before_show does not even arm the start.
+        ctx.status.state = State::Pause;
+        pane.before_show(&ctx).unwrap();
+        assert!(!pane.pending_start, "paused: no deferred start armed");
+        pane.maybe_start(&ctx).unwrap();
+        assert_eq!(pane.sent_area, Rect::default(), "paused: bars stay off");
+
+        // Playing but a modal is open: maybe_start drops the start rather
+        // than painting over the modal.
+        pane.pending_start = true;
+        pane.is_modal_open = true;
+        ctx.status.state = State::Play;
+        pane.maybe_start(&ctx).unwrap();
+        assert!(!pane.pending_start, "modal: pending start dropped");
+        assert_eq!(pane.sent_area, Rect::default(), "modal: bars never start");
+    }
+}

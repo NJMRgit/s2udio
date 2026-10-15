@@ -30,6 +30,9 @@ mod input;
 mod model;
 mod render;
 mod render_rows;
+#[cfg(test)]
+mod tests;
+
 pub(crate) use actions::language_options;
 pub(crate) use appearance::{
     AppearanceTarget, StagedColor, apply_persisted_appearance, persisted_appearance,

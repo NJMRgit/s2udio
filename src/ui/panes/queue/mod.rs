@@ -59,7 +59,7 @@ pub(crate) use play::play_from_stop;
 use play::play_queue_song;
 #[allow(unused_imports)]
 pub(crate) use play::resolved_stream_expired;
-pub(crate) use play::{issue_next_if_still_target, next_track_resolving};
+pub(crate) use play::next_track_resolving;
 #[allow(unused_imports)]
 use render::truncate_to_width;
 #[allow(unused_imports)]
@@ -124,6 +124,11 @@ pub struct QueuePane {
     /// where the viewport height is stale. Re-applied by the next
     /// `before_show`, which knows the real area.
     pending_follow_to_top: Option<usize>,
+    /// A track change whose playing row was not in the pane's queue copy yet
+    /// (a resolve's swap lands its refresh just after the status poll that
+    /// raised the change). Replayed by the `QueueChanged` arm, which is the
+    /// refresh that makes the row findable.
+    pending_follow_song_id: Option<u32>,
 }
 #[derive(Debug, Enum)]
 enum Areas {
@@ -158,8 +163,140 @@ impl QueuePane {
     /// calls this: the movement keys, the mouse wheel, a click or right-click
     /// on a row, and a scrollbar drag. Typing elsewhere in the app does not
     /// count as navigation.
+    #[track_caller]
     pub(super) fn note_user_navigation(&mut self) {
-        self.follow.note_user_navigation(std::time::Instant::now());
+        // Logged with the caller's identity: a suppressed jump is only
+        // diagnosable if the navigation that suppressed it can be attributed
+        // (movement key, click, wheel, scrollbar drag — or a path that should
+        // not count at all).
+        let at = std::time::Instant::now();
+        // `#[track_caller]` so the log names the real source: without it the
+        // location resolves to this line, which made the previous round's
+        // log useless for attributing a suppression.
+        log::debug!(
+            caller:? = std::panic::Location::caller().to_string().as_str();
+            "Queue navigation noted (suppresses the follow jump for 5 s)"
+        );
+        self.follow.note_user_navigation(at);
+    }
+    /// Follow the track that just started, if this is a new one.
+    ///
+    /// The playing row is looked up from `ctx.queue`. That lookup can fail:
+    /// `SongChanged` is driven by a status poll, while a resolve's in-place
+    /// swap reaches MPD over the client channel and its queue refresh lands
+    /// **after** that poll (measured 1.8 ms later in the live log). In that
+    /// window MPD reports the replacement's new song id while `ctx.queue` still
+    /// holds the old row, so nothing matches. Dropping the jump there is what
+    /// the user saw as "the selection doesn't seem to be moving to the new
+    /// track after it resolves and starts playing" — and it was invisible,
+    /// because the whole follow block sat behind the failed lookup.
+    ///
+    /// A row that cannot be resolved yet is therefore **remembered** and
+    /// replayed by the `QueueChanged` arm, once the refresh makes it findable.
+    fn follow_current_song(&mut self, ctx: &Ctx, is_visible: bool) -> Result<()> {
+        let Some((_idx, song)) = ctx.find_current_song_in_queue() else {
+            if let Some(song_id) = ctx.status.songid {
+                log::debug!(
+                    song_id;
+                    "The playing row is not in the queue copy yet; deferring the follow jump"
+                );
+                self.pending_follow_song_id = Some(song_id);
+            } else {
+                // No song at all: nothing to defer to any more.
+                self.pending_follow_song_id = None;
+            }
+            return Ok(());
+        };
+        // A newer track change supersedes any deferral still waiting for a row
+        // that never turned up.
+        self.pending_follow_song_id = None;
+        let song_id = song.id;
+        // One decision per track change: a repeated SongChanged for the same
+        // track (a re-render, a resume, a second status update) must not re-run
+        // the jump and yank a selection the user has since moved.
+        let new_track = self.followed_song_id != Some(song_id);
+        if new_track {
+            self.followed_song_id = Some(song_id);
+        }
+        let follow_enabled = ctx.config.select_current_song_on_change;
+        let decided =
+            new_track && follow_enabled && self.follow.should_follow(std::time::Instant::now());
+        if new_track {
+            log::debug!(
+                song_id, enabled = follow_enabled, follows = decided,
+                visible = is_visible;
+                "The queue selection's follow decision for this track change"
+            );
+        }
+        if !decided {
+            return Ok(());
+        }
+        // The index from `ctx.queue` is deliberately not used: the pane's list
+        // is filtered, so the row is located by id inside `place_follow`.
+        self.place_follow(song_id, is_visible, ctx)
+    }
+    /// Replay a jump that was deferred because the row was not in the queue
+    /// copy yet.
+    ///
+    /// The decision was already made when the change arrived, so the gate is
+    /// **not** consulted again: a deferral is armed because the row was not
+    /// findable, not because the user was navigating, and re-checking seconds
+    /// later lets navigation that happened *after* the change discard a jump
+    /// that was already owed. That is the reported "an unwarmed ▶▶ never causes
+    /// the selection to update when the track actually starts playing" — the
+    /// resolve takes seconds, so the replay routinely landed after the user had
+    /// touched the queue.
+    fn follow_song(&mut self, ctx: &Ctx, song_id: u32) {
+        self.followed_song_id = Some(song_id);
+        if !ctx.config.select_current_song_on_change {
+            return;
+        }
+        if let Err(err) = self.place_follow(song_id, true, ctx) {
+            log::error!(error:? = err; "Failed to place the deferred follow jump");
+        }
+    }
+    /// Put the selection on the row with `song_id` at the top of the visible
+    /// list (or centered, when the config asks for that), and repaint.
+    ///
+    /// The row is found **by id in the pane's own list**, not by an index from
+    /// `ctx.queue`: the pane shows a *filtered* copy (`local_queue`, which drops
+    /// hidden stream rows and the temp-play row), so the two lists can be offset
+    /// and a raw index would land on the wrong row — or be clamped away
+    /// entirely, which is the reported "the highlight/selection never moves to
+    /// the top of the queue".
+    fn place_follow(&mut self, song_id: u32, is_visible: bool, ctx: &Ctx) -> Result<()> {
+        let Some(idx) = self.queue.items.iter().position(|song| song.id == song_id) else {
+            // The row is not in the filtered list (it is hidden, or the swap's
+            // refresh has not landed yet). Re-apply by id once it is.
+            log::debug!(
+                song_id;
+                "The followed row is not in the pane's list yet; re-applying on the refresh"
+            );
+            self.pending_follow_song_id = Some(song_id);
+            return Ok(());
+        };
+        match (is_visible, ctx.config.center_current_song_on_change) {
+            // The default: land the new track at the **top** of the visible
+            // list, as close as the viewport allows — watching the queue then
+            // shows the playing track with the upcoming rows under it.
+            (true, false) => self.queue.select_at_top(idx),
+            (false, false) => {
+                self.queue.select_at_top(idx);
+                // The pane is off screen, so the viewport height is stale;
+                // re-apply on the next show.
+                self.pending_follow_to_top = Some(idx);
+            }
+            // The older centering placement, kept for anyone who prefers it.
+            (true, true) => self.queue.select_idx(idx, usize::MAX),
+            (false, true) => {
+                self.queue.select_idx(idx, usize::MAX);
+                self.should_center_cursor_on_current = true;
+            }
+        }
+        // `ctx.render` reports a channel error rather than an `anyhow::Error`;
+        // the inline code this replaced used `?` on it, which converted via
+        // `From`.
+        ctx.render().map_err(anyhow::Error::from)
     }
     /// The queue the pane shows. Radio stations and Jellyfin audio streams
     /// are played through a temporary MPD playlist entry (required to play
@@ -323,6 +460,7 @@ impl QueuePane {
             follow: follow::FollowGate::default(),
             followed_song_id: None,
             pending_follow_to_top: None,
+            pending_follow_song_id: None,
         }
     }
     pub fn init(ctx: &Ctx) -> (Vec<Constraint>, Vec<Property<SongProperty>>) {
@@ -457,52 +595,25 @@ impl Pane for QueuePane {
                 self.queue.unmark_all();
             }
             UiEvent::QueueChanged => {
+                let was_stale = self.queue.items.len() != ctx.queue.len();
                 self.queue.items.clone_from(&Self::local_queue(ctx));
+                // 2026-10-15: a `SongChanged` that arrived while the pane's
+                // queue copy was stale could not resolve the playing row, so
+                // its follow jump was dropped. Now that the refreshed queue is
+                // in, replay it — the row is findable again.
+                if let Some(song_id) = self.pending_follow_song_id.take() {
+                    log::debug!(
+                        song_id, stale = was_stale;
+                        "Replaying the follow jump now that the queue refresh landed"
+                    );
+                    self.follow_song(ctx, song_id);
+                }
             }
             UiEvent::SongChanged => {
                 // A track without markers replaced a chaptered one: the
                 // Chapters view falls back to the audio list.
                 self.follow_mpd_chapters(ctx);
-                if let Some((idx, song)) = ctx.find_current_song_in_queue() {
-                    // One decision per track change: a repeated SongChanged
-                    // for the same track (a re-render, a resume, a second
-                    // status update) must not re-run the jump and yank a
-                    // selection the user has since moved.
-                    let new_track = self.followed_song_id != Some(song.id);
-                    if new_track {
-                        self.followed_song_id = Some(song.id);
-                        self.follow.begin_track_change();
-                    }
-                    if new_track
-                        && ctx.config.select_current_song_on_change
-                        && self.follow.should_follow(std::time::Instant::now())
-                    {
-                        let to_select = idx;
-                        match (is_visible, ctx.config.center_current_song_on_change) {
-                            // The default: land the new track at the **top**
-                            // of the visible list, as close as the viewport
-                            // allows — watching the queue then shows the
-                            // playing track with the upcoming rows under it.
-                            (true, false) => self.queue.select_at_top(to_select),
-                            (false, false) => {
-                                self.queue.select_at_top(to_select);
-                                // The pane is off screen, so the viewport
-                                // height is stale; re-apply on the next show.
-                                self.pending_follow_to_top = Some(to_select);
-                            }
-                            // The older centering placement, kept for anyone
-                            // who prefers it.
-                            (true, true) => {
-                                self.queue.select_idx(to_select, usize::MAX);
-                            }
-                            (false, true) => {
-                                self.queue.select_idx(to_select, usize::MAX);
-                                self.should_center_cursor_on_current = true;
-                            }
-                        }
-                        ctx.render()?;
-                    }
-                }
+                self.follow_current_song(ctx, is_visible)?;
             }
             UiEvent::Reconnected => {
                 self.before_show(ctx)?;
@@ -1066,4 +1177,614 @@ pub(super) fn schedule_selection_warm(ctx: &Ctx) {
             Ok(())
         },
     );
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod follow_the_track_tests {
+    use super::{QueuePane, follow};
+    use crate::mpd::commands::{Song, State};
+    use crate::ui::panes::Pane;
+
+    fn row(id: u32, file: impl Into<String>) -> Song {
+        Song { id, file: file.into(), ..Default::default() }
+    }
+
+    /// A pane over a 30-row queue with `playing` as the current song, plus the
+    /// id of that row. The viewport is 10 rows so "at the top" is observable.
+    struct Rig {
+        ctx: crate::ctx::Ctx,
+        pane: QueuePane,
+    }
+
+    fn rig(playing_idx: usize, len: usize) -> Rig {
+        let app = crossbeam::channel::unbounded();
+        let work = crossbeam::channel::unbounded();
+        let client = crossbeam::channel::unbounded();
+        // The fixture takes the receivers; leak clones so the senders the code
+        // under test uses stay connected.
+        Box::leak(Box::new(app.1.clone()));
+        Box::leak(Box::new(work.1.clone()));
+        Box::leak(Box::new(client.1.clone()));
+        let mut ctx = crate::tests::fixtures::ctx(
+            (app.0, app.1),
+            (work.0, work.1),
+            (client.0, client.1),
+        );
+        ctx.queue = (0..len).map(|i| row(i as u32 + 1, format!("/music/{i}.flac"))).collect();
+        ctx.status.state = State::Play;
+        ctx.status.song = Some(playing_idx);
+        ctx.status.songid = ctx.queue.get(playing_idx).map(|s| s.id);
+        let mut pane = QueuePane::new(&ctx);
+        // A real viewport, so `select_at_top` clamps against it.
+        pane.areas[super::Areas::Table] = ratatui::layout::Rect::new(0, 0, 80, 10);
+        pane.queue.state.set_content_and_viewport_len(pane.queue.len(), 10);
+        // Skip the first-show jump so the tests exercise the SongChanged path.
+        pane.startup_jump_done = true;
+        Rig { ctx, pane }
+    }
+
+    impl Rig {
+        /// Drive a real `SongChanged` through the pane, as the event loop does.
+        fn song_changed(&mut self) {
+            let mut event = crate::ui::UiEvent::SongChanged;
+            self.pane.on_event(&mut event, true, &self.ctx).expect("the pane handles it");
+        }
+
+        /// Move on to `idx`: set the status, then fire the event.
+        /// Move playback to `idx`, keeping the pane's list in step with
+        /// `ctx.queue` the way the real `QueueChanged` refresh does (the pane
+        /// shows a filtered copy, so the two must not drift apart silently).
+        fn play(&mut self, idx: usize) {
+            self.ctx.status.song = Some(idx);
+            self.ctx.status.songid = self.ctx.queue.get(idx).map(|s| s.id);
+            self.pane.queue.items.clone_from(&QueuePane::local_queue(&self.ctx));
+            self.song_changed();
+        }
+
+        fn selected(&self) -> Option<usize> {
+            self.pane.queue.selected_with_idx().map(|(idx, _)| idx)
+        }
+
+        fn offset(&self) -> usize {
+            self.pane.queue.state.offset()
+        }
+    }
+
+    /// The default behaviour: the selection follows the new track and lands at
+    /// the **top** of the visible list.
+    #[test]
+    fn the_selection_follows_to_the_top() {
+        let mut r = rig(0, 30);
+        r.play(12);
+        assert_eq!(r.selected(), Some(12), "the selection moved to the new track");
+        assert_eq!(r.offset(), 12, "and it is the first visible row");
+    }
+
+    /// A track near the end still lands at the top, with the offset clamped so
+    /// the list never scrolls past its end.
+    #[test]
+    fn a_track_near_the_end_lands_at_the_top_with_the_offset_clamped() {
+        let mut r = rig(0, 30);
+        r.play(29);
+        assert_eq!(r.selected(), Some(29));
+        // 30 rows, 10 visible: the last possible offset is 20.
+        assert_eq!(r.offset(), 20, "the offset clamps to len - viewport");
+    }
+
+    /// Scrolling or moving the selection within the 5 s window stands the jump
+    /// down: the user's position is left exactly where they put it.
+    #[test]
+    fn recent_navigation_suppresses_the_jump() {
+        let mut r = rig(0, 30);
+        // The user moves to row 3 by hand...
+        r.pane.queue.select_idx(3, 0);
+        r.pane.note_user_navigation();
+        // ...and the track changes immediately after.
+        r.play(20);
+        assert_eq!(r.selected(), Some(3), "the user's selection is left alone");
+    }
+
+    /// A suppressed jump does not re-apply for the same track, even after the
+    /// window has elapsed: the user's position survives the whole track.
+    #[test]
+    fn a_suppressed_jump_does_not_re_apply_for_the_same_track() {
+        let mut r = rig(0, 30);
+        r.pane.queue.select_idx(5, 0);
+        r.pane.note_user_navigation();
+        r.play(18);
+        assert_eq!(r.selected(), Some(5));
+        // A repeated SongChanged for the same song (a re-render, a resume).
+        r.song_changed();
+        assert_eq!(r.selected(), Some(5), "the decision is made once per track");
+    }
+
+    /// The gate itself: a second track change inside the window is also
+    /// suppressed (the window is measured from the user's navigation).
+    #[test]
+    fn a_second_change_inside_the_window_is_also_suppressed() {
+        let mut gate = follow::FollowGate::default();
+        gate.note_user_navigation(std::time::Instant::now());
+        assert!(!gate.should_follow(std::time::Instant::now()), "the first change stands down");
+        assert!(
+            !gate.should_follow(std::time::Instant::now()),
+            "still inside the window, so the next change stands down too"
+        );
+    }
+
+    /// With the user never navigating, successive tracks are all followed.
+    #[test]
+    fn successive_tracks_are_followed_when_the_user_never_navigates() {
+        let mut r = rig(0, 30);
+        r.play(4);
+        assert_eq!(r.selected(), Some(4));
+        r.play(9);
+        assert_eq!(r.selected(), Some(9), "the next track is followed again");
+    }
+
+    /// The option switches the whole behaviour off: the selection stays put.
+    #[test]
+    fn the_option_off_leaves_the_selection_alone() {
+        let mut r = rig(0, 30);
+        // `select_current_song_on_change` is on by default in this fork.
+        assert!(r.ctx.config.select_current_song_on_change);
+        r.pane.queue.select_idx(2, 0);
+        // Replace the config with the option off.
+        let mut config = (*r.ctx.config).clone();
+        config.select_current_song_on_change = false;
+        r.ctx.config = std::sync::Arc::new(config);
+        r.play(15);
+        assert_eq!(r.selected(), Some(2), "the selection is untouched");
+    }
+
+    /// The window boundary: exactly 5 s after navigation the jump proceeds.
+    #[test]
+    fn the_window_boundary_is_exclusive() {
+        let mut gate = follow::FollowGate::default();
+        let base = std::time::Instant::now();
+        gate.note_user_navigation(base);
+        assert!(
+            gate.should_follow(base + follow::FOLLOW_SUPPRESS_WINDOW),
+            "the window has elapsed"
+        );
+        let mut gate = follow::FollowGate::default();
+        gate.note_user_navigation(base);
+        assert!(
+            !gate.should_follow(base + follow::FOLLOW_SUPPRESS_WINDOW
+                - std::time::Duration::from_millis(1)),
+            "one millisecond short is still suppressed"
+        );
+    }
+
+    /// **The reported bug: "the selection doesn't seem to be moving to the
+    /// new track after it resolves and starts playing".**
+    ///
+    /// The step resolves a row and the swap gives it a **new id**
+    /// (`delete_id` + `add_id`). `SongChanged` therefore fires with an id the
+    /// pane has never seen, which must still be followed — the id is not the
+    /// track, and treating "a new id" as "the same track already handled"
+    /// would leave the selection behind.
+    #[test]
+    fn a_row_whose_id_changed_after_a_swap_is_still_followed() {
+        let mut r = rig(0, 30);
+        // The look-ahead swapped the row that is about to play, so MPD now
+        // reports a *different* id for it at the same position.
+        let pos = 12;
+        r.ctx.queue[pos].id = 999;
+        r.play(pos);
+        assert_eq!(
+            r.selected(),
+            Some(pos),
+            "the selection follows the row even though its id changed"
+        );
+        assert_eq!(r.offset(), pos, "and it lands at the top of the list");
+    }
+
+    /// The same, with the id change happening *while* the same position keeps
+    /// playing: a repeated event for the new id must not be treated as a
+    /// second, different track.
+    #[test]
+    fn a_swap_then_a_repeat_for_the_new_id_keeps_the_selection_put() {
+        let mut r = rig(0, 30);
+        let pos = 8;
+        r.ctx.queue[pos].id = 555;
+        r.play(pos);
+        assert_eq!(r.selected(), Some(pos));
+        // The user moves away, then a repeated SongChanged arrives for the
+        // same (new) id: it must not yank them again.
+        r.pane.queue.select_idx(2, 0);
+        r.song_changed();
+        assert_eq!(r.selected(), Some(2), "the user's position is respected");
+    }
+
+    /// **The reported sequence: a step resolves, the swap replaces the row
+    /// (new id, new file), and the selection must land on the row that is
+    /// playing.**
+    ///
+    /// `SongChanged` may arrive before the pane has rebuilt its list from the
+    /// refreshed queue (the swap reaches MPD over the client channel, and the
+    /// `QueueChanged` that follows carries the new row). The jump must survive
+    /// that ordering: it is computed from `ctx.queue`, and the pane's own copy
+    /// is replaced afterwards.
+    #[test]
+    fn the_selection_lands_after_a_swap_even_if_the_pane_list_is_stale() {
+        let mut r = rig(0, 30);
+        // The look-ahead swaps the row that is about to play: MPD gets a new
+        // id and the file becomes the buffered proxy URL.
+        let pos = 20;
+        r.ctx.queue[pos].id = 777;
+        // The swap registers the buffered URL in `yt_info` as it replaces the
+        // row (`apply_resolved_streams`), which is what keeps the row visible
+        // in the pane's filtered list — a stream row whose URL is unknown is
+        // hidden, so the jump could not find it.
+        r.ctx.queue[pos].file = "http://127.0.0.1:39235/s2u/audio/newstream".to_owned();
+        r.ctx.yt_info.borrow_mut().insert(
+            r.ctx.queue[pos].file.clone(),
+            crate::shared::ytdlp::YtStreamInfo {
+                url: r.ctx.queue[pos].file.clone(),
+                title: "Swapped".to_owned(),
+                ..Default::default()
+            },
+        );
+        // The pane still holds the pre-swap list (its `QueueChanged` has not
+        // run yet), then the track change arrives: the jump is deferred.
+        r.ctx.status.song = Some(pos);
+        r.ctx.status.songid = Some(777);
+        r.song_changed();
+        assert_eq!(
+            r.pane.pending_follow_song_id,
+            Some(777),
+            "the change is remembered while the pane's list is stale"
+        );
+
+        // The refresh carrying the swapped row lands.
+        let mut ev = crate::ui::UiEvent::QueueChanged;
+        r.pane.on_event(&mut ev, true, &r.ctx).expect("the pane handles it");
+        assert_eq!(
+            r.selected(),
+            Some(pos),
+            "the deferred jump lands once the refreshed list holds the row"
+        );
+        assert_eq!(r.offset(), pos, "at the top of the list");
+    }
+
+    /// **The second reported miss.** The follow jump runs (the log shows
+    /// `follows=true`), and then `QueueChanged` arrives ~2 ms later and
+    /// rebuilds the pane's list — because the swap reached MPD over the client
+    /// channel and its queue refresh lands after the status poll that carried
+    /// the song change. The jump must survive that refresh: it is the row the
+    /// user is watching.
+    ///
+    /// Reported as "the selection doesn't seem to be moving to the new track
+    /// after it resolves and starts playing".
+    #[test]
+    fn the_jump_survives_the_queue_refresh_that_follows_it() {
+        let mut r = rig(0, 60);
+        r.play(30);
+        assert_eq!(r.selected(), Some(30), "the jump ran");
+        assert_eq!(r.offset(), 30, "and landed the row at the top");
+
+        // The swap's queue refresh lands right after (a different content
+        // length is what shifts indices if the selection is recomputed).
+        let mut ev = crate::ui::UiEvent::QueueChanged;
+        r.pane.on_event(&mut ev, true, &r.ctx).expect("handled");
+        assert_eq!(
+            r.selected(),
+            Some(30),
+            "the refresh must not move the selection off the playing row"
+        );
+        assert_eq!(r.offset(), 30, "nor scroll it away");
+    }
+
+    /// **The root cause.** `SongChanged` is driven by a status poll; a
+    /// resolve's swap reaches MPD over the client channel and its queue
+    /// refresh lands *after* that poll (measured 1.8 ms later). In that window
+    /// MPD reports the replacement's new song id while `ctx.queue` still holds
+    /// the old row, so the playing row cannot be resolved — and the old code
+    /// dropped the jump on the floor, silently, because the whole follow block
+    /// sat behind that lookup.
+    ///
+    /// The jump must be remembered and replayed by the refresh.
+    #[test]
+    fn a_change_whose_row_is_not_in_the_queue_yet_is_deferred_and_replayed() {
+        let mut r = rig(0, 30);
+        // MPD has moved to a row the queue copy does not contain yet.
+        r.ctx.status.song = Some(20);
+        r.ctx.status.songid = Some(9999);
+        r.song_changed();
+        assert_eq!(
+            r.selected(),
+            Some(0),
+            "nothing can be selected while the row is unknown"
+        );
+        assert_eq!(
+            r.pane.pending_follow_song_id,
+            Some(9999),
+            "the change is remembered instead of dropped"
+        );
+
+        // The swap's queue refresh lands and the row appears.
+        r.ctx.queue[20].id = 9999;
+        let mut ev = crate::ui::UiEvent::QueueChanged;
+        r.pane.on_event(&mut ev, true, &r.ctx).expect("handled");
+
+        assert_eq!(
+            r.selected(),
+            Some(20),
+            "the deferred jump is replayed once the row is findable"
+        );
+        assert_eq!(r.offset(), 20, "and it lands at the top of the list");
+        assert_eq!(r.pane.pending_follow_song_id, None, "the deferral is consumed");
+    }
+
+    /// A deferred jump for a row that never appears does not move the
+    /// selection, and does not crash or loop: each refresh re-arms the
+    /// deferral, and a later track change supersedes it.
+    #[test]
+    fn a_deferred_jump_for_a_row_that_never_appears_leaves_the_selection_alone() {
+        let mut r = rig(0, 30);
+        r.ctx.status.songid = Some(9999);
+        r.ctx.status.song = Some(20);
+        r.song_changed();
+        assert_eq!(r.pane.pending_follow_song_id, Some(9999));
+        // The refresh arrives without that row (it was consumed/removed).
+        let mut ev = crate::ui::UiEvent::QueueChanged;
+        r.pane.on_event(&mut ev, true, &r.ctx).expect("handled");
+        assert_eq!(r.selected(), Some(0), "the selection is left alone");
+        // A real track change afterwards takes over the pending follow.
+        r.play(4);
+        assert_eq!(r.selected(), Some(4), "the later change is followed normally");
+        assert_eq!(r.pane.pending_follow_song_id, None, "and clears the deferral");
+    }
+
+    /// **The reported bug: "if ▶▶ needs a resolve … the song starts, but the
+    /// highlight/selection never moves to the top of the queue".**
+    ///
+    /// `find_current_song_in_queue()` indexes **`ctx.queue`**, but the pane
+    /// shows a **filtered** copy (`local_queue` drops hidden stream rows and
+    /// the temp-play row). Applying a raw `ctx.queue` index to that shorter
+    /// list lands on the wrong row, or is clamped away entirely. The jump must
+    /// locate the row **by id** in the pane's own list.
+    #[test]
+    fn the_jump_finds_the_row_in_the_filtered_list_not_by_raw_index() {
+        let mut r = rig(0, 30);
+        // Two rows ahead of the target are hidden from the pane (they are
+        // temporary stream entries), so the pane's list is offset by two.
+        let target_pos = 12;
+        let target_id = r.ctx.queue[target_pos].id;
+        r.pane.queue.items.remove(0);
+        r.pane.queue.items.remove(0);
+        assert_eq!(r.pane.queue.items.len(), 28, "the pane list is shorter");
+
+        r.ctx.status.song = Some(target_pos);
+        r.ctx.status.songid = Some(target_id);
+        r.song_changed();
+
+        // The row must be selected where it actually sits in the pane: two
+        // positions earlier than its index in ctx.queue.
+        let selected = r.selected().expect("a row is selected");
+        assert_eq!(
+            r.pane.queue.items[selected].id, target_id,
+            "the selection landed on the playing row, not an offset one"
+        );
+        assert_eq!(selected, target_pos - 2, "at its position in the pane's list");
+        assert_eq!(r.offset(), target_pos - 2, "and at the top of the viewport");
+    }
+
+    /// The warmed case the user reports as working: the row is already there,
+    /// and the jump lands it at the top. Covered too, so the two paths stay in
+    /// step.
+    #[test]
+    fn the_warmed_case_lands_the_row_at_the_top() {
+        let mut r = rig(0, 30);
+        r.play(9);
+        assert_eq!(r.selected(), Some(9));
+        assert_eq!(r.offset(), 9);
+    }
+
+    /// **The reported bug: "an unwarmed ▶▶ never causes the selection to update
+    /// when the track actually starts playing".**
+    ///
+    /// The resolve takes seconds, so the deferred replay lands well after the
+    /// change was raised. Re-checking the navigation gate at replay time let a
+    /// touch on the queue *after* the jump was owed discard it — even though the
+    /// deferral was armed because the row was not findable, not because the user
+    /// was navigating.
+    #[test]
+    fn navigation_after_a_deferral_does_not_discard_the_owed_jump() {
+        let mut r = rig(0, 30);
+        // MPD moved to a row the pane's list does not have yet: deferred.
+        r.ctx.status.song = Some(20);
+        r.ctx.status.songid = Some(9999);
+        r.song_changed();
+        assert_eq!(r.pane.pending_follow_song_id, Some(9999), "armed");
+
+        // The user then touches the queue while the resolve is still running
+        // (seconds later in real use).
+        r.pane.note_user_navigation();
+
+        // The refresh that carries the swapped row lands.
+        r.ctx.queue[20].id = 9999;
+        let mut ev = crate::ui::UiEvent::QueueChanged;
+        r.pane.on_event(&mut ev, true, &r.ctx).expect("handled");
+
+        assert_eq!(
+            r.selected(),
+            Some(20),
+            "the jump was already owed; a later touch must not discard it"
+        );
+        assert_eq!(r.offset(), 20, "landed at the top of the list");
+    }
+
+    /// No current song is a no-op: nothing is selected or scrolled.
+    #[test]
+    fn no_current_song_is_a_no_op() {
+        let mut r = rig(0, 30);
+        r.pane.queue.select_idx(7, 0);
+        r.ctx.status.song = None;
+        r.ctx.status.songid = None;
+        r.song_changed();
+        assert_eq!(r.selected(), Some(7), "the selection is left where it was");
+    }
+
+    /// **The second half of the user's acceptance test: the selection lands on
+    /// the row an unwarmed `▶▶` started, at the top of the list.**
+    ///
+    /// Playback starting is only half of it. The follow jump locates the playing
+    /// row **by id in the pane's list**, and the look ahead's in-place swap
+    /// (`delete_id` + `add_id`) gives that row a *new* id — so this is exactly
+    /// where the swap can make the selection miss the track it just started.
+    ///
+    /// The ids here are the ones from the live log (`814` stepped to, swapped
+    /// under a new id), and the event order is the event loop's: the resolve
+    /// landings first, then `SongChanged`, then the swap's `QueueChanged`.
+    #[test]
+    fn the_selection_follows_the_row_an_unwarmed_step_started() {
+        use crate::tests::fixtures::fake_mpd_server::FakeMpdServer;
+        use crate::ui::modals::paste::{YtAction, apply_resolved_streams};
+        use crate::shared::ytdlp::YtStreamInfo;
+
+        const LINK: &str = "https://www.youtube.com/watch?v=bbbbbbbbbbb";
+
+        // A queue deep enough that "the top" is observable: the step's target
+        // sits at index 12, below the fold of a 10-row viewport.
+        let mut rows: Vec<(u32, String)> = (1200..1220)
+            .map(|id| {
+                (id, format!("https://rr1.googlevideo.com/videoplayback?expire=7258118400&id={id}"))
+            })
+            .collect();
+        rows[12] = (814, format!("{LINK}#s2u-audio"));
+
+        // A real MPD server, so the swap and the step run the production code.
+        let server = FakeMpdServer::start(rows.clone());
+        let mut client = server.client();
+
+        let app = crossbeam::channel::unbounded();
+        let work = crossbeam::channel::unbounded();
+        let client_channel = crossbeam::channel::unbounded();
+        let client_rx = client_channel.1.clone();
+        Box::leak(Box::new(app.1.clone()));
+        Box::leak(Box::new(work.1.clone()));
+        let mut ctx = crate::tests::fixtures::ctx(
+            (app.0, app.1),
+            (work.0, work.1),
+            (client_channel.0, client_channel.1),
+        );
+        ctx.queue = rows
+            .iter()
+            .map(|(id, file)| Song { id: *id, file: file.clone(), ..Default::default() })
+            .collect();
+        ctx.status.state = State::Play;
+        ctx.status.song = Some(0);
+        ctx.status.songid = Some(1200);
+        ctx.status.nextsongid = Some(814);
+        ctx.status.random = true;
+        // A real session has resolved every stream row it shows, so `local_queue`
+        // (which hides an unknown stream URL to keep the pane honest about what
+        // it can play) keeps them. Without this the pane filters the queue down
+        // to the single row this test resolved, and "index 12" cannot exist.
+        {
+            let mut yt_info = ctx.yt_info.borrow_mut();
+            for (_, file) in &rows {
+                yt_info.insert(
+                    file.clone(),
+                    YtStreamInfo {
+                        url: file.clone(),
+                        title: "row".to_owned(),
+                        ..Default::default()
+                    },
+                );
+            }
+        }
+
+        let mut pane = QueuePane::new(&ctx);
+        pane.areas[super::Areas::Table] = ratatui::layout::Rect::new(0, 0, 80, 10);
+        pane.queue.state.set_content_and_viewport_len(pane.queue.len(), 10);
+        pane.startup_jump_done = true;
+        // The user had browsed away from the playing row before pressing `▶▶`.
+        pane.queue.select_idx(0, 0);
+
+        let info = |url: &str| YtStreamInfo {
+            url: url.to_owned(),
+            original_url: LINK.to_owned(),
+            title: "A stream".to_owned(),
+            ..Default::default()
+        };
+        let run_landings = |rx: &crossbeam::channel::Receiver<crate::shared::events::ClientRequest>,
+                            client: &mut crate::mpd::client::Client<'_>| {
+            while let Ok(request) = rx.try_recv() {
+                if let crate::shared::events::ClientRequest::Command(command) = request {
+                    let _ = (command.callback)(client);
+                }
+            }
+        };
+        let sync = |ctx: &mut crate::ctx::Ctx, client: &mut crate::mpd::client::Client<'_>| {
+            use crate::mpd::mpd_client::MpdClient;
+            ctx.queue = client.playlist_info().expect("playlistinfo").unwrap_or_default();
+        };
+
+        // T: the step resolves AND would play row 814.
+        super::next_track_resolving(&ctx);
+        assert_eq!(ctx.pending_next_step.get(), Some(814), "the step is armed");
+
+        // T+1.3 s: the look ahead swaps the same row in place — warm-up only.
+        apply_resolved_streams(
+            &ctx,
+            vec![info("https://rr1.googlevideo.com/videoplayback?expire=7258118400&id=la")],
+            YtAction::ReplaceInPlace(814),
+            Vec::new(),
+        );
+        run_landings(&client_rx, &mut client);
+        sync(&mut ctx, &mut client);
+        assert!(
+            server.playing_file().is_none(),
+            "the warm-up must not start playback"
+        );
+
+        // T+2.7 s: the step's own landing starts the track.
+        apply_resolved_streams(
+            &ctx,
+            vec![info("https://rr1.googlevideo.com/videoplayback?expire=7258118400&id=step")],
+            YtAction::ReplaceAndPlay(814),
+            Vec::new(),
+        );
+        run_landings(&client_rx, &mut client);
+        sync(&mut ctx, &mut client);
+
+        let playing_id = server.state().playing.expect("the step started a row");
+        ctx.status.songid = Some(playing_id);
+        ctx.status.song = ctx.queue.iter().position(|song| song.id == playing_id);
+        assert!(
+            ctx.status.song.is_some(),
+            "the row that started must be in the queue copy"
+        );
+
+        // The event loop's order: the status poll raises `SongChanged`, then the
+        // swap's refresh raises `QueueChanged`.
+        pane.queue.items.clone_from(&QueuePane::local_queue(&ctx));
+        let mut song_changed = crate::ui::UiEvent::SongChanged;
+        pane.on_event(&mut song_changed, true, &ctx).expect("SongChanged is handled");
+        let mut queue_changed = crate::ui::UiEvent::QueueChanged;
+        pane.on_event(&mut queue_changed, true, &ctx).expect("QueueChanged is handled");
+
+        // The jump is "as close to the top of the visible list as the viewport
+        // allows": 20 rows in a 10-row viewport, so the furthest the list can
+        // scroll with row 12 on top is `len - viewport` = 10. The selection is
+        // the assertion that matters — it is on the row the step started.
+        assert_eq!(
+            pane.queue.selected_with_idx().map(|(idx, _)| idx),
+            Some(12),
+            "the selection must land on the row the step started (index 12)"
+        );
+        assert_eq!(
+            pane.queue.state.offset(),
+            10,
+            "and that row is visible at the top of the scrolled list"
+        );
+        assert_eq!(
+            pane.queue.selected_with_idx().map(|(_, song)| song.id),
+            Some(playing_id),
+            "the highlighted row is the one MPD is playing"
+        );
+    }
 }

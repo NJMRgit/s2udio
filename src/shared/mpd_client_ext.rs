@@ -688,3 +688,391 @@ pub enum PartitionedOutputKind {
     OtherPartition,
     CurrentPartition,
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use rstest::{fixture, rstest};
+
+    use crate::{
+        config::keys::actions::{AddOpts, AutoplayKind, Position},
+        ctx::Ctx,
+        mpd::{QueuePosition, commands::Song},
+        tests::fixtures::ctx,
+    };
+
+    mod enqueue_multiple {
+        use std::collections::HashMap;
+
+        use super::*;
+
+        #[fixture]
+        fn ctx_with_queue(mut ctx: Ctx) -> Ctx {
+            let albums = ["a", "b", "b", "b", "c", "c", "d", "e", "e", "f"];
+            for i in 0..10 {
+                ctx.queue.push(Song {
+                    id: i,
+                    file: format!("song{i}"),
+                    metadata: HashMap::from([(
+                        "album".to_owned(),
+                        albums[i as usize].to_owned().into(),
+                    )]),
+                    ..Default::default()
+                });
+            }
+            ctx
+        }
+
+        #[rstest]
+        fn first_after_current_album(ctx_with_queue: Ctx) {
+            let position = Position::AfterCurrentAlbum;
+            let autoplay = AutoplayKind::First;
+            let current_song_idx = Some(4);
+            let hovered = None;
+            let opts = AddOpts { autoplay, position, all: false };
+
+            let (autoplay_idx, queue_position) = opts
+                .autoplay_idx_and_queue_position(&ctx_with_queue.queue, current_song_idx, hovered)
+                .unwrap();
+
+            assert_eq!(queue_position, Some(QueuePosition::Absolute(6)));
+            assert_eq!(autoplay_idx, Some(6));
+        }
+
+        #[rstest]
+        fn hovered_after_current_album(ctx_with_queue: Ctx) {
+            let position = Position::AfterCurrentAlbum;
+            let current_song_idx = Some(4);
+            let hovered = Some(1);
+            let autoplay = AutoplayKind::Hovered;
+            let opts = AddOpts { autoplay, position, all: false };
+
+            let (autoplay_idx, queue_position) = opts
+                .autoplay_idx_and_queue_position(&ctx_with_queue.queue, current_song_idx, hovered)
+                .unwrap();
+
+            assert_eq!(queue_position, Some(QueuePosition::Absolute(6)));
+            assert_eq!(autoplay_idx, Some(7));
+        }
+
+        #[rstest]
+        fn none_after_current_album(ctx_with_queue: Ctx) {
+            let position = Position::AfterCurrentAlbum;
+            let current_song_idx = Some(4);
+            let hovered = Some(1);
+            let autoplay = AutoplayKind::None;
+            let opts = AddOpts { autoplay, position, all: false };
+
+            let (autoplay_idx, queue_position) = opts
+                .autoplay_idx_and_queue_position(&ctx_with_queue.queue, current_song_idx, hovered)
+                .unwrap();
+
+            assert_eq!(queue_position, Some(QueuePosition::Absolute(6)));
+            assert_eq!(autoplay_idx, None);
+        }
+
+        #[rstest]
+        fn first_after_current_album_when_at_the_end_of_queue(ctx_with_queue: Ctx) {
+            let position = Position::AfterCurrentAlbum;
+            let autoplay = AutoplayKind::First;
+            let current_song_idx = Some(9);
+            let hovered = None;
+            let opts = AddOpts { autoplay, position, all: false };
+
+            let (autoplay_idx, queue_position) = opts
+                .autoplay_idx_and_queue_position(&ctx_with_queue.queue, current_song_idx, hovered)
+                .unwrap();
+
+            assert_eq!(queue_position, Some(QueuePosition::Absolute(10)));
+            assert_eq!(autoplay_idx, Some(10));
+        }
+
+        #[rstest]
+        fn first_before_current_album(ctx_with_queue: Ctx) {
+            let position = Position::BeforeCurrentAlbum;
+            let autoplay = AutoplayKind::First;
+            let current_song_idx = Some(5);
+            let hovered = None;
+            let opts = AddOpts { autoplay, position, all: false };
+
+            let (autoplay_idx, queue_position) = opts
+                .autoplay_idx_and_queue_position(&ctx_with_queue.queue, current_song_idx, hovered)
+                .unwrap();
+
+            assert_eq!(queue_position, Some(QueuePosition::Absolute(4)));
+            assert_eq!(autoplay_idx, Some(4));
+        }
+
+        #[rstest]
+        fn hovered_before_current_album(ctx_with_queue: Ctx) {
+            let position = Position::BeforeCurrentAlbum;
+            let current_song_idx = Some(5);
+            let hovered = Some(1);
+            let autoplay = AutoplayKind::Hovered;
+            let opts = AddOpts { autoplay, position, all: false };
+
+            let (autoplay_idx, queue_position) = opts
+                .autoplay_idx_and_queue_position(&ctx_with_queue.queue, current_song_idx, hovered)
+                .unwrap();
+
+            assert_eq!(queue_position, Some(QueuePosition::Absolute(4)));
+            assert_eq!(autoplay_idx, Some(5));
+        }
+
+        #[rstest]
+        fn none_before_current_album(ctx_with_queue: Ctx) {
+            let position = Position::BeforeCurrentAlbum;
+            let current_song_idx = Some(5);
+            let hovered = Some(1);
+            let autoplay = AutoplayKind::None;
+            let opts = AddOpts { autoplay, position, all: false };
+
+            let (autoplay_idx, queue_position) = opts
+                .autoplay_idx_and_queue_position(&ctx_with_queue.queue, current_song_idx, hovered)
+                .unwrap();
+
+            assert_eq!(queue_position, Some(QueuePosition::Absolute(4)));
+            assert_eq!(autoplay_idx, None);
+        }
+
+        #[rstest]
+        fn first_after_current_song(ctx_with_queue: Ctx) {
+            let position = Position::AfterCurrentSong;
+            let autoplay = AutoplayKind::First;
+            let current_song_idx = Some(5);
+            let hovered = None;
+            let opts = AddOpts { autoplay, position, all: false };
+
+            let (autoplay_idx, queue_position) = opts
+                .autoplay_idx_and_queue_position(&ctx_with_queue.queue, current_song_idx, hovered)
+                .unwrap();
+
+            assert_eq!(queue_position, Some(QueuePosition::RelativeAdd(0)));
+            assert_eq!(autoplay_idx, Some(6));
+        }
+
+        #[rstest]
+        fn hovered_after_current_song(ctx_with_queue: Ctx) {
+            let position = Position::AfterCurrentSong;
+            let current_song_idx = Some(5);
+            let hovered = Some(1);
+            let autoplay = AutoplayKind::Hovered;
+            let opts = AddOpts { autoplay, position, all: false };
+
+            let (autoplay_idx, queue_position) = opts
+                .autoplay_idx_and_queue_position(&ctx_with_queue.queue, current_song_idx, hovered)
+                .unwrap();
+
+            assert_eq!(queue_position, Some(QueuePosition::RelativeAdd(0)));
+            assert_eq!(autoplay_idx, Some(7));
+        }
+
+        #[rstest]
+        fn none_after_current_song(ctx_with_queue: Ctx) {
+            let position = Position::AfterCurrentSong;
+            let current_song_idx = Some(5);
+            let hovered = Some(1);
+            let autoplay = AutoplayKind::None;
+            let opts = AddOpts { autoplay, position, all: false };
+
+            let (autoplay_idx, queue_position) = opts
+                .autoplay_idx_and_queue_position(&ctx_with_queue.queue, current_song_idx, hovered)
+                .unwrap();
+
+            assert_eq!(queue_position, Some(QueuePosition::RelativeAdd(0)));
+            assert_eq!(autoplay_idx, None);
+        }
+
+        #[rstest]
+        fn first_start_of_queue(ctx_with_queue: Ctx) {
+            let position = Position::StartOfQueue;
+            let current_song_idx = Some(5);
+            let hovered = None;
+            let autoplay = AutoplayKind::First;
+            let opts = AddOpts { autoplay, position, all: false };
+
+            let (autoplay_idx, queue_position) = opts
+                .autoplay_idx_and_queue_position(&ctx_with_queue.queue, current_song_idx, hovered)
+                .unwrap();
+
+            assert_eq!(queue_position, Some(QueuePosition::Absolute(0)));
+            assert_eq!(autoplay_idx, Some(0));
+        }
+
+        #[rstest]
+        fn hovered_start_of_queue(ctx_with_queue: Ctx) {
+            let position = Position::StartOfQueue;
+            let current_song_idx = Some(5);
+            let hovered = Some(1);
+            let autoplay = AutoplayKind::Hovered;
+            let opts = AddOpts { autoplay, position, all: false };
+
+            let (autoplay_idx, queue_position) = opts
+                .autoplay_idx_and_queue_position(&ctx_with_queue.queue, current_song_idx, hovered)
+                .unwrap();
+
+            assert_eq!(queue_position, Some(QueuePosition::Absolute(0)));
+            assert_eq!(autoplay_idx, Some(1));
+        }
+
+        #[rstest]
+        fn none_start_of_queue(ctx_with_queue: Ctx) {
+            let position = Position::StartOfQueue;
+            let current_song_idx = Some(5);
+            let hovered = Some(1);
+            let autoplay = AutoplayKind::None;
+            let opts = AddOpts { autoplay, position, all: false };
+
+            let (autoplay_idx, queue_position) = opts
+                .autoplay_idx_and_queue_position(&ctx_with_queue.queue, current_song_idx, hovered)
+                .unwrap();
+
+            assert_eq!(queue_position, Some(QueuePosition::Absolute(0)));
+            assert_eq!(autoplay_idx, None);
+        }
+
+        #[rstest]
+        fn first_replace(ctx_with_queue: Ctx) {
+            let position = Position::Replace;
+            let current_song_idx = Some(5);
+            let hovered = Some(1);
+            let autoplay = AutoplayKind::First;
+            let opts = AddOpts { autoplay, position, all: false };
+
+            let (autoplay_idx, queue_position) = opts
+                .autoplay_idx_and_queue_position(&ctx_with_queue.queue, current_song_idx, hovered)
+                .unwrap();
+
+            assert_eq!(queue_position, None);
+            assert_eq!(autoplay_idx, Some(0));
+        }
+
+        #[rstest]
+        fn hovered_replace(ctx_with_queue: Ctx) {
+            let position = Position::Replace;
+            let current_song_idx = Some(5);
+            let hovered = Some(1);
+            let autoplay = AutoplayKind::Hovered;
+            let opts = AddOpts { autoplay, position, all: false };
+
+            let (autoplay_idx, queue_position) = opts
+                .autoplay_idx_and_queue_position(&ctx_with_queue.queue, current_song_idx, hovered)
+                .unwrap();
+
+            assert_eq!(queue_position, None);
+            assert_eq!(autoplay_idx, Some(1));
+        }
+
+        #[rstest]
+        fn none_replace(ctx_with_queue: Ctx) {
+            let position = Position::Replace;
+            let current_song_idx = Some(5);
+            let hovered = Some(1);
+            let autoplay = AutoplayKind::None;
+            let opts = AddOpts { autoplay, position, all: false };
+
+            let (autoplay_idx, queue_position) = opts
+                .autoplay_idx_and_queue_position(&ctx_with_queue.queue, current_song_idx, hovered)
+                .unwrap();
+
+            assert_eq!(queue_position, None);
+            assert_eq!(autoplay_idx, None);
+        }
+
+        #[rstest]
+        fn first_before_current_song(ctx_with_queue: Ctx) {
+            let position = Position::BeforeCurrentSong;
+            let current_song_idx = Some(5);
+            let hovered = Some(1);
+            let autoplay = AutoplayKind::First;
+            let opts = AddOpts { autoplay, position, all: false };
+
+            let (autoplay_idx, queue_position) = opts
+                .autoplay_idx_and_queue_position(&ctx_with_queue.queue, current_song_idx, hovered)
+                .unwrap();
+
+            assert_eq!(queue_position, Some(QueuePosition::RelativeSub(0)));
+            assert_eq!(autoplay_idx, Some(5));
+        }
+
+        #[rstest]
+        fn hovered_before_current_song(ctx_with_queue: Ctx) {
+            let position = Position::BeforeCurrentSong;
+            let current_song_idx = Some(5);
+            let hovered = Some(1);
+            let autoplay = AutoplayKind::Hovered;
+            let opts = AddOpts { autoplay, position, all: false };
+
+            let (autoplay_idx, queue_position) = opts
+                .autoplay_idx_and_queue_position(&ctx_with_queue.queue, current_song_idx, hovered)
+                .unwrap();
+
+            assert_eq!(queue_position, Some(QueuePosition::RelativeSub(0)));
+            assert_eq!(autoplay_idx, Some(6));
+        }
+
+        #[rstest]
+        fn none_before_current_song(ctx_with_queue: Ctx) {
+            let position = Position::BeforeCurrentSong;
+            let current_song_idx = Some(5);
+            let hovered = Some(1);
+            let autoplay = AutoplayKind::None;
+            let opts = AddOpts { autoplay, position, all: false };
+
+            let (autoplay_idx, queue_position) = opts
+                .autoplay_idx_and_queue_position(&ctx_with_queue.queue, current_song_idx, hovered)
+                .unwrap();
+
+            assert_eq!(queue_position, Some(QueuePosition::RelativeSub(0)));
+            assert_eq!(autoplay_idx, None);
+        }
+
+        #[rstest]
+        fn first_end_of_queue(ctx_with_queue: Ctx) {
+            let position = Position::EndOfQueue;
+            let current_song_idx = Some(5);
+            let hovered = Some(1);
+            let autoplay = AutoplayKind::First;
+            let opts = AddOpts { autoplay, position, all: false };
+
+            let (autoplay_idx, queue_position) = opts
+                .autoplay_idx_and_queue_position(&ctx_with_queue.queue, current_song_idx, hovered)
+                .unwrap();
+
+            assert_eq!(queue_position, None);
+            assert_eq!(autoplay_idx, Some(10));
+        }
+
+        #[rstest]
+        fn hovered_end_of_queue(ctx_with_queue: Ctx) {
+            let position = Position::EndOfQueue;
+            let current_song_idx = Some(5);
+            let hovered = Some(1);
+            let autoplay = AutoplayKind::Hovered;
+            let opts = AddOpts { autoplay, position, all: false };
+
+            let (autoplay_idx, queue_position) = opts
+                .autoplay_idx_and_queue_position(&ctx_with_queue.queue, current_song_idx, hovered)
+                .unwrap();
+
+            assert_eq!(queue_position, None);
+            assert_eq!(autoplay_idx, Some(11));
+        }
+
+        #[rstest]
+        fn none_end_of_queue(ctx_with_queue: Ctx) {
+            let position = Position::EndOfQueue;
+            let current_song_idx = Some(5);
+            let hovered = Some(1);
+            let autoplay = AutoplayKind::None;
+            let opts = AddOpts { autoplay, position, all: false };
+
+            let (autoplay_idx, queue_position) = opts
+                .autoplay_idx_and_queue_position(&ctx_with_queue.queue, current_song_idx, hovered)
+                .unwrap();
+
+            assert_eq!(queue_position, None);
+            assert_eq!(autoplay_idx, None);
+        }
+    }
+}

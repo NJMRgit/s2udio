@@ -163,3 +163,22 @@ impl Widget for &mut Tabs<'_> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use ratatui::style::{Color, Modifier, Stylize};
+
+    use super::*;
+
+    #[test]
+    fn can_be_stylized() {
+        assert_eq!(
+            Tabs::new(vec![""]).black().on_white().bold().not_italic().style,
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::White)
+                .add_modifier(Modifier::BOLD)
+                .remove_modifier(Modifier::ITALIC)
+        );
+    }
+}

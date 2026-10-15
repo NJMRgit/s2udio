@@ -68,3 +68,179 @@ impl ScrollbarConfigFile {
         })
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::needless_pass_by_value)]
+mod tests {
+    use ratatui::style::{Color as RC, Modifier as RM};
+    use test_case::test_case;
+
+    use crate::config::theme::{
+        Style, StyleFile, scrollbar::ScrollbarConfigFile, style::Modifiers,
+    };
+
+    #[test]
+    fn maps_symbols() {
+        let input = ScrollbarConfigFile {
+            symbols: vec!["a".to_owned(), "b".to_owned(), "c".to_owned(), "d".to_owned()],
+            ..Default::default()
+        };
+
+        let result = input.into_config(RC::Red).unwrap().symbols;
+
+        assert_eq!(result, ["a".to_owned(), "b".to_owned(), "c".to_owned(), "d".to_owned()]);
+    }
+
+    #[test_case(None,         None,         Style::default().fg(RC::Blue)                ; "uses default colors")]
+    #[test_case(Some("none"), Some("none"), Style::default().fg(RC::Blue)                ; "uses default colors when whole value is None")]
+    #[test_case(Some("red"),  Some("blue"), Style::default().fg(RC::Red).bg(RC::Blue)    ; "correctly maps provided colors")]
+    #[test_case(Some("cyan"), None,         Style::default().fg(RC::Cyan)                ; "correctly maps when only fg is provided")]
+    #[test_case(None,         Some("gray"), Style::default().fg(RC::Blue).bg(RC::Gray)   ; "correctly maps when only bg is provided")]
+    fn thumb_colors_test(c1: Option<&str>, c2: Option<&str>, expected: Style) {
+        let fallback = RC::DarkGray;
+        let input = ScrollbarConfigFile {
+            thumb_style: match (c1, c2) {
+                (Some("none"), Some("none")) => None,
+                (Some(c1), Some(c2)) => Some(StyleFile {
+                    fg: Some(c1.to_string()),
+                    bg: Some(c2.to_string()),
+                    modifiers: None,
+                }),
+                (Some(c1), None) => {
+                    Some(StyleFile { fg: Some(c1.to_string()), bg: None, modifiers: None })
+                }
+                (None, Some(c2)) => {
+                    Some(StyleFile { fg: None, bg: Some(c2.to_string()), modifiers: None })
+                }
+                (None, None) => Some(StyleFile { fg: None, bg: None, modifiers: None }),
+            },
+            ..Default::default()
+        };
+
+        let result = input.into_config(fallback).unwrap();
+
+        assert_eq!(result.thumb_style, expected);
+    }
+
+    #[test_case(None,         None,         Style::default().fg(RC::DarkGray)                ; "uses default colors")]
+    #[test_case(Some("none"), Some("none"), Style::default().fg(RC::DarkGray)                ; "uses default colors when whole value is None")]
+    #[test_case(Some("red"),  Some("blue"), Style::default().fg(RC::Red).bg(RC::Blue)        ; "correctly maps provided colors")]
+    #[test_case(Some("cyan"), None,         Style::default().fg(RC::Cyan)                    ; "correctly maps when only fg is provided")]
+    #[test_case(None,         Some("gray"), Style::default().fg(RC::DarkGray).bg(RC::Gray)   ; "correctly maps when only bg is provided")]
+    fn ends_colors_test(c1: Option<&str>, c2: Option<&str>, expected: Style) {
+        let fallback = RC::DarkGray;
+        let input = ScrollbarConfigFile {
+            ends_style: match (c1, c2) {
+                (Some("none"), Some("none")) => None,
+                (Some(c1), Some(c2)) => Some(StyleFile {
+                    fg: Some(c1.to_string()),
+                    bg: Some(c2.to_string()),
+                    modifiers: None,
+                }),
+                (Some(c1), None) => {
+                    Some(StyleFile { fg: Some(c1.to_string()), bg: None, modifiers: None })
+                }
+                (None, Some(c2)) => {
+                    Some(StyleFile { fg: None, bg: Some(c2.to_string()), modifiers: None })
+                }
+                (None, None) => Some(StyleFile { fg: None, bg: None, modifiers: None }),
+            },
+            ..Default::default()
+        };
+
+        let result = input.into_config(fallback).unwrap();
+
+        assert_eq!(result.ends_style, expected);
+    }
+
+    #[test_case(None,         None,         Style::default().fg(RC::DarkGray)                ; "uses default colors")]
+    #[test_case(Some("none"), Some("none"), Style::default().fg(RC::DarkGray)                ; "uses default colors when whole value is None")]
+    #[test_case(Some("red"),  Some("blue"), Style::default().fg(RC::Red).bg(RC::Blue)        ; "correctly maps provided colors")]
+    #[test_case(Some("cyan"), None,         Style::default().fg(RC::Cyan)                    ; "correctly maps when only fg is provided")]
+    #[test_case(None,         Some("gray"), Style::default().fg(RC::DarkGray).bg(RC::Gray)   ; "correctly maps when only bg is provided")]
+    fn track_colors_test(c1: Option<&str>, c2: Option<&str>, expected: Style) {
+        let fallback = RC::DarkGray;
+        let input = ScrollbarConfigFile {
+            track_style: match (c1, c2) {
+                (Some("none"), Some("none")) => None,
+                (Some(c1), Some(c2)) => Some(StyleFile {
+                    fg: Some(c1.to_string()),
+                    bg: Some(c2.to_string()),
+                    modifiers: None,
+                }),
+                (Some(c1), None) => {
+                    Some(StyleFile { fg: Some(c1.to_string()), bg: None, modifiers: None })
+                }
+                (None, Some(c2)) => {
+                    Some(StyleFile { fg: None, bg: Some(c2.to_string()), modifiers: None })
+                }
+                (None, None) => Some(StyleFile { fg: None, bg: None, modifiers: None }),
+            },
+            ..Default::default()
+        };
+
+        let result = input.into_config(fallback).unwrap();
+
+        assert_eq!(result.track_style, expected);
+    }
+
+    #[test_case(Modifiers::Bold,       RM::BOLD; "bold")]
+    #[test_case(Modifiers::Dim,        RM::DIM; "dim")]
+    #[test_case(Modifiers::Italic,     RM::ITALIC; "italic")]
+    #[test_case(Modifiers::Underlined, RM::UNDERLINED; "underlined")]
+    #[test_case(Modifiers::Reversed,   RM::REVERSED; "reversed")]
+    #[test_case(Modifiers::CrossedOut, RM::CROSSED_OUT; "crossed out")]
+    fn thumb_modifiers(input: Modifiers, expected: RM) {
+        let input = ScrollbarConfigFile {
+            thumb_style: Some(StyleFile { fg: None, bg: None, modifiers: Some(input) }),
+            ..Default::default()
+        };
+
+        let result = input.into_config(RC::Blue).unwrap();
+
+        assert_eq!(
+            result.thumb_style.add_modifier,
+            Style::default().add_modifier(expected).add_modifier
+        );
+    }
+
+    #[test_case(Modifiers::Bold,       RM::BOLD; "bold")]
+    #[test_case(Modifiers::Dim,        RM::DIM; "dim")]
+    #[test_case(Modifiers::Italic,     RM::ITALIC; "italic")]
+    #[test_case(Modifiers::Underlined, RM::UNDERLINED; "underlined")]
+    #[test_case(Modifiers::Reversed,   RM::REVERSED; "reversed")]
+    #[test_case(Modifiers::CrossedOut, RM::CROSSED_OUT; "crossed out")]
+    fn ends_modifiers(input: Modifiers, expected: RM) {
+        let input = ScrollbarConfigFile {
+            ends_style: Some(StyleFile { fg: None, bg: None, modifiers: Some(input) }),
+            ..Default::default()
+        };
+
+        let result = input.into_config(RC::Blue).unwrap();
+
+        assert_eq!(
+            result.ends_style.add_modifier,
+            Style::default().add_modifier(expected).add_modifier
+        );
+    }
+
+    #[test_case(Modifiers::Bold,       RM::BOLD; "bold")]
+    #[test_case(Modifiers::Dim,        RM::DIM; "dim")]
+    #[test_case(Modifiers::Italic,     RM::ITALIC; "italic")]
+    #[test_case(Modifiers::Underlined, RM::UNDERLINED; "underlined")]
+    #[test_case(Modifiers::Reversed,   RM::REVERSED; "reversed")]
+    #[test_case(Modifiers::CrossedOut, RM::CROSSED_OUT; "crossed out")]
+    fn track_modifiers(input: Modifiers, expected: RM) {
+        let input = ScrollbarConfigFile {
+            track_style: Some(StyleFile { fg: None, bg: None, modifiers: Some(input) }),
+            ..Default::default()
+        };
+
+        let result = input.into_config(RC::Blue).unwrap();
+
+        assert_eq!(
+            result.track_style.add_modifier,
+            Style::default().add_modifier(expected).add_modifier
+        );
+    }
+}

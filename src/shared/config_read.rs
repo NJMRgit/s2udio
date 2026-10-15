@@ -282,3 +282,58 @@ pub fn read_theme_file(path: &Path) -> Result<UiConfigFile, ConfigReadError> {
 pub fn find_first_existing_path(paths: Vec<PathBuf>) -> Option<PathBuf> {
     paths.into_iter().find(|path| path.exists())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::shared::env::ENV;
+
+    /// Round 23 one-time migration: a legacy `~/.config/rmpc/config.ron`
+    /// base plus the round-19 `~/.config/s2udio/config.ron` overlay merge
+    /// into a single full `~/.config/s2udio/config.ron`; the legacy base
+    /// is left in place (upstream rmpc), and the sidecars are copied over.
+    #[test]
+    fn migration_merges_legacy_base_and_overlay_into_s2udio_config() {
+        let _home_guard = crate::tests::fixtures::HOME_LOCK.lock().unwrap();
+        let home = std::env::temp_dir().join(format!("s2u-migrate-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        ENV.set("HOME".to_string(), home.to_string_lossy().into_owned());
+
+        let rmpc_dir = home.join(".config/rmpc");
+        let s2udio_dir = home.join(".config/s2udio");
+        std::fs::create_dir_all(&rmpc_dir).unwrap();
+        std::fs::create_dir_all(&s2udio_dir).unwrap();
+
+        // Legacy base: a base-only setting (address) so the merge is
+        // observable.
+        std::fs::write(rmpc_dir.join("config.ron"), "(address: \"1.2.3.4:9999\",)\n").unwrap();
+        // Round-19 overlay: the s2udio-only sections at the old overlay
+        // path (same filename as the future full config).
+        std::fs::write(
+            s2udio_dir.join("config.ron"),
+            "(radio: Some((playlist: Some(\"radio\"), location: None, max_favourites: Some(10))),)\n",
+        )
+        .unwrap();
+        // A legacy sidecar that the new dir lacks.
+        std::fs::write(rmpc_dir.join("keybinds.ron"), "(global: {\"q\": Quit},)\n").unwrap();
+
+        let resolved = resolve_config_path(None).expect("migration resolves a config");
+        assert_eq!(resolved, s2udio_dir.join("config.ron"));
+
+        let config = read_config_file(&resolved).unwrap();
+        assert_eq!(config.address, "1.2.3.4:9999", "base setting survives");
+        assert_eq!(config.radio.playlist.as_deref(), Some("radio"), "overlay section merged");
+
+        // The legacy base is left for upstream rmpc; the sidecar was
+        // copied into the new dir.
+        assert!(rmpc_dir.join("config.ron").exists());
+        assert!(s2udio_dir.join("keybinds.ron").exists());
+
+        // A second resolve is the idempotent fast path.
+        assert_eq!(resolve_config_path(None).unwrap(), s2udio_dir.join("config.ron"));
+
+        ENV.remove("HOME");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+}

@@ -239,3 +239,282 @@ impl<T> Ord for JobOrRepeatedJob<T> {
         self.run_at().cmp(&other.run_at())
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use std::{
+        collections::VecDeque,
+        sync::{Arc, Mutex},
+        time::{Duration, Instant},
+    };
+
+    use super::{Scheduler, TimeProvider};
+    use crate::shared::id;
+
+    #[derive(Clone, Debug)]
+    struct FakeTimeProvider(Arc<Mutex<VecDeque<Instant>>>);
+    impl TimeProvider for FakeTimeProvider {
+        fn now(&self) -> Instant {
+            let instant = self.0.lock().unwrap().pop_front();
+            instant.unwrap_or_else(Instant::now)
+        }
+    }
+    impl FakeTimeProvider {
+        fn new(times: impl Into<VecDeque<Instant>>) -> Self {
+            let times: VecDeque<Instant> = times.into();
+            Self(Arc::new(Mutex::new(times)))
+        }
+    }
+
+    #[test]
+    fn schedules_jobs_in_the_correct_order() {
+        let start = Instant::now();
+        let mut scheduler = Scheduler::new_with_provider(
+            (),
+            FakeTimeProvider::new([
+                // scheduling jobs
+                start,
+                start, // dummy that is read after each add
+                start + Duration::from_micros(1),
+                start + Duration::from_micros(1), // dummy that is read after each add
+                start + Duration::from_micros(2),
+                start + Duration::from_micros(2), // dummy that is read after each add
+                start + Duration::from_micros(3),
+                start + Duration::from_micros(3), // dummy that is read after each add
+                // job runs
+                start + Duration::from_micros(10100),
+                start + Duration::from_micros(20100),
+                start + Duration::from_micros(30100),
+                start + Duration::from_micros(40100),
+            ]),
+        );
+        let results = Arc::new(Mutex::new(Vec::new()));
+
+        let res = Arc::clone(&results);
+        scheduler.schedule(Duration::from_millis(40), move |()| {
+            let mut results = res.lock().unwrap();
+            if results.len() < 4 {
+                results.push(4);
+            }
+            Ok(())
+        });
+        let res = Arc::clone(&results);
+        scheduler.schedule(Duration::from_millis(10), move |()| {
+            let mut results = res.lock().unwrap();
+            if results.len() < 4 {
+                results.push(3);
+            }
+            Ok(())
+        });
+        let res = Arc::clone(&results);
+        scheduler.schedule(Duration::from_millis(20), move |()| {
+            let mut results = res.lock().unwrap();
+            if results.len() < 4 {
+                results.push(2);
+            }
+            Ok(())
+        });
+        let res = Arc::clone(&results);
+        scheduler.schedule(Duration::from_millis(30), move |()| {
+            let mut results = res.lock().unwrap();
+            if results.len() < 4 {
+                results.push(1);
+            }
+            Ok(())
+        });
+
+        scheduler.start();
+        while results.lock().unwrap().len() < 4 {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        scheduler.stop();
+
+        assert_eq!(*results.lock().unwrap(), vec![3, 2, 1, 4]);
+    }
+
+    #[test]
+    fn schedules_repeated_jobs() {
+        let start = Instant::now();
+        let mut scheduler = Scheduler::new_with_provider(
+            (),
+            FakeTimeProvider::new([
+                // scheduling jobs
+                start,
+                start, // dummy that is read after each add
+                start + Duration::from_micros(1),
+                start + Duration::from_micros(1), // dummy that is read after each add
+                // first set of runs
+                start + Duration::from_micros(10100),
+                start + Duration::from_micros(10100),
+                // second set of runs
+                start + Duration::from_micros(30100),
+                start + Duration::from_micros(30100),
+                // third set of runs
+                start + Duration::from_micros(40100),
+                start + Duration::from_micros(40100),
+            ]),
+        );
+        let results = Arc::new(Mutex::new(Vec::new()));
+
+        let res = Arc::clone(&results);
+        let guard1 = scheduler.repeated(Duration::from_millis(10), move |()| {
+            let mut results = res.lock().unwrap();
+            if results.len() < 6 {
+                results.push(1);
+            }
+            Ok(())
+        });
+        let res = Arc::clone(&results);
+        let guard2 = scheduler.repeated(Duration::from_millis(10), move |()| {
+            let mut results = res.lock().unwrap();
+            if results.len() < 6 {
+                results.push(2);
+            }
+            Ok(())
+        });
+
+        scheduler.start();
+        while results.lock().unwrap().len() < 6 {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        drop(guard1);
+        drop(guard2);
+        scheduler.stop();
+
+        assert_eq!(*results.lock().unwrap(), vec![1, 2, 1, 2, 1, 2]);
+    }
+
+    #[test]
+    fn replaces_job() {
+        let start = Instant::now();
+        let mut scheduler = Scheduler::new_with_provider(
+            (),
+            FakeTimeProvider::new([
+                // scheduling jobs
+                start,
+                start, // dummy that is read after each add
+                start + Duration::from_micros(1),
+                start + Duration::from_micros(1), // dummy that is read after each add
+                // first set of runs
+                start + Duration::from_millis(10),
+                start + Duration::from_millis(10),
+            ]),
+        );
+        let results = Arc::new(Mutex::new(Vec::new()));
+
+        let res = Arc::clone(&results);
+        let id = id::new();
+        scheduler.schedule_replace(id, Duration::from_millis(5), move |()| {
+            let mut results = res.lock().unwrap();
+            results.push(1);
+            Ok(())
+        });
+        let res = Arc::clone(&results);
+        scheduler.schedule_replace(id, Duration::from_millis(10), move |()| {
+            let mut results = res.lock().unwrap();
+            results.push(1);
+            Ok(())
+        });
+
+        scheduler.start();
+
+        while results.lock().unwrap().is_empty() {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(*results.lock().unwrap(), vec![1]);
+    }
+
+    #[test]
+    fn interleaves_repeated_and_scheduled_jobs() {
+        let expected_results = 10;
+        let start = Instant::now();
+        let schedule_delays = &[
+            Duration::from_millis(10),
+            Duration::from_millis(10),
+            Duration::from_millis(40),
+            Duration::from_millis(40),
+            Duration::from_millis(70),
+            Duration::from_millis(70),
+            Duration::from_millis(30),
+            Duration::from_millis(30),
+        ];
+        let mut scheduler = Scheduler::new_with_provider(
+            (),
+            FakeTimeProvider::new([
+                // scheduling jobs
+                start,
+                start, // dummy that is read after each add
+                start + Duration::from_micros(1),
+                start + Duration::from_micros(1), // dummy that is read after each add
+                start + Duration::from_micros(2),
+                start + Duration::from_micros(2), // dummy that is read after each add
+                start + Duration::from_micros(3),
+                start + Duration::from_micros(3), // dummy that is read after each add
+                start + Duration::from_micros(4),
+                start + Duration::from_micros(4), // dummy that is read after each add
+                start + Duration::from_micros(5),
+                start + Duration::from_micros(5), // dummy that is read after each add
+                // scheduling repeated jobs
+                start + Duration::from_micros(6),
+                start + Duration::from_micros(6), // dummy that is read after each add
+                start + Duration::from_micros(7),
+                start + Duration::from_micros(7), // dummy that is read after each add
+                // first two jobs running
+                start + Duration::from_micros(10100),
+                start + Duration::from_micros(10100),
+                // repeated jobs running now
+                start + Duration::from_micros(30100),
+                start + Duration::from_micros(30100),
+                // second two jobs running
+                start + Duration::from_micros(40100),
+                start + Duration::from_micros(40100),
+                // repeated jobs should run again
+                start + Duration::from_micros(60100),
+                start + Duration::from_micros(60100),
+                // last job should run now
+                start + Duration::from_micros(70100),
+                start + Duration::from_micros(70100),
+            ]),
+        );
+        let results = Arc::new(Mutex::new(Vec::new()));
+
+        for (i, _) in schedule_delays.iter().enumerate().take(6) {
+            let res = Arc::clone(&results);
+            scheduler.schedule(schedule_delays[i], move |()| {
+                let mut results = res.lock().unwrap();
+                if results.len() < expected_results {
+                    results.push(i + 1);
+                }
+                Ok(())
+            });
+        }
+        let res = Arc::clone(&results);
+        let guard1 = scheduler.repeated(schedule_delays[6], move |()| {
+            let mut results = res.lock().unwrap();
+            if results.len() < expected_results {
+                results.push(11);
+            }
+            Ok(())
+        });
+        let res = Arc::clone(&results);
+        let guard2 = scheduler.repeated(schedule_delays[7], move |()| {
+            let mut results = res.lock().unwrap();
+            if results.len() < expected_results {
+                results.push(22);
+            }
+            Ok(())
+        });
+
+        scheduler.start();
+        while results.lock().unwrap().len() < expected_results {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        drop(guard1);
+        drop(guard2);
+        scheduler.stop();
+
+        assert_eq!(*results.lock().unwrap(), vec![1, 2, 11, 22, 3, 4, 11, 22, 5, 6]);
+    }
+}

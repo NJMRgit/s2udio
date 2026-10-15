@@ -570,3 +570,22 @@ impl QueuePane {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod moved_events_tests {
+    use crate::shared::mouse_event::MouseEventKind;
+
+    #[test]
+    fn moved_events_are_tracked_by_the_mouse_event_tracker() {
+        let mut tracker = crate::shared::mouse_event::MouseEventTracker::default();
+        let ev = tracker.track_and_get(crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Moved,
+            column: 7,
+            row: 3,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        });
+        let ev = ev.expect("moves produce an event");
+        assert!(matches!(ev.kind, MouseEventKind::Moved));
+        assert_eq!((ev.x, ev.y), (7, 3));
+    }
+}

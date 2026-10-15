@@ -251,3 +251,331 @@ impl<T: SocketClient> ProtoClient for T {
         Ok(MpdLine::Value(line))
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use std::io::{BufReader, Cursor};
+
+    use super::SocketClient;
+    use crate::mpd::{FromMpd, LineHandled, errors::MpdError, version::Version};
+
+    #[derive(Default, Debug, PartialEq, Eq)]
+    struct TestMpdObject {
+        val_a: String,
+        val_b: String,
+    }
+    impl FromMpd for TestMpdObject {
+        fn next_internal(&mut self, key: &str, value: String) -> Result<LineHandled, MpdError> {
+            if key == "fail" {
+                return Err(MpdError::Generic(String::from("intentional fail")));
+            }
+            match key {
+                "val_a" => self.val_a = value,
+                "val_b" => self.val_b = value,
+                _ => {
+                    return Err(MpdError::Generic(String::from("unknown value")));
+                }
+            }
+            Ok(LineHandled::Yes)
+        }
+    }
+
+    struct TestClient {
+        read: BufReader<Cursor<Vec<u8>>>,
+    }
+    impl TestClient {
+        fn new(buf: &[u8]) -> Self {
+            Self { read: BufReader::new(Cursor::new(buf.to_vec())) }
+        }
+    }
+    impl SocketClient for TestClient {
+        fn write(&mut self, _bytes: &[u8]) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn read(&mut self) -> &mut impl std::io::BufRead {
+            &mut self.read
+        }
+
+        fn clear_read_buf(&mut self) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn version(&self) -> Version {
+            Version::new(0, 25, 0)
+        }
+    }
+
+    mod read_mpd_line {
+
+        use std::io::{BufReader, Cursor};
+
+        use rstest::rstest;
+
+        use crate::{
+            mpd::{
+                errors::{ErrorCode, MpdError, MpdFailureResponse},
+                proto_client::{MpdLine, ProtoClient, SocketClient},
+            },
+            tests::fixtures::mpd_client::{TestMpdClient, client},
+        };
+
+        #[rstest]
+        fn returns_ok(mut client: TestMpdClient) {
+            client.set_read_content(Box::new(Cursor::new(b"OK enenene")));
+            let result = TestMpdClient::read_line(client.read());
+
+            assert_eq!(Ok(MpdLine::Ok), result);
+        }
+
+        #[rstest]
+        fn returns_ok_for_list_ok(mut client: TestMpdClient) {
+            client.set_read_content(Box::new(Cursor::new(b"list_OK enenene")));
+            let result = TestMpdClient::read_line(client.read());
+
+            assert_eq!(Ok(MpdLine::Ok), result);
+        }
+
+        #[rstest]
+        fn returns_mpd_err(mut client: TestMpdClient) {
+            let err = MpdFailureResponse {
+                code: ErrorCode::PlayerSync,
+                command_list_index: 2,
+                command: "some_cmd".to_string(),
+                message: "error message boi".to_string(),
+            };
+
+            client.set_read_content(Box::new(Cursor::new(
+                b"ACK [55@2] {some_cmd} error message boi",
+            )));
+            let result = TestMpdClient::read_line(client.read());
+
+            assert_eq!(Err(MpdError::Mpd(err)), result);
+        }
+
+        #[rstest]
+        fn returns_client_closed_on_broken_pipe(mut client: TestMpdClient) {
+            struct Mock;
+            impl std::io::BufRead for Mock {
+                fn consume(&mut self, _amt: usize) {}
+
+                fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+                    Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe))
+                }
+            }
+            impl std::io::Read for Mock {
+                fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                    Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe))
+                }
+            }
+
+            client.set_read(BufReader::new(Box::new(Mock)));
+            let result = TestMpdClient::read_line(client.read());
+
+            assert_eq!(Err(MpdError::ClientClosed), result);
+        }
+    }
+
+    mod response {
+
+        use super::*;
+        use crate::mpd::{
+            errors::{ErrorCode, MpdError, MpdFailureResponse},
+            proto_client::ProtoClient,
+        };
+
+        #[test]
+        fn parses_correct_response() {
+            let buf: &[u8] = b"val_b: a\nval_a: 5\nOK\n";
+
+            let result = TestClient::new(buf).read_response::<TestMpdObject>();
+
+            assert_eq!(result, Ok(TestMpdObject { val_a: "5".to_owned(), val_b: "a".to_owned() }));
+        }
+
+        #[test]
+        fn returns_parse_error() {
+            let buf: &[u8] = b"fail: lol\nOK\n";
+
+            let result = TestClient::new(buf).read_response::<TestMpdObject>();
+
+            assert_eq!(result, Err(MpdError::Generic(String::from("intentional fail"))));
+        }
+
+        #[test]
+        fn returns_mpd_error() {
+            let buf: &[u8] = b"ACK [55@2] {some_cmd} error message boi\n";
+            let err = MpdFailureResponse {
+                code: ErrorCode::PlayerSync,
+                command_list_index: 2,
+                command: "some_cmd".to_string(),
+                message: "error message boi".to_string(),
+            };
+
+            let result = TestClient::new(buf).read_response::<TestMpdObject>();
+
+            assert_eq!(result, Err(MpdError::Mpd(err)));
+        }
+    }
+    mod response_opt {
+        use super::*;
+        use crate::mpd::{
+            errors::{ErrorCode, MpdError, MpdFailureResponse},
+            proto_client::ProtoClient,
+        };
+
+        #[test]
+        fn parses_correct_response() {
+            let buf: &[u8] = b"val_b: a\nval_a: 5\nOK\n";
+
+            let result = TestClient::new(buf).read_opt_response::<TestMpdObject>();
+
+            assert_eq!(
+                result,
+                Ok(Some(TestMpdObject { val_a: "5".to_owned(), val_b: "a".to_owned() }))
+            );
+        }
+
+        #[test]
+        fn returns_none() {
+            let buf: &[u8] = b"OK\n";
+
+            let result = TestClient::new(buf).read_opt_response::<TestMpdObject>();
+
+            assert_eq!(result, Ok(None));
+        }
+
+        #[test]
+        fn returns_parse_error() {
+            let buf: &[u8] = b"fail: lol\nOK\n";
+
+            let result = TestClient::new(buf).read_opt_response::<TestMpdObject>();
+
+            assert_eq!(result, Err(MpdError::Generic(String::from("intentional fail"))));
+        }
+
+        #[test]
+        fn returns_mpd_error() {
+            let buf: &[u8] = b"ACK [55@2] {some_cmd} error message boi\n";
+            let err = MpdFailureResponse {
+                code: ErrorCode::PlayerSync,
+                command_list_index: 2,
+                command: "some_cmd".to_string(),
+                message: "error message boi".to_string(),
+            };
+
+            let result = TestClient::new(buf).read_opt_response::<TestMpdObject>();
+
+            assert_eq!(result, Err(MpdError::Mpd(err)));
+        }
+    }
+
+    mod ok {
+        use super::*;
+        use crate::mpd::{
+            errors::{ErrorCode, MpdFailureResponse},
+            proto_client::ProtoClient,
+        };
+
+        #[test]
+        fn parses_correct_response() {
+            let buf: &[u8] = b"OK\n";
+
+            let result = TestClient::new(buf).read_ok();
+
+            assert_eq!(result, Ok(()));
+        }
+
+        #[test]
+        fn returns_mpd_error() {
+            let buf: &[u8] = b"ACK [55@2] {some_cmd} error message boi\n";
+            let err = MpdFailureResponse {
+                code: ErrorCode::PlayerSync,
+                command_list_index: 2,
+                command: "some_cmd".to_string(),
+                message: "error message boi".to_string(),
+            };
+
+            let result = TestClient::new(buf).read_ok();
+
+            assert_eq!(result, Err(MpdError::Mpd(err)));
+        }
+
+        #[test]
+        fn returns_error_when_receiving_value() {
+            let buf: &[u8] = b"idc\nOK\n";
+
+            let result = TestClient::new(buf).read_ok();
+
+            assert_eq!(result, Err(MpdError::Generic(String::from("Expected 'OK' but got 'idc'"))));
+        }
+    }
+
+    mod binary {
+        use crate::mpd::{
+            errors::{ErrorCode, MpdError, MpdFailureResponse},
+            proto_client::{BinaryMpdResponse, ProtoClient, tests::TestClient},
+        };
+
+        #[test]
+        fn returns_mpd_error() {
+            let buf: &[u8] = b"ACK [55@2] {some_cmd} error message boi\n";
+            let err = MpdFailureResponse {
+                code: ErrorCode::PlayerSync,
+                command_list_index: 2,
+                command: "some_cmd".to_string(),
+                message: "error message boi".to_string(),
+            };
+
+            let result = TestClient::new(buf).read_bin_inner(&mut Vec::new());
+
+            assert_eq!(result, Err(MpdError::Mpd(err)));
+        }
+
+        #[test]
+        fn returns_error_when_unknown_receiving_value() {
+            let buf: &[u8] = b"idc: value\nOK\n";
+
+            let result = TestClient::new(buf).read_bin_inner(&mut Vec::new());
+
+            assert_eq!(
+                result,
+                Err(MpdError::Generic(String::from(
+                    "Unexpected key when parsing binary response: 'idc'"
+                )))
+            );
+        }
+
+        #[test]
+        fn returns_none_when_unknown_receiving_unexpected_ok() {
+            let buf: &[u8] = b"OK\n";
+
+            let result = TestClient::new(buf).read_bin_inner(&mut Vec::new());
+
+            assert_eq!(result, Ok(None));
+        }
+
+        #[test]
+        fn returns_success() {
+            let bytes = &[0; 111];
+            let buf: &[u8] = b"size: 222\ntype: image/png\nbinary: 111\n";
+            let buf_end: &[u8] = b"\nOK\n";
+            let c = [buf, bytes, buf_end].concat();
+            let mut client = TestClient::new(&c);
+
+            let mut buf = Vec::new();
+            let result = client.read_bin_inner(&mut buf);
+
+            assert_eq!(buf, bytes);
+            assert_eq!(
+                result,
+                Ok(Some(BinaryMpdResponse {
+                    bytes_read: 111,
+                    size_total: 222,
+                    mime_type: Some("image/png".to_owned())
+                }))
+            );
+        }
+    }
+}

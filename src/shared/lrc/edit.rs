@@ -695,3 +695,405 @@ fn parse_timestamp_raw(tag: &str) -> Option<Duration> {
     };
     Some(Duration::from_millis(minutes * 60_000 + seconds * 1000 + millis))
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    const SAMPLE: &str = "[ti:Test]\n[ar:Artist]\n# lrcgen-gap-align:v1\n\n[00:01.00]<00:01.20>hello <00:01.40>world\n[00:02.00]plain line\n[00:03.00]<00:03.10>a <00:03.30>b <00:03.50>c\n";
+
+    #[test]
+    fn parses_marker_words_with_spans() {
+        let session = LrcEditSession::open(PathBuf::new(), SAMPLE.to_owned());
+        assert_eq!(session.lines.len(), 3);
+        let l0 = &session.lines[0];
+        assert_eq!(l0.content, "hello world");
+        assert_eq!(l0.words.len(), 2);
+        assert_eq!(l0.words[0].text, "hello");
+        assert_eq!(l0.words[0].time, Duration::from_millis(1200));
+        let m1 = SAMPLE.find("<00:01.20>").unwrap();
+        assert_eq!(l0.words[0].marker, Some((m1, m1 + 10)));
+        assert_eq!(l0.words[1].text, "world");
+        assert_eq!(l0.words[1].time, Duration::from_millis(1400));
+        let m2 = SAMPLE.find("<00:01.40>").unwrap();
+        assert_eq!(l0.words[1].marker, Some((m2, m2 + 10)));
+        // plain line: no words
+        assert!(session.lines[1].words.is_empty());
+        assert_eq!(session.lines[1].content, "plain line");
+    }
+
+    #[test]
+    fn parses_interpolated_words_without_markers() {
+        let raw = "[00:01.00]<00:01.20>hello world <00:02.00>next\n";
+        let session = LrcEditSession::open(PathBuf::new(), raw.to_owned());
+        let l0 = &session.lines[0];
+        assert_eq!(l0.words.len(), 3);
+        assert_eq!(l0.words[0].text, "hello");
+        assert_eq!(l0.words[0].time, Duration::from_millis(1200));
+        assert!(l0.words[0].marker.is_some());
+        assert_eq!(l0.words[1].text, "world");
+        assert!(l0.words[1].marker.is_none());
+        assert!(l0.words[1].text_span.is_some());
+        assert_eq!(l0.words[2].text, "next");
+        assert_eq!(l0.words[2].time, Duration::from_secs(2));
+    }
+
+    #[test]
+    fn save_replaces_only_the_changed_marker() {
+        let raw = "[ti:X]\n# lrcgen-gap-align:v1\n[00:01.00]<00:01.20>hello <00:01.40>world\n[00:02.00]plain\n";
+        let mut session = LrcEditSession::open(PathBuf::new(), raw.to_owned());
+        session.set_word_time(0, 0, Duration::from_millis(1350)).unwrap();
+        let new_raw = session.render_pending().unwrap();
+        assert_eq!(
+            new_raw,
+            "[ti:X]\n# lrcgen-gap-align:v1\n[00:01.00]<00:01.35>hello <00:01.40>world\n[00:02.00]plain\n"
+        );
+        // Only that marker changed: header, stamp, line structure intact.
+        assert!(new_raw.starts_with("[ti:X]\n# lrcgen-gap-align:v1\n"));
+        assert!(new_raw.contains("<00:01.40>world"));
+        assert!(new_raw.contains("[00:02.00]plain"));
+    }
+
+    #[test]
+    fn save_promotes_an_interpolated_word_to_a_marker() {
+        let raw = "[00:01.00]<00:01.20>hello world <00:02.00>next\n";
+        let mut session = LrcEditSession::open(PathBuf::new(), raw.to_owned());
+        session.set_word_time(0, 1, Duration::from_millis(1500)).unwrap();
+        let new_raw = session.render_pending().unwrap();
+        assert_eq!(new_raw, "[00:01.00]<00:01.20>hello <00:01.50>world <00:02.00>next\n");
+    }
+
+    #[test]
+    fn multiple_nudges_to_one_word_save_the_latest_time() {
+        let raw = "[00:01.00]<00:01.20>hello\n";
+        let mut session = LrcEditSession::open(PathBuf::new(), raw.to_owned());
+        session.set_word_time(0, 0, Duration::from_millis(1210)).unwrap();
+        session.set_word_time(0, 0, Duration::from_millis(1230)).unwrap();
+        assert_eq!(session.pending.len(), 1, "deduped");
+        let new_raw = session.render_pending().unwrap();
+        assert_eq!(new_raw, "[00:01.00]<00:01.23>hello\n");
+    }
+
+    #[test]
+    fn save_writes_the_file_atomically() {
+        let dir = std::env::temp_dir().join(format!("s2u-lrc-edit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("song.lrc");
+        let raw = "[ti:X]\n[00:01.00]<00:01.20>hello\n";
+        std::fs::write(&path, raw).unwrap();
+        let mut session = LrcEditSession::open(path.clone(), raw.to_owned());
+        session.set_word_time(0, 0, Duration::from_millis(1990)).unwrap();
+        session.save().unwrap();
+        assert!(!session.is_dirty());
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(on_disk, "[ti:X]\n[00:01.00]<00:01.99>hello\n");
+        // Rebuilt session reflects the saved file.
+        assert_eq!(session.lines[0].words[0].time, Duration::from_millis(1990));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn apply_to_raw_edits_one_marker_without_writing() {
+        let raw = "[00:01.00]<00:01.20>hello\n";
+        let new_raw = LrcEditSession::apply_to_raw(raw, 0, 0, Duration::from_millis(900)).unwrap();
+        assert_eq!(new_raw, "[00:01.00]<00:00.90>hello\n");
+    }
+
+    #[test]
+    fn format_and_parse_times_round_trip() {
+        for ms in [0u64, 10, 990, 1000, 61_990, 7_200_000] {
+            let d = Duration::from_millis(ms);
+            let s = LrcEditSession::format_time(d);
+            assert_eq!(LrcEditSession::parse_time(&s), Some(d), "round trip {s}");
+        }
+        assert_eq!(LrcEditSession::format_time(Duration::from_millis(61_990)), "01:01.99");
+        assert_eq!(LrcEditSession::parse_time("1:02.5"), Some(Duration::from_millis(62_500)));
+        assert_eq!(LrcEditSession::parse_time("0:00.005"), Some(Duration::from_millis(5)));
+        assert_eq!(LrcEditSession::parse_time("2:05"), Some(Duration::from_millis(125_000)));
+        assert_eq!(LrcEditSession::parse_time("nope"), None);
+    }
+
+    #[test]
+    fn lines_without_timestamps_are_skipped() {
+        let raw = "[ti:X]\n# stamp\n\n[00:01.00]line\n";
+        let session = LrcEditSession::open(PathBuf::new(), raw.to_owned());
+        assert_eq!(session.lines.len(), 1);
+        assert_eq!(session.lines[0].content, "line");
+    }
+
+    #[test]
+    fn crlf_lines_are_handled() {
+        let raw = "[00:01.00]<00:01.20>hello\r\n[00:02.00]plain\r\n";
+        let session = LrcEditSession::open(PathBuf::new(), raw.to_owned());
+        assert_eq!(session.lines.len(), 2);
+        let m = "[00:01.00]<00:01.20>hello".find("<00:01.20>").unwrap();
+        assert_eq!(session.lines[0].words[0].marker, Some((m, m + 10)));
+    }
+
+    #[test]
+    fn parsed_lines_record_their_raw_and_tag_spans() {
+        let raw = "[ti:X]\n# lrcgen-gap-align:v1\n[00:01.00]<00:01.20>hello\n";
+        let session = LrcEditSession::open(PathBuf::new(), raw.to_owned());
+        assert_eq!(session.lines.len(), 1);
+        let l0 = &session.lines[0];
+        let raw_line = "[00:01.00]<00:01.20>hello\n";
+        let start = raw.find(raw_line).unwrap();
+        assert_eq!(l0.raw_span, Some((start, start + raw_line.len())));
+        assert!(!l0.dirty);
+    }
+
+    #[test]
+    fn delete_word_removes_only_the_word_and_keeps_the_line() {
+        let raw = "[00:01.00]<00:01.10>a <00:01.30>b <00:01.60>c\n";
+        let mut session = LrcEditSession::open(PathBuf::new(), raw.to_owned());
+        let removed_line = session.delete_word_at(0, 1).unwrap();
+        assert!(!removed_line, "the line survives");
+        assert_eq!(session.lines.len(), 1);
+        assert_eq!(session.lines[0].content, "a c");
+        assert_eq!(session.lines[0].words.len(), 2);
+        assert_eq!(session.lines[0].words[0].time, Duration::from_millis(1100));
+        assert_eq!(session.lines[0].words[1].time, Duration::from_millis(1600));
+        let new_raw = session.render_pending().unwrap();
+        assert_eq!(new_raw, "[00:01.00]<00:01.10>a <00:01.60>c\n");
+    }
+
+    #[test]
+    fn delete_word_removes_the_line_when_it_was_the_only_word() {
+        let raw = "[00:01.00]<00:01.10>a\n[00:02.00]<00:02.10>b\n";
+        let mut session = LrcEditSession::open(PathBuf::new(), raw.to_owned());
+        let removed_line = session.delete_word_at(0, 0).unwrap();
+        assert!(removed_line, "a line with no words left is removed");
+        assert_eq!(session.lines.len(), 1);
+        assert_eq!(session.lines[0].content, "b");
+        let new_raw = session.render_pending().unwrap();
+        assert_eq!(new_raw, "[00:02.00]<00:02.10>b\n");
+    }
+
+    #[test]
+    fn delete_word_remaps_and_drops_pending_edits() {
+        let raw = "[00:01.00]<00:01.10>a <00:01.30>b <00:01.60>c\n";
+        let mut session = LrcEditSession::open(PathBuf::new(), raw.to_owned());
+        session.set_word_time(0, 1, Duration::from_millis(1400)).unwrap();
+        session.set_word_time(0, 2, Duration::from_millis(1700)).unwrap();
+        session.delete_word_at(0, 1).unwrap();
+        // The deleted word's own pending edit is dropped; "c"'s pending
+        // shifted from word 2 to word 1.
+        assert_eq!(session.pending, vec![(0, 1)]);
+        let new_raw = session.render_pending().unwrap();
+        assert_eq!(new_raw, "[00:01.00]<00:01.10>a <00:01.70>c\n");
+    }
+
+    #[test]
+    fn delete_line_removes_the_line_and_remaps_pending() {
+        let raw = "[00:01.00]<00:01.10>a\n[00:02.00]<00:02.10>b\n[00:03.00]<00:03.10>c\n";
+        let mut session = LrcEditSession::open(PathBuf::new(), raw.to_owned());
+        session.set_word_time(2, 0, Duration::from_millis(3100)).unwrap();
+        session.delete_line(0).unwrap();
+        assert_eq!(session.lines.len(), 2);
+        assert_eq!(session.lines[0].content, "b");
+        // The pending edit followed the shifted line.
+        assert_eq!(session.pending, vec![(1, 0)]);
+        let new_raw = session.render_pending().unwrap();
+        assert_eq!(new_raw, "[00:02.00]<00:02.10>b\n[00:03.00]<00:03.10>c\n");
+    }
+
+    #[test]
+    fn set_line_text_keeps_word_times_when_the_count_matches() {
+        let raw = "[00:01.00]<00:01.20>hello <00:01.40>world\n";
+        let mut session = LrcEditSession::open(PathBuf::new(), raw.to_owned());
+        session.set_line_text(0, "hello there").unwrap();
+        assert_eq!(session.lines[0].content, "hello there");
+        assert_eq!(session.lines[0].words.len(), 2);
+        assert_eq!(session.lines[0].words[0].text, "hello");
+        assert_eq!(session.lines[0].words[0].time, Duration::from_millis(1200));
+        assert_eq!(session.lines[0].words[1].text, "there");
+        assert_eq!(session.lines[0].words[1].time, Duration::from_millis(1400));
+        let new_raw = session.render_pending().unwrap();
+        assert_eq!(new_raw, "[00:01.00]<00:01.20>hello <00:01.40>there\n");
+    }
+
+    #[test]
+    fn set_line_text_reinterpolates_when_the_count_changes() {
+        let raw = "[00:01.00]<00:01.20>hello\n[00:03.00]next\n";
+        let mut session = LrcEditSession::open(PathBuf::new(), raw.to_owned());
+        session.set_line_text(0, "a b c d").unwrap();
+        let words = &session.lines[0].words;
+        assert_eq!(words.len(), 4);
+        assert_eq!(words[0].time, Duration::from_millis(1000));
+        // The rest interpolate across the 2 s span to the next line.
+        assert!(words[1].time > Duration::from_millis(1000));
+        assert!(words[3].time < Duration::from_millis(3000));
+        let new_raw = session.render_pending().unwrap();
+        assert!(new_raw.starts_with("[00:01.00]<00:01.00>a <00:01."), "got {new_raw}");
+        assert!(new_raw.ends_with(">d\n[00:03.00]next\n"));
+    }
+
+    #[test]
+    fn set_line_time_rewrites_the_tag_keeping_the_words() {
+        let raw = "[00:01.00]<00:01.20>hello <00:01.40>world\n";
+        let mut session = LrcEditSession::open(PathBuf::new(), raw.to_owned());
+        session.set_line_time(0, Duration::from_millis(2500)).unwrap();
+        let new_raw = session.render_pending().unwrap();
+        assert_eq!(new_raw, "[00:02.50]<00:01.20>hello <00:01.40>world\n");
+    }
+
+    #[test]
+    fn insert_line_adds_a_line_after_the_anchor() {
+        let raw = "[00:01.00]<00:01.10>a\n[00:03.00]<00:03.10>b\n";
+        let mut session = LrcEditSession::open(PathBuf::new(), raw.to_owned());
+        let idx = session.insert_line_at(1, Duration::from_millis(2000)).unwrap();
+        assert_eq!(idx, 1);
+        session.set_line_text(idx, "middle").unwrap();
+        let new_raw = session.render_pending().unwrap();
+        assert_eq!(
+            new_raw,
+            "[00:01.00]<00:01.10>a\n[00:02.00]<00:02.00>middle\n[00:03.00]<00:03.10>b\n"
+        );
+    }
+
+    #[test]
+    fn insert_word_before_interpolates_between_the_neighbours() {
+        // hello @1.20, world @1.40 — insert "there" before world: it
+        // lands between the two, timed at the midpoint (1.30), and the
+        // whole line re-renders with explicit markers.
+        let raw = "[ti:X]\n# lrcgen-gap-align:v1\n\n[00:01.00]<00:01.20>hello <00:01.40>world\n";
+        let mut session = LrcEditSession::open(PathBuf::new(), raw.to_owned());
+        let idx = session.insert_word_at(0, 1, false, "there").unwrap();
+        assert_eq!(idx, 1);
+        assert_eq!(session.lines.len(), 1, "still ONE line — the word joins the same line");
+        let words = &session.lines[0].words;
+        assert_eq!(words.len(), 3);
+        assert_eq!(words[0].text, "hello");
+        assert_eq!(words[1].text, "there");
+        assert_eq!(words[1].time, Duration::from_millis(1300));
+        assert_eq!(words[2].text, "world");
+        assert_eq!(words[2].time, Duration::from_millis(1400));
+        assert_eq!(session.lines[0].content, "hello there world");
+        assert!(session.lines[0].dirty);
+        let new_raw = session.render_pending().unwrap();
+        assert_eq!(
+            new_raw,
+            "[ti:X]\n# lrcgen-gap-align:v1\n\n[00:01.00]<00:01.20>hello <00:01.30>there <00:01.40>world\n"
+        );
+    }
+
+    #[test]
+    fn insert_word_after_interpolates_between_the_neighbours() {
+        // Insert "there" after hello (word 0): between 1.20 and 1.40.
+        let raw = "[00:01.00]<00:01.20>hello <00:01.40>world\n";
+        let mut session = LrcEditSession::open(PathBuf::new(), raw.to_owned());
+        let idx = session.insert_word_at(0, 0, true, "there").unwrap();
+        assert_eq!(idx, 1);
+        let words = &session.lines[0].words;
+        assert_eq!(words.len(), 3);
+        assert_eq!(words[0].text, "hello");
+        assert_eq!(words[1].text, "there");
+        assert_eq!(words[1].time, Duration::from_millis(1300));
+        let new_raw = session.render_pending().unwrap();
+        assert_eq!(new_raw, "[00:01.00]<00:01.20>hello <00:01.30>there <00:01.40>world\n");
+    }
+
+    #[test]
+    fn insert_word_at_the_line_edges_uses_line_or_next_line_times() {
+        // Before the FIRST word: interpolate from the line's timestamp.
+        let raw = "[00:01.00]<00:01.20>hello\n[00:03.00]<00:03.10>next\n";
+        let mut session = LrcEditSession::open(PathBuf::new(), raw.to_owned());
+        let idx = session.insert_word_at(0, 0, false, "intro").unwrap();
+        assert_eq!(idx, 0);
+        assert_eq!(session.lines[0].words[0].text, "intro");
+        assert_eq!(session.lines[0].words[0].time, Duration::from_millis(1100));
+        // After the LAST word (hello @1.20, now index 1): its own
+        // moment 100 ms on (1.30) — not floating at the midpoint of the
+        // 1.8 s gap to the next line.
+        let idx = session.insert_word_at(0, 1, true, "outro").unwrap();
+        assert_eq!(idx, 2);
+        assert_eq!(session.lines[0].words[2].time, Duration::from_millis(1300));
+        // Last word of the LAST line: 100 ms on as well.
+        let mut session =
+            LrcEditSession::open(PathBuf::new(), "[00:01.00]<00:01.20>hello\n".to_owned());
+        session.insert_word_at(0, 0, true, "tail").unwrap();
+        assert_eq!(session.lines[0].words[1].time, Duration::from_millis(1300));
+    }
+
+    #[test]
+    fn insert_word_before_the_first_word_gets_its_own_moment() {
+        // Line starts exactly at the first word (1.45): the inserted word
+        // is placed 100 ms before it AND the line tag extends earlier so
+        // the karaoke lights the new word before the original first word.
+        let raw = "[00:01.45]<00:01.45>I <00:02.63>still\n";
+        let mut session = LrcEditSession::open(PathBuf::new(), raw.to_owned());
+        let idx = session.insert_word_at(0, 0, false, "ALPHA").unwrap();
+        assert_eq!(idx, 0);
+        assert_eq!(session.lines[0].time, Duration::from_millis(1350), "tag extends earlier");
+        assert_eq!(session.lines[0].words[0].time, Duration::from_millis(1350));
+        assert_eq!(session.lines[0].words[1].time, Duration::from_millis(1450));
+        let new_raw = session.render_pending().unwrap();
+        assert_eq!(new_raw, "[00:01.35]<00:01.35>ALPHA <00:01.45>I <00:02.63>still\n");
+    }
+
+    #[test]
+    fn insert_word_requires_a_worded_line_and_valid_word() {
+        let raw = "[00:01.00]<00:01.20>hello\n[00:02.00]plain\n";
+        let mut session = LrcEditSession::open(PathBuf::new(), raw.to_owned());
+        assert!(session.insert_word_at(1, 0, false, "x").is_err(), "wordless line");
+        assert!(session.insert_word_at(0, 5, false, "x").is_err(), "word out of range");
+        assert_eq!(session.lines.len(), 2, "no partial state on error");
+    }
+
+    #[test]
+    fn insert_word_remaps_pending_edits_after_the_insertion() {
+        let raw = "[00:01.00]<00:01.20>hello <00:01.40>world <00:01.60>again\n";
+        let mut session = LrcEditSession::open(PathBuf::new(), raw.to_owned());
+        session.set_word_time(0, 2, Duration::from_millis(1700)).unwrap();
+        let idx = session.insert_word_at(0, 0, true, "there").unwrap();
+        assert_eq!(idx, 1);
+        // The pending edit on "again" shifted from word 2 to word 3.
+        assert_eq!(session.pending, vec![(0, 3)]);
+        let new_raw = session.render_pending().unwrap();
+        assert_eq!(
+            new_raw,
+            "[00:01.00]<00:01.20>hello <00:01.30>there <00:01.40>world <00:01.70>again\n"
+        );
+    }
+
+    #[test]
+    fn save_splices_structural_edits_and_keeps_the_header_and_stamp() {
+        let dir = std::env::temp_dir().join(format!("s2u-lrc-edit-r35-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("song.lrc");
+        let raw = "[ti:Test]\n[ar:Artist]\n# lrcgen-gap-align:v1\n\n[00:01.00]<00:01.20>hello <00:01.40>world\n[00:02.00]plain line\n[00:03.00]<00:03.10>a <00:03.30>b <00:03.50>c\n";
+        std::fs::write(&path, raw).unwrap();
+        let mut session = LrcEditSession::open(path.clone(), raw.to_owned());
+        // Structural: delete line 1 (plain), rewrite the last line's
+        // text, insert a line after line 0, nudge a word on line 0.
+        session.delete_line(1).unwrap();
+        session.set_line_text(1, "x y").unwrap();
+        let ins = session.insert_line_at(1, Duration::from_millis(1500)).unwrap();
+        session.set_line_text(ins, "new line").unwrap();
+        session.set_word_time(0, 0, Duration::from_millis(1250)).unwrap();
+        assert!(session.is_dirty());
+        session.save().unwrap();
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert!(on_disk.starts_with("[ti:Test]\n[ar:Artist]\n# lrcgen-gap-align:v1\n\n"));
+        assert_eq!(
+            on_disk,
+            "[ti:Test]\n[ar:Artist]\n# lrcgen-gap-align:v1\n\n[00:01.00]<00:01.25>hello <00:01.40>world\n[00:01.50]<00:01.50>new <00:02.14>line\n[00:03.00]<00:03.00>x <00:05.50>y\n"
+        );
+        // The rebuilt session reflects the saved file (header lines are
+        // still not editable lines).
+        assert_eq!(session.lines.len(), 3);
+        assert!(!session.is_dirty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn deleting_every_line_keeps_the_header_verbatim() {
+        let raw = "[ti:Test]\n# lrcgen-gap-align:v1\n[00:01.00]one\n[00:02.00]two\n";
+        let mut session = LrcEditSession::open(PathBuf::new(), raw.to_owned());
+        session.delete_line(1).unwrap();
+        session.delete_line(0).unwrap();
+        let new_raw = session.render_pending().unwrap();
+        assert_eq!(new_raw, "[ti:Test]\n# lrcgen-gap-align:v1\n");
+    }
+}

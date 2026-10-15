@@ -354,3 +354,228 @@ impl KeybindsOverrides {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use std::collections::HashMap;
+
+    use crossterm::event::{KeyCode, KeyModifiers};
+
+    use super::{Key, KeyConfig, KeyConfigFile, KeySequence, KeybindsOverrides};
+    #[cfg(debug_assertions)]
+    use crate::config::keys::LogsActions;
+    #[cfg(debug_assertions)]
+    use crate::config::keys::LogsActionsFile;
+    use crate::config::keys::{
+        CommonAction, DirectoriesActionsFile, GlobalAction, QueueActions,
+        actions::{CommonActionFile, GlobalActionFile, QueueActionsFile},
+    };
+
+    fn k(s: &str) -> KeySequence {
+        KeySequence::new().char(s.chars().next().unwrap())
+    }
+
+    #[test]
+    fn default_directories_bindings_include_collapse_on_a() {
+        let default = KeyConfigFile::default();
+        assert_eq!(
+            default.directories.get(&k("a")),
+            Some(&DirectoriesActionsFile::FolderCollapse),
+            "a collapses / steps out of the selected folder"
+        );
+        assert_eq!(default.directories.get(&k("d")), Some(&DirectoriesActionsFile::FolderExpand));
+        assert_eq!(default.directories.get(&k("w")), Some(&DirectoriesActionsFile::FolderUp));
+        assert_eq!(default.directories.get(&k("s")), Some(&DirectoriesActionsFile::FolderDown));
+    }
+
+    #[test]
+    fn default_navigation_bindings_include_ctrl_a_select_all() {
+        let default = KeyConfigFile::default();
+        assert_eq!(
+            default.navigation.get(&KeySequence::new().char('a').ctrl()),
+            Some(&CommonActionFile::SelectAll),
+            "Ctrl+A selects all items of the current list"
+        );
+    }
+
+    #[test]
+    fn default_navigation_bindings_include_the_o_keys_for_lyric_lines() {
+        let default = KeyConfigFile::default();
+        assert_eq!(
+            default.navigation.get(&KeySequence::new().char('o')),
+            Some(&CommonActionFile::AddLyricsLineAfter),
+            "o adds a whole new lyric line after the current one"
+        );
+        assert_eq!(
+            default.navigation.get(&KeySequence::new().char('O')),
+            Some(&CommonActionFile::AddLyricsLineBefore),
+            "O adds a whole new lyric line before the current one"
+        );
+    }
+
+    #[test]
+    fn default_queue_bindings_include_shift_tab_for_cycling_lists() {
+        let default = KeyConfigFile::default();
+        assert_eq!(
+            default.queue.get(&KeySequence::new().tab().shift()),
+            Some(&QueueActionsFile::ToggleChapters),
+            "<S-Tab> cycles the audio/video/chapters lists like c"
+        );
+        assert_eq!(default.queue.get(&k("c")), Some(&QueueActionsFile::ToggleChapters));
+    }
+
+    #[test]
+    fn default_global_bindings_include_tab_navigation_and_quit() {
+        // Round 73.2 revision B (the keymap the shipped config documents):
+        // `<Tab>` moves right through the tabs, Shift+Right/Left cycle the
+        // libraries, `Q` is the only quit key (bare `q` is deliberately free)
+        // and `S` opens the library's search page.
+        let default = KeyConfigFile::default();
+        assert_eq!(
+            default.global.get(&KeySequence::new().tab()),
+            Some(&GlobalActionFile::NextTab),
+            "<Tab> moves right through the tabs"
+        );
+        assert_eq!(
+            default.global.get(&KeySequence::new().right().shift()),
+            Some(&GlobalActionFile::NextLibraryTab),
+            "Shift+Right cycles to the next library tab"
+        );
+        assert_eq!(
+            default.global.get(&KeySequence::new().left().shift()),
+            Some(&GlobalActionFile::PreviousLibraryTab),
+            "Shift+Left cycles to the previous library tab"
+        );
+        assert_eq!(
+            default.global.get(&KeySequence::new().char('Q')),
+            Some(&GlobalActionFile::Quit),
+            "Shift+Q is the only quit key"
+        );
+        assert_eq!(
+            default.global.get(&k("q")),
+            None,
+            "bare q is deliberately unbound (it cannot be told from Shift+Q)"
+        );
+        assert_eq!(
+            default.global.get(&KeySequence::new().char('S')),
+            Some(&GlobalActionFile::LibrarySearch),
+            "Shift+S opens the library's search page"
+        );
+    }
+
+    #[test]
+    #[rustfmt::skip]
+    fn converts() {
+        let input = KeyConfigFile {
+            clear: true,
+            global: HashMap::from([(Key { key: KeyCode::Char('a'), modifiers: KeyModifiers::CONTROL, }.into(), GlobalActionFile::Quit)]),
+            directories: HashMap::new(),
+
+            #[cfg(debug_assertions)]
+            logs: HashMap::from([(Key { key: KeyCode::Char('a'), modifiers: KeyModifiers::CONTROL, }.into(), LogsActionsFile::Clear)]),
+            queue: HashMap::from([(Key { key: KeyCode::Char('a'), modifiers: KeyModifiers::CONTROL, }.into(), QueueActionsFile::Play),
+                                  (Key { key: KeyCode::Char('b'), modifiers: KeyModifiers::SHIFT, }.into(), QueueActionsFile::JumpToCurrent)]),
+            navigation: HashMap::from([
+                (Key { key: KeyCode::Char('a'), modifiers: KeyModifiers::CONTROL, }.into(), CommonActionFile::Up),
+                (Key { key: KeyCode::Char('b'), modifiers: KeyModifiers::SHIFT }.into(), CommonActionFile::Up)
+            ])
+        };
+        let expected = KeyConfig {
+            global: HashMap::from([(Key { key: KeyCode::Char('a'), modifiers: KeyModifiers::CONTROL, }.into(), GlobalAction::Quit)]),
+            #[cfg(debug_assertions)]
+            logs: HashMap::from([(Key { key: KeyCode::Char('a'), modifiers: KeyModifiers::CONTROL, }.into(), LogsActions::Clear)]),
+            queue: HashMap::from([(Key { key: KeyCode::Char('a'), modifiers: KeyModifiers::CONTROL, }.into(), QueueActions::Play),
+                                  (Key { key: KeyCode::Char('b'), modifiers: KeyModifiers::SHIFT, }.into(), QueueActions::JumpToCurrent)]),
+            albums: HashMap::from([]),
+            artists: HashMap::from([]),
+            directories: HashMap::from([]),
+            search: HashMap::from([]),
+            navigation: HashMap::from([(Key { key: KeyCode::Char('a'), modifiers: KeyModifiers::CONTROL }.into(), CommonAction::Up),
+                                       (Key { key: KeyCode::Char('b'), modifiers: KeyModifiers::SHIFT }.into(), CommonAction::Up)]),
+        };
+
+        let result: KeyConfig = input.try_into().unwrap();
+
+
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    #[rustfmt::skip]
+    fn converts_without_clearing() {
+        let input = KeyConfigFile {
+            clear: false,
+            global: HashMap::from([
+                (Key { key: KeyCode::Char('a'), modifiers: KeyModifiers::CONTROL, }.into(), GlobalActionFile::Quit),
+                (Key { key: KeyCode::Char(' '), modifiers: KeyModifiers::NONE }.into(), GlobalActionFile::TogglePause),
+            ]),
+            directories: HashMap::new(),
+            queue: HashMap::from([(Key { key: KeyCode::Char('a'), modifiers: KeyModifiers::CONTROL, }.into(), QueueActionsFile::Play),
+                                  (Key { key: KeyCode::Char('b'), modifiers: KeyModifiers::SHIFT, }.into(), QueueActionsFile::JumpToCurrent)]),
+            navigation: HashMap::from([
+                (Key { key: KeyCode::Char('a'), modifiers: KeyModifiers::CONTROL, }.into(), CommonActionFile::Up),
+                (Key { key: KeyCode::Char('b'), modifiers: KeyModifiers::SHIFT }.into(), CommonActionFile::Up),
+            ]),
+            #[cfg(debug_assertions)]
+            logs: HashMap::from([(Key { key: KeyCode::Char('a'), modifiers: KeyModifiers::CONTROL, }.into(), LogsActionsFile::Clear)]),
+        };
+
+        let mut default: KeyConfig = KeyConfig::default();
+        default.global.insert(Key { key: KeyCode::Char('a'), modifiers: KeyModifiers::CONTROL, }.into(), GlobalAction::Quit);
+        default.queue.insert(Key { key: KeyCode::Char('a'), modifiers: KeyModifiers::CONTROL, }.into(), QueueActions::Play);
+        default.queue.insert(Key { key: KeyCode::Char('b'), modifiers: KeyModifiers::SHIFT, }.into(), QueueActions::JumpToCurrent);
+        default.navigation.insert(Key { key: KeyCode::Char('a'), modifiers: KeyModifiers::CONTROL }.into(), CommonAction::Up);
+        default.navigation.insert(Key { key: KeyCode::Char('b'), modifiers: KeyModifiers::SHIFT }.into(), CommonAction::Up);
+        #[cfg(debug_assertions)]
+        default.logs.insert(Key { key: KeyCode::Char('a'), modifiers: KeyModifiers::CONTROL, }.into(), LogsActions::Clear);
+
+        // <Space> is mapped in global keys, it has to remove the default `Select` mapping from navigation keys
+        default.global.insert(Key { key: KeyCode::Char(' '), modifiers: KeyModifiers::NONE, }.into(), GlobalAction::TogglePause);
+        default.navigation.remove(&Key { key: KeyCode::Char(' '), modifiers: KeyModifiers::NONE, }.into());
+
+        let result: KeyConfig = input.try_into().unwrap();
+
+        assert_eq!(result, default);
+    }
+
+    #[test]
+    fn keybinds_overrides_ron_roundtrip() {
+        let overrides = KeybindsOverrides {
+            remove: vec![k("q")],
+            global: HashMap::from([(k("r"), GlobalActionFile::Quit)]),
+            navigation: HashMap::from([(k("p"), CommonActionFile::Close)]),
+            directories: HashMap::from([(k("d"), DirectoriesActionsFile::PlayFile)]),
+            queue: HashMap::from([(k("x"), QueueActionsFile::Delete)]),
+        };
+        let content =
+            ron::ser::to_string_pretty(&overrides, ron::ser::PrettyConfig::default()).unwrap();
+        let parsed: KeybindsOverrides = ron::de::from_str(&content).unwrap();
+        assert_eq!(parsed, overrides);
+    }
+
+    #[test]
+    fn keybinds_overrides_apply_removes_and_rebinds() {
+        let mut keybinds = KeyConfig::default();
+        let overrides = KeybindsOverrides {
+            remove: vec![k("q")],
+            global: HashMap::from([(k("r"), GlobalActionFile::Quit)]),
+            ..Default::default()
+        };
+        overrides.apply_to(&mut keybinds);
+        assert!(!keybinds.global.contains_key(&k("q")));
+        assert_eq!(keybinds.global.get(&k("r")), Some(&GlobalAction::Quit));
+    }
+
+    #[test]
+    fn keybinds_overrides_apply_overrides_existing_binding() {
+        let mut keybinds = KeyConfig::default();
+        // "z" toggles repeat by default; rebind it to pause.
+        let overrides = KeybindsOverrides {
+            global: HashMap::from([(k("z"), GlobalActionFile::TogglePause)]),
+            ..Default::default()
+        };
+        overrides.apply_to(&mut keybinds);
+        assert_eq!(keybinds.global.get(&k("z")), Some(&GlobalAction::TogglePause));
+    }
+}

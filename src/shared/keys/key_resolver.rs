@@ -204,3 +204,524 @@ impl KeyResolver {
         }
     }
 }
+
+#[cfg(test)]
+mod test {
+    use std::collections::HashMap;
+
+    use crossbeam::channel::{Receiver, RecvTimeoutError, Sender};
+    use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
+    use rstest::rstest;
+
+    use super::*;
+    use crate::{
+        config::keys::{CommonAction, GlobalAction, KeyConfig},
+        shared::{
+            events::{ClientRequest, WorkRequest},
+            keys::ActionEvent,
+        },
+        tests::fixtures::{app_event_channel, client_request_channel, ctx, work_request_channel},
+        ui::input::BufferId,
+    };
+
+    fn k(ch: char) -> Key {
+        Key { key: KeyCode::Char(ch), modifiers: KeyModifiers::NONE }
+    }
+
+    fn resolver() -> KeyResolver {
+        let mut cfg = KeyConfig {
+            global: HashMap::new(),
+            navigation: HashMap::new(),
+            albums: HashMap::new(),
+            artists: HashMap::new(),
+            directories: HashMap::new(),
+            search: HashMap::new(),
+            #[cfg(debug_assertions)]
+            logs: HashMap::new(),
+            queue: HashMap::new(),
+        };
+
+        cfg.navigation.insert(vec![k('g')].into(), CommonAction::Down);
+        cfg.navigation.insert(vec![k('g'), k('d')].into(), CommonAction::DownHalf);
+        cfg.navigation.insert(vec![k('x')].into(), CommonAction::Up);
+        cfg.navigation.insert(vec![k('g'), k('a'), k('a')].into(), CommonAction::Right);
+        cfg.global.insert(
+            Key { key: KeyCode::Tab, modifiers: KeyModifiers::NONE }.into(),
+            GlobalAction::NextTab,
+        );
+
+        let mut insert_cfg = KeyConfig {
+            global: HashMap::new(),
+            navigation: HashMap::new(),
+            albums: HashMap::new(),
+            artists: HashMap::new(),
+            directories: HashMap::new(),
+            search: HashMap::new(),
+            #[cfg(debug_assertions)]
+            logs: HashMap::new(),
+            queue: HashMap::new(),
+        };
+
+        insert_cfg.navigation.insert(vec![k('g')].into(), CommonAction::Close);
+        insert_cfg.navigation.insert(vec![k('g'), k('d')].into(), CommonAction::Close);
+        insert_cfg.navigation.insert(vec![k('x')].into(), CommonAction::Close);
+        insert_cfg.navigation.insert(vec![k('g'), k('a'), k('a')].into(), CommonAction::Close);
+
+        KeyResolver {
+            normal_root: KeyTreeNode::build_trie(&cfg, InputModeDiscriminants::Normal),
+            insert_root: KeyTreeNode::build_trie(&insert_cfg, InputModeDiscriminants::Insert),
+            timeout_id: id::new(),
+            buffer: RefCell::new(Vec::new()),
+            normal_timeout: Duration::from_millis(1000),
+            insert_timeout: Duration::from_millis(1000),
+        }
+    }
+
+    #[test]
+    fn traverse_exact_on_leaf() {
+        let resolver = resolver();
+        let res = resolver.traverse(&[k('x')], &resolver.normal_root);
+        match res {
+            TraverseResult::Exact(other) => match other.as_slice() {
+                [Actions::Common(CommonAction::Up)] => {}
+                _ => panic!("expected Exact(Up), got {other:?}"),
+            },
+            other => panic!("expected Exact(Up), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn traverse_ambiguous_on_action_with_children() {
+        let resolver = resolver();
+        let res = resolver.traverse(&[k('g')], &resolver.normal_root);
+        match res {
+            TraverseResult::Ambiguous(other) => match other.as_slice() {
+                [Actions::Common(CommonAction::Down)] => {}
+                _ => panic!("expected Ambiguous(Down), got {other:?}"),
+            },
+            other => panic!("expected Ambiguous(Down), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn traverse_exact_on_longer_sequence_leaf() {
+        let resolver = resolver();
+        let res = resolver.traverse(&[k('g'), k('d')], &resolver.normal_root);
+        match res {
+            TraverseResult::Exact(other) => match other.as_slice() {
+                [Actions::Common(CommonAction::DownHalf)] => {}
+                _ => panic!("expected Exact(DownHalf), got {other:?}"),
+            },
+            other => panic!("expected Exact(DownHalf), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn traverse_prefix_when_valid_path_without_action() {
+        let resolver = resolver();
+        let res = resolver.traverse(&[k('g'), k('a')], &resolver.normal_root);
+        match res {
+            TraverseResult::Prefix => {}
+            other => panic!("expected Prefix, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn traverse_mismatch_on_invalid_key() {
+        let resolver = resolver();
+        let res = resolver.traverse(&[k('z')], &resolver.normal_root);
+        match res {
+            TraverseResult::Mismatch => {}
+            other => panic!("expected Mismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn traverse_mismatch_on_invalid_key_with_longer_sequence() {
+        let resolver = resolver();
+        let res = resolver.traverse(&[k('g'), k('z')], &resolver.normal_root);
+        match res {
+            TraverseResult::Mismatch => {}
+            other => panic!("expected Mismatch, got {other:?}"),
+        }
+    }
+
+    #[rstest]
+    fn handle_key_event_exact_clears_and_executes(
+        app_event_channel: (Sender<AppEvent>, Receiver<AppEvent>),
+        work_request_channel: (Sender<WorkRequest>, Receiver<WorkRequest>),
+        client_request_channel: (Sender<ClientRequest>, Receiver<ClientRequest>),
+    ) {
+        let ctx = ctx(app_event_channel.clone(), work_request_channel, client_request_channel);
+        let resolver = resolver();
+
+        resolver.handle_key_event(k('x'), KeyEventKind::Press, &ctx);
+
+        assert!(resolver.buffer.borrow().is_empty(), "buffer should be cleared after exact action");
+
+        match app_event_channel.1.recv_timeout(Duration::from_millis(100)) {
+            Ok(AppEvent::ActionResolved(ActionEvent { actions, .. })) => match actions.as_slice() {
+                [Actions::Common(CommonAction::Up)] => {}
+                _ => panic!("expected ActionResolved(Up), got {actions:?}"),
+            },
+            other => panic!("expected ActionResolved(Up), got {other:?}"),
+        }
+    }
+
+    #[rstest]
+    fn handle_key_event_repeat_swallowed_for_single_step_tab_navigation(
+        app_event_channel: (Sender<AppEvent>, Receiver<AppEvent>),
+        work_request_channel: (Sender<WorkRequest>, Receiver<WorkRequest>),
+        client_request_channel: (Sender<ClientRequest>, Receiver<ClientRequest>),
+    ) {
+        let ctx = ctx(app_event_channel.clone(), work_request_channel, client_request_channel);
+        let resolver = resolver();
+        let tab = Key { key: KeyCode::Tab, modifiers: KeyModifiers::NONE };
+
+        // The press fires the action exactly once.
+        resolver.handle_key_event(tab, KeyEventKind::Press, &ctx);
+        match app_event_channel.1.recv_timeout(Duration::from_millis(100)) {
+            Ok(AppEvent::ActionResolved(ActionEvent { actions, .. })) => match actions.as_slice() {
+                [Actions::Global(GlobalAction::NextTab)] => {}
+                _ => panic!("expected ActionResolved(NextTab), got {actions:?}"),
+            },
+            other => panic!("expected ActionResolved(NextTab), got {other:?}"),
+        }
+
+        // A held-key Repeat must not re-trigger the single-step action.
+        resolver.handle_key_event(tab, KeyEventKind::Repeat, &ctx);
+        resolver.handle_key_event(tab, KeyEventKind::Repeat, &ctx);
+        match app_event_channel.1.recv_timeout(Duration::from_millis(150)) {
+            Err(RecvTimeoutError::Timeout) => {}
+            other => panic!("expected repeats to be swallowed, got {other:?}"),
+        }
+        assert!(
+            resolver.buffer.borrow().is_empty(),
+            "buffer should be cleared after swallowed repeats"
+        );
+    }
+
+    #[rstest]
+    fn handle_key_event_ambiguous_schedules_timeout_and_keeps_buffer(
+        app_event_channel: (Sender<AppEvent>, Receiver<AppEvent>),
+        work_request_channel: (Sender<WorkRequest>, Receiver<WorkRequest>),
+        client_request_channel: (Sender<ClientRequest>, Receiver<ClientRequest>),
+    ) {
+        let ctx = ctx(app_event_channel.clone(), work_request_channel, client_request_channel);
+        let resolver = resolver();
+
+        resolver.handle_key_event(k('g'), KeyEventKind::Press, &ctx);
+        assert_eq!(resolver.buffer_to_string(), "g");
+
+        resolver.handle_timeout(&ctx);
+
+        assert!(resolver.buffer.borrow().is_empty(), "buffer should be cleared after timeout");
+        match app_event_channel.1.recv_timeout(Duration::from_millis(100)) {
+            Ok(AppEvent::ActionResolved(ActionEvent { actions, .. })) => match actions.as_slice() {
+                [Actions::Common(CommonAction::Down)] => {}
+                _ => panic!("expected ActionResolved(Down), got {actions:?}"),
+            },
+            other => panic!("expected ActionResolved(Down), got {other:?}"),
+        }
+    }
+
+    #[rstest]
+    fn handle_key_event_prefix_schedules_timeout_and_keeps_buffer(
+        app_event_channel: (Sender<AppEvent>, Receiver<AppEvent>),
+        work_request_channel: (Sender<WorkRequest>, Receiver<WorkRequest>),
+        client_request_channel: (Sender<ClientRequest>, Receiver<ClientRequest>),
+    ) {
+        let ctx = ctx(app_event_channel.clone(), work_request_channel, client_request_channel);
+        let resolver = resolver();
+
+        resolver.handle_key_event(k('g'), KeyEventKind::Press, &ctx);
+        resolver.handle_key_event(k('a'), KeyEventKind::Press, &ctx);
+
+        assert_eq!(resolver.buffer_to_string(), "ga");
+
+        resolver.handle_timeout(&ctx);
+
+        assert!(
+            resolver.buffer.borrow().is_empty(),
+            "buffer should be cleared after prefix timeout"
+        );
+        match app_event_channel.1.recv_timeout(Duration::from_millis(300)) {
+            Err(RecvTimeoutError::Timeout) => {}
+            other => panic!("expected Timeout, got {other:?}"),
+        }
+    }
+
+    #[rstest]
+    fn handle_key_event_mismatch_clears_buffer(ctx: Ctx) {
+        let resolver = resolver();
+
+        resolver.handle_key_event(k('g'), KeyEventKind::Press, &ctx);
+        resolver.handle_key_event(
+            Key { key: KeyCode::Char('x'), modifiers: KeyModifiers::SHIFT },
+            KeyEventKind::Press,
+            &ctx,
+        );
+
+        assert!(resolver.buffer.borrow().is_empty(), "buffer should be cleared on mismatch");
+    }
+
+    #[rstest]
+    fn handle_key_event_longer_sequence_executes_leaf_immediately(
+        app_event_channel: (Sender<AppEvent>, Receiver<AppEvent>),
+        work_request_channel: (Sender<WorkRequest>, Receiver<WorkRequest>),
+        client_request_channel: (Sender<ClientRequest>, Receiver<ClientRequest>),
+    ) {
+        let ctx = ctx(app_event_channel.clone(), work_request_channel, client_request_channel);
+        let resolver = resolver();
+
+        resolver.handle_key_event(k('g'), KeyEventKind::Press, &ctx);
+        resolver.handle_key_event(k('d'), KeyEventKind::Press, &ctx);
+
+        assert!(resolver.buffer.borrow().is_empty(), "buffer should be cleared after exact leaf");
+        match app_event_channel.1.recv_timeout(Duration::from_millis(100)) {
+            Ok(AppEvent::ActionResolved(ActionEvent { actions, .. })) => match actions.as_slice() {
+                [Actions::Common(CommonAction::DownHalf)] => {}
+                _ => panic!("expected ActionResolved(DownHalf), got {actions:?}"),
+            },
+            other => panic!("expected ActionResolved(DownHalf), got {other:?}"),
+        }
+    }
+
+    #[rstest]
+    fn timeout_on_ambiguous_executes_shorter_action(
+        app_event_channel: (Sender<AppEvent>, Receiver<AppEvent>),
+        work_request_channel: (Sender<WorkRequest>, Receiver<WorkRequest>),
+        client_request_channel: (Sender<ClientRequest>, Receiver<ClientRequest>),
+    ) {
+        let ctx = ctx(app_event_channel.clone(), work_request_channel, client_request_channel);
+        let resolver = resolver();
+
+        resolver.handle_key_event(k('g'), KeyEventKind::Press, &ctx);
+
+        resolver.handle_timeout(&ctx);
+
+        assert!(resolver.buffer.borrow().is_empty(), "buffer should be cleared after timeout");
+        match app_event_channel.1.recv_timeout(Duration::from_millis(100)) {
+            Ok(AppEvent::ActionResolved(ActionEvent { actions, .. })) => match actions.as_slice() {
+                [Actions::Common(CommonAction::Down)] => {}
+                _ => panic!("expected ActionResolved(Down), got {actions:?}"),
+            },
+            other => panic!("expected ActionResolved(Down), got {other:?}"),
+        }
+    }
+
+    #[rstest]
+    fn timeout_on_prefix_is_noop(
+        app_event_channel: (Sender<AppEvent>, Receiver<AppEvent>),
+        work_request_channel: (Sender<WorkRequest>, Receiver<WorkRequest>),
+        client_request_channel: (Sender<ClientRequest>, Receiver<ClientRequest>),
+    ) {
+        let ctx = ctx(app_event_channel.clone(), work_request_channel, client_request_channel);
+        let resolver = resolver();
+
+        resolver.handle_key_event(k('g'), KeyEventKind::Press, &ctx);
+        resolver.handle_key_event(k('a'), KeyEventKind::Press, &ctx);
+
+        resolver.handle_timeout(&ctx);
+
+        assert!(resolver.buffer.borrow().is_empty(), "buffer should be cleared after timeout");
+        match app_event_channel.1.recv_timeout(Duration::from_millis(300)) {
+            Err(RecvTimeoutError::Timeout) => {}
+            other => panic!("expected Timeout, got {other:?}"),
+        }
+    }
+
+    #[rstest]
+    fn ambiguous_then_mismatch_drops_action_and_clears_buffer(
+        app_event_channel: (Sender<AppEvent>, Receiver<AppEvent>),
+        work_request_channel: (Sender<WorkRequest>, Receiver<WorkRequest>),
+        client_request_channel: (Sender<ClientRequest>, Receiver<ClientRequest>),
+    ) {
+        let ctx = ctx(app_event_channel.clone(), work_request_channel, client_request_channel);
+        let resolver = resolver();
+
+        resolver.handle_key_event(k('g'), KeyEventKind::Press, &ctx);
+        assert_eq!(resolver.buffer_to_string(), "g");
+
+        resolver.handle_key_event(k('z'), KeyEventKind::Press, &ctx);
+
+        assert!(
+            resolver.buffer.borrow().is_empty(),
+            "buffer should be cleared on mismatch after ambiguous"
+        );
+
+        // No action should have been sent.
+        match app_event_channel.1.recv_timeout(Duration::from_millis(200)) {
+            Err(RecvTimeoutError::Timeout) => {}
+            other => panic!("expected no action after mismatch, got {other:?}"),
+        }
+    }
+
+    #[rstest]
+    fn stray_timeout_with_empty_buffer_is_noop(
+        app_event_channel: (Sender<AppEvent>, Receiver<AppEvent>),
+        work_request_channel: (Sender<WorkRequest>, Receiver<WorkRequest>),
+        client_request_channel: (Sender<ClientRequest>, Receiver<ClientRequest>),
+    ) {
+        let ctx = ctx(app_event_channel.clone(), work_request_channel, client_request_channel);
+        let resolver = resolver();
+
+        assert!(resolver.buffer.borrow().is_empty(), "precondition: buffer should be empty");
+
+        resolver.handle_timeout(&ctx);
+
+        match app_event_channel.1.recv_timeout(Duration::from_millis(200)) {
+            Err(RecvTimeoutError::Timeout) => {}
+            other => panic!("expected no action on stray timeout, got {other:?}"),
+        }
+    }
+
+    #[rstest]
+    fn insert_mode_non_candidate_key_flushes_without_action(
+        app_event_channel: (Sender<AppEvent>, Receiver<AppEvent>),
+        work_request_channel: (Sender<WorkRequest>, Receiver<WorkRequest>),
+        client_request_channel: (Sender<ClientRequest>, Receiver<ClientRequest>),
+    ) {
+        let ctx = ctx(app_event_channel.clone(), work_request_channel, client_request_channel);
+        ctx.input.insert_mode(BufferId::new());
+        let resolver = resolver();
+
+        resolver.handle_key_event(k('z'), KeyEventKind::Press, &ctx);
+
+        match app_event_channel.1.recv_timeout(Duration::from_millis(150)) {
+            Ok(AppEvent::InsertModeFlush((None, buf))) => {
+                assert_eq!(buf.len(), 1);
+                assert_eq!(buf[0].to_string(), "z");
+            }
+            other => panic!("expected InsertModeFlush(None, ['z']), got {other:?}"),
+        }
+
+        assert!(resolver.buffer.borrow().is_empty(), "buffer should be empty after flush");
+    }
+
+    #[rstest]
+    fn insert_mode_exact_sequence_flushes_with_action(
+        app_event_channel: (Sender<AppEvent>, Receiver<AppEvent>),
+        work_request_channel: (Sender<WorkRequest>, Receiver<WorkRequest>),
+        client_request_channel: (Sender<ClientRequest>, Receiver<ClientRequest>),
+    ) {
+        let ctx = ctx(app_event_channel.clone(), work_request_channel, client_request_channel);
+        ctx.input.insert_mode(BufferId::new());
+        let resolver = resolver();
+
+        resolver.handle_key_event(k('x'), KeyEventKind::Press, &ctx);
+
+        match app_event_channel.1.recv_timeout(Duration::from_millis(150)) {
+            Ok(AppEvent::InsertModeFlush((Some(ActionEvent { actions, .. }), buf))) => {
+                match actions.as_slice() {
+                    [Actions::Common(CommonAction::Close)] => {
+                        assert_eq!(buf.len(), 1);
+                        assert_eq!(buf[0].to_string(), "x");
+                    }
+                    _ => panic!("expected InsertModeFlush(Some(Common(Close)), got {actions:?}"),
+                }
+            }
+
+            other => panic!("expected InsertModeFlush(Some(Common(Close)), ['x']), got {other:?}"),
+        }
+
+        assert!(resolver.buffer.borrow().is_empty(), "buffer should be empty after flush");
+    }
+
+    #[rstest]
+    fn insert_mode_ambiguous_then_timeout_flushes_with_action(
+        app_event_channel: (Sender<AppEvent>, Receiver<AppEvent>),
+        work_request_channel: (Sender<WorkRequest>, Receiver<WorkRequest>),
+        client_request_channel: (Sender<ClientRequest>, Receiver<ClientRequest>),
+    ) {
+        let ctx = ctx(app_event_channel.clone(), work_request_channel, client_request_channel);
+        ctx.input.insert_mode(BufferId::new());
+        let resolver = resolver();
+
+        resolver.handle_key_event(k('g'), KeyEventKind::Press, &ctx);
+        resolver.handle_timeout(&ctx);
+
+        match app_event_channel.1.recv_timeout(Duration::from_millis(150)) {
+            Ok(AppEvent::InsertModeFlush((Some(ActionEvent { actions, .. }), buf))) => {
+                match actions.as_slice() {
+                    [Actions::Common(CommonAction::Close)] => {
+                        assert_eq!(buf.len(), 1);
+                        assert_eq!(buf[0].to_string(), "g");
+                    }
+                    _ => panic!("expected InsertModeFlush(Some(Common(Close)), got {actions:?}"),
+                }
+            }
+            other => panic!("expected InsertModeFlush(Some(Common(Close)), ['g']), got {other:?}"),
+        }
+
+        assert!(resolver.buffer.borrow().is_empty(), "buffer should be empty after timeout flush");
+    }
+
+    #[rstest]
+    fn insert_mode_prefix_then_timeout_flushes_without_action(
+        app_event_channel: (Sender<AppEvent>, Receiver<AppEvent>),
+        work_request_channel: (Sender<WorkRequest>, Receiver<WorkRequest>),
+        client_request_channel: (Sender<ClientRequest>, Receiver<ClientRequest>),
+    ) {
+        let ctx = ctx(app_event_channel.clone(), work_request_channel, client_request_channel);
+        ctx.input.insert_mode(BufferId::new());
+        let resolver = resolver();
+
+        resolver.handle_key_event(k('g'), KeyEventKind::Press, &ctx);
+        resolver.handle_key_event(k('a'), KeyEventKind::Press, &ctx);
+
+        resolver.handle_timeout(&ctx);
+
+        match app_event_channel.1.recv_timeout(Duration::from_millis(200)) {
+            Ok(AppEvent::InsertModeFlush((None, buf))) => {
+                assert_eq!(buf.iter().map(|k| k.to_string()).join(""), "ga");
+            }
+            other => panic!("expected InsertModeFlush(None, ['g','a']), got {other:?}"),
+        }
+
+        assert!(resolver.buffer.borrow().is_empty(), "buffer should be empty after timeout flush");
+    }
+
+    #[rstest]
+    fn insert_mode_ambiguous_then_mismatch_flushes_without_action(
+        app_event_channel: (Sender<AppEvent>, Receiver<AppEvent>),
+        work_request_channel: (Sender<WorkRequest>, Receiver<WorkRequest>),
+        client_request_channel: (Sender<ClientRequest>, Receiver<ClientRequest>),
+    ) {
+        let ctx = ctx(app_event_channel.clone(), work_request_channel, client_request_channel);
+        ctx.input.insert_mode(BufferId::new());
+        let resolver = resolver();
+
+        resolver.handle_key_event(k('g'), KeyEventKind::Press, &ctx);
+        resolver.handle_key_event(k('z'), KeyEventKind::Press, &ctx);
+
+        match app_event_channel.1.recv_timeout(Duration::from_millis(200)) {
+            Ok(AppEvent::InsertModeFlush((None, buf))) => {
+                assert_eq!(buf.iter().map(|k| k.to_string()).join(""), "gz");
+            }
+            other => panic!("expected InsertModeFlush(None, ['g','z']), got {other:?}"),
+        }
+
+        assert!(resolver.buffer.borrow().is_empty(), "buffer should be empty after mismatch flush");
+    }
+
+    #[rstest]
+    fn insert_mode_stray_timeout_with_empty_buffer_is_noop(
+        app_event_channel: (Sender<AppEvent>, Receiver<AppEvent>),
+        work_request_channel: (Sender<WorkRequest>, Receiver<WorkRequest>),
+        client_request_channel: (Sender<ClientRequest>, Receiver<ClientRequest>),
+    ) {
+        let ctx = ctx(app_event_channel.clone(), work_request_channel, client_request_channel);
+        ctx.input.insert_mode(BufferId::new());
+        let resolver = resolver();
+
+        assert!(resolver.buffer.borrow().is_empty(), "precondition: buffer should be empty");
+
+        resolver.handle_timeout(&ctx);
+
+        match app_event_channel.1.recv_timeout(Duration::from_millis(200)) {
+            Err(RecvTimeoutError::Timeout) => {}
+            other => panic!("expected no event on stray timeout, got {other:?}"),
+        }
+    }
+}

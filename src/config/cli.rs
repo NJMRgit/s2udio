@@ -574,3 +574,38 @@ impl Args {
         <Self as Parser>::try_parse_from(argv)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rq_subcommand_parses() {
+        for (line, want) in [
+            ("rq start", RqCmd::Start),
+            ("rq stop", RqCmd::Stop),
+            ("rq open", RqCmd::Open),
+            ("rq check", RqCmd::Check),
+        ] {
+            let args = Args::parse_from(["s2udio", "rq", line.split_whitespace().nth(1).unwrap()]);
+            match args.command {
+                Some(Command::Rq { cmd }) => assert_eq!(cmd, want, "{line}"),
+                other => panic!("expected Command::Rq for {line}, got {other:?}"),
+            }
+        }
+        assert!(Args::try_parse_from(["s2udio", "rq", "bogus"]).is_err());
+    }
+
+    #[test]
+    fn lyrics_source_cli_flag_parses() {
+        // Round 38: --lyrics-source accepts both modes (kebab-case) and
+        // is absent by default.
+        let args = Args::parse_from(["s2udio", "--lyrics-source", "local-only"]);
+        assert_eq!(args.lyrics_source, Some(LyricsSource::LocalOnly));
+        let args = Args::parse_from(["s2udio", "--lyrics-source", "local-first"]);
+        assert_eq!(args.lyrics_source, Some(LyricsSource::LocalFirst));
+        let args = Args::parse_from(["s2udio"]);
+        assert_eq!(args.lyrics_source, None);
+        assert!(Args::try_parse_from(["s2udio", "--lyrics-source", "bogus"]).is_err());
+    }
+}

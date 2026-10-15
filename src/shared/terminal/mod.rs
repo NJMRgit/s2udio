@@ -335,3 +335,27 @@ fn kitty_supported(emulator: Emulator, probe: bool) -> bool {
         _ => probe,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Emulator;
+    use super::kitty_supported;
+
+    #[test]
+    fn kitty_supported_requires_an_identified_capable_emulator() {
+        // A real kitty/ghostty/foot terminal: probe decides.
+        assert!(kitty_supported(Emulator::Kitty, true));
+        assert!(kitty_supported(Emulator::Ghostty, true));
+        assert!(kitty_supported(Emulator::Foot, true));
+        assert!(!kitty_supported(Emulator::Kitty, false));
+
+        // Konsole answers the query but cannot render rmpc's images
+        // (missing unicode placeholders) — never use kitty there.
+        assert!(!kitty_supported(Emulator::Konsole, true));
+
+        // An unidentified emulator answering the query is most likely a
+        // partial implementation (Konsole when its XTVERSION response was
+        // missed) — fall back to Block instead of white lines.
+        assert!(!kitty_supported(Emulator::Unknown, true));
+    }
+}

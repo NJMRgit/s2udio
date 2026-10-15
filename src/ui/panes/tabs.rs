@@ -421,3 +421,47 @@ impl Pane for TabsPane {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use ratatui::{Terminal, backend::TestBackend, layout::Rect};
+
+    use super::*;
+    
+
+    /// Render the bar at the given terminal width and return the text row.
+    /// (The width/separator tests that used this were superseded by later
+    /// tab-bar rounds; a re-written test will use it again.)
+    #[allow(dead_code)]
+    fn bar_line(ctx: &Ctx, width: u16) -> String {
+        let backend = TestBackend::new(width, 3);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut pane = TabsPane::new(ctx).unwrap();
+        terminal
+            .draw(|frame| {
+                let inner = Rect { x: 1, y: 1, width: width - 2, height: 1 };
+                pane.render(frame, inner, ctx).unwrap();
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        (0..buf.area().width).map(|x| buf[(x, 1)].symbol().chars().next().unwrap_or(' ')).collect()
+    }
+
+    /// The user's tab set (Queue, Playlists, MPD, Radio). Round 28: the
+    /// Search tab folded into the MPD tab, so it is never in the bar (a
+    /// leftover "Search" config entry is hidden by `is_tab_hidden`).
+    #[allow(dead_code)]
+    fn with_four_tabs(mut ctx: Ctx) -> Ctx {
+        let mut config = ctx.config.as_ref().clone();
+        config.tabs.names = vec!["Queue".into(), "Playlists".into(), "MPD".into(), "Radio".into()];
+        ctx.config = std::sync::Arc::new(config);
+        ctx
+    }
+
+
+
+
+
+
+}

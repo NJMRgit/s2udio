@@ -146,6 +146,13 @@ pub struct ControlsPane {
     /// playback, `(0, mpv title)` while an mpv session is the UI source;
     /// `None` when nothing plays. The carousel restarts when it changes.
     last_song_key: Option<(u32, String)>,
+    /// 2026-10-15: the redraw tick that animates the `▶▶` resolver spinner.
+    /// Armed only while a step is waiting for its row to resolve, so it costs
+    /// nothing otherwise. The status update loop already drives frames while
+    /// playback runs, but that loop stops when MPD is stopped or paused — and a
+    /// step can be pressed from either state — so the spinner needs its own
+    /// tick to animate there.
+    spinner_tick: Option<crate::shared::id::Id>,
 }
 impl ControlsPane {
     pub fn new() -> Self {
@@ -156,6 +163,7 @@ impl ControlsPane {
             carousel_anchor: None,
             last_tab: None,
             last_song_key: None,
+            spinner_tick: None,
         }
     }
     fn mode_info(mode: Mode) -> &'static str {
@@ -190,6 +198,68 @@ impl ControlsPane {
         let volume_start = volume_fit_start(area, area.x + 1 + time_w);
         let free = volume_start.saturating_sub(area.x + 1 + time_w);
         area.x + 1 + time_w + free.saturating_sub(TRANSPORT_CLUSTER_W) / 2
+    }
+    /// Arm the redraw tick while the `▶▶` spinner is on screen, and cancel it
+    /// the moment the step finishes, so an idle controls bar costs no frames.
+    ///
+    /// The same shape as the Queue pane's Duration spinner
+    /// (`QueuePane::schedule_spinner_tick`): one fixed job id re-armed with
+    /// `schedule_replace`, so the repeats cannot pile up, and cancelled
+    /// explicitly when nothing is spinning (a scheduler job is one-shot, so it
+    /// does not stop on its own).
+    fn sync_spinner_tick(&mut self, ctx: &Ctx) {
+        use crate::ui::panes::queue::SPINNER_FRAME_MS;
+        if ctx.pending_next_step.get().is_none() {
+            if let Some(id) = self.spinner_tick.take() {
+                ctx.scheduler.cancel(id);
+            }
+            return;
+        }
+        if self.spinner_tick.is_some() {
+            return;
+        }
+        let id = crate::shared::id::new();
+        self.spinner_tick = Some(id);
+        ctx.scheduler.schedule_replace(
+            id,
+            std::time::Duration::from_millis(SPINNER_FRAME_MS),
+            |(tx, _)| {
+                tx.send(crate::AppEvent::RequestRender)?;
+                Ok(())
+            },
+        );
+    }
+    /// The `▶▶` slot's label: the button itself, or a spinner while the step it
+    /// started is still resolving.
+    ///
+    /// A `▶▶` press cannot be handed straight to MPD for a queue of web
+    /// streams: the next entry is an unresolved link, so the step resolves the
+    /// row first and starts it once the stream is known (roughly a second, and
+    /// longer on a slow resolve). `Ctx::pending_next_step` is exactly that
+    /// in-flight state — set when the step arms and cleared when its row is
+    /// playable or the step is abandoned — so the button reports the wait
+    /// instead of looking like the press did nothing.
+    ///
+    /// The slot keeps a **fixed width** whichever label shows, so the transport
+    /// cluster never shifts. The width is measured rather than assumed: `▶`
+    /// (U+25B6) is East-Asian *ambiguous* while the spinner frames (U+28xx) are
+    /// neutral, so on a terminal that renders ambiguous glyphs double-width the
+    /// two labels would otherwise differ by a column. `SLOT` is the column
+    /// count the cluster reserves for this button (see
+    /// [`TRANSPORT_CLUSTER_W`]).
+    fn next_button_label(ctx: &Ctx) -> String {
+        const SLOT: usize = 6;
+        let label = if ctx.pending_next_step.get().is_some() {
+            crate::ui::panes::queue::spinner_frame()
+        } else {
+            "▶▶"
+        };
+        let used = Line::from(label).width();
+        let total = SLOT.saturating_sub(used);
+        // Bias the left pad so the glyph sits centered in the slot.
+        let left = total / 2;
+        let right = total - left;
+        format!("{}{}{}", " ".repeat(left), label, " ".repeat(right))
     }
     /// The row-2 column separator columns: `│` at `sep1` (after the time
     /// text), `│` at `sep2` (after the transport cluster). The dividers
@@ -721,6 +791,11 @@ impl Pane for ControlsPane {
         if area.height == 0 || area.width < 10 {
             return Ok(());
         }
+        // 2026-10-15: keep the `▶▶` resolver spinner moving. The status update
+        // loop already drives frames while MPD plays, but it stops when MPD is
+        // stopped or paused, and a step can be pressed from either state — so
+        // the tick is armed here, while the spinner is actually on screen.
+        self.sync_spinner_tick(ctx);
         let buf = frame.buffer_mut();
         let theme = ControlsTheme::from_ctx(ctx);
         let left = area.x;
@@ -965,6 +1040,13 @@ impl Pane for ControlsPane {
             } else {
                 "▶"
             };
+            // 2026-10-15: `▶▶` shows a spinner while the step it started is
+            // still resolving. The step cannot simply hand MPD the next entry
+            // (for a queue of web streams that entry is an unresolved link), so
+            // it resolves the row first and only then starts it — a wait of
+            // roughly a second, during which the press previously looked like it
+            // had done nothing.
+            let next_slot = Self::next_button_label(ctx);
             // The cluster `   ◀◀   ▶   ▶▶  ■   ` between the separators
             // (the stop button is no longer pipe-separated — round 60c S4
             // renders the mock's plain cluster).
@@ -981,7 +1063,13 @@ impl Pane for ControlsPane {
             if play_w < 2 {
                 x += Self::put(buf, x, y2, " ".repeat(2 - play_w).as_str(), theme.transport);
             }
-            x += Self::put(buf, x, y2, "  ▶▶  ", hover_zone(transport_start + 12, transport_start + 16, theme.transport));
+            x += Self::put(
+                buf,
+                x,
+                y2,
+                next_slot.as_str(),
+                hover_zone(transport_start + 12, transport_start + 16, theme.transport),
+            );
             let _ = Self::put(
                 buf,
                 x,
@@ -1161,5 +1249,245 @@ impl Pane for ControlsPane {
             _ => {}
         }
         Ok(())
+    }
+}
+
+
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use std::{collections::HashMap, time::Duration};
+
+    use ratatui::{Terminal, backend::TestBackend, layout::Rect};
+
+    use super::*;
+    use crate::{
+        mpd::commands::{Song, State, Status, Volume, status::OnOffOneshot},
+        tests::fixtures::ctx,
+    };
+
+    fn playing_ctx(mut ctx: Ctx) -> Ctx {
+        let song = Song {
+            id: 1,
+            file: "file.flac".to_owned(),
+            duration: Some(Duration::from_secs(248)),
+            metadata: HashMap::from([
+                ("artist".to_string(), "Delta Heavy".into()),
+                ("album".to_string(), "Paradise Lost".into()),
+                ("title".to_string(), "Punish My Love".into()),
+            ]),
+            last_modified: chrono::Utc::now(),
+            added: None,
+        };
+        ctx.queue = vec![song];
+        ctx.status = Status {
+            state: State::Play,
+            songid: Some(1),
+            song: Some(0),
+            elapsed: Duration::from_secs(140),
+            duration: Duration::from_secs(248),
+            volume: Volume::new(40),
+            bitrate: Some(819),
+            repeat: false,
+            random: true,
+            single: OnOffOneshot::Off,
+            consume: OnOffOneshot::On,
+            ..Default::default()
+        };
+        ctx
+    }
+
+    fn controls_lines(ctx: &Ctx, width: u16) -> Vec<String> {
+        let backend = TestBackend::new(width, 5);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut pane = ControlsPane::new();
+        terminal
+            .draw(|frame| {
+                let inner = Rect { x: 0, y: 0, width, height: 3 };
+                pane.render(frame, inner, ctx).unwrap();
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        (0..3)
+            .map(|y| {
+                (0..buf.area().width)
+                    .map(|x| buf[(x, y)].symbol().chars().next().unwrap_or(' '))
+                    .collect()
+            })
+            .collect()
+    }
+
+
+    #[rstest::rstest]
+    fn channel_line_is_album_for_audio(ctx: Ctx) {
+        let ctx = playing_ctx(ctx);
+        let line = ControlsPane::channel_line(&ctx);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text, "Paradise Lost");
+    }
+
+
+
+    #[rstest::rstest]
+    fn time_and_volume_are_shown(ctx: Ctx) {
+        let ctx = playing_ctx(ctx);
+        let lines = controls_lines(&ctx, 90);
+        assert!(lines[2].contains("2:20 / 4:08 (819 kbps)"));
+        assert!(lines[2].contains("40%"));
+    }
+
+
+
+
+
+
+
+    /// The mpv-mode buttons (Audio / Subs) replace the MPD mode toggles
+    /// while a video plays; the Download button only appears once the
+    /// playing media is a resolved ytdlp stream.
+    #[rstest::rstest]
+    fn mpv_buttons_replace_modes_while_a_video_plays(ctx: Ctx) {
+        let mut ctx = playing_ctx(ctx);
+        ctx.mpv.active = true;
+        ctx.mpv.paused = false;
+        ctx.mpv.title = "Video".into();
+        ctx.mpv.artist = "Channel".into();
+        let lines = controls_lines(&ctx, 90);
+        // [Sub] furthest right, [Audio] to its left; no Repeat/Random/Single.
+        assert!(lines[0].contains("[Sub]"), "{lines:?}");
+        assert!(lines[0].contains("[Audio]"), "{lines:?}");
+        assert!(!lines[0].contains("Repeat"), "{lines:?}");
+        assert!(!lines[0].contains("Random"), "{lines:?}");
+        assert!(!lines[0].contains("Single"), "{lines:?}");
+        // no stream resolved -> no download button
+        assert!(!lines[0].contains("⤓"), "{lines:?}");
+    }
+
+    #[rstest::rstest]
+    fn download_button_only_shows_for_a_resolved_stream(ctx: Ctx) {
+        let mut ctx = playing_ctx(ctx);
+        ctx.mpv.active = true;
+        ctx.mpv.paused = false;
+        ctx.mpv.title = "Video".into();
+        ctx.mpv.artist = "Channel".into();
+        use crate::shared::ytdlp::YtStreamInfo;
+        ctx.yt_info.borrow_mut().insert(
+            "https://www.youtube.com/watch?v=abc".to_owned(),
+            YtStreamInfo {
+                url: "https://rr4.example/audio.m4a".to_owned(),
+                original_url: "https://www.youtube.com/watch?v=abc".to_owned(),
+                title: "Video".to_owned(),
+                channel: Some("Channel".to_owned()),
+                ..Default::default()
+            },
+        );
+        // the mpv playlist entry is the original link
+        ctx.mpv.playlist.borrow_mut().push(crate::core::mpv::MpvPlaylistEntry::new(
+            "Video",
+            "https://www.youtube.com/watch?v=abc",
+            None,
+        ));
+        let lines = controls_lines(&ctx, 90);
+        assert!(lines[0].contains("⤓"), "{lines:?}");
+        // ordering: download left of [Audio] left of [Sub]
+        let d = lines[0].find("⤓").unwrap();
+        let a = lines[0].find("[Audio]").unwrap();
+        let s = lines[0].find("[Sub]").unwrap();
+        assert!(d < a && a < s, "{lines:?}");
+    }
+
+    // ── 2026-10-15: `▶▶` shows a spinner while the step resolves ─────────
+
+    /// The button is the arrow when no step is in flight...
+    #[test]
+    fn the_next_button_shows_the_arrow_when_idle() {
+        let ctx = playing_ctx(ctx_fixture());
+        assert_eq!(ctx.pending_next_step.get(), None, "nothing is armed");
+        let label = ControlsPane::next_button_label(&ctx);
+        assert!(label.contains('▶'), "the idle button is the arrow: {label:?}");
+    }
+
+    /// ...and a spinner while the step waits for its row to resolve, so the
+    /// press visibly does something during the ~1 s wait.
+    #[test]
+    fn the_next_button_shows_a_spinner_while_the_step_resolves() {
+        let ctx = playing_ctx(ctx_fixture());
+        ctx.pending_next_step.set(Some(7));
+        let label = ControlsPane::next_button_label(&ctx);
+        let frames = crate::ui::panes::queue::SPINNER_FRAMES;
+        assert!(
+            frames.iter().any(|f| label.contains(f)),
+            "the waiting button is a spinner frame: {label:?}"
+        );
+        assert!(!label.contains('▶'), "the arrow is replaced, not kept: {label:?}");
+    }
+
+    /// The slot keeps its width whichever label shows, so the transport cluster
+    /// never shifts under the user's cursor (the click zones are fixed column
+    /// ranges).
+    #[test]
+    fn the_next_button_slot_keeps_its_width() {
+        let ctx = playing_ctx(ctx_fixture());
+        let idle = Line::from(ControlsPane::next_button_label(&ctx)).width();
+        ctx.pending_next_step.set(Some(7));
+        let busy = Line::from(ControlsPane::next_button_label(&ctx)).width();
+        assert_eq!(idle, busy, "the slot width must not change with the label");
+        assert_eq!(idle, 6, "and it stays the width the cluster reserves");
+    }
+
+    /// The frames cycle, so the glyph animates rather than sitting on one
+    /// character.
+    ///
+    /// `spinner_frame()` is wall-clock based (one step per
+    /// `SPINNER_FRAME_MS`), so calls inside the same 120 ms window return the
+    /// same frame by design — the test steps across that window rather than
+    /// calling in a tight loop.
+    #[test]
+    fn the_spinner_frames_advance() {
+        use crate::ui::panes::queue::{SPINNER_FRAMES, SPINNER_FRAME_MS};
+        assert!(
+            SPINNER_FRAMES.len() > 1,
+            "more than one frame exists, so the glyph can animate"
+        );
+        // Different points in the frame window map to different frames. This
+        // reproduces the function's own arithmetic rather than racing the wall
+        // clock, which would be flaky in a fast test run.
+        let frame_at = |ms: u64| SPINNER_FRAMES[(ms / SPINNER_FRAME_MS) as usize % SPINNER_FRAMES.len()];
+        let seen: std::collections::HashSet<&str> =
+            (0..SPINNER_FRAMES.len() as u64).map(|i| frame_at(i * SPINNER_FRAME_MS)).collect();
+        assert_eq!(
+            seen.len(),
+            SPINNER_FRAMES.len(),
+            "each step of the window shows a different frame"
+        );
+    }
+
+    /// The spinner's redraw tick is armed only while a step is in flight, so an
+    /// idle controls bar schedules no frames.
+    #[test]
+    fn the_spinner_tick_is_armed_only_while_a_step_waits() {
+        let ctx = playing_ctx(ctx_fixture());
+        let mut pane = ControlsPane::new();
+        assert!(pane.spinner_tick.is_none(), "nothing armed at rest");
+        pane.sync_spinner_tick(&ctx);
+        assert!(pane.spinner_tick.is_none(), "still nothing while idle");
+        ctx.pending_next_step.set(Some(7));
+        pane.sync_spinner_tick(&ctx);
+        assert!(pane.spinner_tick.is_some(), "a waiting step arms the tick");
+        let armed = pane.spinner_tick;
+        // A second render must not arm a second job.
+        pane.sync_spinner_tick(&ctx);
+        assert_eq!(pane.spinner_tick, armed, "the tick is not re-armed every frame");
+        ctx.pending_next_step.set(None);
+        pane.sync_spinner_tick(&ctx);
+        assert!(pane.spinner_tick.is_none(), "the tick is dropped when the step ends");
+    }
+
+    fn ctx_fixture() -> Ctx {
+        let app = crossbeam::channel::unbounded();
+        let work = crossbeam::channel::unbounded();
+        let client = crossbeam::channel::unbounded();
+        ctx((app.0, app.1), (work.0, work.1), (client.0, client.1))
     }
 }

@@ -113,3 +113,91 @@ impl Pane for VolumePane {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use ratatui::{Terminal, backend::TestBackend, prelude::Rect};
+    use rstest::rstest;
+
+    use crate::{
+        config::{
+            tabs::VolumeType,
+            theme::volume_slider::{Symbols, VolumeSliderConfig},
+        },
+        ctx::Ctx,
+        mpd::commands::Volume,
+        tests::fixtures::{ctx, terminal},
+        ui::panes::{Pane, volume::VolumePane},
+    };
+
+    fn pane() -> VolumePane {
+        VolumePane::new(VolumeType::Slider(VolumeSliderConfig {
+            symbols: Symbols {
+                start: Some("♪".to_owned()),
+                filled: "█".to_owned(),
+                thumb: "●".to_owned(),
+                track: "─".to_owned(),
+                end: Some("♪".to_owned()),
+            },
+            ..Default::default()
+        }))
+    }
+
+    #[rstest]
+    fn volume_zero_is_correct(mut terminal: Terminal<TestBackend>, mut ctx: Ctx) {
+        let mut pane = pane();
+        ctx.status.volume = Volume::new(0);
+
+        let buf = terminal
+            .draw(|frame| {
+                pane.render(frame, Rect::new(0, 0, 5, 1), &ctx).unwrap();
+            })
+            .unwrap()
+            .buffer;
+
+        assert_eq!(buf[(0, 0)].symbol(), "♪");
+        assert_eq!(buf[(1, 0)].symbol(), "─");
+        assert_eq!(buf[(2, 0)].symbol(), "─");
+        assert_eq!(buf[(3, 0)].symbol(), "─");
+        assert_eq!(buf[(4, 0)].symbol(), "♪");
+    }
+
+    #[rstest]
+    fn volume_max_is_correct(mut terminal: Terminal<TestBackend>, mut ctx: Ctx) {
+        let mut pane = pane();
+        ctx.status.volume = Volume::new(100);
+
+        let buf = terminal
+            .draw(|frame| {
+                pane.render(frame, Rect::new(0, 0, 5, 1), &ctx).unwrap();
+            })
+            .unwrap()
+            .buffer;
+
+        assert_eq!(buf[(0, 0)].symbol(), "♪");
+        assert_eq!(buf[(1, 0)].symbol(), "█");
+        assert_eq!(buf[(2, 0)].symbol(), "█");
+        assert_eq!(buf[(3, 0)].symbol(), "█");
+        assert_eq!(buf[(4, 0)].symbol(), "♪");
+    }
+
+    #[rstest]
+    fn volume_half_is_correct(mut terminal: Terminal<TestBackend>, mut ctx: Ctx) {
+        let mut pane = pane();
+        ctx.status.volume = Volume::new(50);
+
+        let buf = terminal
+            .draw(|frame| {
+                pane.render(frame, Rect::new(0, 0, 5, 1), &ctx).unwrap();
+            })
+            .unwrap()
+            .buffer;
+
+        assert_eq!(buf[(0, 0)].symbol(), "♪");
+        assert_eq!(buf[(1, 0)].symbol(), "█");
+        assert_eq!(buf[(2, 0)].symbol(), "●");
+        assert_eq!(buf[(3, 0)].symbol(), "─");
+        assert_eq!(buf[(4, 0)].symbol(), "♪");
+    }
+}

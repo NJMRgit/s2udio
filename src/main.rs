@@ -30,6 +30,13 @@ use crate::{
         tmux::{self, IS_TMUX},
     },
 };
+#[cfg(test)]
+mod tests {
+    mod cli_integration;
+    pub mod fixtures;
+    mod remote_ipc;
+}
+
 mod config;
 mod core;
 mod ctx;

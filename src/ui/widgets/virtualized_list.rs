@@ -123,3 +123,95 @@ pub fn scroll_selection_into_view(
             .saturating_sub((offset.saturating_add(scrolloff)).saturating_sub(selected));
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::{backend::TestBackend, layout::Rect, text::Line};
+
+    fn items(n: usize) -> Vec<ListItem<'static>> {
+        (0..n).map(|i| ListItem::new(Line::from(format!("row {i}")))).collect()
+    }
+
+    #[test]
+    fn renders_the_visible_slice_from_the_offset() {
+        let mut state = ListState::default();
+        *state.offset_mut() = 5;
+        state.select(Some(5));
+
+        let backend = TestBackend::new(30, 3);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                StatefulWidget::render(
+                    VirtualizedList::new(items(20)).highlight_style(Style::default()),
+                    Rect::new(0, 0, 30, 3),
+                    frame.buffer_mut(),
+                    &mut state,
+                )
+            })
+            .unwrap();
+
+        // The real state is untouched (offset 5, selection 5).
+        assert_eq!(state.offset(), 5);
+        assert_eq!(state.selected(), Some(5));
+        // The buffer shows rows 5..8.
+        let content = terminal.backend().buffer().content();
+        let row_text = |row: usize| -> String {
+            content[row * 30..row * 30 + 30].iter().map(|cell| cell.symbol()).collect::<String>()
+        };
+        assert!(row_text(0).contains("row 5"), "first line shows row 5: {:?}", row_text(0));
+        assert!(row_text(2).contains("row 7"), "third line shows row 7: {:?}", row_text(2));
+    }
+
+    #[test]
+    fn off_screen_selection_renders_no_highlight() {
+        let mut state = ListState::default();
+        *state.offset_mut() = 10;
+        state.select(Some(0)); // selection far above the window
+
+        let backend = TestBackend::new(30, 3);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                StatefulWidget::render(
+                    VirtualizedList::new(items(20)).highlight_style(Style::default()),
+                    Rect::new(0, 0, 30, 3),
+                    frame.buffer_mut(),
+                    &mut state,
+                )
+            })
+            .unwrap();
+
+        assert_eq!(state.offset(), 10, "the viewport offset is preserved");
+        assert_eq!(state.selected(), Some(0), "the selection is preserved");
+    }
+
+    #[test]
+    fn scroll_viewport_clamps_at_the_ends() {
+        let mut state = ListState::default();
+        scroll_viewport(&mut state, 1, 3, 20, 5);
+        assert_eq!(state.offset(), 3);
+        scroll_viewport(&mut state, 1, 100, 20, 5);
+        assert_eq!(state.offset(), 15, "clamps at content_len - viewport");
+        scroll_viewport(&mut state, -1, 100, 20, 5);
+        assert_eq!(state.offset(), 0);
+    }
+
+    #[test]
+    fn scroll_selection_into_view_brings_an_off_screen_selection_back() {
+        let mut state = ListState::default();
+        *state.offset_mut() = 10;
+        state.select(Some(12));
+        scroll_selection_into_view(&mut state, 20, 5, 0);
+        assert_eq!(state.offset(), 10, "already visible, no move");
+
+        state.select(Some(18));
+        scroll_selection_into_view(&mut state, 20, 5, 0);
+        assert_eq!(state.offset(), 14, "scrolled down so row 18 is the last visible row");
+
+        state.select(Some(0));
+        scroll_selection_into_view(&mut state, 20, 5, 0);
+        assert_eq!(state.offset(), 0, "scrolled up so row 0 is visible");
+    }
+}

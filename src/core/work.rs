@@ -863,3 +863,85 @@ fn jellyfin_handle(
         })?;
     f(&jf)
 }
+
+#[cfg(test)]
+mod mpris_art_guard_tests {
+    use super::{is_expected_mpris_art, set_expected_mpris_art};
+
+    #[test]
+    fn only_the_expected_source_writes() {
+        // No stream: nothing is current.
+        set_expected_mpris_art(None);
+        assert!(!is_expected_mpris_art("https://i.ytimg.com/vi/a/maxresdefault.jpg"));
+
+        // The current stream's art is expected...
+        set_expected_mpris_art(Some("https://i.ytimg.com/vi/b/maxresdefault.jpg".to_owned()));
+        assert!(is_expected_mpris_art("https://i.ytimg.com/vi/b/maxresdefault.jpg"));
+        // ...a previous stream's art is stale and must be skipped.
+        assert!(!is_expected_mpris_art("https://i.ytimg.com/vi/a/maxresdefault.jpg"));
+
+        // Jellyfin streams are keyed by their item id.
+        set_expected_mpris_art(Some("jellyfin:abcdef0123456789abcdef0123456789".to_owned()));
+        assert!(is_expected_mpris_art("jellyfin:abcdef0123456789abcdef0123456789"));
+        assert!(!is_expected_mpris_art("https://i.ytimg.com/vi/b/maxresdefault.jpg"));
+    }
+
+    // ── 2026-10-15: the MPRIS poster gets the same letterbox crop ────────
+
+    fn letterboxed_jpeg() -> Vec<u8> {
+        use image::{DynamicImage, Rgb, RgbImage};
+        let mut img = RgbImage::new(480, 360);
+        for (x, y, px) in img.enumerate_pixels_mut() {
+            *px = if y < 45 || y >= 315 {
+                Rgb([0, 0, 0])
+            } else {
+                Rgb([(x % 251) as u8, (y % 241) as u8, 128])
+            };
+        }
+        let mut out = Vec::new();
+        let mut enc = image::codecs::jpeg::JpegEncoder::new(&mut out);
+        enc.encode_image(&DynamicImage::ImageRgb8(img)).expect("encode");
+        out
+    }
+
+    /// The poster bytes the media controls read are the **cropped** thumbnail,
+    /// so the desktop art matches the pane.
+    #[test]
+    fn mpris_poster_bytes_are_the_cropped_thumbnail() {
+        let raw = letterboxed_jpeg();
+        let out = crate::shared::image::crop_letterbox_bytes(&raw, true);
+        let img = image::load_from_memory(&out).expect("decodes");
+        let aspect = img.width() as f64 / img.height() as f64;
+        assert!(
+            aspect > 1.6,
+            "the bars are gone, so the poster is ~16:9 (got {aspect:.3})"
+        );
+    }
+
+    /// The option governs this surface too: off means the bytes are written
+    /// through untouched.
+    #[test]
+    fn mpris_poster_crop_follows_the_option() {
+        let raw = letterboxed_jpeg();
+        assert_eq!(
+            crate::shared::image::crop_letterbox_bytes(&raw, false),
+            raw,
+            "off leaves the poster bytes alone"
+        );
+    }
+
+    /// Bar-free art (a real poster, `maxresdefault`) is written through
+    /// unchanged: the crop must never damage genuine artwork.
+    #[test]
+    fn mpris_poster_leaves_bar_free_art_unchanged() {
+        use image::{DynamicImage, Rgb, RgbImage};
+        let mut img = RgbImage::new(1280, 720);
+        for (x, y, px) in img.enumerate_pixels_mut() {
+            *px = Rgb([(x % 251) as u8, (y % 241) as u8, ((x + y) % 239) as u8]);
+        }
+        let mut raw = Vec::new();
+        let mut enc = image::codecs::jpeg::JpegEncoder::new(&mut raw);
+        enc.encode_image(&DynamicImage::ImageRgb8(img)).expect("encode");
+        assert_eq!(crate::shared::image::crop_letterbox_bytes(&raw, true), raw);
+    }
+}

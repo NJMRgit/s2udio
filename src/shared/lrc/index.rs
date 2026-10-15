@@ -169,3 +169,349 @@ impl LrcIndex {
         }
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use std::{
+        collections::{BTreeMap, HashMap},
+        path::PathBuf,
+        time::Duration,
+    };
+
+    use bon::builder;
+    use chrono::DateTime;
+
+    use super::LrcIndex;
+    use crate::{
+        mpd::commands::{Song, metadata_tag::MetadataTag},
+        shared::lrc::LrcMetadata,
+    };
+
+    #[builder]
+    fn song(artist: &str, title: &str, album: Option<&str>, duration: Option<Duration>) -> Song {
+        let mut metadata = HashMap::new();
+        metadata.insert("artist".into(), MetadataTag::from(artist.to_owned()));
+        metadata.insert("title".into(), MetadataTag::from(title.to_owned()));
+        if let Some(album) = album {
+            metadata.insert("album".into(), MetadataTag::from(album.to_owned()));
+        }
+        Song {
+            id: 0,
+            file: String::new(),
+            duration,
+            metadata,
+            last_modified: DateTime::default(),
+            added: Some(DateTime::default()),
+        }
+    }
+
+    #[builder]
+    fn index_entry(
+        artist: Option<&str>,
+        title: Option<&str>,
+        album: Option<&str>,
+        author: Option<&str>,
+        length: Option<Duration>,
+        offset: Option<i64>,
+        path: Option<&str>,
+    ) -> (PathBuf, LrcMetadata) {
+        (
+            path.map(PathBuf::from).unwrap_or_default(),
+            LrcMetadata {
+                title: title.map(|v| v.to_owned()),
+                artist: artist.map(|v| v.to_owned()),
+                album: album.map(|v| v.to_owned()),
+                author: author.map(|v| v.to_owned()),
+                length,
+                offset,
+            },
+        )
+    }
+
+    #[test]
+    fn empty_index_matches_nothing() {
+        let song = song()
+            .artist("123")
+            .album("333")
+            .title("asdf")
+            .duration(Duration::from_secs(147))
+            .call();
+        let index = LrcIndex { index: BTreeMap::new() };
+
+        let result = index.find_entry(&song);
+
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn entry_matches_by_album_artist_title_len() {
+        let song = song()
+            .artist("123")
+            .album("333")
+            .title("asdf")
+            .duration(Duration::from_secs(147))
+            .call();
+        let index = LrcIndex {
+            index: BTreeMap::from_iter(vec![
+                index_entry()
+                    .artist("123")
+                    .album("333")
+                    .title("asdf")
+                    .length(Duration::from_secs(143))
+                    .call(),
+            ]),
+        };
+
+        let result = index.find_entry(&song);
+
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn entry_matches_by_album_artist_title_len_case_insensitive() {
+        let song = song()
+            .artist("AAA")
+            .album("BBB")
+            .title("CCC")
+            .duration(Duration::from_secs(147))
+            .call();
+        let index = LrcIndex {
+            index: BTreeMap::from_iter(vec![
+                index_entry()
+                    .artist("aaa")
+                    .album("bbb")
+                    .title("CCC")
+                    .length(Duration::from_secs(143))
+                    .call(),
+            ]),
+        };
+
+        let result = index.find_entry(&song);
+
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn song_without_album_matches_lrc_without_album() {
+        let song = song().artist("123").title("asdf").duration(Duration::from_secs(147)).call();
+        let index = LrcIndex {
+            index: BTreeMap::from_iter(vec![
+                index_entry().artist("123").title("asdf").length(Duration::from_secs(143)).call(),
+            ]),
+        };
+
+        let result = index.find_entry(&song);
+
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn song_without_album_matches_lrc_with_album() {
+        let song = song().artist("123").title("asdf").duration(Duration::from_secs(147)).call();
+        let index = LrcIndex {
+            index: BTreeMap::from_iter(vec![
+                index_entry()
+                    .artist("123")
+                    .title("asdf")
+                    .album("song does not have me")
+                    .length(Duration::from_secs(143))
+                    .call(),
+            ]),
+        };
+
+        let result = index.find_entry(&song);
+
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn song_with_album_matches_lrc_without_album() {
+        let song = song()
+            .artist("123")
+            .title("asdf")
+            .album("lrc does not have me")
+            .duration(Duration::from_secs(147))
+            .call();
+        let index = LrcIndex {
+            index: BTreeMap::from_iter(vec![
+                index_entry().artist("123").title("asdf").length(Duration::from_secs(143)).call(),
+            ]),
+        };
+
+        let result = index.find_entry(&song);
+
+        assert!(result.is_some());
+    }
+    #[test]
+    fn length_is_ignored_when_single_match_is_found() {
+        let song = song().artist("123").title("asdf").duration(Duration::from_secs(999)).call();
+        let index = LrcIndex {
+            index: BTreeMap::from_iter(vec![
+                index_entry()
+                    .artist("123")
+                    .title("asdf")
+                    .album("song does not have me")
+                    .length(Duration::from_secs(1))
+                    .call(),
+            ]),
+        };
+
+        let result = index.find_entry(&song);
+
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn song_has_no_duration() {
+        let song = song().artist("123").title("asdf").call();
+        let index = LrcIndex {
+            index: BTreeMap::from_iter(vec![
+                index_entry()
+                    .path("1")
+                    .artist("123")
+                    .title("asdf")
+                    .album("song does not have me")
+                    .length(Duration::from_secs(1))
+                    .call(),
+                index_entry()
+                    .path("2")
+                    .artist("123")
+                    .title("asdf")
+                    .album("song does not have me")
+                    .length(Duration::from_secs(1))
+                    .call(),
+            ]),
+        };
+
+        let result = index.find_entry(&song);
+
+        assert!(result.unwrap().0.to_string_lossy() == "1");
+    }
+
+    #[test]
+    fn length_is_considered_with_multiple_matches() {
+        let song = song().artist("123").title("asdf").duration(Duration::from_secs(100)).call();
+        let index = LrcIndex {
+            index: BTreeMap::from_iter(vec![
+                index_entry()
+                    .path("should not match")
+                    .artist("123")
+                    .title("asdf")
+                    .length(Duration::from_secs(103))
+                    .call(),
+                index_entry()
+                    .path("should match")
+                    .artist("123")
+                    .title("asdf")
+                    .length(Duration::from_secs(99))
+                    .call(),
+                index_entry()
+                    .path("should not match either")
+                    .artist("123")
+                    .title("asdf")
+                    .length(Duration::from_secs(108))
+                    .call(),
+            ]),
+        };
+
+        let result = index.find_entry(&song);
+
+        assert!(result.unwrap().0.to_string_lossy() == "should match");
+    }
+
+    #[test]
+    fn multiple_matches_no_lrc_without_len_no_length_match() {
+        let song = song().artist("123").title("asdf").duration(Duration::from_secs(100)).call();
+        let index = LrcIndex {
+            index: BTreeMap::from_iter(vec![
+                index_entry()
+                    .path("should not match")
+                    .artist("123")
+                    .title("asdf")
+                    .length(Duration::from_secs(200))
+                    .call(),
+                index_entry()
+                    .path("should match")
+                    .artist("123")
+                    .title("asdf")
+                    .length(Duration::from_secs(199))
+                    .call(),
+                index_entry()
+                    .path("should not match either")
+                    .artist("123")
+                    .title("asdf")
+                    .length(Duration::from_secs(1))
+                    .call(),
+            ]),
+        };
+
+        let result = index.find_entry(&song);
+
+        assert!(result.unwrap().0.to_string_lossy() == "should match");
+    }
+
+    #[test]
+    fn both_lrc_with_and_without_len_fallback_to_no_length() {
+        let song = song().artist("123").title("asdf").duration(Duration::from_secs(999)).call();
+        let index = LrcIndex {
+            index: BTreeMap::from_iter(vec![
+                index_entry()
+                    .path("should not match")
+                    .artist("123")
+                    .title("asdf")
+                    .album("song does not have me")
+                    .length(Duration::from_secs(103))
+                    .call(),
+                index_entry()
+                    .path("no length")
+                    .artist("123")
+                    .title("asdf")
+                    .album("song does not have me")
+                    .call(),
+                index_entry()
+                    .path("should match")
+                    .artist("123")
+                    .title("asdf")
+                    .album("song does not have me")
+                    .length(Duration::from_secs(99))
+                    .call(),
+            ]),
+        };
+
+        let result = index.find_entry(&song);
+
+        assert!(result.unwrap().0.to_string_lossy() == "no length");
+    }
+
+    #[test]
+    fn mutlitle_matches_prioritize_album_match() {
+        let song = song()
+            .artist("123")
+            .album("456")
+            .title("asdf")
+            .duration(Duration::from_secs(200))
+            .call();
+        let index = LrcIndex {
+            index: BTreeMap::from_iter(vec![
+                index_entry()
+                    .path("should not match")
+                    .artist("123")
+                    .title("asdf")
+                    .length(Duration::from_secs(200))
+                    .call(),
+                index_entry().path("no album").artist("123").title("asdf").album("456").call(),
+                index_entry()
+                    .path("should match")
+                    .artist("123")
+                    .title("asdf")
+                    .length(Duration::from_secs(201))
+                    .call(),
+            ]),
+        };
+
+        let result = index.find_entry(&song);
+
+        assert!(result.unwrap().0.to_string_lossy() == "no album");
+    }
+}

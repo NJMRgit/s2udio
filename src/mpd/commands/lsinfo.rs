@@ -127,3 +127,73 @@ impl FromMpd for LsInfo {
         }
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::{FromMpd, LsInfo};
+    use crate::mpd::commands::lsinfo::{Dir, LsInfoEntry, Playlist};
+
+    #[test]
+    fn can_parse_playlist_entry() {
+        let input = r"playlist: autechre.m3u
+Last-Modified: 2024-10-30T00:04:26Z
+directory: .cue
+Last-Modified: 2024-11-02T02:55:40Z
+directory: .win
+Last-Modified: 2024-09-15T19:39:47Z
+directory: flac
+Last-Modified: 2024-12-23T00:11:38Z
+directory: wav
+Last-Modified: 2024-08-12T03:03:40Z";
+
+        let mut result = LsInfo::default();
+        for line in input.lines() {
+            let (key, value) = line.split_once(": ").unwrap();
+            result.next_internal(key.to_lowercase().as_str(), value.to_owned()).unwrap();
+        }
+
+        let result = result.0;
+        assert_eq!(result.len(), 5);
+        assert_eq!(
+            result[0],
+            LsInfoEntry::Playlist(Playlist {
+                name: "autechre.m3u".to_owned(),
+                full_path: "autechre.m3u".to_owned(),
+                last_modified: "2024-10-30T00:04:26Z".to_string().parse().unwrap()
+            })
+        );
+        assert_eq!(
+            result[1],
+            LsInfoEntry::Dir(Dir {
+                name: ".cue".to_owned(),
+                full_path: ".cue".to_owned(),
+                last_modified: "2024-11-02T02:55:40Z".to_owned().parse().unwrap()
+            })
+        );
+        assert_eq!(
+            result[2],
+            LsInfoEntry::Dir(Dir {
+                name: ".win".to_owned(),
+                full_path: ".win".to_owned(),
+                last_modified: "2024-09-15T19:39:47Z".to_owned().parse().unwrap()
+            })
+        );
+        assert_eq!(
+            result[3],
+            LsInfoEntry::Dir(Dir {
+                name: "flac".to_owned(),
+                full_path: "flac".to_owned(),
+                last_modified: "2024-12-23T00:11:38Z".to_owned().parse().unwrap()
+            })
+        );
+        assert_eq!(
+            result[4],
+            LsInfoEntry::Dir(Dir {
+                name: "wav".to_owned(),
+                full_path: "wav".to_owned(),
+                last_modified: "2024-08-12T03:03:40Z".to_owned().parse().unwrap()
+            })
+        );
+    }
+}

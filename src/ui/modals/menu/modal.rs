@@ -1078,3 +1078,104 @@ fn anchor_rect(anchor: Position, width: u16, height: u16, frame: Rect) -> Rect {
     Rect { x, y, width, height }
 }
 
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::{config::keys::DirectoriesActions, shared::keys::Actions};
+
+    fn menu_with_items(ctx: &Ctx, labels: &[&str]) -> MenuModal<'static> {
+        let labels = labels.to_vec();
+        MenuModal::new(ctx)
+            .list_section(ctx, move |mut section| {
+                for label in labels {
+                    section.add_item(label, |_ctx| Ok(()));
+                }
+                Some(section)
+            })
+            .build()
+    }
+
+    /// `d` (FolderExpand) selects the highlighted option, like Enter: the
+    /// menu runs the item's action and closes itself.
+    #[test]
+    fn d_selects_the_highlighted_option() {
+        let (app_tx, app_rx) = crossbeam::channel::unbounded();
+        let mut ctx = crate::tests::fixtures::ctx(
+            (app_tx, app_rx.clone()),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+        );
+        let mut modal = menu_with_items(&ctx, &["Option one", "Option two"]);
+
+        let mut action = ActionEvent::from(Arc::new(vec![Actions::Directories(
+            DirectoriesActions::FolderExpand,
+        )]));
+        modal.handle_key(&mut action, &mut ctx).unwrap();
+
+        match app_rx.recv_timeout(std::time::Duration::from_millis(200)) {
+            Ok(crate::AppEvent::UiEvent(crate::ui::UiAppEvent::PopModal(id))) => {
+                assert_eq!(id, modal.id());
+            }
+            other => panic!("expected PopModal after selecting with d, got {other:?}"),
+        }
+    }
+
+    /// `→` (PlayFile) selects the highlighted option too.
+    #[test]
+    fn right_arrow_selects_the_highlighted_option() {
+        let (app_tx, app_rx) = crossbeam::channel::unbounded();
+        let mut ctx = crate::tests::fixtures::ctx(
+            (app_tx, app_rx.clone()),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+        );
+        let mut modal = menu_with_items(&ctx, &["Option one"]);
+
+        let mut action =
+            ActionEvent::from(Arc::new(vec![Actions::Directories(DirectoriesActions::PlayFile)]));
+        modal.handle_key(&mut action, &mut ctx).unwrap();
+
+        match app_rx.recv_timeout(std::time::Duration::from_millis(200)) {
+            Ok(crate::AppEvent::UiEvent(crate::ui::UiAppEvent::PopModal(id))) => {
+                assert_eq!(id, modal.id());
+            }
+            other => panic!("expected PopModal after selecting with right arrow, got {other:?}"),
+        }
+    }
+
+    /// w/s (CommonAction Up/Down) move the highlight and never select.
+    #[test]
+    fn w_s_move_the_highlight_without_selecting() {
+        // The app receiver must stay alive for the render() calls the
+        // Up/Down handlers issue.
+        let (app_tx, app_rx) = crossbeam::channel::unbounded();
+        let mut ctx = crate::tests::fixtures::ctx(
+            (app_tx, app_rx),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+        );
+        let mut modal = menu_with_items(&ctx, &["Option one", "Option two"]);
+        // The first item is highlighted after build().
+        assert_eq!(modal.sections[0].selected(), Some(0));
+
+        let mut action = ActionEvent::from(Arc::new(vec![Actions::Common(CommonAction::Down)]));
+        modal.handle_key(&mut action, &mut ctx).unwrap();
+        assert_eq!(modal.sections[0].selected(), Some(1), "s moves down");
+
+        let mut action = ActionEvent::from(Arc::new(vec![Actions::Common(CommonAction::Up)]));
+        modal.handle_key(&mut action, &mut ctx).unwrap();
+        assert_eq!(modal.sections[0].selected(), Some(0), "w moves up");
+    }
+
+    #[allow(dead_code)]
+    fn test_ctx() -> Ctx {
+        crate::tests::fixtures::ctx(
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+        )
+    }
+}

@@ -201,3 +201,24 @@ impl std::str::FromStr for State {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::OnOffOneshot;
+
+    #[test]
+    fn single_cycles_off_oneshot() {
+        // Single is always enabled as a oneshot: off <-> oneshot, and a
+        // plain on counts as enabled (clicking it disables).
+        assert_eq!(OnOffOneshot::Off.cycle_single(), OnOffOneshot::Oneshot);
+        assert_eq!(OnOffOneshot::Oneshot.cycle_single(), OnOffOneshot::Off);
+        assert_eq!(OnOffOneshot::On.cycle_single(), OnOffOneshot::Off);
+    }
+
+    #[test]
+    fn consume_cycles_all_three_states() {
+        assert_eq!(OnOffOneshot::Off.cycle(), OnOffOneshot::Oneshot);
+        assert_eq!(OnOffOneshot::Oneshot.cycle(), OnOffOneshot::On);
+        assert_eq!(OnOffOneshot::On.cycle(), OnOffOneshot::Off);
+    }
+}

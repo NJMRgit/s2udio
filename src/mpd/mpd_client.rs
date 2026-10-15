@@ -1742,3 +1742,17 @@ impl FilterExt for &[Filter<'_>] {
             )
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::StrExt;
+
+    #[test]
+    fn strext_test() {
+        let input = String::from("test\\test\",h,");
+
+        let result = input.quote_and_escape();
+
+        assert_eq!(result, "\"test\\\\test\\\",h,\"");
+    }
+}

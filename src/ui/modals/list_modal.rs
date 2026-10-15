@@ -535,3 +535,226 @@ impl<V> ListModal<'_, V> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use super::*;
+    use crate::{config::keys::CommonAction, shared::keys::Actions, ui::ActionEvent};
+
+    fn test_ctx() -> (Ctx, crossbeam::channel::Receiver<crate::AppEvent>) {
+        let (app_tx, app_rx) = crossbeam::channel::unbounded();
+        let ctx = crate::tests::fixtures::ctx(
+            (app_tx, app_rx.clone()),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+        );
+        (ctx, app_rx)
+    }
+
+    fn key(action: CommonAction) -> ActionEvent {
+        ActionEvent::from(Arc::new(vec![Actions::Common(action)]))
+    }
+
+    /// Render once so `DirState` gets its content/viewport length (the
+    /// production flow always renders before any key/mouse event).
+    fn render_modal<V: std::fmt::Debug>(modal: &mut ListModal<'_, V>, ctx: &mut Ctx) {
+        let backend = ratatui::backend::TestBackend::new(100, 30);
+        let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+        terminal.draw(|frame| modal.render(frame, ctx).expect("modal renders")).expect("draw ok");
+    }
+
+    /// Single-select (the legacy `SelectModal` shape): pressing Down moves
+    /// the highlight, Confirm twice delivers the confirmed option's value
+    /// and index to the callback and closes the modal.
+    #[test]
+    fn single_select_confirm_delivers_value_and_index() {
+        let (mut ctx, app_rx) = test_ctx();
+        let captured = Arc::new(Mutex::new(None));
+        let captured2 = captured.clone();
+        let mut modal = ListModal::builder()
+            .ctx(&ctx)
+            .title("Pick a playlist".into())
+            .options(vec!["alpha".to_owned(), "beta".to_owned(), "gamma".to_owned()])
+            .row_fn(|v: &String, _marked, idx| format!("{:>3}: {v}", idx + 1))
+            .size_fn(|_| (80, 15))
+            .on_confirm(move |ctx, confirm: ListConfirm<String>| {
+                *captured2.lock().unwrap() = Some(confirm);
+                ctx.app_event_sender.send(crate::AppEvent::UiEvent(
+                    crate::ui::UiAppEvent::PopModal(crate::shared::id::new()),
+                ))?;
+                Ok(())
+            })
+            .build();
+
+        render_modal(&mut modal, &mut ctx);
+        modal.handle_key(&mut key(CommonAction::Down), &mut ctx).unwrap();
+        // Enter moves to the buttons, a second Enter confirms the focused
+        // (first) button.
+        modal.handle_key(&mut key(CommonAction::Confirm), &mut ctx).unwrap();
+        modal.handle_key(&mut key(CommonAction::Confirm), &mut ctx).unwrap();
+
+        let confirm = captured.lock().unwrap().take().expect("callback ran");
+        assert_eq!(confirm.button, 0);
+        assert_eq!(confirm.value, Some("beta".to_owned()));
+        assert_eq!(confirm.index, 1);
+        assert!(confirm.marked.is_empty());
+        // The modal closed itself.
+        assert!(
+            app_rx.iter().any(|ev| matches!(
+                ev,
+                crate::AppEvent::UiEvent(crate::ui::UiAppEvent::PopModal(id)) if id == modal.id()
+            )),
+            "expected the modal to close after confirming"
+        );
+    }
+
+    /// Multi-select (the torrent picker shape): Space toggles marks, the
+    /// confirm payload carries the mark_id-mapped indices and the button.
+    #[test]
+    fn multi_select_confirm_delivers_marked_ids() {
+        let (mut ctx, app_rx) = test_ctx();
+        let captured = Arc::new(Mutex::new(None));
+        let captured2 = captured.clone();
+        let mut modal = ListModal::builder()
+            .ctx(&ctx)
+            .title("▶ files — demo ".into())
+            .options(vec![
+                (2, "S01E02.mkv".to_owned(), 900),
+                (0, "S01E00.mkv".to_owned(), 700),
+                (1, "S01E01.mkv".to_owned(), 800),
+            ])
+            .row_fn(|(_, name, len): &(usize, String, u64), marked, _idx| {
+                let mark = if marked { "✔ " } else { "  " };
+                format!("{mark}{name}  ({len})")
+            })
+            .size_fn(|len| (70, (len as u16 + 5).min(18)))
+            .buttons(vec!["Play", "Download & Play", "Cancel"])
+            .confirm_buttons(2)
+            .multi_select(true)
+            .mark_id(|o: &(usize, String, u64)| o.0)
+            .list_right_padding(1)
+            .bottom_title(|n| format!(" {n} marked "))
+            .wheel_moves_selection(true)
+            .scrollbar_drag(true)
+            .on_confirm(move |ctx, confirm: ListConfirm<(usize, String, u64)>| {
+                *captured2.lock().unwrap() = Some(confirm);
+                ctx.app_event_sender.send(crate::AppEvent::UiEvent(
+                    crate::ui::UiAppEvent::PopModal(crate::shared::id::new()),
+                ))?;
+                Ok(())
+            })
+            .build();
+
+        render_modal(&mut modal, &mut ctx);
+        // Space marks row 0 (positional 2); Down + Space marks row 1
+        // (positional 0).
+        let space = |ctx: &mut Ctx, modal: &mut ListModal<'_, (usize, String, u64)>| {
+            modal
+                .handle_raw_key(
+                    crossterm::event::KeyEvent::new(
+                        crossterm::event::KeyCode::Char(' '),
+                        crossterm::event::KeyModifiers::NONE,
+                    ),
+                    ctx,
+                )
+                .unwrap()
+        };
+        space(&mut ctx, &mut modal);
+        modal.handle_key(&mut key(CommonAction::Down), &mut ctx).unwrap();
+        space(&mut ctx, &mut modal);
+        // Confirm twice: list -> buttons, then the focused Play button.
+        modal.handle_key(&mut key(CommonAction::Confirm), &mut ctx).unwrap();
+        modal.handle_key(&mut key(CommonAction::Confirm), &mut ctx).unwrap();
+
+        let confirm = captured.lock().unwrap().take().expect("callback ran");
+        assert_eq!(confirm.button, 0, "Play confirmed");
+        assert_eq!(confirm.value, None);
+        // Sorted list order: row 0 = S01E02 (positional 2), row 1 =
+        // S01E00 (positional 0).
+        assert_eq!(confirm.marked, vec![2, 0]);
+        assert!(
+            app_rx.iter().any(|ev| matches!(
+                ev,
+                crate::AppEvent::UiEvent(crate::ui::UiAppEvent::PopModal(id)) if id == modal.id()
+            )),
+            "expected the modal to close after confirming"
+        );
+    }
+
+    /// The cancel button closes the modal without running the callback.
+    #[test]
+    fn cancel_button_hides_without_callback() {
+        let (mut ctx, _app_rx) = test_ctx();
+        let ran = Arc::new(Mutex::new(false));
+        let ran2 = ran.clone();
+        let mut modal = ListModal::builder()
+            .ctx(&ctx)
+            .title("Pick".into())
+            .options(vec!["only".to_owned()])
+            .row_fn(|v: &String, _marked, idx| format!("{:>3}: {v}", idx + 1))
+            .size_fn(|_| (80, 15))
+            .on_confirm(move |ctx, _confirm: ListConfirm<String>| {
+                *ran2.lock().unwrap() = true;
+                ctx.app_event_sender.send(crate::AppEvent::UiEvent(
+                    crate::ui::UiAppEvent::PopModal(crate::shared::id::new()),
+                ))?;
+                Ok(())
+            })
+            .build();
+
+        render_modal(&mut modal, &mut ctx);
+        // Enter -> buttons (Confirm focused); Down -> the Cancel button;
+        // Enter -> cancel: hide, no callback.
+        modal.handle_key(&mut key(CommonAction::Confirm), &mut ctx).unwrap();
+        modal.handle_key(&mut key(CommonAction::Down), &mut ctx).unwrap();
+        modal.handle_key(&mut key(CommonAction::Confirm), &mut ctx).unwrap();
+        assert!(!*ran.lock().unwrap(), "cancel must not run the callback");
+    }
+
+    /// The unified row-click mapping (torrent-picker math, which the
+    /// legacy picker's extra `-1` used to break): clicking the second
+    /// visible row selects the second option.
+    #[test]
+    fn click_on_second_row_selects_second_option() {
+        let (mut ctx, _app_rx) = test_ctx();
+        let mut modal = ListModal::builder()
+            .ctx(&ctx)
+            .title("Pick".into())
+            .options(vec![
+                "alpha".to_owned(),
+                "beta".to_owned(),
+                "gamma".to_owned(),
+                "delta".to_owned(),
+            ])
+            .row_fn(|v: &String, _marked, idx| format!("{:>3}: {v}", idx + 1))
+            .size_fn(|_| (80, 15))
+            .on_confirm(|_ctx, _confirm: ListConfirm<String>| Ok(()))
+            .build();
+
+        // Render so `options_area` is populated (80x15 popup centered in
+        // the 100x30 test backend: x=10, y=7; the list block's inner area
+        // starts below the top border + title row, so options_area.y = 9).
+        let backend = ratatui::backend::TestBackend::new(100, 30);
+        let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| modal.render(frame, &mut ctx).expect("modal renders"))
+            .expect("draw ok");
+        assert_eq!(modal.options_area.y, 9, "layout assumption");
+
+        // Click the second option row (y = options_area.y + 1).
+        modal
+            .handle_mouse_event(
+                MouseEvent {
+                    x: 50,
+                    y: modal.options_area.y + 1,
+                    kind: MouseEventKind::LeftClick,
+                    modifiers: crossterm::event::KeyModifiers::NONE,
+                },
+                &mut ctx,
+            )
+            .unwrap();
+        assert_eq!(modal.state.get_selected(), Some(1), "second row selects the second option");
+    }
+}

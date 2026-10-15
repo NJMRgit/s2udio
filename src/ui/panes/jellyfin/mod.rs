@@ -317,6 +317,10 @@ mod poster;
 mod render;
 mod search;
 
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests;
+
 impl Pane for JellyfinPane {
     fn render(
         &mut self,

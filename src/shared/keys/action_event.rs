@@ -94,3 +94,44 @@ impl ActionEvent {
         result
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn consume_survives_abandon_and_blocks_nothing_else() {
+        // Esc binds Common(Close) + Global(ShowSettings) to one keypress.
+        let mut ev: ActionEvent = Arc::new(vec![
+            Actions::Common(CommonAction::Close),
+            Actions::Global(GlobalAction::ShowSettings),
+        ])
+        .into();
+        assert!(!ev.is_consumed());
+
+        // A pane clears its selection: it claims the Close half and marks
+        // the keypress consumed so the settings half does not fire.
+        assert!(ev.claim_common().is_some());
+        ev.consume();
+        assert!(ev.is_consumed());
+
+        // The pane's global handling then abandons (re-enabling claim_global
+        // for later stages) — the consumed flag must survive that.
+        ev.abandon();
+        assert!(ev.is_consumed());
+        assert!(ev.claim_global().is_some());
+    }
+
+    #[test]
+    fn not_consumed_keeps_the_global_half_available() {
+        let mut ev: ActionEvent = Arc::new(vec![
+            Actions::Common(CommonAction::Close),
+            Actions::Global(GlobalAction::ShowSettings),
+        ])
+        .into();
+        // No selection: the pane does not consume, so the settings half
+        // still fires.
+        assert!(!ev.is_consumed());
+        assert!(ev.claim_global().is_some());
+    }
+}

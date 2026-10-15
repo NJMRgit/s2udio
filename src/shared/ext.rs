@@ -362,3 +362,49 @@ pub mod num {
         }
     }
 }
+
+
+
+
+    #[cfg(test)]
+    mod test {
+        use std::time::Duration;
+
+        use test_case::test_case;
+
+        
+        use crate::shared::ext::duration::DurationExt;
+
+        #[test_case(Duration::from_secs(0), "0:00")]
+        #[test_case(Duration::from_secs(1), "0:01")]
+        #[test_case(Duration::from_secs(30), "0:30")]
+        #[test_case(Duration::from_secs(60), "1:00")]
+        #[test_case(Duration::from_secs(95), "1:35")]
+        #[test_case(Duration::from_secs(123), "2:03")]
+        #[test_case(Duration::from_secs(3599), "59:59")]
+        #[test_case(Duration::from_secs(3600), "1:00:00")]
+        #[test_case(Duration::from_secs(3601), "1:00:01")]
+        #[test_case(Duration::from_secs(3661), "1:01:01")]
+        #[test_case(Duration::from_secs(7200), "2:00:00")]
+        #[test_case(Duration::from_secs(86399), "23:59:59")]
+        #[test_case(Duration::from_secs(86400), "1d 00:00:00")]
+        #[test_case(Duration::from_secs(90061), "1d 01:01:01")]
+        #[test_case(Duration::from_secs(99999), "1d 03:46:39")]
+        #[test_case(Duration::from_secs(172_800), "2d 00:00:00")]
+        fn duration_to_string(input: Duration, expected: &str) {
+            assert_eq!(input.to_string(), expected);
+        }
+
+        #[test_case(Duration::from_secs(0), "0s")]
+        #[test_case(Duration::from_secs(1), "1s")]
+        #[test_case(Duration::from_secs(60), "1m")]
+        #[test_case(Duration::from_secs(95), "1m, 35s")]
+        #[test_case(Duration::from_secs(3600), "1h")]
+        #[test_case(Duration::from_secs(3601), "1h, 1s")]
+        #[test_case(Duration::from_secs(3661), "1h, 1m, 1s")]
+        #[test_case(Duration::from_secs(3600 * 24), "1d")]
+        #[test_case(Duration::from_secs(99999), "1d, 3h, 46m, 39s")]
+        fn duration_format(input: Duration, expected: &str) {
+            assert_eq!(input.format_to_duration(", "), expected);
+        }
+    }

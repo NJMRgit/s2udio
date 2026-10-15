@@ -166,3 +166,51 @@ impl DurationFormat {
         result
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_custom_format_tokens() {
+        let classic = DurationFormat::parse("%M:%S").unwrap();
+        assert_eq!(classic.format(45), "00:45");
+        assert_eq!(classic.format(85), "01:25");
+
+        let mixed = DurationFormat::parse("%h hours, %M mins").unwrap();
+        assert_eq!(mixed.format(3665), "1 hours, 01 mins");
+
+        let unpadded = DurationFormat::parse("%m:%s").unwrap();
+        assert_eq!(unpadded.format(85), "1:25");
+    }
+
+    #[test]
+    fn test_total_seconds_token() {
+        let total = DurationFormat::parse("%t seconds").unwrap();
+        assert_eq!(total.format(90), "90 seconds");
+        assert_eq!(total.format(3600), "3600 seconds");
+    }
+
+    #[test]
+    fn test_literal_percent() {
+        let fmt = DurationFormat::parse("Usage: 100%%").unwrap();
+        assert_eq!(fmt.format(60), "Usage: 100%");
+
+        let fmt2 = DurationFormat::parse("%M%%").unwrap();
+        assert_eq!(fmt2.format(60), "01%");
+    }
+
+    #[test]
+    fn test_zero_duration() {
+        let fmt2 = DurationFormat::parse("%M:%S").unwrap();
+        assert_eq!(fmt2.format(0), "00:00");
+    }
+
+    #[test]
+    fn test_invalid_format_token() {
+        assert!(DurationFormat::parse("%z").is_err());
+        assert!(DurationFormat::parse("%M:%S%").is_err());
+        assert!(DurationFormat::parse("test %x test").is_err());
+    }
+}

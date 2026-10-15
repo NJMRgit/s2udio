@@ -1208,3 +1208,147 @@ pub(crate) fn validate_tabs(layout: &SizedPaneOrSplit, tabs: &Tabs) -> Result<()
     );
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Today's bare-`Directories` config syntax (a unit variant, no args)
+    /// parses with the default tree args — backward compatibility is
+    /// load-bearing: the round-23 configs need no edits.
+    #[test]
+    fn bare_browser_panes_parse_with_default_tree_args() {
+        let tabs: TabsFile = ron::from_str(
+            r#"#![enable(unwrap_newtypes)]
+[
+    (
+        name: "MPD",
+        pane: Pane(Directories),
+    ),
+    (
+        name: "Playlists",
+        pane: Pane(Playlists),
+    ),
+    (
+        name: "Jellyfin",
+        pane: Pane(Jellyfin),
+    ),
+    (
+        name: "Radio",
+        pane: Pane(Radio),
+    ),
+]
+"#,
+        )
+        .expect("bare browser panes must keep parsing (round-23 syntax)");
+        let panes: Vec<PaneTypeFile> = tabs
+            .0
+            .into_iter()
+            .map(|tab| match tab.pane {
+                PaneOrSplitFile::Pane(pane) => pane,
+                PaneOrSplitFile::Split { .. } | PaneOrSplitFile::Component(_) => {
+                    panic!("test config must use bare panes")
+                }
+            })
+            .collect();
+        for pane in panes {
+            let tree = match pane {
+                PaneTypeFile::Directories { tree }
+                | PaneTypeFile::Playlists { tree }
+                | PaneTypeFile::Jellyfin { tree }
+                | PaneTypeFile::Radio { tree } => tree,
+                other => panic!("expected a browser pane, got {other:?}"),
+            };
+            assert_eq!(
+                tree,
+                TreeBrowserArgs::default(),
+                "bare browser panes parse with the default tree args"
+            );
+        }
+    }
+
+    /// A config that sets explicit tree args round-trips through serde:
+    /// the args survive parse -> serialize -> parse unchanged.
+    #[test]
+    fn explicit_tree_args_round_trip() {
+        let tabs: TabsFile = ron::from_str(
+            r#"#![enable(unwrap_newtypes)]
+[
+    (
+        name: "MPD",
+        pane: Pane(Directories(tree: (tree_min_width: 60, tree_hide_below: 100, info_box_cap: None))),
+    ),
+]
+"#,
+        )
+        .expect("explicit tree args must parse");
+        let PaneOrSplitFile::Pane(PaneTypeFile::Directories { tree }) = &tabs.0[0].pane else {
+            panic!("expected a Directories pane");
+        };
+        assert_eq!(tree.tree_min_width, 60);
+        assert_eq!(tree.tree_hide_below, 100);
+        assert_eq!(tree.info_box_cap, None);
+
+        let serialized = ron::to_string(&tabs).expect("round-trip serialize");
+        let reparsed: TabsFile = ron::from_str(&serialized).expect("round-trip reparse");
+        assert_eq!(reparsed, tabs, "explicit tree args round-trip unchanged");
+    }
+
+    /// The serde defaults reproduce today's constants exactly (the parity
+    /// pin for the args side): 50-col minimum, hidden <= 120, info cap 15.
+    #[test]
+    fn default_args_are_today_s_constants() {
+        let args = TreeBrowserArgs::default();
+        assert_eq!(args.tree_min_width, 50);
+        assert_eq!(args.tree_hide_below, 120);
+        assert_eq!(args.info_box_cap, Some(15));
+    }
+
+    /// The construction-pattern bridge (see
+    /// docs/design/Rewrite/new-browser-tab.md): a config block
+    /// (`Directories { tree: ... }`) converts into the pane type, and
+    /// `Config::tree_browser_args` hands those args to the singleton
+    /// adapter; pane types absent from the config fall back to defaults.
+    #[test]
+    fn config_tree_browser_args_read_the_first_occurrence_args() {
+        let tabs_file = TabsFile(vec![TabFile {
+            name: "Local".to_string(),
+            border_type: BorderTypeFile::None,
+            pane: PaneOrSplitFile::Pane(PaneTypeFile::Directories {
+                tree: TreeBrowserArgs {
+                    tree_min_width: 60,
+                    tree_hide_below: 100,
+                    info_box_cap: None,
+                },
+            }),
+        }]);
+        let tabs = tabs_file
+            .convert(&HashMap::new(), &BorderSetLib::default())
+            .expect("a bare Directories tab converts");
+        let config = crate::config::Config { tabs, ..crate::config::Config::default() };
+        assert_eq!(
+            config.tree_browser_args(PaneTypeDiscriminants::Directories),
+            TreeBrowserArgs { tree_min_width: 60, tree_hide_below: 100, info_box_cap: None },
+            "the config block's tree args drive the adapter"
+        );
+        assert_eq!(
+            config.tree_browser_args(PaneTypeDiscriminants::Radio),
+            TreeBrowserArgs::default(),
+            "panes absent from the config fall back to the defaults"
+        );
+    }
+
+    /// Round-34 live regression: the lyrics pane must be keyboard-
+    /// focusable in release builds (it was in `UNFOSUSABLE_TABS`, so
+    /// clicks on the pencil/words never moved focus and the edit-mode
+    /// keyboard — ←/→/w/s/+/-/Enter/<C-s>/Esc — never reached the pane;
+    /// the unit tests exercised `handle_action` directly and missed it).
+    #[test]
+    fn lyrics_pane_is_focusable() {
+        let pane_type: PaneType = PaneTypeFile::Lyrics.try_into().expect("Lyrics pane converts");
+        assert!(
+            !UNFOSUSABLE_TABS.contains(&PaneTypeDiscriminants::from(&pane_type)),
+            "Lyrics must not be in the unfocusable list (round-34 edit-mode keyboard)"
+        );
+    }
+}

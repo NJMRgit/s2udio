@@ -164,3 +164,38 @@ impl From<ImageBackend> for ImageMethod {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{AlbumArtConfig, AlbumArtConfigFile};
+
+    /// The crop defaults **on**: every existing config keeps the new
+    /// behaviour without an edit, which is what the user asked for.
+    #[test]
+    fn crop_letterbox_defaults_on() {
+        assert!(AlbumArtConfigFile::default().crop_letterbox);
+        let config: AlbumArtConfig = AlbumArtConfigFile::default().into();
+        assert!(config.crop_letterbox);
+    }
+
+    /// An older `config.ron` with no `crop_letterbox` key still parses and
+    /// picks up the on default (`#[serde(default)]` on the struct).
+    #[test]
+    fn an_absent_field_in_an_older_config_defaults_on() {
+        let parsed: AlbumArtConfigFile =
+            ron::from_str("(order: EmbeddedFirst, max_size_px: (width: 0, height: 0))")
+                .expect("an older config parses");
+        assert!(parsed.crop_letterbox, "a missing key means on");
+    }
+
+    /// The option can be switched off, and it survives the conversion to the
+    /// runtime config the panes read.
+    #[test]
+    fn crop_letterbox_can_be_switched_off() {
+        let parsed: AlbumArtConfigFile =
+            ron::from_str("(crop_letterbox: false)").expect("parses");
+        assert!(!parsed.crop_letterbox);
+        let config: AlbumArtConfig = parsed.into();
+        assert!(!config.crop_letterbox, "off reaches the runtime config");
+    }
+}

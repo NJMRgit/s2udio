@@ -286,3 +286,95 @@ impl CavaOverridesFile {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Round 29: the sidecar can set the cava node name (and explicitly
+    /// disable it with an empty string); `None` leaves it untouched.
+    #[test]
+    fn node_name_override_sets_and_disables() {
+        let mut cava = Cava::default();
+        assert_eq!(cava.input.node_name, None);
+
+        let set = CavaOverridesFile { node_name: Some("s2udio-cava".into()), ..Default::default() };
+        set.apply_to(&mut cava);
+        assert_eq!(cava.input.node_name.as_deref(), Some("s2udio-cava"));
+
+        // Some("") explicitly disables the rename.
+        let off = CavaOverridesFile { node_name: Some(String::new()), ..Default::default() };
+        off.apply_to(&mut cava);
+        assert_eq!(cava.input.node_name, None, "an empty node_name disables the rename");
+
+        // None leaves the resolved value alone.
+        cava.input.node_name = Some("keep-me".into());
+        let untouched = CavaOverridesFile::default();
+        untouched.apply_to(&mut cava);
+        assert_eq!(cava.input.node_name.as_deref(), Some("keep-me"));
+    }
+
+    /// The main config's cava.input accepts `node_name` (round 29); the
+    /// round-30 removal of the `method` field is invisible to old configs
+    /// (`method: Pipewire` is an unknown field and is ignored).
+    #[test]
+    fn main_config_input_parses_node_name() {
+        let content = r#"(input: (method: Pipewire, source: "Media.monitor", node_name: Some("s2udio-cava")))"#;
+        let parsed: CavaFile = ron::de::from_str(content).unwrap();
+        let cava: Cava = parsed.into();
+        assert_eq!(cava.input.node_name.as_deref(), Some("s2udio-cava"));
+        assert_eq!(cava.input.source, "Media.monitor");
+    }
+
+    /// Old configs / sidecars with removed fields (sample rate / bit depth,
+    /// and the round-30 `method`) must still load: the unknown fields are
+    /// ignored and the rest applies.
+    #[test]
+    fn legacy_sidecar_with_removed_fields_still_parses() {
+        // A cava.ron written before the sample rate / bit depth options were
+        // removed must still load: the unknown fields are ignored and the
+        // rest applies.
+        let content = r#"(framerate: Some(90), autosens: Some(false), sensitivity: Some(175),
+            lower_cutoff_freq: Some(20), higher_cutoff_freq: Some(15000),
+            sample_rate: Some(48000), sample_bits: Some(24), channels: Some(2),
+            method: Some(Fifo), source: Some("/tmp/mpd-cava.fifo"),
+            noise_reduction: Some(10), monstercat: Some(false), waves: Some(false))"#;
+        let parsed: CavaOverridesFile = ron::de::from_str(content).unwrap();
+        assert_eq!(parsed.framerate, Some(90));
+        assert_eq!(parsed.sensitivity, Some(175));
+        assert_eq!(parsed.channels, Some(2));
+    }
+
+    /// Round 30: a main config that still points cava at the MPD fifo loads
+    /// (the `method` field is gone and ignored) and its `source` falls back
+    /// to the PipeWire default capture source.
+    #[test]
+    fn legacy_fifo_input_falls_back_to_pipewire_auto() {
+        let content = r#"(input: (method: Fifo, source: "/tmp/mpd-cava.fifo", sample_rate: Some(44100), sample_bits: Some(16), channels: Some(2)))"#;
+        let parsed: CavaFile = ron::de::from_str(content).unwrap();
+        let cava: Cava = parsed.into();
+        assert_eq!(cava.input.source, "auto");
+    }
+
+    /// Round 30: the generated cava config always selects the PipeWire
+    /// input method.
+    #[test]
+    fn generated_config_is_pipewire_only() {
+        let cava = Cava::default();
+        let config = cava.to_cava_config_file(24).unwrap();
+        assert!(config.contains("method = pipewire"), "{config}");
+        assert!(!config.contains("fifo"), "{config}");
+    }
+
+    /// Round 30: the sidecar's `source` is sanitized the same way as the
+    /// main config's (a fifo path falls back to "auto").
+    #[test]
+    fn sidecar_source_sanitizes_fifo_paths() {
+        let mut cava = Cava::default();
+        cava.input.source = "/tmp/mpd-cava.fifo".into();
+        let overrides =
+            CavaOverridesFile { source: Some("/tmp/mpd-cava.fifo".into()), ..Default::default() };
+        overrides.apply_to(&mut cava);
+        assert_eq!(cava.input.source, "auto");
+    }
+}

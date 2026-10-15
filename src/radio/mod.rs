@@ -613,3 +613,59 @@ fn fetch_stations(agent: &ureq::Agent, url: &str) -> Result<Vec<DirectoryStation
         .context("Cannot parse station directory")?;
     Ok(raw.iter().filter_map(station_from_value).collect())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn station_from_value_uses_url_resolved() {
+        let value = json!({
+            "name": "My Radio",
+            "url": "http://original.example/stream",
+            "url_resolved": "http://resolved.example/stream",
+            "country": "Germany",
+            "countrycode": "DE",
+            "tags": "rock,  indie",
+            "bitrate": 128,
+            "votes": 42,
+            "distance": 12.5,
+        });
+        let station = station_from_value(&value).unwrap();
+        assert_eq!(station.name, "My Radio");
+        assert_eq!(station.url, "http://resolved.example/stream");
+        assert_eq!(station.country, "Germany");
+        assert_eq!(station.tags, vec!["rock", "indie"]);
+        assert_eq!(station.bitrate, Some(128));
+        assert_eq!(station.votes, 42);
+        assert_eq!(station.distance_km, Some(12.5));
+    }
+
+    #[test]
+    fn station_from_value_handles_array_tags() {
+        let value = json!({
+            "name": "X",
+            "url": "http://x.example",
+            "tags": ["a", "b"],
+            "language": "english",
+        });
+        let station = station_from_value(&value).unwrap();
+        assert_eq!(station.tags, vec!["a", "b"]);
+        assert_eq!(station.language, vec!["english"]);
+    }
+
+    #[test]
+    fn station_from_value_rejects_non_http() {
+        let value = json!({"name": "X", "url": "ftp://nope"});
+        assert!(station_from_value(&value).is_none());
+    }
+
+    #[test]
+    fn station_from_value_defaults_country() {
+        let value = json!({"name": "X", "url": "http://x.example", "countrycode": "DE"});
+        let station = station_from_value(&value).unwrap();
+        assert_eq!(station.country, "Unknown");
+        assert_eq!(station.country_code, "DE");
+    }
+}

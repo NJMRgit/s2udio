@@ -49,3 +49,41 @@ impl PartialOrd for Version {
         Some(self.cmp(other))
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use crate::mpd::version::Version;
+
+    #[test]
+    fn test_version_eq() {
+        let version_1: Version = "0.22.0".parse().unwrap();
+        let version_2: Version = "0.22.0".parse().unwrap();
+
+        assert!(version_1 == version_2);
+    }
+
+    #[test]
+    fn test_version_major() {
+        let version_1: Version = "1.23.0".parse().unwrap();
+        let version_2: Version = "0.28.0".parse().unwrap();
+
+        assert!(version_1 > version_2);
+    }
+
+    #[test]
+    fn test_version_minor() {
+        let version_1: Version = "0.23.0".parse().unwrap();
+        let version_2: Version = "0.22.0".parse().unwrap();
+
+        assert!(version_1 > version_2);
+    }
+
+    #[test]
+    fn test_version_patch() {
+        let version_1: Version = "0.22.1".parse().unwrap();
+        let version_2: Version = "0.22.0".parse().unwrap();
+
+        assert!(version_1 > version_2);
+    }
+}

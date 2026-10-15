@@ -708,3 +708,145 @@ impl Modal for YtSearchModal {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tests::fixtures;
+    use ratatui::{Terminal, backend::TestBackend};
+
+    fn test_ctx() -> Ctx {
+        fixtures::ctx(
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+        )
+    }
+
+    /// Every row of the rendered frame as a string, so the popup's rows can be
+    /// read top to bottom.
+    fn render(modal: &mut YtSearchModal, ctx: &mut Ctx) -> Vec<String> {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| modal.render(frame, ctx).expect("render ok"))
+            .expect("draw ok");
+        let buffer = terminal.backend().buffer();
+        let width = buffer.area.width as usize;
+        buffer
+            .content
+            .chunks(width)
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect())
+            .collect()
+    }
+
+    /// An empty input carries the hint itself, in the input row: no message
+    /// row sits under the divider any more, and the popup is five rows tall
+    /// (borders, input, divider, hints).
+    #[test]
+    fn empty_input_shows_the_hint_in_the_input_row() {
+        let mut ctx = test_ctx();
+        let mut modal = YtSearchModal::new(&ctx);
+        let rows = render(&mut modal, &mut ctx);
+
+        let hint_rows: Vec<&String> = rows.iter().filter(|row| row.contains(INPUT_HINT)).collect();
+        assert_eq!(hint_rows.len(), 1, "the hint is drawn once:\n{}", rows.join("\n"));
+        let input_row = rows
+            .iter()
+            .position(|row| row.contains("Search:"))
+            .expect("the input row carries the frame's label");
+        assert!(
+            rows[input_row].contains(INPUT_HINT),
+            "the hint lives in the input row: {:?}",
+            rows[input_row]
+        );
+        // Directly below the input is the divider, then the hints row: the
+        // idle popup has no message row between them.
+        assert!(
+            rows[input_row + 1].contains('├'),
+            "the divider follows the input: {:?}",
+            rows[input_row + 1]
+        );
+        assert!(
+            rows[input_row + 2].contains("Esc close"),
+            "the hints row follows the divider: {:?}",
+            rows[input_row + 2]
+        );
+        assert!(
+            rows[input_row + 3].contains('╰'),
+            "the popup is five rows tall, bottom border last: {:?}",
+            rows[input_row + 3]
+        );
+    }
+
+    /// Typing replaces the hint: the query is what the input row shows.
+    #[test]
+    fn typed_query_replaces_the_hint() {
+        let mut ctx = test_ctx();
+        let mut modal = YtSearchModal::new(&ctx);
+        ctx.input.set_buffer("cats".to_owned(), modal.input_buffer_id);
+        let rows = render(&mut modal, &mut ctx);
+
+        assert!(
+            !rows.iter().any(|row| row.contains(INPUT_HINT)),
+            "the hint is gone once text is typed:\n{}",
+            rows.join("\n")
+        );
+        assert!(
+            rows.iter().any(|row| row.contains("Search: cats")),
+            "the input row shows the query:\n{}",
+            rows.join("\n")
+        );
+    }
+
+    /// A search in flight keeps its message row; the idle popup is the only
+    /// state without one.
+    #[test]
+    fn searching_keeps_its_message_row() {
+        let mut ctx = test_ctx();
+        let mut modal = YtSearchModal::new(&ctx);
+        modal.phase = Phase::Searching;
+        let rows = render(&mut modal, &mut ctx);
+
+        let message_row = rows
+            .iter()
+            .position(|row| row.contains("Searching…"))
+            .expect("the searching message is on screen");
+        assert!(
+            rows[message_row + 1].contains("Esc close"),
+            "the hints row stays below the message: {:?}",
+            rows[message_row + 1]
+        );
+    }
+
+    /// `Esc` while the query input has focus closes the popup in one press
+    /// (round 102, user feedback): no staged exit, and the input buffer goes
+    /// with it. The event the platform sends for that `Esc` is an
+    /// insert-mode `Cancel`.
+    #[test]
+    fn esc_in_the_input_closes_the_popup() {
+        let app = crossbeam::channel::unbounded();
+        let work = crossbeam::channel::unbounded();
+        let client = crossbeam::channel::unbounded();
+        let events = app.1.clone();
+        // Keep the fixture's receivers alive (it drops them otherwise).
+        Box::leak(Box::new(app.1.clone()));
+        let ctx = fixtures::ctx((app.0, app.1), (work.0, work.1), (client.0, client.1));
+        let mut modal = YtSearchModal::new(&ctx);
+        let (id, buffer) = (modal.id(), modal.input_buffer_id);
+        assert!(ctx.input.is_active(buffer), "the popup opens with its input focused");
+
+        modal
+            .handle_insert_mode(InputResultEvent::Cancel, &ctx)
+            .expect("cancel is handled");
+
+        assert!(!ctx.input.is_active(buffer), "the input buffer is destroyed");
+        let popped = events.try_iter().any(|event| {
+            matches!(
+                event,
+                crate::AppEvent::UiEvent(crate::ui::UiAppEvent::PopModal(popped)) if popped == id
+            )
+        });
+        assert!(popped, "the popup asked the platform to close it");
+    }
+}

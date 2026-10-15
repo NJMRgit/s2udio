@@ -988,3 +988,18 @@ fn prompt_video_resume(ctx: &mut Ctx, title: &str, seconds: f64, key: String) {
             .build()
     );
 }
+
+#[cfg(test)]
+mod tests {
+    use super::should_prompt_resume;
+
+    /// At/around the threshold: only a position past 10 s is worth a prompt
+    /// (the boundary belongs to "start from the beginning").
+    #[test]
+    fn prompts_only_past_ten_seconds() {
+        assert!(!should_prompt_resume(0.0));
+        assert!(!should_prompt_resume(10.0));
+        assert!(should_prompt_resume(10.001));
+        assert!(should_prompt_resume(3600.0));
+    }
+}

@@ -190,3 +190,37 @@ where
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod scrollbar_tests {
+    use ratatui::layout::Rect;
+
+    use crate::shared::mouse_event::{MouseEvent, MouseEventKind};
+
+    #[test]
+    fn test_mouse_event_in_scrollbar_area() {
+        let scrollbar_area = Rect::new(29, 1, 1, 8);
+
+        let inside_event =
+            MouseEvent { kind: MouseEventKind::LeftClick, x: 29, y: 3, ..Default::default() };
+        assert!(scrollbar_area.contains(inside_event.into()));
+
+        let outside_event =
+            MouseEvent { kind: MouseEventKind::LeftClick, x: 28, y: 3, ..Default::default() };
+        assert!(!scrollbar_area.contains(outside_event.into()));
+    }
+
+    #[test]
+    fn test_scrollbar_drag_events() {
+        let scrollbar_area = Rect::new(29, 1, 1, 8);
+        let drag_start = ratatui::layout::Position { x: 29, y: 1 };
+        let drag_event = MouseEvent {
+            kind: MouseEventKind::Drag { drag_start_position: drag_start },
+            x: 29,
+            y: 5,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        assert!(scrollbar_area.contains(drag_event.into()));
+        assert!(matches!(drag_event.kind, MouseEventKind::Drag { .. }));
+    }
+}

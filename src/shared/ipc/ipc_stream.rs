@@ -124,3 +124,84 @@ impl Drop for IpcStream {
         }
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod test {
+    use std::{
+        collections::HashMap,
+        io::{BufRead, BufReader, Read},
+        os::unix::net::UnixStream,
+    };
+
+    use serde_json::json;
+
+    use crate::shared::ipc::ipc_stream::{IPC_RESPONSE_SUCCESS, IpcStream};
+
+    #[test]
+    fn prints_ok_on_drop() {
+        let mut stream = UnixStream::pair().expect("Failed to create UnixStream pair");
+        let ipc_stream = IpcStream::from(stream.0);
+
+        drop(ipc_stream);
+        let mut buf = String::new();
+        stream.1.read_to_string(&mut buf).unwrap();
+
+        assert_eq!(buf.trim(), IPC_RESPONSE_SUCCESS);
+    }
+
+    #[test]
+    fn prints_success_responses_on_drop() {
+        let stream = UnixStream::pair().expect("Failed to create UnixStream pair");
+        let mut ipc_stream = IpcStream::from(stream.0);
+
+        ipc_stream.insert_response("hi", "Hello");
+        ipc_stream.insert_response("bye", "World");
+
+        drop(ipc_stream);
+
+        let mut buf = String::new();
+        let mut reader = BufReader::new(stream.1);
+
+        reader.read_line(&mut buf).unwrap();
+
+        assert_eq!(
+            serde_json::from_str::<HashMap<String, serde_json::Value>>(buf.trim()).unwrap(),
+            HashMap::from([("hi".to_owned(), json!("Hello")), ("bye".to_owned(), json!("World"))])
+        );
+
+        buf.clear();
+        reader.read_line(&mut buf).unwrap();
+        assert_eq!(buf.trim(), IPC_RESPONSE_SUCCESS);
+    }
+
+    #[test]
+    fn prints_error_on_drop() {
+        let stream = UnixStream::pair().expect("Failed to create UnixStream pair");
+        let mut ipc_stream = IpcStream::from(stream.0);
+
+        ipc_stream.insert_response("hi", "Hello");
+        ipc_stream.insert_response("bye", "World");
+        ipc_stream.error("An error occurred".to_string());
+
+        let mut buf = String::new();
+        let mut reader = BufReader::new(stream.1);
+
+        reader.read_line(&mut buf).unwrap();
+        assert_eq!(buf.trim(), "error: An error occurred");
+    }
+
+    #[test]
+    fn prints_error_on_drop_when_no_success_messages() {
+        let stream = UnixStream::pair().expect("Failed to create UnixStream pair");
+        let ipc_stream = IpcStream::from(stream.0);
+
+        ipc_stream.error("An error occurred".to_string());
+
+        let mut buf = String::new();
+        let mut reader = BufReader::new(stream.1);
+
+        reader.read_line(&mut buf).unwrap();
+        assert_eq!(buf.trim(), "error: An error occurred");
+    }
+}

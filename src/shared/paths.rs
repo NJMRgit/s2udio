@@ -151,3 +151,38 @@ pub fn resolve_bin(name: &str) -> PathBuf {
     }
     PathBuf::from(name)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn theme_paths_prefer_the_s2udio_theme_dir() {
+        let _home_guard = crate::tests::fixtures::HOME_LOCK.lock().unwrap();
+        // Round 23: s2udio's own themes resolve from ~/.config/s2udio/
+        // FIRST; the legacy ~/.config/rmpc/ dir is only a read-only
+        // fallback for the one-time migration.
+        use crate::shared::env::ENV;
+        let home = std::env::temp_dir().join(format!("s2u-theme-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        ENV.set("HOME".to_string(), home.to_string_lossy().into_owned());
+
+        let base_config = home.join(".config/s2udio/config.ron");
+        let paths = theme_paths(None, &base_config, "default");
+        assert_eq!(
+            paths[0],
+            home.join(".config/s2udio/themes/default.ron"),
+            "s2udio theme dir is the first candidate"
+        );
+        assert_eq!(
+            paths[2],
+            home.join(".config/rmpc/themes/default.ron"),
+            "legacy rmpc theme dir is the migration fallback"
+        );
+        assert_eq!(paths[0].to_string_lossy().contains(".config/s2udio"), true);
+
+        ENV.remove("HOME");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+}

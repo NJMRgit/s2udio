@@ -42,6 +42,46 @@ pub trait DirStackItem {
         self.to_list_item(ctx, false, false, None)
     }
 }
+/// Test-only item: the dirstack unit tests drive `Dir<String, _>`.
+#[cfg(test)]
+impl DirStackItem for String {
+    fn as_path(&self) -> &str {
+        self
+    }
+
+    fn is_file(&self) -> bool {
+        true
+    }
+
+    fn to_file_preview(&self, _ctx: &Ctx) -> Vec<PreviewGroup> {
+        Vec::new()
+    }
+
+    fn matches(&self, _: &[Property<SongProperty>], _ctx: &Ctx, filter: &str) -> bool {
+        self.to_lowercase().contains(&filter.to_lowercase())
+    }
+
+    fn to_list_item<'a>(
+        &self,
+        ctx: &Ctx,
+        is_marked: bool,
+        matches_filter: bool,
+        _additional_content: Option<String>,
+    ) -> ListItem<'a> {
+        let config = &ctx.config;
+
+        if is_marked {
+            ListItem::new(Line::from(Span::from(self.clone())))
+                .style(config.theme.marked_item_style)
+        } else if matches_filter {
+            ListItem::new(Line::from(Span::from(self.clone())))
+                .style(config.theme.highlighted_item_style)
+        } else {
+            ListItem::new(Line::from(Span::from(self.clone())))
+        }
+    }
+}
+
 impl DirStackItem for DirOrSong {
     fn as_path(&self) -> &str {
         match self {

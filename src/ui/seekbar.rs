@@ -378,3 +378,31 @@ fn interactive_seek(ctx: &Ctx, state: &mut SeekbarState, dir: SeekDir) {
         state.cursor = (state.cursor + delta).clamp(0.0, state.duration);
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+
+    use super::*;
+    use crate::tests::fixtures::ctx;
+
+    fn fixture() -> Ctx {
+        ctx(
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+        )
+    }
+
+    fn key(code: KeyCode, kind: KeyEventKind) -> KeyEvent {
+        KeyEvent { kind, ..KeyEvent::new(code, KeyModifiers::NONE) }
+    }
+
+    #[test]
+    fn not_focused_returns_false() {
+        let ctx = fixture();
+        assert!(!is_focused(&ctx));
+        assert!(!handle_key(&ctx, key(KeyCode::Right, KeyEventKind::Press)));
+    }
+}

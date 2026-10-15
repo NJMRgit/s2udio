@@ -73,3 +73,68 @@ impl<'a> SubTabBar<'a> {
         areas
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_ctx() -> Ctx {
+        crate::tests::fixtures::ctx(
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+        )
+    }
+
+    fn render(bar: &SubTabBar<'_>, ctx: &mut Ctx) -> (String, Vec<Rect>) {
+        let backend = ratatui::backend::TestBackend::new(60, 3);
+        let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+        let mut areas = Vec::new();
+        terminal.draw(|frame| areas = bar.render(frame, ctx)).expect("draw ok");
+        let width = terminal.backend().buffer().area.width as usize;
+        let line: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .skip(width * (bar.y as usize))
+            .take(width)
+            .map(|c| c.symbol())
+            .collect();
+        (line, areas)
+    }
+
+    /// The active segment gets the filled dot and bold text; inactive ones
+    /// the hollow dot and dim text; the areas come back one per segment.
+    #[test]
+    fn renders_segments_with_active_marker_and_click_areas() {
+        let mut ctx = test_ctx();
+        let segments = [
+            Segment { label: "Audio", active: true },
+            Segment { label: "Video", active: false },
+            Segment { label: "Chapters", active: false },
+        ];
+        let bar = SubTabBar::new(&segments, 1, 1, 59);
+        let (line, areas) = render(&bar, &mut ctx);
+
+        assert!(line.contains(" ● Audio "), "active segment shows ●: {line}");
+        assert!(line.contains(" ⭘ Video "), "inactive segment shows ⭘: {line}");
+        assert!(line.contains(" ⭘ Chapters "), "inactive segment shows ⭘: {line}");
+        assert_eq!(areas.len(), 3, "one click area per segment");
+        assert!(areas[0].contains(ratatui::layout::Position::new(2, 1)));
+        assert!(areas[1].x >= areas[0].right(), "segments are laid out left to right");
+        assert_eq!(areas[2].y, 1, "all segments share the row");
+    }
+
+    /// A short right bound clips the last segment instead of overflowing.
+    #[test]
+    fn clips_at_the_right_bound() {
+        let mut ctx = test_ctx();
+        let segments =
+            [Segment { label: "Audio", active: true }, Segment { label: "Video", active: false }];
+        let bar = SubTabBar::new(&segments, 1, 1, 12);
+        let (line, areas) = render(&bar, &mut ctx);
+        assert!(areas[1].right() <= 12, "no segment past the right bound");
+        let _ = line;
+    }
+}

@@ -534,3 +534,120 @@ impl QueueRow {
 fn selection_moved(previous: Option<u32>, current: Option<u32>) -> bool {
     current.is_some() && previous != current
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod hover_render_tests {
+    use ratatui::backend::TestBackend;
+    use ratatui::layout::Rect;
+
+use super::{Areas, QueuePane};
+    use crate::tests::fixtures::ctx as fixture_ctx;
+
+    fn queue_ctx() -> (crate::ctx::Ctx, crossbeam::channel::Sender<crate::shared::events::AppEvent>)
+    {
+        let (app_tx, _app_rx) = crossbeam::channel::unbounded();
+        let ctx = fixture_ctx(
+            (app_tx.clone(), _app_rx),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+        );
+        (ctx, app_tx)
+    }
+
+    fn entries(n: usize) -> Vec<crate::core::mpv::MpvPlaylistEntry> {
+        (0..n)
+            .map(|i| {
+                crate::core::mpv::MpvPlaylistEntry::new(format!("v{i}"), format!("url{i}"), None)
+            })
+            .collect()
+    }
+
+    fn video_pane(ctx: &mut crate::ctx::Ctx) -> QueuePane {
+        ctx.queue_tab.set(crate::ctx::QueueTabMode::Video);
+        let mut pane = QueuePane::new(ctx);
+        pane.video_items_len = ctx.video_playlist.borrow().len();
+        pane
+    }
+
+    /// Render the pane once and return the table area (so the row maths
+    /// below line up with the drawn rows).
+    fn render(pane: &mut QueuePane, ctx: &crate::ctx::Ctx) -> Rect {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|frame| pane.render(frame, Rect::new(0, 0, 80, 24), ctx).unwrap()).unwrap();
+        pane.areas[Areas::Table]
+    }
+
+    fn row_bg(
+        pane: &mut QueuePane,
+        ctx: &crate::ctx::Ctx,
+        table: Rect,
+        row: u16,
+    ) -> Option<ratatui::style::Color> {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|frame| pane.render(frame, Rect::new(0, 0, 80, 24), ctx).unwrap()).unwrap();
+        let buf = terminal.backend().buffer();
+        buf[(table.x + 1, table.y + row)].style().bg
+    }
+
+    #[test]
+    fn video_row_under_mouse_gets_the_hover_highlight() {
+        let (mut ctx, _tx) = queue_ctx();
+        ctx.video_playlist.borrow_mut().extend(entries(6));
+        let mut pane = video_pane(&mut ctx);
+        let table = render(&mut pane, &ctx);
+
+        // No mouse: the row background is the plain list text (a Reset bg).
+        assert_eq!(row_bg(&mut pane, &ctx, table, 2), Some(ratatui::style::Color::Reset));
+
+        // Point the mouse at row 2: the row gets the hover highlight.
+        ctx.set_mouse_pos(Some(ratatui::layout::Position { x: table.x + 1, y: table.y + 2 }));
+        let hovered = ctx.config.theme.hovered_item_style.bg;
+        assert_eq!(row_bg(&mut pane, &ctx, table, 2), hovered);
+
+        // The other rows stay plain.
+        assert_eq!(row_bg(&mut pane, &ctx, table, 3), Some(ratatui::style::Color::Reset));
+        ctx.set_mouse_pos(None);
+    }
+
+    #[test]
+    fn hovering_the_selected_video_row_uses_the_hover_highlight() {
+        let (mut ctx, _tx) = queue_ctx();
+        ctx.video_playlist.borrow_mut().extend(entries(6));
+        let mut pane = video_pane(&mut ctx);
+
+        // Select row 2 (the keyboard cursor); hovering it must still show
+        // the hover highlight (brighter than the plain selection).
+        let table = render(&mut pane, &ctx);
+        pane.video_state.select(Some(2));
+        ctx.set_mouse_pos(Some(ratatui::layout::Position { x: table.x + 1, y: table.y + 2 }));
+        let hovered = ctx.config.theme.hovered_item_style.bg;
+        assert_eq!(
+            row_bg(&mut pane, &ctx, table, 2),
+            hovered,
+            "hover wins over the selection highlight on the selected row"
+        );
+        ctx.set_mouse_pos(None);
+    }
+
+    #[test]
+    fn a_selection_move_schedules_the_warm() {
+        // The regression: `w`/`s` are `DirectoriesActions::FolderUp/FolderDown`
+        // (claimed by the Queue pane), so `fetch_data_internal` never ran and
+        // the selection-time metadata warm never fired on this tab. The render
+        // pass now drives it, on a real selection move only.
+        use super::selection_moved;
+        // First render of a selected row: nothing warmed yet.
+        assert!(selection_moved(None, Some(7)));
+        // A different row: warm the new one.
+        assert!(selection_moved(Some(7), Some(8)));
+        // The same row repainting (spinner tick, resize, hover): no reschedule,
+        // so the 400 ms debounce is never pushed back and cannot starve.
+        assert!(!selection_moved(Some(7), Some(7)));
+        // A cleared queue has nothing to resolve.
+        assert!(!selection_moved(Some(7), None));
+        assert!(!selection_moved(None, None));
+    }
+}

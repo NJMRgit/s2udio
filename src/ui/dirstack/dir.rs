@@ -311,3 +311,142 @@ where
             .inspect(|(idx, _)| self.state.select(Some(*idx), ctx.config.scrolloff));
     }
 }
+
+
+
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+
+    use ratatui::widgets::ListState;
+    use rstest::rstest;
+
+    use super::{Dir, DirState};
+    use crate::{ctx::Ctx, tests::fixtures::ctx, ui::input::BufferId};
+
+
+    fn create_subject() -> Dir<String, ListState> {
+        let mut res = Dir {
+            items: vec!["a", "b", "c", "d", "f"].into_iter().map(ToOwned::to_owned).collect(),
+            state: DirState::default(),
+            matched_item_count: 0,
+            filter_buffer_id: BufferId::new(),
+            filter_active: false,
+        };
+        res.state.set_content_and_viewport_len(res.items.len(), res.items.len());
+        res
+    }
+
+    mod selected {
+        
+
+
+    }
+
+    mod selected_with_idx {
+        
+
+
+    }
+
+    mod toggle_mark_selected {
+        
+
+        
+
+    }
+
+    mod mark_selected {
+        
+
+        
+
+
+    }
+
+    mod unmark_selected {
+        
+
+        
+
+
+    }
+
+    mod remove {
+        use std::collections::BTreeSet;
+
+        use crate::ui::dirstack::dir::tests::create_subject;
+
+        #[test]
+        fn does_nothing_when_outside_range() {
+            let mut subject = create_subject();
+            subject.state.mark(2);
+            subject.state.mark(3);
+
+            subject.remove(5);
+
+            assert_eq!(subject.marked(), &BTreeSet::from([2, 3]));
+        }
+
+        #[test]
+        fn removes_item() {
+            let mut subject = create_subject();
+            subject.state.mark(2);
+            subject.state.mark(4);
+
+            subject.remove(2);
+
+            assert_eq!(subject.marked(), &BTreeSet::from([3]));
+        }
+    }
+
+    mod jump_next_matching {
+        use super::*;
+
+        #[rstest]
+        fn jumps_by_half_viewport(ctx: Ctx) {
+            let mut val: Dir<String, ListState> = Dir {
+                items: vec!["aa", "ab", "c", "ad"].into_iter().map(ToOwned::to_owned).collect(),
+                ..Default::default()
+            };
+            val.state.set_content_and_viewport_len(val.items.len(), 2);
+            val.state.select(Some(0), 0);
+
+            val.set_filter_active(true);
+            ctx.input.set_buffer("a".to_string(), val.filter_buffer_id);
+
+            val.jump_next_matching(&[], &ctx);
+            assert_eq!(val.state.get_selected(), Some(1));
+
+            val.jump_next_matching(&[], &ctx);
+            assert_eq!(val.state.get_selected(), Some(3));
+        }
+    }
+
+    mod jump_previous_matching {
+        use super::*;
+
+        #[rstest]
+        fn jumps_by_half_viewport(ctx: Ctx) {
+            let mut val: Dir<String, ListState> = Dir {
+                items: vec!["aa", "ab", "c", "ad", "padding"]
+                    .into_iter()
+                    .map(ToOwned::to_owned)
+                    .collect(),
+                ..Default::default()
+            };
+            val.state.set_content_and_viewport_len(val.items.len(), 2);
+            val.state.select(Some(4), 0);
+
+            val.set_filter_active(true);
+            ctx.input.set_buffer("a".to_string(), val.filter_buffer_id);
+
+            val.jump_previous_matching(&[], &ctx);
+            assert_eq!(val.state.get_selected(), Some(3));
+
+            val.jump_previous_matching(&[], &ctx);
+            assert_eq!(val.state.get_selected(), Some(1));
+        }
+    }
+}

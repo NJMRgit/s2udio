@@ -528,3 +528,311 @@ impl TabScreen {
             .min_set_by(|a, b| a.1.area.left().cmp(&b.1.area.left()))
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use crate::{
+        config::tabs::{Pane as ConfigPane, PaneType, SizedPaneOrSplit, SizedSubPane},
+        mpd::commands::Song,
+        shared::chapters::Chapter,
+        ui::panes::PaneContainer,
+    };
+
+    fn pane(pane_type: PaneType) -> SizedPaneOrSplit {
+        SizedPaneOrSplit::Pane(ConfigPane {
+            pane: pane_type,
+            background_color: None,
+            borders: ratatui::widgets::Borders::NONE,
+            border_style: None,
+            border_active_style: None,
+            border_title: Vec::new(),
+            border_title_position: ratatui::widgets::TitlePosition::Top,
+            border_title_alignment: ratatui::layout::Alignment::Left,
+            border_symbols: crate::config::theme::borders::BorderSymbols::default(),
+            id: crate::shared::id::new(),
+        })
+    }
+
+    fn sub(pane: SizedPaneOrSplit, size: &str) -> SizedSubPane {
+        SizedSubPane {
+            size: size.parse().unwrap(),
+            collapse_below: None,
+            shrink_below: None,
+            window_sizes: Vec::new(),
+            pane,
+        }
+    }
+
+    fn split(
+        panes: Vec<SizedSubPane>,
+        direction: ratatui::layout::Direction,
+        borders: ratatui::widgets::Borders,
+    ) -> SizedPaneOrSplit {
+        SizedPaneOrSplit::Split {
+            background_color: None,
+            borders,
+            border_style: None,
+            border_title: Vec::new(),
+            border_title_position: ratatui::widgets::TitlePosition::Top,
+            border_title_alignment: ratatui::layout::Alignment::Left,
+            border_symbols: crate::config::theme::borders::BorderSymbols::default(),
+            direction,
+            panes,
+        }
+    }
+
+    /// The merged queue box from the user's live config: a 1-row spacer
+    /// (the toggle row), then one box with ALL borders holding the header
+    /// row + divider and the queue list.
+    fn queue_tab_panes() -> SizedPaneOrSplit {
+        use ratatui::layout::Direction::{Horizontal, Vertical};
+        split(
+            vec![
+                sub(pane(PaneType::Empty), "1"),
+                sub(
+                    split(
+                        vec![
+                            sub(
+                                split(
+                                    vec![
+                                        sub(pane(PaneType::Empty), "1"),
+                                        sub(pane(PaneType::QueueHeader()), "100%"),
+                                    ],
+                                    Horizontal,
+                                    ratatui::widgets::Borders::NONE,
+                                ),
+                                "2",
+                            ),
+                            sub(
+                                split(
+                                    vec![
+                                        sub(pane(PaneType::Empty), "1"),
+                                        sub(pane(PaneType::Queue), "100%"),
+                                        sub(pane(PaneType::Empty), "2"),
+                                    ],
+                                    Horizontal,
+                                    ratatui::widgets::Borders::NONE,
+                                ),
+                                "100%",
+                            ),
+                        ],
+                        Vertical,
+                        ratatui::widgets::Borders::ALL,
+                    ),
+                    "100%",
+                ),
+            ],
+            Vertical,
+            ratatui::widgets::Borders::NONE,
+        )
+    }
+
+    /// A Queue tab whose top-left corner holds another focusable pane (like the
+    /// user's live layout, where the album-art/lyrics row sits above the queue
+    /// box). `before_show` must land the initial keyboard focus on the Queue
+    /// pane — the pane the queue's navigation keys drive — even though that
+    /// other pane is focusable and geometrically first.
+    fn queue_tab_with_art_and_lyrics() -> SizedPaneOrSplit {
+        use ratatui::layout::Direction::{Horizontal, Vertical};
+        split(
+            vec![
+                sub(pane(PaneType::Lyrics), "20"),
+                sub(pane(PaneType::Empty), "1"),
+                sub(
+                    split(
+                        vec![
+                            sub(
+                                split(
+                                    vec![
+                                        sub(pane(PaneType::Empty), "1"),
+                                        sub(pane(PaneType::QueueHeader()), "100%"),
+                                    ],
+                                    Horizontal,
+                                    ratatui::widgets::Borders::NONE,
+                                ),
+                                "2",
+                            ),
+                            sub(
+                                split(
+                                    vec![
+                                        sub(pane(PaneType::Empty), "1"),
+                                        sub(pane(PaneType::Queue), "100%"),
+                                        sub(pane(PaneType::Empty), "2"),
+                                    ],
+                                    Horizontal,
+                                    ratatui::widgets::Borders::NONE,
+                                ),
+                                "100%",
+                            ),
+                        ],
+                        Vertical,
+                        ratatui::widgets::Borders::ALL,
+                    ),
+                    "100%",
+                ),
+            ],
+            Vertical,
+            ratatui::widgets::Borders::NONE,
+        )
+    }
+
+    #[test]
+    fn queue_tab_initial_focus_lands_on_the_queue_pane() {
+        let (app_tx, _app_rx) = crossbeam::channel::unbounded();
+        let (work_tx, work_rx) = crossbeam::channel::unbounded();
+        let (client_tx, client_rx) = crossbeam::channel::unbounded();
+        // before_show on the focusable panes above the queue (album art,
+        // lyrics) requests art/search work on the work and client channels:
+        // keep cloned receivers alive so those sends succeed (the fixture
+        // drops the originals it is handed).
+        let _work_rx = work_rx.clone();
+        let _client_rx = client_rx.clone();
+        let ctx = crate::tests::fixtures::ctx(
+            (app_tx, _app_rx),
+            (work_tx, work_rx),
+            (client_tx, client_rx),
+        );
+        let mut panes = PaneContainer::new(&ctx).unwrap();
+        let mut screen = TabScreen::new(queue_tab_with_art_and_lyrics()).unwrap();
+        let area = Rect::new(0, 0, 160, 50);
+        screen.before_show(&mut panes, area, &ctx).unwrap();
+
+        let focused_pane = screen
+            .panes
+            .panes_iter()
+            .find(|pane| pane.id == screen.focused)
+            .map(|pane| pane.pane.clone());
+        assert_eq!(
+            focused_pane,
+            Some(PaneType::Queue),
+            "opening the Queue tab must focus the queue list, not the panes above it"
+        );
+    }
+
+    #[test]
+    fn queue_toggle_renders_above_the_merged_queue_box() {
+        let (app_tx, _app_rx) = crossbeam::channel::unbounded();
+        let mut ctx = crate::tests::fixtures::ctx(
+            (app_tx, _app_rx),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+        );
+        // A current track with chapter markers.
+        ctx.queue =
+            vec![Song { id: 1, file: "/mnt/music/a.flac".to_owned(), ..Default::default() }];
+        ctx.status.songid = Some(1);
+        ctx.status.state = crate::mpd::commands::State::Play;
+        ctx.chapters.borrow_mut().insert(
+            "/mnt/music/a.flac".to_owned(),
+            vec![Chapter { title: "Intro".into(), start_secs: 0.0, end_secs: 60.0 }],
+        );
+        ctx.queue_tab.set(crate::ctx::QueueTabMode::Chapters);
+
+        let mut panes = PaneContainer::new(&ctx).unwrap();
+        let mut screen = TabScreen::new(queue_tab_panes()).unwrap();
+        let area = Rect::new(0, 0, 100, 60);
+        screen.before_show(&mut panes, area, &ctx).unwrap();
+
+        let backend = ratatui::backend::TestBackend::new(100, 60);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|frame| screen.render(&mut panes, frame, area, 60, &ctx).unwrap()).unwrap();
+        let buf = terminal.backend().buffer();
+
+        // The toggle appears exactly once, on its own row directly above
+        // the box's top border (`╭` below it, no border glyphs on its row).
+        let rows: Vec<String> = (0..60u16)
+            .map(|y| (0..100).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>())
+            .collect();
+        let toggle_rows: Vec<usize> = rows
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| line.contains("Audio") && line.contains("Chapters"))
+            .map(|(y, _)| y)
+            .collect();
+        assert_eq!(toggle_rows.len(), 1, "expected exactly one toggle row");
+        let toggle_y = toggle_rows[0];
+        // The box top border sits right below the toggle row.
+        assert_eq!(buf[(1, toggle_y as u16 + 1)].symbol(), "─");
+        assert!(
+            matches!(buf[(0, toggle_y as u16 + 1)].symbol(), "╭" | "┌"),
+            "box top border corner missing below the toggle row"
+        );
+        // The box holds the header labels + divider + the list, all inside
+        // one box.
+        let header_y = toggle_y + 2;
+        let line = &rows[header_y];
+        assert!(
+            line.contains("Chapter") && line.contains("Time") && line.contains("Duration"),
+            "chapters header missing inside the box: {line}"
+        );
+        assert!(rows[header_y + 1].contains("─"), "divider row missing under the header");
+    }
+
+    #[test]
+    fn clicking_each_toggle_segment_switches_the_queue_list() {
+        let (app_tx, _app_rx) = crossbeam::channel::unbounded();
+        let mut ctx = crate::tests::fixtures::ctx(
+            (app_tx, _app_rx),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+        );
+        // A current track with chapter markers (Chapters segment shows).
+        ctx.queue =
+            vec![Song { id: 1, file: "/mnt/music/a.flac".to_owned(), ..Default::default() }];
+        ctx.status.songid = Some(1);
+        ctx.status.state = crate::mpd::commands::State::Play;
+        ctx.chapters.borrow_mut().insert(
+            "/mnt/music/a.flac".to_owned(),
+            vec![Chapter { title: "Intro".into(), start_secs: 0.0, end_secs: 60.0 }],
+        );
+        ctx.queue_tab.set(crate::ctx::QueueTabMode::Audio);
+
+        let mut panes = PaneContainer::new(&ctx).unwrap();
+        let mut screen = TabScreen::new(queue_tab_panes()).unwrap();
+        let area = Rect::new(0, 0, 100, 60);
+        screen.before_show(&mut panes, area, &ctx).unwrap();
+
+        let backend = ratatui::backend::TestBackend::new(100, 60);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|frame| screen.render(&mut panes, frame, area, 60, &ctx).unwrap()).unwrap();
+
+        // The queue pane's toggle areas are wired up after the render.
+        let Panes::Queue(queue_pane) =
+            panes.get_mut(&crate::config::tabs::PaneType::Queue, &ctx).unwrap()
+        else {
+            panic!("no queue pane");
+        };
+        let chapters_area = queue_pane.toggle_areas[2];
+        let video_area = queue_pane.toggle_areas[1];
+        let audio_area = queue_pane.toggle_areas[0];
+        // All three segments are on the row above the box.
+        assert_eq!(chapters_area.y, audio_area.y);
+        assert!(chapters_area.width > 0);
+
+        // Clicks route through TabScreen to the queue pane and switch the
+        // list: Chapters (the previously-unreachable segment), then back.
+        let click =
+            |screen: &mut TabScreen, panes: &mut PaneContainer, ctx: &mut Ctx, area: Rect| {
+                screen
+                    .handle_mouse_event(
+                        panes,
+                        MouseEvent {
+                            x: area.x + 2,
+                            y: area.y,
+                            kind: MouseEventKind::LeftClick,
+                            modifiers: crossterm::event::KeyModifiers::NONE,
+                        },
+                        ctx,
+                    )
+                    .unwrap()
+            };
+        click(&mut screen, &mut panes, &mut ctx, chapters_area);
+        assert_eq!(ctx.queue_tab.get(), crate::ctx::QueueTabMode::Chapters);
+        click(&mut screen, &mut panes, &mut ctx, audio_area);
+        assert_eq!(ctx.queue_tab.get(), crate::ctx::QueueTabMode::Audio);
+        click(&mut screen, &mut panes, &mut ctx, video_area);
+        assert_eq!(ctx.queue_tab.get(), crate::ctx::QueueTabMode::Video);
+    }
+}

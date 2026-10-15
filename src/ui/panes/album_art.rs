@@ -585,3 +585,231 @@ impl Pane for AlbumArtPane {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use std::time::Duration;
+
+    use crossbeam::channel::{Receiver, RecvTimeoutError, Sender};
+    use rstest::rstest;
+
+    use super::AlbumArtPane;
+    use crate::{
+        MpdQueryResult,
+        config::{Config, album_art::ImageMethod, tabs::PaneType},
+        mpd::commands::{Song, State},
+        shared::{
+            events::{AppEvent, ClientRequest, WorkRequest},
+            mpd_query::MpdQuery,
+        },
+        tests::fixtures::{app_event_channel, client_request_channel, ctx, work_request_channel},
+        ui::{
+            UiEvent,
+            panes::{
+                Pane,
+                album_art::{ALBUM_ART, JF_VIDEO_ART},
+            },
+        },
+    };
+
+    #[rstest]
+    #[case(ImageMethod::Kitty, true)]
+    #[case(ImageMethod::None, false)]
+    fn searches_for_album_art_before_show(
+        #[case] method: ImageMethod,
+        #[case] should_search: bool,
+        app_event_channel: (Sender<AppEvent>, Receiver<AppEvent>),
+        work_request_channel: (Sender<WorkRequest>, Receiver<WorkRequest>),
+        client_request_channel: (Sender<ClientRequest>, Receiver<ClientRequest>),
+    ) {
+        let rx = client_request_channel.1.clone();
+        let mut ctx = ctx(app_event_channel, work_request_channel, client_request_channel);
+        let selected_song_id = 333;
+        let mut config = Config::default();
+        config.album_art.method = method;
+        ctx.config = std::sync::Arc::new(config);
+        ctx.queue.push(Song { id: selected_song_id, ..Default::default() });
+        ctx.status.songid = Some(selected_song_id);
+        ctx.status.state = State::Play;
+        let mut screen = AlbumArtPane::new(&ctx);
+
+        screen.before_show(&ctx).unwrap();
+
+        if should_search {
+            assert!(matches!(
+                rx.recv_timeout(Duration::from_millis(100)).unwrap(),
+                ClientRequest::Query(MpdQuery {
+                    id: ALBUM_ART,
+                    replace_id: Some(ALBUM_ART),
+                    target: Some(PaneType::AlbumArt),
+                    ..
+                })
+            ));
+        } else {
+            assert!(
+                rx.recv_timeout(Duration::from_millis(100))
+                    .is_err_and(|err| RecvTimeoutError::Timeout == err)
+            );
+        }
+    }
+
+    #[rstest]
+    #[case(ImageMethod::Kitty, true)]
+    #[case(ImageMethod::None, false)]
+    fn searches_for_album_art_on_event(
+        #[case] method: ImageMethod,
+        #[case] should_search: bool,
+        app_event_channel: (Sender<AppEvent>, Receiver<AppEvent>),
+        work_request_channel: (Sender<WorkRequest>, Receiver<WorkRequest>),
+        client_request_channel: (Sender<ClientRequest>, Receiver<ClientRequest>),
+    ) {
+        let rx = client_request_channel.1.clone();
+        let mut ctx = ctx(app_event_channel, work_request_channel, client_request_channel);
+        let selected_song_id = 333;
+        let mut config = Config::default();
+        config.album_art.method = method;
+        ctx.config = std::sync::Arc::new(config);
+        ctx.queue.push(Song { id: selected_song_id, ..Default::default() });
+        ctx.status.songid = Some(selected_song_id);
+        ctx.status.state = State::Play;
+        let mut screen = AlbumArtPane::new(&ctx);
+
+        screen.on_event(&mut UiEvent::SongChanged, true, &ctx).unwrap();
+
+        if should_search {
+            assert!(matches!(
+                rx.recv_timeout(Duration::from_millis(100)).unwrap(),
+                ClientRequest::Query(MpdQuery {
+                    id: ALBUM_ART,
+                    replace_id: Some(ALBUM_ART),
+                    target: Some(PaneType::AlbumArt),
+                    ..
+                })
+            ));
+        } else {
+            let result = rx.recv_timeout(Duration::from_millis(100));
+            assert!(result.is_err_and(|err| RecvTimeoutError::Timeout == err));
+        }
+    }
+
+    #[test]
+    fn video_playing_requests_the_video_art_as_album_art() {
+        use crate::core::mpv::MpvSession;
+        let (app_tx, _app_rx) = crossbeam::channel::unbounded();
+        let (work_tx, work_rx) = crossbeam::channel::unbounded();
+        let mut ctx = ctx(
+            (app_tx, _app_rx),
+            (work_tx.clone(), work_rx.clone()),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+        );
+        ctx.mpv = MpvSession {
+            active: true,
+            item_id: Some("abcdef0123456789abcdef0123456789".to_owned()),
+            ..Default::default()
+        };
+        let mut screen = AlbumArtPane::new(&ctx);
+        screen.before_show(&ctx).unwrap();
+        assert!(matches!(
+            work_rx.try_recv(),
+            Ok(WorkRequest::FetchJellyfinVideoArt { item_id })
+                if item_id == "abcdef0123456789abcdef0123456789"
+        ));
+    }
+
+    #[test]
+    fn video_art_result_shows_when_the_item_is_current() {
+        use crate::core::mpv::MpvSession;
+        let (app_tx, _app_rx) = crossbeam::channel::unbounded();
+        let (work_tx, work_rx) = crossbeam::channel::unbounded();
+        let mut ctx = ctx(
+            (app_tx, _app_rx),
+            (work_tx, work_rx.clone()),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+        );
+        let item_id = "abcdef0123456789abcdef0123456789";
+        ctx.mpv =
+            MpvSession { active: true, item_id: Some(item_id.to_owned()), ..Default::default() };
+        let mut screen = AlbumArtPane::new(&ctx);
+        let bytes = vec![0u8; 64];
+        let result = MpdQueryResult::Any(Box::new(crate::jellyfin::JellyfinResult::Image {
+            item_id: item_id.to_owned(),
+            bytes: bytes.clone(),
+        }));
+        // The current item's image is accepted: the facade queues an encode.
+        screen.on_query_finished(JF_VIDEO_ART, result, true, &ctx).unwrap();
+        assert!(matches!(work_rx.try_recv(), Ok(WorkRequest::ResizeImage(_))));
+        // A stale item's image is dropped (no encode queued).
+        ctx.mpv.item_id = Some("deadbeefdeadbeefdeadbeefdeadbeef".to_owned());
+        let stale = MpdQueryResult::Any(Box::new(crate::jellyfin::JellyfinResult::Image {
+            item_id: item_id.to_owned(),
+            bytes,
+        }));
+        screen.on_query_finished(JF_VIDEO_ART, stale, true, &ctx).unwrap();
+        assert!(matches!(work_rx.try_recv(), Err(crossbeam::channel::TryRecvError::Empty)));
+    }
+
+    #[rstest]
+    fn a_resolved_stream_row_asks_for_its_thumbnail(
+        app_event_channel: (Sender<AppEvent>, Receiver<AppEvent>),
+        work_request_channel: (Sender<WorkRequest>, Receiver<WorkRequest>),
+        client_request_channel: (Sender<ClientRequest>, Receiver<ClientRequest>),
+    ) {
+        // Round 111: a tagged stream link is not an art source — MPD cannot
+        // answer for it and its `https` scheme is on the disabled-protocol
+        // list, which is why a selected stream row showed no artwork. Once the
+        // row's resolve is known the link is swapped for the resolved
+        // thumbnail.
+        let ctx = ctx(app_event_channel, work_request_channel, client_request_channel);
+        let link = "https://www.youtube.com/watch?v=dpSUbK-bOLA";
+        let tagged = format!("{link}#s2u-audio");
+        let thumb = "https://i.ytimg.com/vi/dpSUbK-bOLA/maxresdefault.jpg";
+        ctx.yt_info.borrow_mut().insert(
+            link.to_owned(),
+            crate::shared::ytdlp::YtStreamInfo {
+                original_url: link.to_owned(),
+                thumbnail: Some(thumb.to_owned()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(AlbumArtPane::resolved_art_uri(&ctx, tagged.clone()), thumb);
+        // An unknown row keeps its own URI (the MPD album-art path).
+        assert_eq!(
+            AlbumArtPane::resolved_art_uri(&ctx, "/music/song.flac".to_owned()),
+            "/music/song.flac"
+        );
+    }
+
+    #[rstest]
+    fn an_unresolved_youtube_row_shows_its_derived_thumbnail(
+        app_event_channel: (Sender<AppEvent>, Receiver<AppEvent>),
+        work_request_channel: (Sender<WorkRequest>, Receiver<WorkRequest>),
+        client_request_channel: (Sender<ClientRequest>, Receiver<ClientRequest>),
+    ) {
+        // Round 111: the artwork must not wait for the `yt-dlp` resolve (3-5 s
+        // measured). The video id is in the tagged link, and YouTube serves
+        // `i.ytimg.com/vi/<id>/…` for it, so the thumbnail is known up front.
+        let ctx = ctx(app_event_channel, work_request_channel, client_request_channel);
+        let tagged = "https://www.youtube.com/watch?v=dpSUbK-bOLA#s2u-audio";
+        assert_eq!(
+            AlbumArtPane::derived_stream_thumbnail(tagged).as_deref(),
+            Some("https://i.ytimg.com/vi/dpSUbK-bOLA/hqdefault.jpg")
+        );
+        // Every other link shape has no derivable pattern and keeps the MPD
+        // album-art path.
+        assert_eq!(AlbumArtPane::derived_stream_thumbnail("/music/song.flac"), None);
+        assert_eq!(AlbumArtPane::derived_stream_thumbnail("http://radio.example/s"), None);
+        // A resolved row's own thumbnail still wins over the derived one.
+        let link = "https://www.youtube.com/watch?v=dpSUbK-bOLA";
+        let resolved = "https://i.ytimg.com/vi/dpSUbK-bOLA/maxresdefault.jpg";
+        ctx.yt_info.borrow_mut().insert(
+            link.to_owned(),
+            crate::shared::ytdlp::YtStreamInfo {
+                original_url: link.to_owned(),
+                thumbnail: Some(resolved.to_owned()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(AlbumArtPane::resolved_art_uri(&ctx, tagged.to_owned()), resolved);
+    }
+}

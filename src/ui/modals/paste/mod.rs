@@ -32,6 +32,8 @@ mod playlist;
 #[path = "queue-stream.rs"]
 mod queue_stream;
 mod resolve;
+#[cfg(test)]
+mod resolve_e2e_tests;
 mod warm;
 
 pub(crate) use download::stream_daemon_job;

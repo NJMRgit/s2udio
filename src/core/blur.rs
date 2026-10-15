@@ -108,3 +108,78 @@ pub fn apply_mode_color(config: &mut Config, mode: &str) -> Result<bool> {
     crate::config::derive_theme_accents(&mut config.theme);
     Ok(true)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn schedule_mode_is_parsed() {
+        // read from the real file when present; the parser itself is what
+        // matters here.
+        if let Some(mode) = read_schedule_mode() {
+            assert!(!mode.is_empty());
+        }
+    }
+
+    #[test]
+    fn parse_hex_colors() {
+        assert_eq!(parse_hex("#FF6673"), Some(Color::Rgb(0xff, 0x66, 0x73)));
+        assert_eq!(parse_hex("ff6673"), Some(Color::Rgb(0xff, 0x66, 0x73)));
+        assert_eq!(parse_hex("#ff66"), None);
+    }
+
+    #[test]
+    fn parse_rgb_colors() {
+        assert_eq!(parse_rgb("255,127,153"), Some(Color::Rgb(255, 127, 153)));
+        assert_eq!(parse_rgb("1,2"), None);
+    }
+
+    const BLSW_SAMPLE: &str = r##"FLWR_TINT="#50ff7f99"
+FLWR_OUTLINE_COLOR_ACTIVE="255,127,153"
+FLWR_FF_LOGO_COLOR="#FF6673"
+NIGHT_TINT="#50005e8a"
+NIGHT_OUTLINE_COLOR_ACTIVE="0,94,138"
+NIGHT_FF_LOGO_COLOR="#07A761"
+"##;
+
+    #[test]
+    fn finds_mode_color_in_blsw() {
+        let content = BLSW_SAMPLE;
+        assert_eq!(find_var(content, "FLWR_FF_LOGO_COLOR"), Some("#FF6673"));
+        assert_eq!(find_var(content, "FLWR_OUTLINE_COLOR_ACTIVE"), Some("255,127,153"));
+        assert_eq!(find_var(content, "MISSING_X"), None);
+    }
+
+    #[test]
+    fn parse_hex_from_blsw() {
+        assert_eq!(
+            parse_hex(find_var(BLSW_SAMPLE, "FLWR_FF_LOGO_COLOR").unwrap()),
+            Some(Color::Rgb(0xff, 0x66, 0x73))
+        );
+    }
+
+    #[test]
+    fn parses_tint_rgba() {
+        assert_eq!(parse_tint("#50ff7f99"), Some(Color::Rgb(0xff, 0x7f, 0x99)));
+        assert_eq!(parse_tint("#50005e8a"), Some(Color::Rgb(0x00, 0x5e, 0x8a)));
+    }
+
+    #[test]
+    fn greyish_keeps_the_hue_but_mutes_it() {
+        let pink = greyish(Color::Rgb(255, 127, 153));
+        // Red still dominates (pink hue), but the red channel drops below
+        // full saturation.
+        let Color::Rgb(r, g, b) = pink else { panic!("expected rgb") };
+        assert!(r > b && r > g, "red should stay dominant: {pink:?}");
+        assert!(r < 255, "muted red channel should drop: {pink:?}");
+    }
+
+    #[test]
+    fn greyish_brightens_dark_colors() {
+        // Monster's dark red must be lifted so text stays readable.
+        let dark = greyish(Color::Rgb(100, 0, 41));
+        let Color::Rgb(r, _, _) = dark else { panic!("expected rgb") };
+        assert!(r >= 0x80, "dark red should be brightened: {dark:?}");
+    }
+}

@@ -44,3 +44,66 @@ impl From<ExitCode> for i32 {
         value.0 as i32
     }
 }
+
+#[cfg(test)]
+mod test {
+    use rstest::rstest;
+
+    use super::ExitCode;
+
+    #[rstest]
+    #[case(0b0000_0001, 0b0000_0000, 0b0000_0000)]
+    #[case(0b0000_0001, 0b0000_0001, 0b0000_0001)]
+    #[case(0b0000_0010, 0b0000_0001, 0b0000_0000)]
+    #[case(0b0000_0010, 0b0000_0010, 0b0000_0010)]
+    fn bit_and(#[case] a: u8, #[case] b: u8, #[case] expected: u8) {
+        assert_eq!(ExitCode::from(a) & ExitCode::from(b), ExitCode::from(expected));
+    }
+
+    #[rstest]
+    #[case(0b0000_0001, 0b0000_0000, 0b0000_0000)]
+    #[case(0b0000_0001, 0b0000_0001, 0b0000_0001)]
+    #[case(0b0000_0010, 0b0000_0001, 0b0000_0000)]
+    #[case(0b0000_0010, 0b0000_0010, 0b0000_0010)]
+    fn bit_and_assign(#[case] a: u8, #[case] b: u8, #[case] expected: u8) {
+        let mut code_a = ExitCode::from(a);
+        code_a &= ExitCode::from(b);
+        assert_eq!(code_a, ExitCode::from(expected));
+    }
+
+    #[rstest]
+    #[case(0b0000_0001, 0b0000_0000, 0b0000_0001)]
+    #[case(0b0000_0001, 0b0000_0001, 0b0000_0001)]
+    #[case(0b0000_0010, 0b0000_0001, 0b0000_0011)]
+    #[case(0b0000_0010, 0b0000_0010, 0b0000_0010)]
+    fn bit_or(#[case] a: u8, #[case] b: u8, #[case] expected: u8) {
+        assert_eq!(ExitCode::from(a) | ExitCode::from(b), ExitCode::from(expected));
+    }
+
+    #[rstest]
+    #[case(0b0000_0001, 0b0000_0000, 0b0000_0001)]
+    #[case(0b0000_0001, 0b0000_0001, 0b0000_0001)]
+    #[case(0b0000_0010, 0b0000_0001, 0b0000_0011)]
+    #[case(0b0000_0010, 0b0000_0010, 0b0000_0010)]
+    fn bit_or_assign(#[case] a: u8, #[case] b: u8, #[case] expected: u8) {
+        let mut code_a = ExitCode::from(a);
+        code_a |= ExitCode::from(b);
+        assert_eq!(code_a, ExitCode::from(expected));
+    }
+
+    #[test]
+    fn add() {
+        use super::ExitCode;
+
+        let code1 = ExitCode::from(0);
+        let code2 = ExitCode::from(1);
+        let code3 = ExitCode::from(2);
+
+        assert_eq!(code1 + code1, ExitCode::from(0));
+        assert_eq!(code2 + code2, ExitCode::from(2));
+        assert_eq!(code3 + code3, ExitCode::from(4));
+        assert_eq!(code1 + code2, ExitCode::from(1));
+        assert_eq!(code1 + code3, ExitCode::from(2));
+        assert_eq!(code2 + code3, ExitCode::from(3));
+    }
+}

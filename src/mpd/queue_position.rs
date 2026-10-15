@@ -45,3 +45,18 @@ fn parse_subsequent(v: &str) -> anyhow::Result<usize> {
             .parse()?,
     )
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+
+    #[test]
+    fn test_queue_position_fromstr() {
+        assert!("+0".parse::<QueuePosition>().unwrap() == QueuePosition::RelativeAdd(0));
+        assert!("-0".parse::<QueuePosition>().unwrap() == QueuePosition::RelativeSub(0));
+        assert!("-15".parse::<QueuePosition>().unwrap() == QueuePosition::RelativeSub(15));
+        assert!("0".parse::<QueuePosition>().unwrap() == QueuePosition::Absolute(0));
+        assert!("15".parse::<QueuePosition>().unwrap() == QueuePosition::Absolute(15));
+    }
+}

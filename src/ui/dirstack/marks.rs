@@ -105,3 +105,87 @@ impl MarkState {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::MarkState;
+
+    #[test]
+    fn add_marks_without_removing() {
+        let mut s = MarkState::default();
+        s.add(2);
+        s.add(5);
+        assert_eq!(s.iter().collect::<Vec<_>>(), vec![2, 5]);
+        // Re-adding a marked index keeps it marked (no toggle-off).
+        s.add(2);
+        assert_eq!(s.iter().collect::<Vec<_>>(), vec![2, 5]);
+    }
+
+    #[test]
+    fn select_range_replaces_the_previous_range() {
+        let mut s = MarkState::default();
+        s.set_anchor(1);
+        s.select_range(4);
+        assert_eq!(s.iter().collect::<Vec<_>>(), vec![1, 2, 3, 4]);
+        // Contracting back to 2 unmarks 3 and 4.
+        s.select_range(2);
+        assert_eq!(s.iter().collect::<Vec<_>>(), vec![1, 2]);
+        // Selecting the anchor itself unmarks everything.
+        s.select_range(1);
+        assert!(s.is_empty());
+    }
+
+    #[test]
+    fn select_range_without_anchor_uses_the_clicked_row() {
+        let mut s = MarkState::default();
+        s.select_range(3);
+        assert!(s.is_empty(), "no anchor yet: nothing to range against");
+        // The first click with no anchor sets it implicitly to the row.
+        s.set_anchor(3);
+        s.select_range(6);
+        assert_eq!(s.iter().collect::<Vec<_>>(), vec![3, 4, 5, 6]);
+    }
+
+    #[test]
+    fn add_never_removes() {
+        let mut s = MarkState::default();
+        s.add(2);
+        s.add(5);
+        assert_eq!(s.iter().collect::<Vec<_>>(), vec![2, 5]);
+        // Re-adding an already-marked index keeps it marked (no toggle-off).
+        s.add(2);
+        assert_eq!(s.iter().collect::<Vec<_>>(), vec![2, 5]);
+    }
+
+    #[test]
+    fn mark_all_marks_every_index() {
+        let mut s = MarkState::default();
+        s.add(1);
+        s.mark_all(6);
+        assert_eq!(s.iter().collect::<Vec<_>>(), vec![0, 1, 2, 3, 4, 5]);
+        // An empty list clears the marks instead of panicking.
+        s.mark_all(0);
+        assert!(s.is_empty());
+    }
+
+    #[test]
+    fn clamp_drops_out_of_range_marks() {
+        let mut s = MarkState::default();
+        for i in [0, 2, 4, 7] {
+            s.add(i);
+        }
+        s.clamp(5);
+        assert_eq!(s.iter().collect::<Vec<_>>(), vec![0, 2, 4]);
+        s.clamp(0);
+        assert!(s.is_empty());
+    }
+
+    #[test]
+    fn ranges_are_contiguous_runs() {
+        let mut s = MarkState::default();
+        for i in [0, 1, 2, 5, 6, 9] {
+            s.add(i);
+        }
+        assert_eq!(s.iter().collect::<Vec<_>>(), vec![0, 1, 2, 5, 6, 9]);
+    }
+}

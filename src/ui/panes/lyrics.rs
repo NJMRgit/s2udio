@@ -2091,3 +2091,118 @@ pub(crate) fn format_clock(secs: u64) -> String {
         format!("{}:{:02}", secs / 60, secs % 60)
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod schedule_tests {
+    use super::{LyricsPane, Pane};
+    use crate::ui::UiEvent;
+
+    #[test]
+    fn playback_state_change_rearms_the_next_line_schedule() {
+        let (app_tx, _app_rx) = crossbeam::channel::unbounded();
+        let ctx = crate::tests::fixtures::ctx(
+            (app_tx, _app_rx),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+        );
+        let mut pane = LyricsPane::new(&ctx);
+        // Pretend a schedule for the next line was already armed.
+        pane.last_requested_line_idx = 5;
+
+        pane.on_event(&mut UiEvent::PlaybackStateChanged, true, &ctx).unwrap();
+
+        assert_eq!(
+            pane.last_requested_line_idx,
+            usize::MAX,
+            "pause/resume invalidates the stale next-line schedule so the \
+             "
+        );
+    }
+
+    #[test]
+    fn pausing_reanchors_the_edit_selection_to_the_current_lyric() {
+        use crate::mpd::commands::State;
+        use std::time::Duration;
+
+        let (app_tx, _app_rx) = crossbeam::channel::unbounded();
+        let mut ctx = crate::tests::fixtures::ctx(
+            (app_tx, _app_rx),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+        );
+        let mut pane = LyricsPane::new(&ctx);
+        let dir = std::env::temp_dir().join(format!("s2u-lyrics-anchor-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("song.lrc");
+        std::fs::write(&path, "[00:01.00]<00:01.10>one <00:01.30>two\n[00:03.00]<00:03.10>three\n")
+            .unwrap();
+        let mut song = crate::mpd::commands::Song::default();
+        song.id = 1;
+        song.file = dir.join("song.flac").to_string_lossy().into_owned();
+        song.metadata.insert("title".to_string(), "Song".into());
+        song.metadata.insert("artist".to_string(), "Test Artist".into());
+        ctx.queue = vec![song];
+        ctx.status.state = State::Pause;
+        ctx.status.songid = Some(1);
+        ctx.status.elapsed = Duration::from_millis(1500);
+        pane.update_lyrics(&ctx).unwrap();
+        assert!(pane.current_lyrics.is_some(), "lyrics loaded from the sidecar");
+        pane.set_edit_mode(&ctx, true).unwrap();
+        assert!(pane.edit_mode, "edit mode enabled");
+        // Move the selection off the current lyric (line 0) to line 1.
+        pane.edit_selection = Some((1, 0));
+        assert_eq!(pane.anchor_line(&ctx), 0, "anchor = the lyric at the pause position");
+
+        pane.on_event(&mut UiEvent::PlaybackStateChanged, true, &ctx).unwrap();
+
+        assert_eq!(
+            pane.edit_selection,
+            Some((0, 1)),
+            "pausing re-anchors the selection to the word current at the pause position"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn pausing_keeps_the_selection_when_already_on_the_current_lyric() {
+        use crate::mpd::commands::State;
+        use std::time::Duration;
+
+        let (app_tx, _app_rx) = crossbeam::channel::unbounded();
+        let mut ctx = crate::tests::fixtures::ctx(
+            (app_tx, _app_rx),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+        );
+        let mut pane = LyricsPane::new(&ctx);
+        let dir = std::env::temp_dir().join(format!("s2u-lyrics-anchor2-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("song.lrc");
+        std::fs::write(&path, "[00:01.00]<00:01.10>one <00:01.30>two\n[00:03.00]<00:03.10>three\n")
+            .unwrap();
+        let mut song = crate::mpd::commands::Song::default();
+        song.id = 1;
+        song.file = dir.join("song.flac").to_string_lossy().into_owned();
+        song.metadata.insert("title".to_string(), "Song".into());
+        song.metadata.insert("artist".to_string(), "Test Artist".into());
+        ctx.queue = vec![song];
+        ctx.status.state = State::Pause;
+        ctx.status.songid = Some(1);
+        ctx.status.elapsed = Duration::from_millis(1500);
+        pane.update_lyrics(&ctx).unwrap();
+        pane.set_edit_mode(&ctx, true).unwrap();
+        // Already on the current lyric, second word — a pause keeps the
+        // word the user is editing.
+        pane.edit_selection = Some((0, 1));
+
+        pane.on_event(&mut UiEvent::PlaybackStateChanged, true, &ctx).unwrap();
+
+        assert_eq!(
+            pane.edit_selection,
+            Some((0, 1)),
+            "already on the anchor: the word selection is preserved"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}

@@ -960,3 +960,202 @@ impl From<StickersSupport> for bool {
         }
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use crate::{
+        config::Config,
+        mpd::commands::{Song, State, Status},
+    };
+
+    use super::initial_tab_with;
+
+    fn song(id: u32, file: &str) -> Song {
+        Song { id, file: file.to_owned(), ..Default::default() }
+    }
+
+    fn no_yt() -> std::collections::HashSet<String> {
+        std::collections::HashSet::new()
+    }
+
+    /// The chapters shown follow the *active UI source*: while the mpv
+    /// video plays, its chapters; when MPD playback takes over (the mutual
+    /// exclusion pauses the video, but the mpv session stays alive), the
+    /// current queue song's chapters — the list must not stay stuck on the
+    /// video's markers.
+    #[test]
+    fn playback_chapters_follow_the_ui_source() {
+        let (app_tx, _app_rx) = crossbeam::channel::unbounded();
+        let mut ctx = crate::tests::fixtures::ctx(
+            (app_tx, _app_rx),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+        );
+        use crate::shared::chapters::Chapter;
+        // A chaptered video plays in mpv.
+        ctx.mpv.active = true;
+        ctx.mpv.item_id = Some("0123456789abcdef0123456789abcdef".to_owned());
+        ctx.chapters.borrow_mut().insert(
+            "0123456789abcdef0123456789abcdef".to_owned(),
+            vec![Chapter { title: "Video intro".into(), start_secs: 0.0, end_secs: 60.0 }],
+        );
+        // A chaptered music file sits in the queue.
+        ctx.status.state = State::Play;
+        ctx.status.songid = Some(1);
+        ctx.queue = vec![song(1, "audio/song.flac")];
+        ctx.chapters.borrow_mut().insert(
+            "audio/song.flac".to_owned(),
+            vec![Chapter { title: "Audio intro".into(), start_secs: 0.0, end_secs: 30.0 }],
+        );
+        // While the video is the UI source, its chapters apply.
+        assert_eq!(ctx.current_playback_chapters()[0].title, "Video intro");
+        assert!(ctx.has_current_chapters());
+        // MPD starts playing (pausing the video): the music's chapters now.
+        ctx.mpv.paused = true;
+        assert_eq!(ctx.current_playback_chapters()[0].title, "Audio intro");
+        // The music stops again (video still paused): the video's chapters
+        // are back (it is the current thing again).
+        ctx.status.state = State::Stop;
+        assert_eq!(ctx.current_playback_chapters()[0].title, "Video intro");
+    }
+
+    #[test]
+    fn cava_hides_on_the_queue_tab_while_a_video_plays() {
+        let (app_tx, _app_rx) = crossbeam::channel::unbounded();
+        let mut ctx = crate::tests::fixtures::ctx(
+            (app_tx, _app_rx),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+        );
+        ctx.active_tab = crate::config::tabs::TabName::from("Queue");
+        let cava = crate::config::tabs::PaneType::Cava;
+        // No video: cava shows on the Queue tab.
+        assert!(!ctx.cava_hidden_on("Queue"));
+        assert!(!ctx.is_pane_hidden(&cava));
+        // A video starts playing in mpv: cava hides on every tab (MPD is
+        // paused, the bars would go flat everywhere).
+        ctx.mpv.active = true;
+        assert!(ctx.cava_hidden_on("Queue"));
+        assert!(ctx.is_pane_hidden(&cava));
+        assert!(ctx.cava_hidden_on("Directories"));
+        // The Jellyfin tab hides it regardless.
+        assert!(ctx.cava_hidden_on("Jellyfin"));
+        // Video ends: cava is back on the Queue tab.
+        ctx.mpv.active = false;
+        assert!(!ctx.cava_hidden_on("Queue"));
+        assert!(!ctx.is_pane_hidden(&cava));
+    }
+
+    #[test]
+    fn playing_local_file_opens_queue_tab() {
+        let config = Config::default();
+        let queue = vec![song(1, "/mnt/music/album/track.flac")];
+        let status = Status { state: State::Play, songid: Some(1), ..Default::default() };
+        assert_eq!(initial_tab_with(&config, &status, &queue, None, &no_yt()).as_str(), "Queue");
+    }
+
+
+    #[test]
+    fn playing_youtube_stream_opens_queue_tab() {
+        let config = Config::default();
+        let url = "https://rr4.googlevideo.com/videoplayback?source=youtube";
+        let queue = vec![song(4, url)];
+        let status = Status { state: State::Play, songid: Some(4), ..Default::default() };
+        let yt = std::collections::HashSet::from([url.to_owned()]);
+        assert_eq!(initial_tab_with(&config, &status, &queue, None, &yt).as_str(), "Queue");
+    }
+
+
+    #[test]
+    fn stopped_without_state_falls_back_to_first_tab() {
+        let config = Config::default();
+        let status = Status { state: State::Stop, ..Default::default() };
+        assert_eq!(initial_tab_with(&config, &status, &[], None, &no_yt()).as_str(), "Queue");
+    }
+
+
+    #[test]
+    fn unknown_last_tab_falls_back() {
+        let config = Config::default();
+        let status = Status { state: State::Stop, ..Default::default() };
+        assert_eq!(
+            initial_tab_with(&config, &status, &[], Some("Nope"), &no_yt()).as_str(),
+            "Queue"
+        );
+    }
+
+    /// Round 23 lookup order: the user's MPD library (colocated, read-only)
+    /// is checked FIRST, then s2udio's own lyrics library (colocated), then
+    /// the s2udio lyrics index (metadata match). s2udio never writes to the
+    /// user's library — the write path only ever targets `lyrics_dir`.
+    #[test]
+    fn lyrics_lookup_prefers_user_library_then_s2udio_library_then_index() {
+        let _home_guard = crate::tests::fixtures::HOME_LOCK.lock().unwrap();
+        use crate::shared::env::ENV;
+        use crate::shared::lrc::{LrcIndex, LrcMetadata};
+        let home = std::env::temp_dir().join(format!("s2u-lyrics-lookup-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        ENV.set("HOME".to_string(), home.to_string_lossy().into_owned());
+
+        let music = home.join("Music");
+        let lyrics_dir = home.join(".config/s2udio/lyrics");
+        std::fs::create_dir_all(music.join("Artist/Album")).unwrap();
+        std::fs::create_dir_all(lyrics_dir.join("Artist/Album")).unwrap();
+        // MPD's music_directory, read by the user-library lookup.
+        let mpd_conf_dir = home.join(".config/mpd");
+        std::fs::create_dir_all(&mpd_conf_dir).unwrap();
+        std::fs::write(
+            mpd_conf_dir.join("mpd.conf"),
+            format!("music_directory \"{}\"\n", music.display()),
+        )
+        .unwrap();
+
+        let user_lrc = music.join("Artist/Album/01 Track.lrc");
+        let s2udio_lrc = lyrics_dir.join("Artist/Album/01 Track.lrc");
+        std::fs::write(&user_lrc, "[ti:01 Track]\n[ar:Artist]\n[00:01.00]user line\n").unwrap();
+        std::fs::write(&s2udio_lrc, "[ti:01 Track]\n[ar:Artist]\n[00:01.00]s2udio line\n").unwrap();
+
+        let (app_tx, _app_rx) = crossbeam::channel::unbounded();
+        let mut ctx = crate::tests::fixtures::ctx(
+            (app_tx, _app_rx),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+        );
+        let mut song = song(1, "Artist/Album/01 Track.flac");
+        song.metadata.insert("artist".to_owned(), "Artist".into());
+        song.metadata.insert("title".to_owned(), "01 Track".into());
+        ctx.queue = vec![song];
+        ctx.status.state = crate::mpd::commands::State::Play;
+        ctx.status.songid = Some(1);
+        let mut config = (*ctx.config).clone();
+        config.lyrics_dir = Some(format!("{}/", lyrics_dir.display()));
+        ctx.config = std::sync::Arc::new(config);
+
+        // 1. The user's library .lrc wins over s2udio's own copy.
+        assert_eq!(ctx.find_current_lyrics_path(), Some(user_lrc.clone()));
+
+        // 2. When the user's library file is gone, s2udio's own copy is used.
+        std::fs::remove_file(&user_lrc).unwrap();
+        assert_eq!(ctx.find_current_lyrics_path(), Some(s2udio_lrc.clone()));
+
+        // 3. When neither colocated file exists, the index (metadata
+        //    match) still resolves the s2udio file.
+        std::fs::remove_file(&s2udio_lrc).unwrap();
+        ctx.lrc_index = LrcIndex::default();
+        ctx.lrc_index.add(
+            s2udio_lrc.clone(),
+            LrcMetadata {
+                title: Some("01 Track".to_owned()),
+                artist: Some("Artist".to_owned()),
+                album: None,
+                ..Default::default()
+            },
+        );
+        assert_eq!(ctx.find_current_lyrics_path(), Some(s2udio_lrc.clone()));
+
+        ENV.remove("HOME");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+}

@@ -778,3 +778,110 @@ pub mod utils {
         Cow::Borrowed(inp)
     }
 }
+
+    #[cfg(test)]
+    #[allow(clippy::unwrap_used)]
+    mod tests {
+        use std::{
+            path::PathBuf,
+            sync::{LazyLock, Mutex},
+        };
+
+        use test_case::test_case;
+
+        use super::tilde_expand;
+        use crate::{config::utils::tilde_expand_path, shared::env::ENV};
+
+        static TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+        #[test_case("~", "/home/some_user")]
+        #[test_case("~enene", "~enene")]
+        #[test_case("~nope/", "~nope/")]
+        #[test_case("~/yes", "/home/some_user/yes")]
+        #[test_case("no/~/no", "no/~/no")]
+        #[test_case("basic/path", "basic/path")]
+        fn home_dir_present(input: &str, expected: &str) {
+            let _guard = TEST_LOCK.lock().unwrap();
+
+            ENV.clear();
+            ENV.set("HOME".to_string(), "/home/some_user/".to_string());
+            assert_eq!(tilde_expand(input), expected);
+        }
+
+        #[test_case("~", "~")]
+        #[test_case("~enene", "~enene")]
+        #[test_case("~nope/", "~nope/")]
+        #[test_case("~/yes", "~/yes")]
+        #[test_case("no/~/no", "no/~/no")]
+        #[test_case("basic/path", "basic/path")]
+        fn home_dir_not_present(input: &str, expected: &str) {
+            let _guard = TEST_LOCK.lock().unwrap();
+
+            ENV.clear();
+            ENV.remove("HOME");
+            assert_eq!(tilde_expand(input), expected);
+        }
+
+        #[test_case("~", "/home/some_user")]
+        #[test_case("~enene", "~enene")]
+        #[test_case("~nope/", "~nope/")]
+        #[test_case("~/yes", "/home/some_user/yes")]
+        #[test_case("no/~/no", "no/~/no")]
+        #[test_case("basic/path", "basic/path")]
+        fn home_dir_present_path(input: &str, expected: &str) {
+            let _guard = TEST_LOCK.lock().unwrap();
+
+            ENV.clear();
+            ENV.set("HOME".to_string(), "/home/some_user/".to_string());
+
+            let got = tilde_expand_path(&PathBuf::from(input));
+            assert_eq!(got, PathBuf::from(expected));
+        }
+
+        #[test_case("~", "~")]
+        #[test_case("~enene", "~enene")]
+        #[test_case("~nope/", "~nope/")]
+        #[test_case("~/yes", "~/yes")]
+        #[test_case("no/~/no", "no/~/no")]
+        #[test_case("basic/path", "basic/path")]
+        fn home_dir_not_present_path(input: &str, expected: &str) {
+            let _guard = TEST_LOCK.lock().unwrap();
+
+            ENV.clear();
+            ENV.remove("HOME");
+
+            let got = tilde_expand_path(&PathBuf::from(input));
+            assert_eq!(got, PathBuf::from(expected));
+        }
+
+        #[test]
+        fn torrent_cache_dir_default_is_expanded() {
+            let _home_guard = crate::tests::fixtures::HOME_LOCK.lock().unwrap();
+            use crate::config::{ConfigFile, UiConfig};
+
+            let _guard = TEST_LOCK.lock().unwrap();
+            // The runtime torrent config expands the `~` in the default
+            // cache dir (a config-file value is expanded too): without a
+            // `torrent:` section the engine and the "Play and Download"
+            // move must not address a literal `~/…` path.
+            ENV.clear();
+            ENV.set("HOME".to_string(), "/home/some_user".to_string());
+            let config = ConfigFile::default()
+                .into_config(UiConfig::default(), None, None, true)
+                .expect("Default config should be valid");
+            assert_eq!(
+                config.torrent.cache_dir.to_string_lossy(),
+                "/home/some_user/.cache/s2udio/torrents"
+            );
+            // A config-file value is expanded the same way.
+            let mut file = ConfigFile::default();
+            file.torrent.cache_dir = Some("~/custom/torrents".into());
+            let config = file
+                .into_config(UiConfig::default(), None, None, true)
+                .expect("config should be valid");
+            assert_eq!(
+                config.torrent.cache_dir.to_string_lossy(),
+                "/home/some_user/custom/torrents"
+            );
+        }
+    }

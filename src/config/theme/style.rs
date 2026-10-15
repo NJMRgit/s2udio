@@ -297,3 +297,104 @@ impl From<crate::config::ConfigColor> for RColor {
         }
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use ratatui::style::Modifier as RM;
+    use test_case::test_case;
+
+    use crate::config::{ConfigColor, theme::style::Modifiers};
+
+    #[test]
+    #[rustfmt::skip]
+    fn string_values() {
+        assert_eq!(ConfigColor::try_from("reset".as_bytes()).unwrap(), ConfigColor::Reset);
+        assert_eq!(ConfigColor::try_from("default".as_bytes()).unwrap(), ConfigColor::Reset);
+        assert_eq!(ConfigColor::try_from("black".as_bytes()).unwrap(), ConfigColor::Black);
+        assert_eq!(ConfigColor::try_from("red".as_bytes()).unwrap(), ConfigColor::Red);
+        assert_eq!(ConfigColor::try_from("green".as_bytes()).unwrap(), ConfigColor::Green);
+        assert_eq!(ConfigColor::try_from("yellow".as_bytes()).unwrap(), ConfigColor::Yellow);
+        assert_eq!(ConfigColor::try_from("blue".as_bytes()).unwrap(), ConfigColor::Blue);
+        assert_eq!(ConfigColor::try_from("magenta".as_bytes()).unwrap(), ConfigColor::Magenta);
+        assert_eq!(ConfigColor::try_from("cyan".as_bytes()).unwrap(), ConfigColor::Cyan);
+        assert_eq!(ConfigColor::try_from("gray".as_bytes()).unwrap(), ConfigColor::Gray);
+        assert_eq!(ConfigColor::try_from("dark_gray".as_bytes()).unwrap(), ConfigColor::DarkGray);
+        assert_eq!(ConfigColor::try_from("light_red".as_bytes()).unwrap(), ConfigColor::LightRed);
+        assert_eq!(ConfigColor::try_from("light_green".as_bytes()).unwrap(), ConfigColor::LightGreen);
+        assert_eq!(ConfigColor::try_from("light_yellow".as_bytes()).unwrap(), ConfigColor::LightYellow);
+        assert_eq!(ConfigColor::try_from("light_blue".as_bytes()).unwrap(), ConfigColor::LightBlue);
+        assert_eq!(ConfigColor::try_from("light_magenta".as_bytes()).unwrap(), ConfigColor::LightMagenta);
+        assert_eq!(ConfigColor::try_from("light_cyan".as_bytes()).unwrap(), ConfigColor::LightCyan);
+        assert_eq!(ConfigColor::try_from("white".as_bytes()).unwrap(), ConfigColor::White);
+    }
+
+    #[test]
+    fn hex_value() {
+        let input: &[u8] = b"#ff00ff";
+        let result = ConfigColor::try_from(input).unwrap();
+        assert_eq!(result, ConfigColor::Hex(16_711_935));
+    }
+
+    #[test]
+    fn invalid_hex_value() {
+        let input: &[u8] = b"#ff00f";
+        let result = ConfigColor::try_from(input);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn rgb_value() {
+        let input: &[u8] = b"rgb(255,0,255)";
+        let result = ConfigColor::try_from(input).unwrap();
+        assert_eq!(result, ConfigColor::Rgb(255, 0, 255));
+    }
+
+    #[test]
+    fn invalid_rgb_value() {
+        let input: &[u8] = b"rgb(255,0,256)";
+        let result = ConfigColor::try_from(input);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn indexed_value() {
+        let input: &[u8] = b"255";
+        let result = ConfigColor::try_from(input).unwrap();
+        assert_eq!(result, ConfigColor::Indexed(255));
+    }
+
+    #[test]
+    fn invalid_indexed_value() {
+        let input: &[u8] = b"256";
+        let result = ConfigColor::try_from(input);
+        assert!(result.is_err());
+    }
+
+    #[test_case(Modifiers::Bold,       RM::BOLD; "bold")]
+    #[test_case(Modifiers::Dim,        RM::DIM; "dim")]
+    #[test_case(Modifiers::Italic,     RM::ITALIC; "italic")]
+    #[test_case(Modifiers::Underlined, RM::UNDERLINED; "underlined")]
+    #[test_case(Modifiers::Reversed,   RM::REVERSED; "reversed")]
+    #[test_case(Modifiers::CrossedOut, RM::CROSSED_OUT; "crossed out")]
+    fn single_modifiers(input: Modifiers, expected: RM) {
+        let result: RM = input.into();
+
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn modifiers_group1() {
+        let result: RM = (Modifiers::Bold | Modifiers::Dim | Modifiers::Italic).into();
+
+        assert_eq!(result, RM::BOLD | RM::DIM | RM::ITALIC);
+    }
+
+    #[test]
+    fn modifiers_group2() {
+        let result: RM =
+            (Modifiers::Underlined | Modifiers::Reversed | Modifiers::CrossedOut).into();
+
+        assert_eq!(result, RM::UNDERLINED | RM::REVERSED | RM::CROSSED_OUT);
+    }
+}

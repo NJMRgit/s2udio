@@ -81,3 +81,200 @@ impl ProgressBarConfigFile {
         })
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::needless_pass_by_value)]
+mod tests {
+    use ratatui::style::{Color as RC, Modifier as RM};
+    use test_case::test_case;
+
+    use crate::config::theme::{
+        Style, StyleFile, progress_bar::ProgressBarConfigFile, style::Modifiers,
+    };
+
+    #[test]
+    fn maps_three_symbols() {
+        let input = ProgressBarConfigFile {
+            symbols: vec!["a".to_owned(), "b".to_owned(), "c".to_owned()],
+            ..Default::default()
+        };
+
+        let result = input.into_config().unwrap().symbols;
+
+        assert_eq!(
+            result,
+            ["a".to_owned(), "a".to_owned(), "b".to_owned(), "c".to_owned(), "c".to_owned()]
+        );
+    }
+
+    #[test]
+    fn maps_symbols() {
+        let input = ProgressBarConfigFile {
+            symbols: vec![
+                "a".to_owned(),
+                "b".to_owned(),
+                "c".to_owned(),
+                "d".to_owned(),
+                "e".to_owned(),
+            ],
+            ..Default::default()
+        };
+
+        let result = input.into_config().unwrap().symbols;
+
+        assert_eq!(
+            result,
+            ["a".to_owned(), "b".to_owned(), "c".to_owned(), "d".to_owned(), "e".to_owned()]
+        );
+    }
+
+    #[test_case(None,         None,         Style::default().fg(RC::Blue)                ; "uses default colors")]
+    #[test_case(Some("none"), Some("none"), Style::default().fg(RC::Blue)                ; "uses default colors when whole value is None")]
+    #[test_case(Some("red"),  Some("blue"), Style::default().fg(RC::Red).bg(RC::Blue)    ; "correctly maps provided colors")]
+    #[test_case(Some("cyan"), None,         Style::default().fg(RC::Cyan)                ; "correctly maps when only fg is provided")]
+    #[test_case(None,         Some("gray"), Style::default().fg(RC::Blue).bg(RC::Gray)   ; "correctly maps when only bg is provided")]
+    fn elapsed_colors_test(c1: Option<&str>, c2: Option<&str>, expected: Style) {
+        let input = ProgressBarConfigFile {
+            elapsed_style: match (c1, c2) {
+                (Some("none"), Some("none")) => None,
+                (Some(c1), Some(c2)) => Some(StyleFile {
+                    fg: Some(c1.to_string()),
+                    bg: Some(c2.to_string()),
+                    modifiers: None,
+                }),
+                (Some(c1), None) => {
+                    Some(StyleFile { fg: Some(c1.to_string()), bg: None, modifiers: None })
+                }
+                (None, Some(c2)) => {
+                    Some(StyleFile { fg: None, bg: Some(c2.to_string()), modifiers: None })
+                }
+                (None, None) => Some(StyleFile { fg: None, bg: None, modifiers: None }),
+            },
+            ..Default::default()
+        };
+
+        let result = input.into_config().unwrap();
+
+        assert_eq!(result.elapsed_style, expected);
+    }
+
+    #[test_case(None,         None,         Style::default().fg(RC::Black)                ; "uses default colors")]
+    #[test_case(Some("none"), Some("none"), Style::default().fg(RC::Black)                ; "uses default colors when whole value is None")]
+    #[test_case(Some("red"),  Some("blue"), Style::default().fg(RC::Red).bg(RC::Blue)     ; "correctly maps provided colors")]
+    #[test_case(Some("cyan"), None,         Style::default().fg(RC::Cyan)                 ; "correctly maps when only fg is provided")]
+    #[test_case(None,         Some("gray"), Style::default().fg(RC::Black).bg(RC::Gray)   ; "correctly maps when only bg is provided")]
+    fn track_colors_test(c1: Option<&str>, c2: Option<&str>, expected: Style) {
+        let input = ProgressBarConfigFile {
+            track_style: match (c1, c2) {
+                (Some("none"), Some("none")) => None,
+                (Some(c1), Some(c2)) => Some(StyleFile {
+                    fg: Some(c1.to_string()),
+                    bg: Some(c2.to_string()),
+                    modifiers: None,
+                }),
+                (Some(c1), None) => {
+                    Some(StyleFile { fg: Some(c1.to_string()), bg: None, modifiers: None })
+                }
+                (None, Some(c2)) => {
+                    Some(StyleFile { fg: None, bg: Some(c2.to_string()), modifiers: None })
+                }
+                (None, None) => Some(StyleFile { fg: None, bg: None, modifiers: None }),
+            },
+            ..Default::default()
+        };
+
+        let result = input.into_config().unwrap();
+
+        assert_eq!(result.track_style, expected);
+    }
+
+    #[test_case(None,         None,         Style::default().fg(RC::Blue)                ; "uses default colors")]
+    #[test_case(Some("none"), Some("none"), Style::default().fg(RC::Blue)                ; "uses default colors when whole value is None")]
+    #[test_case(Some("red"),  Some("blue"), Style::default().fg(RC::Red).bg(RC::Blue)    ; "correctly maps provided colors")]
+    #[test_case(Some("cyan"), None,         Style::default().fg(RC::Cyan)                ; "correctly maps when only fg is provided")]
+    #[test_case(None,         Some("gray"), Style::default().fg(RC::Blue).bg(RC::Gray)   ; "correctly maps when only bg is provided")]
+    fn thumb_colors_test(c1: Option<&str>, c2: Option<&str>, expected: Style) {
+        let input = ProgressBarConfigFile {
+            thumb_style: match (c1, c2) {
+                (Some("none"), Some("none")) => None,
+                (Some(c1), Some(c2)) => Some(StyleFile {
+                    fg: Some(c1.to_string()),
+                    bg: Some(c2.to_string()),
+                    modifiers: None,
+                }),
+                (Some(c1), None) => {
+                    Some(StyleFile { fg: Some(c1.to_string()), bg: None, modifiers: None })
+                }
+                (None, Some(c2)) => {
+                    Some(StyleFile { fg: None, bg: Some(c2.to_string()), modifiers: None })
+                }
+                (None, None) => Some(StyleFile { fg: None, bg: None, modifiers: None }),
+            },
+            ..Default::default()
+        };
+
+        let result = input.into_config().unwrap();
+
+        assert_eq!(result.thumb_style, expected);
+    }
+
+    #[test_case(Modifiers::Bold,       RM::BOLD; "bold")]
+    #[test_case(Modifiers::Dim,        RM::DIM; "dim")]
+    #[test_case(Modifiers::Italic,     RM::ITALIC; "italic")]
+    #[test_case(Modifiers::Underlined, RM::UNDERLINED; "underlined")]
+    #[test_case(Modifiers::Reversed,   RM::REVERSED; "reversed")]
+    #[test_case(Modifiers::CrossedOut, RM::CROSSED_OUT; "crossed out")]
+    fn track_modifiers(input: Modifiers, expected: RM) {
+        let input = ProgressBarConfigFile {
+            track_style: Some(StyleFile { fg: None, bg: None, modifiers: Some(input) }),
+            ..Default::default()
+        };
+
+        let result = input.into_config().unwrap();
+
+        assert_eq!(
+            result.track_style.add_modifier,
+            Style::default().add_modifier(expected).add_modifier
+        );
+    }
+
+    #[test_case(Modifiers::Bold,       RM::BOLD; "bold")]
+    #[test_case(Modifiers::Dim,        RM::DIM; "dim")]
+    #[test_case(Modifiers::Italic,     RM::ITALIC; "italic")]
+    #[test_case(Modifiers::Underlined, RM::UNDERLINED; "underlined")]
+    #[test_case(Modifiers::Reversed,   RM::REVERSED; "reversed")]
+    #[test_case(Modifiers::CrossedOut, RM::CROSSED_OUT; "crossed out")]
+    fn thumb_modifiers(input: Modifiers, expected: RM) {
+        let input = ProgressBarConfigFile {
+            thumb_style: Some(StyleFile { fg: None, bg: None, modifiers: Some(input) }),
+            ..Default::default()
+        };
+
+        let result = input.into_config().unwrap();
+
+        assert_eq!(
+            result.thumb_style.add_modifier,
+            Style::default().add_modifier(expected).add_modifier
+        );
+    }
+
+    #[test_case(Modifiers::Bold,       RM::BOLD; "bold")]
+    #[test_case(Modifiers::Dim,        RM::DIM; "dim")]
+    #[test_case(Modifiers::Italic,     RM::ITALIC; "italic")]
+    #[test_case(Modifiers::Underlined, RM::UNDERLINED; "underlined")]
+    #[test_case(Modifiers::Reversed,   RM::REVERSED; "reversed")]
+    #[test_case(Modifiers::CrossedOut, RM::CROSSED_OUT; "crossed out")]
+    fn elapsed_modifiers(input: Modifiers, expected: RM) {
+        let input = ProgressBarConfigFile {
+            elapsed_style: Some(StyleFile { fg: None, bg: None, modifiers: Some(input) }),
+            ..Default::default()
+        };
+
+        let result = input.into_config().unwrap();
+
+        assert_eq!(
+            result.elapsed_style.add_modifier,
+            Style::default().add_modifier(expected).add_modifier
+        );
+    }
+}

@@ -1031,3 +1031,49 @@ fn tray() -> Result<(), String> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn state_file_round_trips() {
+        let dir = std::env::temp_dir().join(format!("rqctl-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Point the state path at the temp dir via a write probe: we can't
+        // easily redirect state_path(), so test the pieces it uses.
+        let reg = RqEngineFile {
+            pid: u32::MAX,
+            web_url: "http://127.0.0.1:1/web/".to_owned(),
+            engine_port: 3030,
+            cache_dir: "/tmp/x".to_owned(),
+            started_at: 1,
+        };
+        let json = serde_json::to_string(&reg).unwrap();
+        let back: RqEngineFile = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.pid, reg.pid);
+        assert_eq!(back.web_url, reg.web_url);
+        let _ = dir;
+    }
+
+    #[test]
+    fn dead_pid_is_not_alive() {
+        // 99_999_999 is beyond Linux's pid_max (~4M), so no process can
+        // own it (and unlike -1/u32::MAX it is not the "signal everyone"
+        // special case, which kill() reports as alive for root).
+        assert!(!pid_alive(99_999_999));
+        // Our own pid is alive.
+        assert!(pid_alive(std::process::id()));
+    }
+
+    #[test]
+    fn stop_registered_without_state_is_a_noop() {
+        // Never touch a live registration (a running engine's file must
+        // survive tests) — skip when one exists.
+        if read_state().is_some() {
+            eprintln!("skipping: an rqbit engine is registered");
+            return;
+        }
+        assert_eq!(stop_registered().expect("no state -> Ok(false)"), false);
+    }
+}

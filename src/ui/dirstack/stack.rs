@@ -120,3 +120,109 @@ where
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+
+    mod new {
+        use ratatui::widgets::ListState;
+
+        use crate::ui::dirstack::DirStack;
+
+        #[test]
+        fn creates_with_correct_current() {
+            let input = vec!["test".to_owned()];
+
+            let result: DirStack<String, ListState> = DirStack::new(input.clone());
+
+            assert_eq!(result.current().items, input);
+        }
+
+        #[test]
+        fn selects_none_when_input_is_empty() {
+            let input = Vec::new();
+
+            let result: DirStack<String, ListState> = DirStack::new(input.clone());
+
+            assert_eq!(result.current().selected(), None);
+        }
+
+        #[test]
+        fn selects_first_when_input_is_not_empty() {
+            let input = vec!["test".to_owned(), "test2".to_owned(), "test3".to_owned()];
+
+            let result: DirStack<String, ListState> = DirStack::new(input.clone());
+
+            assert_eq!(result.current().selected(), Some("test".to_owned()).as_ref());
+        }
+    }
+
+    mod next_path {
+        use ratatui::widgets::ListState;
+
+        use crate::ui::dirstack::{DirStack, Path};
+
+        #[test]
+        fn returns_none_when_nothing_is_selected() {
+            let input = vec!["test".to_owned(), "test2".to_owned(), "test3".to_owned()];
+            let mut subject: DirStack<String, ListState> = DirStack::new(input.clone());
+            subject.current_mut().state.select(None, 0);
+
+            let result = subject.next_path();
+
+            assert_eq!(result, None);
+        }
+
+        #[test]
+        fn returns_correct_path() {
+            let level1 = vec!["a".to_owned(), "b".to_owned(), "c".to_owned()];
+            let mut subject: DirStack<String, ListState> = DirStack::new(level1.clone());
+            subject.current_mut().state.select(Some(1), 0);
+            subject.enter();
+            let level2 = vec!["d".to_owned(), "e".to_owned(), "f".to_owned()];
+            subject.insert("b".into(), level2);
+            subject.current_mut().state.select(Some(2), 0);
+
+            let result = subject.next_path();
+
+            assert_eq!(result, Some(Path::from(["b", "f"])));
+        }
+    }
+
+    mod leave {
+        use ratatui::widgets::ListState;
+
+        use crate::ui::dirstack::{DirStack, Path};
+
+        #[test]
+        fn enter_and_leave_alters_path_correctly() {
+            let mut subject: DirStack<String, ListState> = DirStack::new(vec!["first".to_owned()]);
+            subject.insert("first".into(), vec!["second".to_owned()]);
+            subject.insert(["first", "second"].into(), vec!["third".to_owned()]);
+            subject.insert(["first", "second", "third"].into(), vec!["fourth".to_owned()]);
+
+            assert_eq!(subject.path(), &Path::new());
+
+            subject.current_mut().select_idx(0, 0);
+            subject.enter();
+            assert_eq!(subject.path(), &Path::from(["first"]));
+
+            subject.current_mut().select_idx(0, 0);
+            subject.enter();
+            assert_eq!(subject.path(), &Path::from(["first", "second"]));
+
+            subject.current_mut().select_idx(0, 0);
+            subject.enter();
+            assert_eq!(subject.path(), &Path::from(["first", "second", "third"]));
+
+            subject.leave();
+            assert_eq!(subject.path(), &Path::from(["first", "second"]));
+        }
+
+        #[test]
+        fn returns_false_on_root() {
+            let mut val: DirStack<String, ListState> = DirStack::new(Vec::new());
+            assert!(!val.leave());
+        }
+    }
+}

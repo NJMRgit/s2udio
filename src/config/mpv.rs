@@ -210,3 +210,45 @@ impl From<MpvFile> for Mpv {
         }
     }
 }
+
+
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::{Mpv, MpvFile};
+
+    #[test]
+    fn mpv_bin_defaults_to_mpv_and_expands_tilde() {
+        // The tilde expansion reads the shared test ENV; the lock keeps
+        // other HOME-reading tests from racing this one.
+        let _home_guard = crate::tests::fixtures::HOME_LOCK.lock().unwrap();
+        use crate::shared::env::ENV;
+
+        let default: Mpv = MpvFile::default().into();
+        assert_eq!(default.bin, "mpv");
+        assert!(!default.svp, "svp support defaults off");
+
+        ENV.set("HOME".to_owned(), "/home/tester".to_owned());
+        let explicit: Mpv = MpvFile {
+            audio_lang: None,
+            subtitles: None,
+            bin: Some("~/somewhere/mpv".to_owned()),
+            svp_bin: None,
+            svp: None,
+        }
+        .into();
+        assert_eq!(explicit.bin, "/home/tester/somewhere/mpv");
+
+        let blank: Mpv = MpvFile {
+            audio_lang: None,
+            subtitles: None,
+            bin: Some("   ".to_owned()),
+            svp_bin: None,
+            svp: Some(true),
+        }
+        .into();
+        assert_eq!(blank.bin, "mpv", "blank bin falls back to mpv");
+        assert!(blank.svp, "explicit svp override survives");
+    }
+}

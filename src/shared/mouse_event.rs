@@ -420,3 +420,132 @@ impl ScrollbarDrag {
             .clamp(0.0, 1.0)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_scrollbar_interaction_detection() {
+        let scrollbar_area = Rect::new(10, 5, 1, 10);
+        let scrollbar_x = scrollbar_area.right().saturating_sub(1); // x = 10
+
+        let click_event = MouseEvent {
+            x: scrollbar_x,
+            y: 7,
+            kind: MouseEventKind::LeftClick,
+            ..Default::default()
+        };
+        assert!(is_scrollbar_interaction(click_event, scrollbar_area,));
+
+        let click_event = MouseEvent {
+            x: scrollbar_x + 1,
+            y: 7,
+            kind: MouseEventKind::LeftClick,
+            ..Default::default()
+        };
+        assert!(!is_scrollbar_interaction(click_event, scrollbar_area,));
+
+        let drag_start = Position { x: scrollbar_x, y: 7 };
+        let drag_event = MouseEvent {
+            x: scrollbar_x + 1,
+            y: 9,
+            kind: MouseEventKind::Drag { drag_start_position: drag_start },
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        assert!(is_scrollbar_interaction(drag_event, scrollbar_area));
+
+        let drag_start_off = Position { x: scrollbar_x + 1, y: 7 };
+        let drag_event = MouseEvent {
+            x: scrollbar_x + 1,
+            y: 9,
+            kind: MouseEventKind::Drag { drag_start_position: drag_start_off },
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        assert!(!is_scrollbar_interaction(drag_event, scrollbar_area));
+
+        let drag_event = MouseEvent {
+            x: scrollbar_x,
+            y: 9,
+            kind: MouseEventKind::Drag { drag_start_position: drag_start },
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        assert!(is_scrollbar_interaction(drag_event, scrollbar_area));
+    }
+
+    /// The thumb follows the pointer 1:1 once a drag is grabbed: dragging
+    /// from the middle of a thumb anchored at the top of the track moves
+    /// the scroll fraction proportionally, and the thumb never leaves the
+    /// track.
+    #[test]
+    fn test_scrollbar_drag_keeps_thumb_under_pointer() {
+        let area = Rect::new(10, 5, 1, 10); // 10 rows, y 5..14
+        let content_len = 101; // max offset 100
+        let viewport_len = 10;
+        let position = 0;
+        let geometry = ScrollbarGeometry::vertical(area, content_len, viewport_len, position, 1, 1);
+        let travel = geometry.track_len - geometry.thumb_size;
+
+        let mut drag = ScrollbarDrag::default();
+        // Click on the thumb's first row: this is a grab, not a jump.
+        let grab = MouseEvent {
+            x: 10,
+            y: geometry.thumb_top(),
+            kind: MouseEventKind::LeftClick,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        assert_eq!(drag.handle(grab, area, content_len, viewport_len, position, 1, 1), None);
+        assert!(drag.grab_offset.is_some());
+
+        // Drag down 2 rows: the fraction increases by 2 / travel.
+        let drag_event = MouseEvent {
+            x: 10,
+            y: geometry.thumb_top() + 2,
+            kind: MouseEventKind::Drag {
+                drag_start_position: Position { x: 10, y: geometry.thumb_top() },
+            },
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        let frac = drag
+            .handle(drag_event, area, content_len, viewport_len, position, 1, 1)
+            .expect("drag returns a fraction");
+        assert!((frac - 2.0 / f64::from(travel)).abs() < 1e-9, "frac {frac}");
+
+        // Dragging far below the track clamps at the bottom.
+        let bottom = MouseEvent {
+            x: 10,
+            y: 40,
+            kind: MouseEventKind::Drag {
+                drag_start_position: Position { x: 10, y: geometry.thumb_top() },
+            },
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        assert_eq!(drag.handle(bottom, area, content_len, viewport_len, position, 1, 1), Some(1.0));
+    }
+
+    /// A click on the track (not on the thumb) jumps to that fraction, and
+    /// the drag that follows starts from there.
+    #[test]
+    fn test_scrollbar_drag_track_click_jumps() {
+        let area = Rect::new(10, 5, 1, 10);
+        let content_len = 101;
+        let viewport_len = 10;
+        let position = 0;
+        let geometry = ScrollbarGeometry::vertical(area, content_len, viewport_len, position, 1, 1);
+        let travel = geometry.track_len - geometry.thumb_size;
+
+        let mut drag = ScrollbarDrag::default();
+        let click = MouseEvent {
+            x: 10,
+            y: geometry.track_top + travel / 2, // middle of the track
+            kind: MouseEventKind::LeftClick,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        let frac = drag
+            .handle(click, area, content_len, viewport_len, position, 1, 1)
+            .expect("track click jumps");
+        let expected =
+            f64::from(geometry.track_top + travel / 2 - geometry.track_top) / f64::from(travel);
+        assert!((frac - expected).abs() < 1e-9, "frac {frac}, expected {expected}");
+    }
+}

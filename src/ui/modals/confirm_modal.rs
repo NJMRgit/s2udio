@@ -276,3 +276,67 @@ impl Modal for ConfirmModal<'_> {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Space confirms the selected button (double-click / Enter already
+    /// worked; the minimal keybind set maps Space to TogglePause, so it must
+    /// be consumed at the raw level instead of toggling playback).
+    #[test]
+    fn space_confirms_the_selected_button() {
+        let (app_tx, app_rx) = crossbeam::channel::unbounded();
+        let mut ctx = crate::tests::fixtures::ctx(
+            (app_tx, app_rx.clone()),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+        );
+        // The action itself is observable: it sends a marker event before
+        // the modal's own PopModal.
+        let mut modal = ConfirmModal::builder()
+            .ctx(&ctx)
+            .message(vec!["Proceed?"])
+            .action(Action::Single {
+                confirm_label: Some("OK"),
+                cancel_label: None,
+                on_confirm: Box::new(|ctx| {
+                    ctx.app_event_sender.send(crate::AppEvent::UiEvent(
+                        crate::ui::UiAppEvent::PopModal(crate::shared::id::new()),
+                    ))?;
+                    Ok(())
+                }),
+            })
+            .build();
+
+        modal
+            .handle_raw_key(
+                crossterm::event::KeyEvent::new(
+                    crossterm::event::KeyCode::Char(' '),
+                    crossterm::event::KeyModifiers::NONE,
+                ),
+                &mut ctx,
+            )
+            .unwrap();
+
+        let mut events = Vec::new();
+        while let Ok(ev) = app_rx.try_recv() {
+            events.push(ev);
+        }
+        assert!(
+            matches!(
+                events.first(),
+                Some(crate::AppEvent::UiEvent(crate::ui::UiAppEvent::PopModal(marker)))
+                    if *marker != modal.id()
+            ),
+            "the confirm action ran first, got {events:?}"
+        );
+        assert!(
+            events.iter().any(|ev| matches!(
+                ev,
+                crate::AppEvent::UiEvent(crate::ui::UiAppEvent::PopModal(id)) if *id == modal.id()
+            )),
+            "the dialog closed after confirming, got {events:?}"
+        );
+    }
+}

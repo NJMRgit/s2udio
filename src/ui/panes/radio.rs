@@ -1753,3 +1753,182 @@ impl Pane for RadioPane {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod paste_play_tests {
+    use super::{RadioPane, RadioStation, RegionKind, StationRow};
+    use crate::{
+        MpdQueryResult, config::tabs::TreeBrowserArgs, tests::fixtures::ctx, ui::panes::Pane,
+        ui::tree_browser::TreeBrowserCore,
+    };
+
+    /// "Play (don't add to queue)" routes its `addid` result to the Radio
+    /// pane, which records the id so the Queue pane hides the entry (and
+    /// the pane drops it again on song change / stop).
+    #[test]
+    fn paste_play_result_registers_the_hidden_entry() {
+        let mut pane_ctx = ctx(
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+        );
+        let mut pane = RadioPane::new(&pane_ctx);
+        pane.on_query_finished(
+            crate::ui::modals::paste::PASTE_PLAY,
+            MpdQueryResult::Any(Box::new(7u32)),
+            true,
+            &pane_ctx,
+        )
+        .unwrap();
+        assert_eq!(pane.temp_play_id, Some(7));
+        assert_eq!(pane_ctx.temp_play_id.get(), Some(7), "the queue pane reads it via Ctx");
+
+        // A song change (or stop) drops the temporary entry.
+        pane_ctx.status.songid = Some(8);
+        pane_ctx.status.state = crate::mpd::commands::State::Play;
+        let mut event = crate::ui::UiEvent::SongChanged;
+        pane.on_event(&mut event, true, &pane_ctx).unwrap();
+        assert_eq!(pane.temp_play_id, None);
+        assert_eq!(pane_ctx.temp_play_id.get(), None);
+    }
+
+    /// The `PLAY` arm (a station played with `d`/`→`) records the temp id
+    /// the same way the paste arm does, so the Queue pane hides the entry
+    /// consistently (pins the Phase-2 unification: radio's `PLAY` result
+    /// sets `ctx.temp_play_id` like its `PASTE_PLAY` arm).
+    #[test]
+    fn play_result_registers_the_hidden_entry() {
+        let pane_ctx = ctx(
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+        );
+        let mut pane = RadioPane::new(&pane_ctx);
+        pane.on_query_finished(super::PLAY, MpdQueryResult::Any(Box::new(7u32)), true, &pane_ctx)
+            .unwrap();
+        assert_eq!(pane.temp_play_id, Some(7));
+        assert_eq!(pane_ctx.temp_play_id.get(), Some(7), "the queue pane reads it via Ctx");
+    }
+
+    /// The tree-browser args plumb into the pane uniformly, and radio's
+    /// regions tree keeps its always-visible 30% share regardless of them
+    /// (radio's shape — the width/hide args deliberately do not apply).
+    #[test]
+    fn tree_args_plumb_in_but_keep_the_regions_tree_shape() {
+        let pane_ctx = ctx(
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+        );
+        let mut pane = RadioPane::new(&pane_ctx);
+        pane.tree_args = TreeBrowserArgs {
+            tree_min_width: 60,
+            tree_hide_below: 200,
+            ..TreeBrowserArgs::default()
+        };
+        let (regions, stations) = pane.split_tree(ratatui::prelude::Rect::new(0, 0, 160, 30));
+        assert_eq!(regions.width, 48, "radio keeps its 30% region tree (160*30%)");
+        assert_eq!(stations.width, 112, "the stations pane gets the rest");
+    }
+
+    /// Round 32: the wheel over the regions tree and the stations list
+    /// scrolls the viewport only — the highlight stays put (it may leave
+    /// the visible area) and the offsets clamp at the lists' ends.
+    #[test]
+    fn wheel_scrolls_the_regions_and_stations_viewports() {
+        use ratatui::backend::TestBackend;
+        use ratatui::prelude::Rect;
+
+        use crate::shared::mouse_event::{MouseEvent, MouseEventKind};
+
+        let (app_tx, app_rx) = crossbeam::channel::unbounded();
+        let (work_tx, work_rx) = crossbeam::channel::unbounded();
+        let (client_tx, client_rx) = crossbeam::channel::unbounded();
+        // Keep the receivers alive for the whole test: render and pane
+        // actions send render/work/client requests that must never fail.
+        std::mem::forget(app_rx);
+        std::mem::forget(work_rx);
+        std::mem::forget(client_rx);
+        let pane_ctx = ctx(
+            (app_tx, crossbeam::channel::unbounded().1),
+            (work_tx, crossbeam::channel::unbounded().1),
+            (client_tx, crossbeam::channel::unbounded().1),
+        );
+        let mut pane = RadioPane::new(&pane_ctx);
+        // A populated regions tree + a long favourites station list so
+        // both viewports have room to scroll.
+        pane.regions = (0..40)
+            .map(|i| crate::ui::panes::radio::RegionRow {
+                kind: RegionKind::Favourites,
+                label: format!("Region {i}"),
+                depth: 0,
+                expandable: false,
+                expanded: false,
+            })
+            .collect();
+        pane.region_list.select(Some(0));
+        pane.stations = (0..40)
+            .map(|i| {
+                StationRow::Favourite(RadioStation {
+                    name: format!("S{i}"),
+                    url: format!("http://s{i}"),
+                })
+            })
+            .collect();
+        pane.station_list.select(Some(0));
+
+        let backend = TestBackend::new(160, 30);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| pane.render(frame, Rect::new(0, 0, 160, 30), &pane_ctx).unwrap())
+            .unwrap();
+        let regions_area = pane.regions_area;
+        let stations_area = pane.stations_area;
+
+        let region_sel = pane.region_list.selected();
+        let station_sel = pane.station_list.selected();
+
+        // Wheel over the regions tree.
+        pane.handle_mouse_event(
+            MouseEvent {
+                x: regions_area.x + 5,
+                y: regions_area.y + 2,
+                kind: MouseEventKind::ScrollDown,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            },
+            &pane_ctx,
+        )
+        .unwrap();
+        assert_eq!(pane.region_list.offset(), 1, "wheel down scrolls the regions viewport");
+        assert_eq!(pane.region_list.selected(), region_sel, "the region highlight does not move");
+
+        // Wheel over the stations list.
+        pane.handle_mouse_event(
+            MouseEvent {
+                x: stations_area.x + 5,
+                y: stations_area.y + 2,
+                kind: MouseEventKind::ScrollDown,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            },
+            &pane_ctx,
+        )
+        .unwrap();
+        assert_eq!(pane.station_list.offset(), 1, "wheel down scrolls the stations viewport");
+        assert_eq!(
+            pane.station_list.selected(),
+            station_sel,
+            "the station highlight does not move"
+        );
+        pane.handle_mouse_event(
+            MouseEvent {
+                x: stations_area.x + 5,
+                y: stations_area.y + 2,
+                kind: MouseEventKind::ScrollUp,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            },
+            &pane_ctx,
+        )
+        .unwrap();
+        assert_eq!(pane.station_list.offset(), 0, "wheel up scrolls the stations viewport back");
+    }
+}

@@ -437,3 +437,102 @@ impl AlbumArtFacade {
         self.last_size = area;
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use crossbeam::channel::{Receiver, Sender};
+    use rstest::rstest;
+
+    use super::AlbumArtFacade;
+    use crate::{
+        shared::events::{AppEvent, ClientRequest, WorkRequest},
+        tests::fixtures::{app_event_channel, client_request_channel, ctx, work_request_channel},
+    };
+
+    /// The self-heal must only trigger when a frame's diff actually rewrote
+    /// the art pane area: re-placing after every frame made the art strobe
+    /// while playing (status updates render many frames a second).
+    #[rstest]
+    fn re_place_skipped_while_the_art_area_is_unchanged(
+        app_event_channel: (Sender<AppEvent>, Receiver<AppEvent>),
+        work_request_channel: (Sender<WorkRequest>, Receiver<WorkRequest>),
+        client_request_channel: (Sender<ClientRequest>, Receiver<ClientRequest>),
+    ) {
+        let mut facade = AlbumArtFacade::new(&ctx(
+            app_event_channel,
+            work_request_channel,
+            client_request_channel,
+        ));
+        facade.set_size(ratatui::layout::Rect::new(0, 0, 10, 5));
+        let mut buffer = ratatui::buffer::Buffer::empty(ratatui::layout::Rect::new(0, 0, 10, 5));
+
+        // First frame at a fresh area is treated as dirty (nothing drawn yet);
+        // the flush that follows a change draws and clears the latch.
+        facade.frame_rendered(&buffer);
+        assert!(facade.region_dirty);
+        facade.region_dirty = false;
+
+        // Identical frames must not re-dirty: this is the steady-state
+        // playback case that used to re-place the image every frame.
+        facade.frame_rendered(&buffer);
+        assert!(!facade.region_dirty);
+
+        // A frame that rewrote a cell inside the art pane area (modal
+        // closed, resize, layout change) re-dirties so the image heals.
+        buffer.get_mut(3, 2).set_symbol("x");
+        facade.frame_rendered(&buffer);
+        assert!(facade.region_dirty);
+
+        // The latch stays set until a draw clears it, so a sequence of
+        // changing frames keeps the heal armed.
+        facade.frame_rendered(&buffer);
+        assert!(facade.region_dirty);
+    }
+
+    /// A pane-area change (resize / layout change) forces a heal instead of
+    /// comparing across mismatched areas.
+    #[rstest]
+    fn pane_area_change_marks_dirty(
+        app_event_channel: (Sender<AppEvent>, Receiver<AppEvent>),
+        work_request_channel: (Sender<WorkRequest>, Receiver<WorkRequest>),
+        client_request_channel: (Sender<ClientRequest>, Receiver<ClientRequest>),
+    ) {
+        let mut facade = AlbumArtFacade::new(&ctx(
+            app_event_channel,
+            work_request_channel,
+            client_request_channel,
+        ));
+        facade.set_size(ratatui::layout::Rect::new(0, 0, 10, 5));
+        let buffer = ratatui::buffer::Buffer::empty(ratatui::layout::Rect::new(0, 0, 10, 5));
+        facade.frame_rendered(&buffer);
+        facade.region_dirty = false;
+
+        facade.set_size(ratatui::layout::Rect::new(0, 0, 12, 6));
+        facade.frame_rendered(&buffer);
+        assert!(facade.region_dirty);
+    }
+
+    /// Cells outside the art pane area must not dirty the region.
+    #[rstest]
+    fn cells_outside_the_art_area_are_ignored(
+        app_event_channel: (Sender<AppEvent>, Receiver<AppEvent>),
+        work_request_channel: (Sender<WorkRequest>, Receiver<WorkRequest>),
+        client_request_channel: (Sender<ClientRequest>, Receiver<ClientRequest>),
+    ) {
+        let mut facade = AlbumArtFacade::new(&ctx(
+            app_event_channel,
+            work_request_channel,
+            client_request_channel,
+        ));
+        facade.set_size(ratatui::layout::Rect::new(0, 0, 4, 4));
+        let mut buffer = ratatui::buffer::Buffer::empty(ratatui::layout::Rect::new(0, 0, 10, 10));
+        facade.frame_rendered(&buffer);
+        facade.region_dirty = false;
+
+        // A change at (9, 9) is outside the 4x4 art pane area: no heal.
+        buffer.get_mut(9, 9).set_symbol("x");
+        facade.frame_rendered(&buffer);
+        assert!(!facade.region_dirty);
+    }
+}

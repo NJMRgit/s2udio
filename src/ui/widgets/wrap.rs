@@ -61,3 +61,16 @@ pub(crate) fn wrap_spans(spans: &[Span], width: u16) -> Vec<Line<'static>> {
     }
     rows
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wrap_to_width_breaks_on_words_and_keeps_paragraphs() {
+        assert_eq!(wrap_to_width("one two three", 8), vec!["one two", "three"]);
+        assert_eq!(wrap_to_width("short", 20), vec!["short"]);
+        assert_eq!(wrap_to_width("a\nb", 5), vec!["a", "b"]);
+    }
+}

@@ -1574,4 +1574,826 @@ pub fn set_volume(ctx: &Ctx, new_volume: u32) {
 
 
 
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use std::io::Write;
+    use std::os::unix::net::UnixListener;
+    use std::path::Path;
 
+    use super::{MpvPlaylistEntry, read_mpv_state, read_mpv_title};
+
+    /// A `Ctx` for the resume-seek logic: the socket path points nowhere, so
+    /// every `mpv_seek` is a fast connect failure and only the state machine
+    /// under test is exercised.
+    fn resume_test_ctx() -> crate::ctx::Ctx {
+        let (app_tx, app_rx) = crossbeam::channel::unbounded();
+        crate::tests::fixtures::ctx(
+            (app_tx, app_rx),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+        )
+    }
+
+    /// The attempt counter of the armed resume seek, if any.
+    fn armed(ctx: &crate::ctx::Ctx) -> Option<(f64, u8)> {
+        ctx.mpv.resume_seek.get().map(|(secs, attempts, _)| (secs, attempts))
+    }
+
+    /// Round 110 (host-verified): mpv v0.41 appends ANY sibling `.m3u` next to
+    /// the playlist file as an extra entry — with the stray file present the
+    /// launch played the extra entry and exited 3 ("some files played, some
+    /// didn't"), which is `unix_wait_status(768)`, the exact code the reported
+    /// torrent stream died with. The writer must therefore leave the directory
+    /// with exactly one `.m3u`, whatever was dropped there.
+    #[test]
+    fn write_mpv_m3u_leaves_no_sibling_playlist_behind() {
+        let dir = std::env::temp_dir().join("s2u-mpv");
+        std::fs::create_dir_all(&dir).expect("tmp dir");
+        let foreign = dir.join("someone-elses-playlist.m3u");
+        std::fs::write(&foreign, "#EXTM3U\nhttp://127.0.0.1:1/other\n").expect("write");
+        let own_stale = dir.join("s2u-mpv-playlist-1.m3u");
+        std::fs::write(&own_stale, "#EXTM3U\nhttp://127.0.0.1:1/stale\n").expect("write");
+
+        let entries = vec![MpvPlaylistEntry::new("t".to_owned(), "http://127.0.0.1:2/keep".to_owned(), None)];
+        let path = super::write_mpv_m3u(&entries);
+
+        assert!(path.exists(), "the launch's own playlist exists");
+        assert!(!foreign.exists(), "a foreign sibling playlist is removed");
+        assert!(!own_stale.exists(), "a stale sibling playlist is removed");
+        let siblings: Vec<String> = std::fs::read_dir(&dir)
+            .expect("dir")
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".m3u"))
+            .collect();
+        assert_eq!(siblings, vec![path.file_name().unwrap().to_string_lossy().into_owned()]);
+        let body = std::fs::read_to_string(&path).expect("read");
+        assert!(body.contains("http://127.0.0.1:2/keep"), "body: {body}");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The failure notice shown when mpv exits without playing must name the
+    /// reason mpv logged — `--no-terminal` suppresses it on stderr, so the log
+    /// file is the only witness (round 108's known gap, closed in round 110).
+    /// A benign `[v] … Failed …` line must not win over mpv's error level.
+    #[test]
+    fn mpv_log_reason_finds_the_first_error_line() {
+        let path = std::env::temp_dir().join(format!("s2u-mpv-reason-{}.log", std::process::id()));
+        std::fs::write(
+            &path,
+            "[   0.010][v][cplayer] Playing: http://127.0.0.1:3030/torrents/0/stream/0\n\
+             [   0.015][v][cplayer] Failed sending hook command auto_profiles/on_load. Removing hook.\n\
+             [   0.020][e][ffmpeg] tcp: Connection to tcp://127.0.0.1:3030 failed: Connection refused\n\
+             [   0.030][e][stream] Failed to open http://127.0.0.1:3030/torrents/0/stream/0.\n",
+        )
+        .expect("write");
+        let reason = super::mpv_log_reason(&path).expect("a reason");
+        assert!(reason.contains("Connection refused"), "reason: {reason}");
+        assert!(!reason.starts_with('['), "the mpv prefix is stripped: {reason}");
+        let _ = std::fs::remove_file(&path);
+        // No error level at all: fall back to the first failure-mentioning line.
+        std::fs::write(&path, "[   0.010][v][ytdl_hook] youtube-dl failed: unexpected error\n")
+            .expect("write");
+        let fallback = super::mpv_log_reason(&path).expect("a fallback reason");
+        assert!(fallback.contains("youtube-dl failed"), "fallback: {fallback}");
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(super::mpv_log_reason(Path::new("/nonexistent/s2u-mpv.log")), None);
+    }
+
+    /// The polling bug this fixes: mpv reports position 0 while it is still
+    /// opening an entry, and a seek sent then is dropped. The retry must not
+    /// spend an attempt until playback has actually started, must seek once
+    /// it has, and must stop once the position passed the target.
+    #[test]
+    fn resume_seek_waits_for_playback_then_clears_when_it_lands() {
+        let ctx = resume_test_ctx();
+        let socket = std::path::Path::new("/tmp/s2u-tests-no-such-mpv-socket");
+        ctx.mpv.resume_seek.set(Some((600.0, 0, None)));
+
+        // mpv is still opening the entry: no attempt, still armed.
+        super::apply_pending_resume_seek(&ctx, socket, 0.0, 0.0);
+        assert_eq!(armed(&ctx), Some((600.0, 0)));
+
+        // Playback started short of the target: one seek attempt.
+        super::apply_pending_resume_seek(&ctx, socket, 5.0, 0.0);
+        assert_eq!(armed(&ctx), Some((600.0, 1)));
+
+        // Within the 5 s tolerance of the target: done, cleared.
+        super::apply_pending_resume_seek(&ctx, socket, 600.0, 0.0);
+        assert_eq!(armed(&ctx), None);
+    }
+
+    /// A target at or past the known end of the video is dropped instead of
+    /// being retried forever.
+    #[test]
+    fn resume_seek_past_the_end_is_dropped() {
+        let ctx = resume_test_ctx();
+        let socket = std::path::Path::new("/tmp/s2u-tests-no-such-mpv-socket");
+        ctx.mpv.resume_seek.set(Some((96.0, 0, None)));
+        super::apply_pending_resume_seek(&ctx, socket, 5.0, 100.0);
+        assert_eq!(armed(&ctx), None);
+    }
+
+    /// The retry is attempt-bounded and rate-limited: a stream that never
+    /// reaches the target is not fought indefinitely, and a second seek is
+    /// not sent within the retry interval.
+    #[test]
+    fn resume_seek_retries_are_bounded_and_rate_limited() {
+        let ctx = resume_test_ctx();
+        let socket = std::path::Path::new("/tmp/s2u-tests-no-such-mpv-socket");
+        ctx.mpv
+            .resume_seek
+            .set(Some((600.0, super::MAX_START_SEEK_ATTEMPTS, None)));
+        super::apply_pending_resume_seek(&ctx, socket, 5.0, 0.0);
+        assert_eq!(armed(&ctx), None, "the attempt budget is spent");
+
+        ctx.mpv
+            .resume_seek
+            .set(Some((600.0, 1, Some(std::time::Instant::now()))));
+        super::apply_pending_resume_seek(&ctx, socket, 5.0, 0.0);
+        assert_eq!(armed(&ctx), Some((600.0, 1)), "rate-limited between attempts");
+    }
+
+    /// A fake mpv IPC server: answers each incoming line with one JSON
+    /// response line (like mpv's ipc protocol).
+    fn fake_mpv(socket: &std::path::Path, responses: Vec<&'static str>) {
+        let _ = std::fs::remove_file(socket);
+        let listener = UnixListener::bind(socket).unwrap();
+        std::thread::spawn(move || {
+            use std::io::{BufRead, BufReader};
+            if let Ok((stream, _)) = listener.accept() {
+                let mut reader = BufReader::new(stream);
+                let mut line = String::new();
+                let mut i = 0;
+                // Like real mpv: answer each command line immediately.
+                while reader.read_line(&mut line).is_ok_and(|n| n > 0) {
+                    if i < responses.len() {
+                        let _ = writeln!(reader.get_mut(), "{}", responses[i]);
+                        let _ = reader.get_mut().flush();
+                    }
+                    i += 1;
+                    line.clear();
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn detach_child_makes_the_child_its_own_session_leader() {
+        use super::detach_child;
+        let mut cmd = std::process::Command::new("sleep");
+        cmd.arg("30");
+        unsafe { detach_child(&mut cmd) };
+        let mut child = cmd.spawn().expect("sleep must spawn");
+        // /proc/<pid>/stat: after the comm field (the last ')') the fields
+        // are state, ppid, pgrp, session, ... A setsid'd child is its own
+        // process-group leader and session leader (pgrp == session == pid).
+        let stat = std::fs::read_to_string(format!("/proc/{}/stat", child.id()))
+            .expect("child stat readable");
+        let after_comm = stat.rsplit_once(')').map(|(_, r)| r).unwrap_or(&stat);
+        let fields: Vec<&str> = after_comm.split_whitespace().collect();
+        assert!(fields.len() > 3, "stat fields: {stat}");
+        let pid = i64::from(child.id());
+        assert_eq!(fields[2].parse::<i64>().unwrap(), pid, "pgrp must be its own");
+        assert_eq!(fields[3].parse::<i64>().unwrap(), pid, "session must be its own");
+        // SIGHUP (signal 1) must be ignored: /proc/<pid>/status SigIgn is a
+        // bitmask whose bit 0 is SIGHUP.
+        let status = std::fs::read_to_string(format!("/proc/{}/status", child.id()))
+            .expect("child status readable");
+        let sigign = status.lines().find_map(|l| l.strip_prefix("SigIgn:")).expect("SigIgn line");
+        let sigign = u64::from_str_radix(sigign.trim(), 16).expect("SigIgn hex");
+        assert_eq!(sigign & 1, 1, "SIGHUP must be ignored: SigIgn={sigign:#x}");
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    #[test]
+    fn read_mpv_state_parses_responses_and_detects_a_dead_socket() {
+        let dir = std::env::temp_dir().join(format!("mpv-read-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let socket = dir.join("mpv.sock");
+
+        // Live mpv: all six properties answered.
+        fake_mpv(
+            &socket,
+            vec![
+                r#"{"error":"success","data":42.5}"#,
+                r#"{"error":"success","data":false}"#,
+                r#"{"error":"success","data":600.0}"#,
+                r#"{"error":"success","data":71}"#,
+                r#"{"error":"success","data":0}"#,
+                r#"{"error":"success","data":1}"#,
+            ],
+        );
+        let state = read_mpv_state(&socket).expect("live mpv must read Some");
+        assert_eq!(state.0, 42.5);
+        assert!(!state.1);
+        assert_eq!(state.2, 600.0);
+        assert_eq!(state.3, Some(71));
+        assert_eq!(state.4, Some(0));
+        assert_eq!(state.5, Some(1));
+        assert_eq!(read_mpv_title(&socket), None, "no title property was answered");
+
+        // Dead mpv: the socket file is gone / connection refused. This used
+        // to come back as Some((0.0, false, 0.0, ..)) — the zombie session
+        // that kept MPRIS alive and swallowed new videos instead of
+        // launching a fresh mpv.
+        let _ = std::fs::remove_file(&socket);
+        assert!(read_mpv_state(&socket).is_none(), "dead mpv must read None");
+        assert!(read_mpv_title(&socket).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_mpv_state_keeps_fields_aligned_when_duration_is_unavailable() {
+        // An HLS stream whose demuxer has not loaded yet answers `duration`
+        // as unavailable. Each property must land in its own slot: the old
+        // positional-number parser shifted every later field (volume would
+        // show up as `duration`).
+        let dir = std::env::temp_dir().join(format!("mpv-dur-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let socket = dir.join("mpv.sock");
+        fake_mpv(
+            &socket,
+            vec![
+                r#"{"error":"success","data":42.5}"#,
+                r#"{"error":"success","data":false}"#,
+                r#"{"error":"property unavailable","data":null}"#,
+                r#"{"error":"success","data":71}"#,
+                r#"{"error":"success","data":0}"#,
+                r#"{"error":"success","data":1}"#,
+            ],
+        );
+        let state = read_mpv_state(&socket).expect("live mpv must read Some");
+        assert_eq!(state.0, 42.5, "position stays in slot 0");
+        assert!(!state.1);
+        assert_eq!(state.2, 0.0, "duration is 0, not the volume value");
+        assert_eq!(state.3, Some(71), "volume stays in slot 3");
+        assert_eq!(state.4, Some(0), "playlist-pos stays in slot 4");
+        assert_eq!(state.5, Some(1), "playlist-count stays in slot 5");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn is_provisional_title_detects_stream_basenames() {
+        use super::{is_provisional_title, is_stream_basename};
+        // A resolved HLS/audio stream's basename must be treated as
+        // provisional so the saved title / yt-info is used instead.
+        assert!(is_stream_basename("index.m3u8"));
+        assert!(is_stream_basename("audio.m4a"));
+        assert!(!is_stream_basename("a real song name.flac"));
+        assert!(!is_stream_basename("dir/index.m3u8"));
+        assert!(is_provisional_title("index.m3u8"));
+        assert!(is_provisional_title("watch?v=abc123"));
+        assert!(is_provisional_title("https://example/stream"));
+        assert!(!is_provisional_title("Rick Astley - Never Gonna Give You Up"));
+    }
+
+    #[test]
+    fn playlist_entry_serializes_original_url_and_defaults_when_missing() {
+        use super::MpvPlaylistEntry;
+        // New format round-trips the canonical link.
+        let mut entry = MpvPlaylistEntry::new(
+            "Rick Astley - Never Gonna Give You Up",
+            "https://rr4.example/audio.m3u8",
+            None,
+        );
+        entry.original_url = Some("https://youtu.be/x".to_owned());
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(json.contains("original_url"), "{json}");
+        let back: MpvPlaylistEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.original_url.as_deref(), Some("https://youtu.be/x"));
+        assert_eq!(back.lookup_url(), "https://youtu.be/x");
+        // Old saved files (no `original_url` field) still deserialize.
+        let old = r#"{"title":"T","url":"https://u/x","duration":null}"#;
+        let old_entry: MpvPlaylistEntry = serde_json::from_str(old).unwrap();
+        assert_eq!(old_entry.original_url, None);
+        assert_eq!(old_entry.lookup_url(), "https://u/x");
+    }
+
+    #[test]
+    fn read_mpv_playlist_parses_entries_and_falls_back_to_the_path() {
+        use super::read_mpv_playlist;
+        let dir = std::env::temp_dir().join(format!("mpv-pl-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let socket = dir.join("mpv.sock");
+
+        // mpv reports its playlist: filename is the URL (the original
+        // YouTube link for a resolved stream), title the media title.
+        fake_mpv(
+            &socket,
+            vec![
+                r#"{"error":"success","data":[{"filename":"https://www.youtube.com/watch?v=Hc9qrvQ3QPg","title":"I tested EVERY 32bit float wireless lav mic","current":true}]}"#,
+                r#"{"error":"success","data":"https://www.youtube.com/watch?v=Hc9qrvQ3QPg"}"#,
+            ],
+        );
+        let entries = read_mpv_playlist(&socket);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].url, "https://www.youtube.com/watch?v=Hc9qrvQ3QPg");
+        assert_eq!(entries[0].title, "I tested EVERY 32bit float wireless lav mic");
+
+        // No playlist property yet (single loaded file): the playing path
+        // is the only entry.
+        fake_mpv(
+            &socket,
+            vec![
+                r#"{"error":"property unavailable","data":null}"#,
+                r#"{"error":"success","data":"https://youtu.be/abc123"}"#,
+            ],
+        );
+        let entries = read_mpv_playlist(&socket);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].url, "https://youtu.be/abc123");
+        assert_eq!(entries[0].title, "https://youtu.be/abc123");
+
+        // Dead socket: no entries (the reattach falls back gracefully).
+        let _ = std::fs::remove_file(&socket);
+        assert!(read_mpv_playlist(&socket).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reattach_recovers_the_playlist_from_mpv_when_the_state_file_has_none() {
+        use std::io::{BufRead, BufReader};
+
+        use super::detect_mpv_session_at;
+        let dir = std::env::temp_dir().join(format!("mpv-reattach-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let socket = dir.join("mpv.sock");
+
+        // mpv answers in order: read_mpv_state (6 lines), read_mpv_title
+        // (1 line), read_mpv_playlist (playlist + path).
+        let responses = [
+            r#"{"error":"success","data":123.4}"#,
+            r#"{"error":"success","data":false}"#,
+            r#"{"error":"success","data":1598.0}"#,
+            r#"{"error":"success","data":80}"#,
+            r#"{"error":"success","data":0}"#,
+            r#"{"error":"success","data":1}"#,
+            r#"{"error":"success","data":"I tested EVERY 32bit float wireless lav mic"}"#,
+            r#"{"error":"success","data":[{"filename":"https://www.youtube.com/watch?v=Hc9qrvQ3QPg","title":"I tested EVERY 32bit float wireless lav mic","current":true}]}"#,
+            r#"{"error":"success","data":"https://www.youtube.com/watch?v=Hc9qrvQ3QPg"}"#,
+        ];
+        let _ = std::fs::remove_file(&socket);
+        let listener = UnixListener::bind(&socket).unwrap();
+        std::thread::spawn(move || {
+            // Three sequential connections (one per mpv_exchange call);
+            // answer all command lines in order across connections.
+            let mut i = 0;
+            for _ in 0..3 {
+                if let Ok((stream, _)) = listener.accept() {
+                    let mut reader = BufReader::new(stream);
+                    let mut line = String::new();
+                    while reader.read_line(&mut line).is_ok_and(|n| n > 0) {
+                        if i < responses.len() {
+                            let _ = writeln!(reader.get_mut(), "{}", responses[i]);
+                            let _ = reader.get_mut().flush();
+                        }
+                        i += 1;
+                        line.clear();
+                    }
+                }
+            }
+        });
+
+        let (app_tx, _app_rx) = crossbeam::channel::unbounded();
+        let mut ctx = crate::tests::fixtures::ctx(
+            (app_tx, _app_rx),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+        );
+        let mut config = crate::config::Config::default();
+        config.cache_dir = Some(dir.clone());
+        ctx.config = std::sync::Arc::new(config);
+        // A fresh state file that knows the title but carries an empty
+        // playlist (e.g. written before the session had entries, or the
+        // stale-file case — both leave the playlist empty).
+        crate::ui::modals::paste::write_mpv_mpris_state(&ctx);
+        {
+            // Rewrite with an empty playlist and the known title.
+            let path = crate::ui::modals::paste::mpv_mpris_state_path(Some(&dir));
+            std::fs::write(
+                &path,
+                r#"{"title":"stale title","artist":"","art":"","playing":true,"position":0,"duration":0,"socket":"","item_id":"","playlist":[],"playlist_pos":0}"#,
+            )
+            .unwrap();
+        }
+
+        assert!(detect_mpv_session_at(&mut ctx, socket), "a live mpv session must be detected");
+        // The playlist is recovered from mpv itself, so the yt-info /
+        // chapters / thumbnail lookups (keyed by the playing URL) work.
+        assert_eq!(ctx.mpv.playlist.borrow().len(), 1, "playlist recovered");
+        assert_eq!(ctx.mpv.playlist.borrow()[0].url, "https://www.youtube.com/watch?v=Hc9qrvQ3QPg");
+        assert_eq!(ctx.mpv.title, "stale title", "fresh state file is trusted for the title");
+        assert_eq!(ctx.mpv.playlist_pos.get(), Some(0));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The persistent video playlist: add/append semantics, the current
+    /// entry matched by URL, and the persistence file round-trip.
+    #[test]
+    fn video_playlist_add_append_current_and_persist() {
+        use crate::core::mpv::{
+            MpvPlaylistEntry, add_to_video_playlist, video_playlist_current_idx,
+        };
+        use crate::tests::fixtures::ctx;
+
+        let (app_tx, _app_rx) = crossbeam::channel::unbounded();
+        let mut ctx = ctx(
+            (app_tx, _app_rx),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+        );
+        let dir = std::env::temp_dir().join(format!("video-playlist-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let mut config = crate::config::Config::default();
+        config.cache_dir = Some(dir.clone());
+        ctx.config = std::sync::Arc::new(config);
+
+        *ctx.video_playlist.borrow_mut() = vec![
+            MpvPlaylistEntry::new(
+                "A",
+                "http://jf/Videos/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/stream",
+                None,
+            ),
+            MpvPlaylistEntry::new(
+                "B",
+                "http://jf/Videos/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/stream",
+                None,
+            ),
+            MpvPlaylistEntry::new(
+                "C",
+                "http://jf/Videos/cccccccccccccccccccccccccccccccc/stream",
+                None,
+            ),
+        ];
+        // The session plays B (matched by URL, not by position).
+        ctx.mpv.active = true;
+        ctx.mpv.playlist.borrow_mut().push(MpvPlaylistEntry::new(
+            "B",
+            "http://jf/Videos/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/stream",
+            None,
+        ));
+        ctx.mpv.playlist_pos.set(Some(0));
+        assert_eq!(video_playlist_current_idx(&ctx), Some(1));
+
+        // Add (after the current entry) and append.
+        add_to_video_playlist(
+            &ctx,
+            vec![MpvPlaylistEntry::new(
+                "D",
+                "http://jf/Videos/dddddddddddddddddddddddddddddddd/stream",
+                None,
+            )],
+            true,
+        );
+        add_to_video_playlist(
+            &ctx,
+            vec![MpvPlaylistEntry::new(
+                "E",
+                "http://jf/Videos/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee/stream",
+                None,
+            )],
+            false,
+        );
+        let titles: Vec<String> =
+            ctx.video_playlist.borrow().iter().map(|e| e.title.clone()).collect();
+        assert_eq!(titles, vec!["A", "B", "D", "C", "E"]);
+
+        // A URL-less entry is dropped.
+        add_to_video_playlist(&ctx, vec![MpvPlaylistEntry::new("X", "", None)], true);
+        assert_eq!(ctx.video_playlist.borrow().len(), 5);
+
+        // The queue tab switched to the Video list.
+        assert_eq!(ctx.queue_tab.get(), crate::ctx::QueueTabMode::Video);
+
+        // The persistence file round-trips the queue.
+        let path = crate::ui::modals::paste::video_playlist_path(Some(&dir));
+        let content = std::fs::read_to_string(&path).expect("video playlist saved");
+        let stored: Vec<MpvPlaylistEntry> =
+            serde_json::from_str(&content).expect("valid JSON playlist");
+        assert_eq!(stored.len(), 5);
+        assert_eq!(stored[2].title, "D");
+        assert_eq!(stored[3].title, "C");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Jellyfin item metadata replaces the URL-derived "stream" titles in
+    /// the session playlist and the persistent queue.
+    #[test]
+    fn jellyfin_metadata_updates_the_playlist_titles() {
+        use crate::core::mpv::{MpvPlaylistEntry, update_jellyfin_entry_title};
+        use crate::tests::fixtures::ctx;
+
+        let (app_tx, _app_rx) = crossbeam::channel::unbounded();
+        let mut ctx = ctx(
+            (app_tx, _app_rx),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+        );
+        let item_id = "0123456789abcdef0123456789abcdef";
+        let url = format!("http://jf/Videos/{item_id}/stream?static=true");
+        // Session plays a single Jellyfin video recorded with the
+        // URL-derived title; the queue holds the same stream too.
+        ctx.mpv.active = true;
+        ctx.mpv.playlist.borrow_mut().push(MpvPlaylistEntry::new("stream", url.clone(), None));
+        ctx.video_playlist.borrow_mut().push(MpvPlaylistEntry::new("stream", url.clone(), None));
+
+        update_jellyfin_entry_title(&ctx, item_id, "Real Episode Name");
+
+        assert_eq!(ctx.mpv.playlist.borrow()[0].title, "Real Episode Name");
+        assert_eq!(ctx.video_playlist.borrow()[0].title, "Real Episode Name");
+        // Unrelated entries are untouched.
+        ctx.video_playlist.borrow_mut().push(MpvPlaylistEntry::new(
+            "stream",
+            "http://jf/Videos/ffffffffffffffffffffffffffffffff/stream",
+            None,
+        ));
+        update_jellyfin_entry_title(&ctx, item_id, "Real Episode Name");
+        assert_eq!(
+            ctx.video_playlist.borrow()[1].title,
+            "stream",
+            "other items' titles are not overwritten"
+        );
+    }
+
+    /// The poll confirms a recorded playlist entry against mpv's actual
+    /// playing path before adopting it as the current item.
+    #[test]
+    fn recorded_entry_for_mpv_pos_confirms_the_playing_entry() {
+        use super::{MpvPlaylistEntry, recorded_entry_for_mpv_pos};
+
+        // Jellyfin stream URLs: {base}/Videos/<32-hex-id>/stream. The
+        // recorded season (rotated: the clicked episode first) and mpv's
+        // real playlist can diverge after a `loadfile … replace` splice;
+        // a same-length old season leaves mpv's `playlist-pos` pointing at
+        // a stale index, and following it would surface the *next*
+        // episode's metadata (+1) while mpv plays the clicked one.
+        let clicked = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let next = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let season: Vec<MpvPlaylistEntry> = [clicked, next, "cccccccccccccccccccccccccccccccc"]
+            .iter()
+            .map(|id| {
+                MpvPlaylistEntry::new(
+                    format!("episode-{id}"),
+                    format!("http://jf/Videos/{id}/stream?static=true"),
+                    None,
+                )
+            })
+            .collect();
+
+        // mpv is playing the clicked episode: the recorded entry at mpv's
+        // position matches its path -> adopted.
+        let adopted = recorded_entry_for_mpv_pos(
+            &season,
+            0,
+            Some(&format!("http://jf/Videos/{clicked}/stream?static=true")),
+        );
+        let expected_title = format!("episode-{clicked}");
+        assert_eq!(
+            adopted.as_ref().map(|e| e.title.as_str()),
+            Some(expected_title.as_str()),
+            "matching entry is adopted"
+        );
+
+        // mpv is still on the clicked episode but its reported position is
+        // the stale index 1 (old-season splice): the recorded entry at that
+        // index is the NEXT episode -> the advance is refused so the UI
+        // keeps showing the clicked episode.
+        let refused = recorded_entry_for_mpv_pos(
+            &season,
+            1,
+            Some(&format!("http://jf/Videos/{clicked}/stream?static=true")),
+        );
+        assert!(refused.is_none(), "diverged position is not adopted");
+
+        // mpv genuinely advanced to the next episode: its path matches the
+        // recorded entry at the new position -> adopted.
+        let advanced = recorded_entry_for_mpv_pos(
+            &season,
+            1,
+            Some(&format!("http://jf/Videos/{next}/stream?static=true")),
+        );
+        assert!(advanced.is_some(), "real auto-advance is adopted");
+
+        // Out of range: nothing to adopt.
+        let clicked_path = format!("http://jf/Videos/{clicked}/stream?static=true");
+        assert!(recorded_entry_for_mpv_pos(&season, 5, Some(&clicked_path)).is_none());
+
+        // A non-Jellyfin entry (YouTube etc.) carries no item id: the
+        // positional behavior is preserved regardless of mpv's path.
+        let yt = vec![MpvPlaylistEntry::new("y", "https://www.youtube.com/watch?v=abc", None)];
+        assert!(
+            recorded_entry_for_mpv_pos(&yt, 0, Some("https://rr4.example/stream.m3u8")).is_some()
+        );
+        assert!(recorded_entry_for_mpv_pos(&yt, 0, None).is_some());
+    }
+
+    /// `read_mpv_path` returns the playing file/URL, `None` when mpv does
+    /// not answer (or the socket is gone).
+    #[test]
+    fn read_mpv_path_parses_the_playing_path() {
+        use super::read_mpv_path;
+
+        let dir = std::env::temp_dir().join(format!("mpv-path-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let socket = dir.join("mpv.sock");
+        fake_mpv(
+            &socket,
+            vec![
+                r#"{"error":"success","data":"http://jf/Videos/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/stream"}"#,
+            ],
+        );
+        assert_eq!(
+            read_mpv_path(&socket).as_deref(),
+            Some("http://jf/Videos/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/stream")
+        );
+
+        let _ = std::fs::remove_file(&socket);
+        assert!(read_mpv_path(&socket).is_none(), "dead socket reads None");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `mpv_playlist_clear` sends mpv's `playlist-clear` command.
+    #[test]
+    fn mpv_playlist_clear_sends_the_command() {
+        use std::io::{BufRead, BufReader};
+
+        use super::mpv_playlist_clear;
+        let dir = std::env::temp_dir().join(format!("mpv-clear-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let socket = dir.join("mpv.sock");
+        let _ = std::fs::remove_file(&socket);
+        let listener = UnixListener::bind(&socket).unwrap();
+        std::thread::spawn(move || {
+            if let Ok((stream, _)) = listener.accept() {
+                let mut reader = BufReader::new(stream);
+                let mut line = String::new();
+                if reader.read_line(&mut line).is_ok_and(|n| n > 0) {
+                    let _ = writeln!(reader.get_mut(), r#"{{"error":"success"}}"#);
+                    let _ = reader.get_mut().flush();
+                }
+            }
+        });
+        mpv_playlist_clear(&socket);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn session_playlist_shown_for_torrent_and_jellyfin_but_not_yt() {
+        use crate::core::mpv::MpvPlaylistEntry;
+        let (app_tx, _app_rx) = crossbeam::channel::unbounded();
+        let mut ctx = crate::tests::fixtures::ctx(
+            (app_tx, _app_rx),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+        );
+        ctx.mpv.active = true;
+
+        // A torrent session: the Queue tab's Video list shows the session
+        // playlist (the torrent's files) even though no Jellyfin item
+        // plays — the persistent list cannot hold the token-bearing URLs.
+        ctx.mpv.playlist.borrow_mut().push(MpvPlaylistEntry::new(
+            "ep01.mkv",
+            "http://s2u:tok@127.0.0.1:3030/torrents/1/stream/0",
+            None,
+        ));
+        ctx.mpv.playlist.borrow_mut().push(MpvPlaylistEntry::new(
+            "ep02.mkv",
+            "http://s2u:tok@127.0.0.1:3030/torrents/1/stream/1",
+            None,
+        ));
+        assert!(super::session_playlist_shown(&ctx), "torrent session playlist is shown");
+
+        // A Jellyfin item session: the season playlist is shown too.
+        ctx.mpv.item_id = Some("0123456789abcdef0123456789abcdef".to_owned());
+        assert!(super::session_playlist_shown(&ctx), "jellyfin session playlist is shown");
+        ctx.mpv.item_id = None;
+
+        // A plain YouTube video: the persistent playlist is shown again.
+        ctx.mpv.playlist.borrow_mut().clear();
+        ctx.mpv.playlist.borrow_mut().push(MpvPlaylistEntry::new(
+            "some video",
+            "https://youtu.be/abc123",
+            None,
+        ));
+        assert!(!super::session_playlist_shown(&ctx), "non-torrent session uses the queue");
+    }
+
+    #[test]
+    fn mpv_socket_prefers_live_fixed_socket_then_per_instance_then_stale() {
+        use std::io::{BufRead as _, Write as _};
+
+        // One temp dir per scenario so listener lifetimes stay obvious.
+        let base = std::env::temp_dir().join(format!("mpv-socket-test-{}", std::process::id()));
+
+        // 1. No sockets at all -> None.
+        let dir = base.join("none");
+        std::fs::create_dir_all(dir.join("mpvSockets")).unwrap();
+        assert_eq!(super::mpv_socket_in(&dir.join("mpvsocket"), &dir.join("mpvSockets"), None), None);
+
+        // 2. A stale fixed socket file (no listener) plus a live per-instance
+        //    socket -> the live per-instance socket wins.
+        let dir = base.join("per-instance");
+        std::fs::create_dir_all(dir.join("mpvSockets")).unwrap();
+        let fixed = dir.join("mpvsocket");
+        let per = dir.join("mpvSockets");
+        std::fs::write(&fixed, b"stale").unwrap();
+        let per_sock = per.join("100");
+        let listener = UnixListener::bind(&per_sock).unwrap();
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut line = String::new();
+                let _ = std::io::BufReader::new(&stream).read_line(&mut line);
+                let _ = writeln!(stream, r#"{{"error":"success"}}"#);
+            }
+        });
+        assert_eq!(super::mpv_socket_in(&fixed, &per, None).as_deref(), Some(per_sock.as_path()));
+
+        // 3. The fixed socket live -> it wins even over a newer per-instance
+        //    entry (the fixed socket is the SVP4 one and must be used).
+        let dir = base.join("fixed-live");
+        std::fs::create_dir_all(dir.join("mpvSockets")).unwrap();
+        let fixed = dir.join("mpvsocket");
+        let per = dir.join("mpvSockets");
+        let fixed_listener = UnixListener::bind(&fixed).unwrap();
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = fixed_listener.accept() {
+                let mut line = String::new();
+                let _ = std::io::BufReader::new(&stream).read_line(&mut line);
+                let _ = writeln!(stream, r#"{{"error":"success"}}"#);
+            }
+        });
+        let newer = per.join("101");
+        std::fs::write(&newer, b"x").unwrap();
+        assert_eq!(super::mpv_socket_in(&fixed, &per, None).as_deref(), Some(fixed.as_path()));
+
+        // 4. Fixed stale, no per-instance sockets -> the stale fixed path is
+        //    returned so callers can detect the dead socket (old fallback).
+        let dir = base.join("stale-only");
+        std::fs::create_dir_all(dir.join("mpvSockets")).unwrap();
+        let fixed = dir.join("mpvsocket");
+        std::fs::write(&fixed, b"stale").unwrap();
+        assert_eq!(
+            super::mpv_socket_in(&fixed, &dir.join("mpvSockets"), None).as_deref(),
+            Some(fixed.as_path())
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn connect_socket_times_out_on_a_stuck_listener() {
+        use std::time::{Duration, Instant};
+
+        // A listener with a zero backlog that never accepts: the one
+        // allowed pending connection fills the slot, so the next connect
+        // gets EAGAIN — a blocking connect would wait forever (a leftover
+        // thumbfast thumbnailer once held /tmp/mpvsocket like this and
+        // froze the whole app at startup). connect_socket must give up.
+        let dir = std::env::temp_dir().join(format!("mpv-connect-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let socket = dir.join("stuck.sock");
+        let _ = std::fs::remove_file(&socket);
+
+        let fd = unsafe {
+            let fd = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0);
+            assert!(fd >= 0, "socket: {}", std::io::Error::last_os_error());
+            let path_c =
+                std::ffi::CString::new(socket.as_os_str().as_encoded_bytes()).expect("no NUL");
+            let mut addr: libc::sockaddr_un = std::mem::zeroed();
+            addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
+            std::ptr::copy_nonoverlapping(
+                path_c.as_bytes().as_ptr(),
+                addr.sun_path.as_mut_ptr() as *mut u8,
+                path_c.as_bytes().len(),
+            );
+            let len = std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t;
+            assert_eq!(
+                libc::bind(fd, &addr as *const libc::sockaddr_un as *const libc::sockaddr, len),
+                0,
+                "bind: {}",
+                std::io::Error::last_os_error()
+            );
+            assert_eq!(libc::listen(fd, 0), 0, "listen: {}", std::io::Error::last_os_error());
+            fd
+        };
+        // Occupy the single backlog slot (keep it open until the end).
+        let _slot =
+            std::os::unix::net::UnixStream::connect(&socket).expect("first connect is allowed");
+
+        let start = Instant::now();
+        let result = super::connect_socket(&socket, Duration::from_millis(200));
+        let elapsed = start.elapsed();
+        assert!(result.is_err(), "a stuck listener must not connect: {result:?}");
+        assert!(elapsed < Duration::from_secs(5), "connect must give up fast, took {elapsed:?}");
+
+        drop(_slot);
+        unsafe {
+            libc::close(fd);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

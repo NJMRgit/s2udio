@@ -700,3 +700,177 @@ fn apply_pending_start_seek(ctx: &Ctx) {
         Ok(())
     });
 }
+
+/// Round 105d: the current-song auto-resolve must not **start** playback on
+/// its own — a stopped (or paused) MPD keeps its `songid`, which can point at
+/// an unresolved row after a restore, and resolving it with `ReplaceAndPlay`
+/// would play it without any user action.
+#[cfg(test)]
+mod resolve_current_song_tests {
+    use super::*;
+    use crate::mpd::commands::Song;
+    use crate::shared::events::WorkRequest;
+    use crate::ui::modals::paste::YtAction;
+
+    fn rig(
+        queue: Vec<Song>,
+        songid: Option<u32>,
+        state: State,
+    ) -> (Ctx, crossbeam::channel::Receiver<WorkRequest>) {
+        let app = crossbeam::channel::unbounded();
+        let work = crossbeam::channel::unbounded();
+        let client = crossbeam::channel::unbounded();
+        // Keep the fixture's receivers alive: the code under test sends on all
+        // three channels.
+        Box::leak(Box::new(app.1.clone()));
+        let work_rx = work.1.clone();
+        Box::leak(Box::new(client.1.clone()));
+        let mut ctx = crate::tests::fixtures::ctx(
+            (app.0, app.1),
+            (work.0, work.1),
+            (client.0, client.1),
+        );
+        ctx.queue = queue;
+        ctx.status.songid = songid;
+        ctx.status.state = state;
+        (ctx, work_rx)
+    }
+
+    fn row(id: u32, file: &str) -> Song {
+        Song { id, file: file.to_owned(), ..Default::default() }
+    }
+
+    fn asks_play(work_rx: &crossbeam::channel::Receiver<WorkRequest>, link: &str, id: u32) -> bool {
+        work_rx.try_iter().any(|r| {
+            matches!(
+                r,
+                WorkRequest::ResolveYtStreams { urls, action, .. }
+                    if urls == vec![link.to_owned()]
+                        && matches!(action, YtAction::ReplaceAndPlay(found) if found == id)
+            )
+        })
+    }
+
+    /// A stopped queue whose retained current song is an unresolved link must
+    /// not be resolved into playback — that is the auto-start the user saw
+    /// after a restore.
+    #[test]
+    fn a_stopped_queue_never_auto_starts_playback() {
+        let link = "https://www.youtube.com/watch?v=STALE#s2u-audio";
+        let (ctx, work_rx) = rig(vec![row(7, link)], Some(7), State::Stop);
+        resolve_current_song(&ctx);
+        assert_eq!(
+            work_rx.try_iter().count(),
+            0,
+            "a stopped queue is not resolved into playback"
+        );
+    }
+
+    /// Paused is not playing either: nothing starts itself.
+    #[test]
+    fn a_paused_queue_never_auto_starts_playback() {
+        let link = "https://www.youtube.com/watch?v=STALE#s2u-audio";
+        let (ctx, work_rx) = rig(vec![row(7, link)], Some(7), State::Pause);
+        resolve_current_song(&ctx);
+        assert_eq!(work_rx.try_iter().count(), 0);
+    }
+
+    /// An expired resolved row at a stopped current song is likewise left
+    /// alone (the expired arm can also play a replacement).
+    #[test]
+    fn a_stopped_expired_row_never_auto_starts_playback() {
+        const EXPIRED: &str = "https://rr2.googlevideo.com/videoplayback?expire=1000000000&id=a";
+        let (ctx, work_rx) = rig(vec![row(7, EXPIRED)], Some(7), State::Stop);
+        ctx.yt_info.borrow_mut().insert(
+            EXPIRED.to_owned(),
+            crate::shared::ytdlp::YtStreamInfo {
+                url: EXPIRED.to_owned(),
+                original_url: "https://www.youtube.com/watch?v=STALE2".to_owned(),
+                title: "Stale".to_owned(),
+                ..Default::default()
+            },
+        );
+        resolve_current_song(&ctx);
+        assert_eq!(work_rx.try_iter().count(), 0);
+    }
+
+    /// While MPD is actually playing the unresolved row, the round-91
+    /// behavior stands: resolve it and play the replacement.
+    #[test]
+    fn a_playing_current_tagged_row_is_resolved_and_played() {
+        let link = "https://www.youtube.com/watch?v=PLAY";
+        let tagged = format!("{link}#s2u-audio");
+        let (ctx, work_rx) = rig(vec![row(8, &tagged)], Some(8), State::Play);
+        resolve_current_song(&ctx);
+        assert!(asks_play(&work_rx, link, 8), "the playing row is resolved into playback");
+    }
+}
+
+/// 2026-10-15: the decode-error recovery budget that bounds the resolve storm.
+#[cfg(test)]
+mod decode_recovery_budget_tests {
+    use super::{DECODE_RECOVERY_LIMIT, DECODE_RECOVERY_WINDOW, StatusState};
+    use std::time::{Duration, Instant};
+
+    fn at(secs: u64) -> Instant {
+        Instant::now() + Duration::from_secs(secs)
+    }
+
+    /// Ordinary one-off recoveries are never refused: a stale URL mid-track,
+    /// then another much later, both resolve.
+    #[test]
+    fn ordinary_recoveries_are_allowed() {
+        let mut state = StatusState::new();
+        assert!(state.may_recover_decode_error(at(0)));
+        // Well outside the window: the budget has reset.
+        assert!(state.may_recover_decode_error(at(60)));
+    }
+
+    /// A run of failures exhausts the budget, so the cascade stops instead of
+    /// spawning a resolve per skipped row.
+    #[test]
+    fn a_run_of_failures_exhausts_the_budget() {
+        let mut state = StatusState::new();
+        for i in 0..DECODE_RECOVERY_LIMIT {
+            assert!(
+                state.may_recover_decode_error(at(0)),
+                "recovery {} of the budget is allowed",
+                i + 1
+            );
+        }
+        assert!(
+            !state.may_recover_decode_error(at(1)),
+            "the budget is spent: the rest is left to MPD"
+        );
+    }
+
+    /// The budget refills once the window has passed, so a later genuine
+    /// failure is still recovered.
+    #[test]
+    fn the_budget_refills_after_the_window() {
+        let mut state = StatusState::new();
+        for _ in 0..DECODE_RECOVERY_LIMIT {
+            assert!(state.may_recover_decode_error(at(0)));
+        }
+        assert!(!state.may_recover_decode_error(at(1)), "spent inside the window");
+        let after = DECODE_RECOVERY_WINDOW + Duration::from_secs(1);
+        assert!(
+            state.may_recover_decode_error(at(after.as_secs())),
+            "a later failure is recovered again"
+        );
+    }
+
+    /// The boundary is exclusive: exactly one window later the oldest entry
+    /// has aged out.
+    #[test]
+    fn the_window_boundary_is_exclusive() {
+        let mut state = StatusState::new();
+        for _ in 0..DECODE_RECOVERY_LIMIT {
+            assert!(state.may_recover_decode_error(at(0)));
+        }
+        assert!(
+            state.may_recover_decode_error(at(DECODE_RECOVERY_WINDOW.as_secs())),
+            "the window has elapsed, so one slot is free"
+        );
+    }
+}

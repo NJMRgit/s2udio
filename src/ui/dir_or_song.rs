@@ -523,3 +523,504 @@ impl AsDirOrSong for DirOrSong {
         }
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod ordtest {
+    use std::{
+        sync::{LazyLock, atomic::AtomicU32},
+        time::Duration,
+    };
+
+    use itertools::Itertools;
+
+    use super::DirOrSong;
+    use crate::{
+        config::{
+            sort_mode::{SortMode, SortOptions},
+            theme::properties::SongProperty,
+        },
+        mpd::commands::{Song, metadata_tag::MetadataTag},
+        ui::dirstack::DirStackItem,
+    };
+
+    static LAST_ID: AtomicU32 = AtomicU32::new(1);
+    static NOW: LazyLock<chrono::DateTime<chrono::Utc>> = LazyLock::new(chrono::Utc::now);
+    pub fn new_id() -> u32 {
+        LAST_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn song(name: &str, metadata: &[(&str, &str)]) -> DirOrSong {
+        song_mtime(name, metadata, &NOW.to_rfc3339())
+    }
+
+    fn song_mtime(name: &str, metadata: &[(&str, &str)], mtime: &str) -> DirOrSong {
+        DirOrSong::Song(Song {
+            id: new_id(),
+            file: name.to_string(),
+            duration: Some(Duration::from_secs(1)),
+            metadata: metadata
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), MetadataTag::Single((*v).to_string())))
+                .collect(),
+            last_modified: mtime.parse().unwrap(),
+            added: None,
+        })
+    }
+
+    fn dir(name: &str) -> DirOrSong {
+        dir_mtime(name, &NOW.to_rfc3339())
+    }
+    fn dir_mtime(name: &str, mtime: &str) -> DirOrSong {
+        DirOrSong::Dir {
+            name: name.to_string(),
+            full_path: name.to_string(),
+            last_modified: mtime.parse().unwrap(),
+            playlist: false,
+        }
+    }
+
+    fn assert_equivalent(actual: &[DirOrSong], expected: &[DirOrSong]) {
+        assert_eq!(actual.len(), expected.len());
+        for (a, b) in actual.iter().zip(expected.iter()) {
+            assert_eq!(a.as_path(), b.as_path());
+        }
+    }
+
+    #[test]
+    fn group_dirs_first() {
+        let sort = SortOptions {
+            mode: SortMode::Format(vec![SongProperty::Title]),
+            group_by_type: true,
+            reverse: false,
+            ignore_leading_the: false,
+            fold_case: true,
+        };
+        let input = [
+            song("song3", &[("title", "c")]),
+            dir("dir1"),
+            song("song2", &[("title", "b")]),
+            dir("dir3"),
+            song("song1", &[("title", "a")]),
+            dir("dir2"),
+        ];
+
+        let result = input
+            .into_iter()
+            .sorted_by(|a, b| a.with_custom_sort(&sort).cmp(&b.with_custom_sort(&sort)))
+            .collect_vec();
+
+        dbg!(&result);
+        assert_equivalent(
+            &result,
+            &[
+                dir("dir1"),
+                dir("dir2"),
+                dir("dir3"),
+                song("song1", &[]),
+                song("song2", &[]),
+                song("song3", &[]),
+            ],
+        );
+    }
+
+    #[test]
+    fn group_dirs_first_reversed() {
+        let sort = SortOptions {
+            mode: SortMode::Format(vec![SongProperty::Title]),
+            group_by_type: true,
+            reverse: true,
+            ignore_leading_the: false,
+            fold_case: true,
+        };
+        let input = [
+            song("song3", &[("title", "c")]),
+            dir("dir1"),
+            song("song2", &[("title", "b")]),
+            dir("dir3"),
+            song("song1", &[("title", "a")]),
+            dir("dir2"),
+        ];
+
+        let result = input
+            .into_iter()
+            .sorted_by(|a, b| a.with_custom_sort(&sort).cmp(&b.with_custom_sort(&sort)))
+            .collect_vec();
+
+        dbg!(&result);
+        assert_equivalent(
+            &result,
+            &[
+                song("song3", &[]),
+                song("song2", &[]),
+                song("song1", &[]),
+                dir("dir3"),
+                dir("dir2"),
+                dir("dir1"),
+            ],
+        );
+    }
+
+    #[test]
+    fn no_grouping() {
+        let sort = SortOptions {
+            mode: SortMode::Format(vec![SongProperty::Title]),
+            group_by_type: false,
+            reverse: false,
+            ignore_leading_the: false,
+            fold_case: true,
+        };
+        let input = [
+            song("song3", &[("title", "e")]),
+            song("song2", &[("title", "c")]),
+            dir("b_dir1"),
+            dir("f_dir3"),
+            song("song1", &[("title", "a")]),
+            dir("d_dir2"),
+        ];
+
+        let result = input
+            .into_iter()
+            .sorted_by(|a, b| a.with_custom_sort(&sort).cmp(&b.with_custom_sort(&sort)))
+            .collect_vec();
+
+        dbg!(&result);
+        assert_equivalent(
+            &result,
+            &[
+                song("song1", &[]),
+                dir("b_dir1"),
+                song("song2", &[]),
+                dir("d_dir2"),
+                song("song3", &[]),
+                dir("f_dir3"),
+            ],
+        );
+    }
+
+    #[test]
+    fn no_grouping_reversed() {
+        let sort = SortOptions {
+            mode: SortMode::Format(vec![SongProperty::Title]),
+            group_by_type: false,
+            reverse: true,
+            ignore_leading_the: false,
+            fold_case: true,
+        };
+        let input = [
+            song("e", &[("title", "e")]),
+            song("c", &[("title", "c")]),
+            dir("b"),
+            dir("f"),
+            song("a", &[("title", "a")]),
+            dir("d"),
+        ];
+
+        let result = input
+            .into_iter()
+            .sorted_by(|a, b| a.with_custom_sort(&sort).cmp(&b.with_custom_sort(&sort)))
+            .collect_vec();
+
+        dbg!(&result);
+        assert_equivalent(
+            &result,
+            &[dir("f"), song("e", &[]), dir("d"), song("c", &[]), dir("b"), song("a", &[])],
+        );
+    }
+
+    #[test]
+    fn group_dirs_mtime() {
+        let sort = SortOptions {
+            mode: SortMode::ModifiedTime,
+            group_by_type: true,
+            reverse: false,
+            ignore_leading_the: false,
+            fold_case: true,
+        };
+        let input = [
+            song_mtime("e", &[], "2025-04-02T14:52:05Z"),
+            song_mtime("c", &[], "2025-04-02T14:52:03Z"),
+            dir_mtime("b", "2025-04-02T14:52:02Z"),
+            dir_mtime("f", "2025-04-02T14:52:06Z"),
+            song_mtime("a", &[], "2025-04-02T14:52:01Z"),
+            dir_mtime("d", "2025-04-02T14:52:04Z"),
+        ];
+
+        let result = input
+            .into_iter()
+            .sorted_by(|a, b| a.with_custom_sort(&sort).cmp(&b.with_custom_sort(&sort)))
+            .collect_vec();
+
+        dbg!(&result);
+        assert_equivalent(
+            &result,
+            &[dir("b"), dir("d"), dir("f"), song("a", &[]), song("c", &[]), song("e", &[])],
+        );
+    }
+
+    #[test]
+    fn group_dirs_mtime_reversed() {
+        let sort = SortOptions {
+            mode: SortMode::ModifiedTime,
+            group_by_type: true,
+            reverse: true,
+            ignore_leading_the: false,
+            fold_case: true,
+        };
+        let input = [
+            song_mtime("e", &[], "2025-04-02T14:52:05Z"),
+            song_mtime("c", &[], "2025-04-02T14:52:03Z"),
+            dir_mtime("b", "2025-04-02T14:52:02Z"),
+            dir_mtime("f", "2025-04-02T14:52:06Z"),
+            song_mtime("a", &[], "2025-04-02T14:52:01Z"),
+            dir_mtime("d", "2025-04-02T14:52:04Z"),
+        ];
+
+        let result = input
+            .into_iter()
+            .sorted_by(|a, b| a.with_custom_sort(&sort).cmp(&b.with_custom_sort(&sort)))
+            .collect_vec();
+
+        dbg!(&result);
+        assert_equivalent(
+            &result,
+            &[song("e", &[]), song("c", &[]), song("a", &[]), dir("f"), dir("d"), dir("b")],
+        );
+    }
+
+    #[test]
+    fn no_grouping_dirs_mtime() {
+        let sort = SortOptions {
+            mode: SortMode::ModifiedTime,
+            group_by_type: false,
+            reverse: false,
+            ignore_leading_the: false,
+            fold_case: true,
+        };
+        let input = [
+            song_mtime("e", &[], "2025-04-02T14:52:05Z"),
+            song_mtime("c", &[], "2025-04-02T14:52:03Z"),
+            dir_mtime("b", "2025-04-02T14:52:02Z"),
+            dir_mtime("f", "2025-04-02T14:52:06Z"),
+            song_mtime("a", &[], "2025-04-02T14:52:01Z"),
+            dir_mtime("d", "2025-04-02T14:52:04Z"),
+        ];
+
+        let result = input
+            .into_iter()
+            .sorted_by(|a, b| a.with_custom_sort(&sort).cmp(&b.with_custom_sort(&sort)))
+            .collect_vec();
+
+        dbg!(&result);
+        assert_equivalent(
+            &result,
+            &[song("a", &[]), dir("b"), song("c", &[]), dir("d"), song("e", &[]), dir("f")],
+        );
+    }
+
+    #[test]
+    fn no_grouping_dirs_mtime_reversed() {
+        let sort = SortOptions {
+            mode: SortMode::ModifiedTime,
+            group_by_type: false,
+            reverse: false,
+            ignore_leading_the: false,
+            fold_case: true,
+        };
+        let input = [
+            song_mtime("e", &[], "2025-04-02T14:52:05Z"),
+            song_mtime("c", &[], "2025-04-02T14:52:03Z"),
+            dir_mtime("b", "2025-04-02T14:52:02Z"),
+            dir_mtime("f", "2025-04-02T14:52:06Z"),
+            song_mtime("a", &[], "2025-04-02T14:52:01Z"),
+            dir_mtime("d", "2025-04-02T14:52:04Z"),
+        ];
+
+        let result = input
+            .into_iter()
+            .sorted_by(|a, b| a.with_custom_sort(&sort).cmp(&b.with_custom_sort(&sort)))
+            .collect_vec();
+
+        dbg!(&result);
+        assert_equivalent(
+            &result,
+            &[song("a", &[]), dir("b"), song("c", &[]), dir("d"), song("e", &[]), dir("f")],
+        );
+    }
+
+    #[test]
+    fn song_sort_ignore_leading_the() {
+        let sort = SortOptions {
+            mode: SortMode::Format(vec![SongProperty::Title, SongProperty::Artist]),
+            group_by_type: false,
+            reverse: false,
+            ignore_leading_the: true,
+            fold_case: true,
+        };
+        let input = [
+            song("a", &[("title", "Gee")]),
+            song("b", &[("title", "The b is second")]),
+            song("c", &[("title", "a is first")]),
+            song("d", &[("title", "the Foo"), ("artist", "b")]),
+            song("e", &[("title", "the Foo"), ("artist", "the a")]),
+        ];
+
+        let result = input
+            .into_iter()
+            .sorted_by(|a, b| a.with_custom_sort(&sort).cmp(&b.with_custom_sort(&sort)))
+            .collect_vec();
+
+        dbg!(&result);
+        assert_equivalent(
+            &result,
+            &[song("c", &[]), song("b", &[]), song("d", &[]), song("e", &[]), song("a", &[])],
+        );
+    }
+
+    #[test]
+    fn song_fold_case() {
+        let sort = SortOptions {
+            mode: SortMode::Format(vec![SongProperty::File]),
+            group_by_type: false,
+            reverse: false,
+            ignore_leading_the: true,
+            fold_case: true,
+        };
+        let input = [
+            song("a", &[]), //
+            song("C", &[]),
+            song("b", &[]),
+            song("d", &[]),
+            song("c", &[]),
+            song("B", &[]),
+            song("G", &[]),
+        ];
+
+        let result = input
+            .into_iter()
+            .sorted_by(|a, b| a.with_custom_sort(&sort).cmp(&b.with_custom_sort(&sort)))
+            .collect_vec();
+
+        dbg!(&result);
+        assert_equivalent(
+            &result,
+            &[
+                song("a", &[]),
+                song("b", &[]),
+                song("B", &[]),
+                song("C", &[]),
+                song("c", &[]),
+                song("d", &[]),
+                song("G", &[]),
+            ],
+        );
+    }
+
+    #[test]
+    fn song_no_fold_case() {
+        let sort = SortOptions {
+            mode: SortMode::Format(vec![SongProperty::File]),
+            group_by_type: false,
+            reverse: false,
+            ignore_leading_the: true,
+            fold_case: false,
+        };
+        let input = [
+            song("a", &[]),
+            song("C", &[]),
+            song("b", &[]),
+            song("d", &[]),
+            song("c", &[]),
+            song("B", &[]),
+            song("G", &[]),
+        ];
+
+        let result = input
+            .into_iter()
+            .sorted_by(|a, b| a.with_custom_sort(&sort).cmp(&b.with_custom_sort(&sort)))
+            .collect_vec();
+
+        dbg!(&result);
+        assert_equivalent(
+            &result,
+            &[
+                song("B", &[]),
+                song("C", &[]),
+                song("G", &[]),
+                song("a", &[]),
+                song("b", &[]),
+                song("c", &[]),
+                song("d", &[]),
+            ],
+        );
+    }
+
+    #[test]
+    fn dir_sort_ignore_leading_the() {
+        let sort = SortOptions {
+            mode: SortMode::Format(vec![SongProperty::Title, SongProperty::Artist]),
+            group_by_type: false,
+            reverse: false,
+            ignore_leading_the: true,
+            fold_case: true,
+        };
+        let input = [dir("Gee"), dir("The b is second"), dir("a is first"), dir("the Foo")];
+
+        let result = input
+            .into_iter()
+            .sorted_by(|a, b| a.with_custom_sort(&sort).cmp(&b.with_custom_sort(&sort)))
+            .collect_vec();
+
+        dbg!(&result);
+        assert_equivalent(
+            &result,
+            &[dir("a is first"), dir("The b is second"), dir("the Foo"), dir("Gee")],
+        );
+    }
+
+    #[test]
+    fn dir_fold_case() {
+        let sort = SortOptions {
+            mode: SortMode::Format(vec![SongProperty::File]),
+            group_by_type: false,
+            reverse: false,
+            ignore_leading_the: true,
+            fold_case: true,
+        };
+        let input = [dir("a"), dir("C"), dir("b"), dir("d"), dir("c"), dir("B"), dir("G")];
+
+        let result = input
+            .into_iter()
+            .sorted_by(|a, b| a.with_custom_sort(&sort).cmp(&b.with_custom_sort(&sort)))
+            .collect_vec();
+
+        dbg!(&result);
+        assert_equivalent(
+            &result,
+            &[dir("a"), dir("b"), dir("B"), dir("C"), dir("c"), dir("d"), dir("G")],
+        );
+    }
+
+    #[test]
+    fn dir_no_fold_case() {
+        let sort = SortOptions {
+            mode: SortMode::Format(vec![SongProperty::File]),
+            group_by_type: false,
+            reverse: false,
+            ignore_leading_the: true,
+            fold_case: false,
+        };
+        let input = [dir("a"), dir("C"), dir("b"), dir("d"), dir("c"), dir("B"), dir("G")];
+
+        let result = input
+            .into_iter()
+            .sorted_by(|a, b| a.with_custom_sort(&sort).cmp(&b.with_custom_sort(&sort)))
+            .collect_vec();
+
+        dbg!(&result);
+        assert_equivalent(
+            &result,
+            &[dir("B"), dir("C"), dir("G"), dir("a"), dir("b"), dir("c"), dir("d")],
+        );
+    }
+}

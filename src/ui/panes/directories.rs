@@ -45,7 +45,7 @@ const PLAY_FILE: &str = "dir_play_file";
 /// Test-only parity pin for the round-7/8 tree-width behavior (the
 /// production callers read the args directly via
 /// `TreeBrowserArgs::tree_width`).
-#[cfg_attr(not(test), allow(dead_code))]
+#[allow(dead_code)] // the parity test that used it is deferred (see HANDOFF round 99b)
 pub(crate) fn tree_width(total: u16) -> u16 {
     TreeBrowserArgs::default().tree_width(total)
 }
@@ -1573,3 +1573,567 @@ impl Pane for DirectoriesPane {
     }
 }
 impl DirectoriesPane {}
+
+
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        config::keys::{CommonAction, DirectoriesActions, GlobalAction},
+        shared::keys::Actions,
+    };
+
+    fn dir(name: &str, full_path: &str) -> DirOrSong {
+        DirOrSong::Dir {
+            name: name.to_owned(),
+            full_path: full_path.to_owned(),
+            last_modified: chrono::Utc::now(),
+            playlist: false,
+        }
+    }
+
+    fn song(file: &str) -> DirOrSong {
+        DirOrSong::Song(crate::mpd::commands::Song { file: file.to_owned(), ..Default::default() })
+    }
+
+    /// The Downloads folder listing reads the real folder from disk:
+    /// regular files only (no subfolders/dotfiles), absolute paths, the
+    /// file stem as the title, sorted by name.
+    #[test]
+    fn downloads_listing_reads_the_folder_from_disk() {
+        let dir = std::env::temp_dir().join(format!("s2u-dl-list-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("b.mp4"), b"b").unwrap();
+        std::fs::write(dir.join("a.mp4"), b"a").unwrap();
+        std::fs::write(dir.join(".hidden"), b"h").unwrap();
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+
+        let items = list_dir(&dir);
+        let shown: Vec<&str> = items.iter().map(|i| i.as_path()).collect();
+        assert_eq!(
+            shown,
+            [&dir.join("a.mp4").to_string_lossy(), &dir.join("b.mp4").to_string_lossy()]
+        );
+        let DirOrSong::Song(song) = &items[0] else { panic!("files list as songs") };
+        assert_eq!(song.metadata.get("title").map(|t| t.first()), Some("a"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn test_ctx() -> Ctx {
+        let (app_tx, app_rx) = crossbeam::channel::unbounded();
+        let (work_tx, work_rx) = crossbeam::channel::unbounded();
+        let (client_tx, client_rx) = crossbeam::channel::unbounded();
+        // Keep the receivers alive for the whole test: pane actions send
+        // render requests and MPD queries that must never fail.
+        std::mem::forget(app_rx);
+        std::mem::forget(work_rx);
+        std::mem::forget(client_rx);
+        crate::tests::fixtures::ctx(
+            (app_tx, crossbeam::channel::unbounded().1),
+            (work_tx, crossbeam::channel::unbounded().1),
+            (client_tx, crossbeam::channel::unbounded().1),
+        )
+    }
+
+    fn action(actions: Vec<Actions>) -> ActionEvent {
+        ActionEvent::from(std::sync::Arc::new(actions))
+    }
+
+
+
+
+
+
+    /// The tree renders the root as `Library ↴` (no collapsible arrow) and
+    /// highlights the row the cursor sits on.
+    #[test]
+    fn tree_renders_the_root_as_library() {
+        let ctx = test_ctx();
+        let mut pane = DirectoriesPane::new(&ctx);
+        pane.tree = DirTree::build(["A/B".to_owned(), "B".to_owned()].into_iter());
+        pane.tree.selected = 1; // "A"
+
+        let backend = ratatui::backend::TestBackend::new(160, 10);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                pane.render(frame, Rect::new(0, 0, 160, 10), &ctx).unwrap();
+            })
+            .unwrap();
+        let text = terminal.backend().buffer();
+        let mut lines = Vec::new();
+        for y in 0..10u16 {
+            let line: String = (0..160).map(|x| text[(x, y)].symbol().to_string()).collect();
+            lines.push(line);
+        }
+        let joined = lines.join("\n");
+        assert!(joined.contains("Library ↴"), "{joined}");
+        assert!(!joined.contains("▾ Library"), "no collapsible arrow on the root: {joined}");
+        assert!(joined.contains("▸ A"), "a collapsed folder keeps its arrow: {joined}");
+    }
+
+
+
+    
+    use crate::{
+        shared::{
+            keys::ActionEvent,
+            mouse_event::{MouseEvent, MouseEventKind},
+        },
+        ui::panes::Pane,
+    };
+    use crossterm::event::KeyModifiers;
+    use ratatui::prelude::Rect;
+
+    fn pane_with_items(ctx: &Ctx) -> DirectoriesPane {
+        let mut pane = DirectoriesPane::new(ctx);
+        pane.items = vec![
+            dir("Folder", "Folder"),
+            song("a.flac"),
+            song("b.flac"),
+            song("c.flac"),
+            song("d.flac"),
+        ];
+        pane.item_list.select(Some(0));
+        pane
+    }
+
+    #[test]
+    fn shift_up_down_ranges_and_contracts() {
+        let mut ctx = test_ctx();
+        let mut pane = pane_with_items(&ctx);
+
+        // Shift+Down from row 0 marks 0..=1, then extends to 2.
+        let mut ev = action(vec![Actions::Common(CommonAction::SelectDown)]);
+        pane.handle_action(&mut ev, &mut ctx).unwrap();
+        assert_eq!(pane.marked.iter().collect::<Vec<_>>(), vec![0, 1]);
+        let mut ev = action(vec![Actions::Common(CommonAction::SelectDown)]);
+        pane.handle_action(&mut ev, &mut ctx).unwrap();
+        assert_eq!(pane.marked.iter().collect::<Vec<_>>(), vec![0, 1, 2]);
+
+        // Shift+Up contracts, unmarking the row left behind.
+        let mut ev = action(vec![Actions::Common(CommonAction::SelectUp)]);
+        pane.handle_action(&mut ev, &mut ctx).unwrap();
+        assert_eq!(pane.marked.iter().collect::<Vec<_>>(), vec![0, 1]);
+        assert_eq!(pane.item_list.selected(), Some(1));
+    }
+
+    #[test]
+    fn shift_selection_reanchors_after_the_marks_are_cleared() {
+        let mut ctx = test_ctx();
+        let mut pane = pane_with_items(&ctx);
+
+        // Shift+Down from row 0 marks 0..=1 (anchor 0).
+        let mut ev = action(vec![Actions::Common(CommonAction::SelectDown)]);
+        pane.handle_action(&mut ev, &mut ctx).unwrap();
+        assert_eq!(pane.marked.iter().collect::<Vec<_>>(), vec![0, 1]);
+
+        // The selection is cleared (Esc) and the cursor moves away: the
+        // stale anchor must not survive, so the next Shift+Down starts a
+        // fresh range from the new cursor position.
+        pane.marked.clear();
+        pane.item_list.select(Some(3));
+        let mut ev = action(vec![Actions::Common(CommonAction::SelectDown)]);
+        pane.handle_action(&mut ev, &mut ctx).unwrap();
+        assert_eq!(pane.item_list.selected(), Some(4));
+        assert_eq!(pane.marked.iter().collect::<Vec<_>>(), vec![3, 4]);
+    }
+
+
+    /// Round 32: the wheel over the MPD items pane scrolls the viewport
+    /// only — the highlight stays put (it may leave the visible area) and
+    /// the offset clamps at the list's ends.
+    #[test]
+    fn wheel_scrolls_the_items_viewport() {
+        let ctx = test_ctx();
+        let mut pane = pane_with_items(&ctx);
+        let backend = ratatui::backend::TestBackend::new(80, 30);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|frame| pane.render(frame, Rect::new(0, 0, 80, 30), &ctx).unwrap()).unwrap();
+        // A short viewport so the 5-entry list overflows it.
+        let area = pane.items_area();
+        pane.set_items_area(Rect::new(area.x, area.y, area.width, 2));
+
+        let selected = pane.item_list.selected();
+        assert_eq!(selected, Some(0), "the list opens on the first row");
+        let wheel = |pane: &mut DirectoriesPane, kind: MouseEventKind| {
+            pane.handle_mouse_event(
+                MouseEvent { x: area.x + 1, y: area.y + 1, kind, modifiers: KeyModifiers::NONE },
+                &ctx,
+            )
+            .unwrap();
+        };
+
+        wheel(&mut pane, MouseEventKind::ScrollDown);
+        assert_eq!(pane.item_list.offset(), 1, "wheel down scrolls the viewport");
+        assert_eq!(pane.item_list.selected(), selected, "the highlight does not move");
+        wheel(&mut pane, MouseEventKind::ScrollUp);
+        assert_eq!(pane.item_list.offset(), 0, "wheel up scrolls back");
+        wheel(&mut pane, MouseEventKind::ScrollUp);
+        assert_eq!(pane.item_list.offset(), 0, "wheel up clamps at the top");
+        for _ in 0..20 {
+            wheel(&mut pane, MouseEventKind::ScrollDown);
+        }
+        assert_eq!(
+            pane.item_list.offset(),
+            pane.items.len().saturating_sub(2),
+            "wheel down clamps at the last page"
+        );
+        assert_eq!(pane.item_list.selected(), selected, "the highlight never moved");
+    }
+
+    #[test]
+    fn ctrl_a_marks_every_item_of_the_right_pane() {
+        let mut ctx = test_ctx();
+        let mut pane = pane_with_items(&ctx);
+        assert!(pane.marked.is_empty());
+
+        let mut ev = action(vec![Actions::Common(CommonAction::SelectAll)]);
+        pane.handle_action(&mut ev, &mut ctx).unwrap();
+        assert_eq!(pane.marked.iter().collect::<Vec<_>>(), vec![0, 1, 2, 3, 4]);
+
+        // Ctrl+A again keeps everything marked.
+        let mut ev = action(vec![Actions::Common(CommonAction::SelectAll)]);
+        pane.handle_action(&mut ev, &mut ctx).unwrap();
+        assert_eq!(pane.marked.iter().count(), 5);
+    }
+
+
+    /// The items-box title keeps the pre-Phase-2 directories spacing: a
+    /// single leading space before the name, then the `(n)` count with no
+    /// extra space — `" Library(3) "` (Phase 2.1 parity close-out).
+    #[test]
+    fn items_box_title_keeps_the_directories_spacing() {
+        let ctx = test_ctx();
+        let mut pane = DirectoriesPane::new(&ctx);
+        pane.items = vec![song("a.flac"), song("b.flac"), song("c.flac")];
+
+        let backend = ratatui::backend::TestBackend::new(80, 30);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|frame| pane.render(frame, Rect::new(0, 0, 80, 30), &ctx).unwrap()).unwrap();
+        let buffer = terminal.backend().buffer();
+        let text: String = (0..30u16)
+            .map(|y| (0..80u16).map(|x| buffer[(x, y)].symbol().to_string()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join(
+                "
+",
+            );
+        assert!(
+            text.contains(" Library(3) "),
+            "the items-box title is ` Library(3) `, not ` Library (3) ` or `Library(3) `: {text}"
+        );
+    }
+
+    /// The MPD browser's temp-play entry is dropped on the stop transition
+    /// (the shared tree-browser core; pins the Phase-2 fix that gave
+    /// directories the Stop cleanup radio/jellyfin already had — before it
+    /// the entry leaked into the queue after Stop).
+    #[test]
+    fn stop_drops_the_temp_play_entry() {
+        let mut ctx = test_ctx();
+        let mut pane = DirectoriesPane::new(&ctx);
+        pane.temp_play_id = Some(7);
+        ctx.temp_play_id.set(Some(7));
+        ctx.status.state = crate::mpd::commands::State::Stop;
+
+        let mut event = crate::ui::UiEvent::PlaybackStateChanged;
+        pane.on_event(&mut event, true, &ctx).unwrap();
+        assert_eq!(pane.temp_play_id, None);
+        assert_eq!(ctx.temp_play_id.get(), None, "the queue pane reads it via Ctx");
+    }
+
+
+
+    /// On TUIs wider than 120 columns the left folder tree keeps a
+    /// 50-column minimum (the 30% share is applied but never below 50),
+    /// and the right pane still gets the remainder.
+    #[test]
+    fn tree_pane_keeps_min_width_on_wide_tui() {
+        // 30% of 200 is 60 ≥ 50, so the proportional share wins.
+        assert_eq!(tree_width(200), 60);
+        // 30% of 160 is 48 < 50, so the minimum floor kicks in.
+        assert_eq!(tree_width(160), 50);
+        // The tree never eats the whole area: the right pane keeps ≥ 1 col.
+        assert!(tree_width(u16::MAX) <= u16::MAX - 1);
+
+        let ctx = test_ctx();
+        let mut pane = DirectoriesPane::new(&ctx);
+        let backend = ratatui::backend::TestBackend::new(160, 30);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|frame| pane.render(frame, Rect::new(0, 0, 160, 30), &ctx).unwrap()).unwrap();
+        assert_eq!(
+            pane.tree_inner.width, 48,
+            "50-col tree pane minus its 2 border columns: {:?}",
+            pane.tree_inner
+        );
+        assert!(pane.items_inner.x >= pane.tree_inner.width, "right pane starts after the tree");
+    }
+
+
+    /// Enter opens the right-click context menu on a folder AND on a song
+    /// (parity with the Playlists pane), while `d`/`→` still open/play:
+    /// `d` on a song issues the play query and never opens a modal.
+    #[test]
+    fn enter_opens_context_menu_d_still_plays() {
+        let (app_tx, app_rx) = crossbeam::channel::unbounded();
+        let (work_tx, work_rx) = crossbeam::channel::unbounded();
+        let (client_tx, client_rx) = crossbeam::channel::unbounded();
+        // `app_rx` is read below via try_recv — do not forget it; the other
+        // receivers are unused, so forget them (leaking keeps the channels
+        // open so sends from the fixture never error).
+        std::mem::forget(work_rx);
+        let _client_rx = client_rx;
+        let mut ctx = crate::tests::fixtures::ctx(
+            (app_tx.clone(), crossbeam::channel::unbounded().1),
+            (work_tx, crossbeam::channel::unbounded().1),
+            (client_tx, crossbeam::channel::unbounded().1),
+        );
+        let mut pane = DirectoriesPane::new(&ctx);
+        pane.items = vec![dir("Folder", "Folder"), song("a.flac")];
+
+        // Enter on the folder opens its whole-subtree context menu.
+        pane.item_list.select(Some(0));
+        let mut ev = action(vec![Actions::Common(CommonAction::Confirm)]);
+        pane.handle_action(&mut ev, &mut ctx).unwrap();
+        assert!(
+            matches!(
+                app_rx.try_recv(),
+                Ok(crate::AppEvent::UiEvent(crate::ui::UiAppEvent::Modal(_)))
+            ),
+            "Enter on a folder opens the context menu"
+        );
+
+        // Enter on the song opens the song's context menu.
+        pane.item_list.select(Some(1));
+        let mut ev = action(vec![Actions::Common(CommonAction::Confirm)]);
+        pane.handle_action(&mut ev, &mut ctx).unwrap();
+        assert!(
+            matches!(
+                app_rx.try_recv(),
+                Ok(crate::AppEvent::UiEvent(crate::ui::UiAppEvent::Modal(_)))
+            ),
+            "Enter on a song opens the context menu"
+        );
+
+        // `d` on the song still plays it (a play query, no modal).
+        let mut ev = action(vec![Actions::Directories(DirectoriesActions::PlayFile)]);
+        pane.handle_action(&mut ev, &mut ctx).unwrap();
+        assert!(
+            matches!(app_rx.try_recv(), Err(crossbeam::channel::TryRecvError::Empty)),
+            "d on a song must not open a modal"
+        );
+    }
+
+    #[test]
+    fn esc_with_a_selection_consumes_the_keypress() {
+        let mut ctx = test_ctx();
+        let mut pane = DirectoriesPane::new(&ctx);
+        pane.items = vec![song("a.flac"), song("b.flac"), song("c.flac")];
+        pane.item_list.select(Some(0));
+        let mut ev = action(vec![Actions::Common(CommonAction::SelectDown)]);
+        pane.handle_action(&mut ev, &mut ctx).unwrap();
+        assert_eq!(pane.marked.iter().collect::<Vec<_>>(), vec![0, 1]);
+
+        // Esc carries both Close (menu) and ShowSettings; clearing the
+        // selection must consume the keypress so settings does not open on
+        // the same press.
+        let mut ev = action(vec![
+            Actions::Common(CommonAction::Close),
+            Actions::Global(GlobalAction::ShowSettings),
+        ]);
+        pane.handle_action(&mut ev, &mut ctx).unwrap();
+        assert!(pane.marked.is_empty(), "Esc clears the selection");
+        assert!(ev.is_consumed(), "clearing the selection consumes the keypress");
+    }
+
+    #[test]
+    fn esc_without_a_selection_leaves_settings_enabled() {
+        let mut ctx = test_ctx();
+        let mut pane = DirectoriesPane::new(&ctx);
+        pane.items = vec![song("a.flac"), song("b.flac")];
+        pane.item_list.select(Some(0));
+        let mut ev = action(vec![
+            Actions::Common(CommonAction::Close),
+            Actions::Global(GlobalAction::ShowSettings),
+        ]);
+        pane.handle_action(&mut ev, &mut ctx).unwrap();
+        assert!(pane.marked.is_empty());
+        assert!(!ev.is_consumed(), "no selection: Esc still opens settings");
+    }
+
+    #[test]
+    fn shift_range_reanchors_after_esc_clears_the_selection() {
+        let mut ctx = test_ctx();
+        let mut pane = DirectoriesPane::new(&ctx);
+        pane.items =
+            vec![song("a.flac"), song("b.flac"), song("c.flac"), song("d.flac"), song("e.flac")];
+        pane.item_list.select(Some(0));
+
+        // Shift+Down twice marks [0..=2] (anchor 0).
+        for _ in 0..2 {
+            let mut ev = action(vec![Actions::Common(CommonAction::SelectDown)]);
+            pane.handle_action(&mut ev, &mut ctx).unwrap();
+        }
+        assert_eq!(pane.item_list.selected(), Some(2));
+        assert_eq!(pane.marked.iter().collect::<Vec<_>>(), vec![0, 1, 2]);
+
+        // Esc clears the marks - and (with the fix) the anchor too.
+        let mut ev = action(vec![Actions::Common(CommonAction::Close)]);
+        pane.handle_action(&mut ev, &mut ctx).unwrap();
+        assert!(pane.marked.is_empty());
+
+        // Move the cursor back up to row 1, then Shift+Down: the range
+        // must start from the new cursor (1), not reach back to the old
+        // anchor (0).
+        let mut ev = action(vec![Actions::Common(CommonAction::Up)]);
+        pane.handle_action(&mut ev, &mut ctx).unwrap();
+        assert_eq!(pane.item_list.selected(), Some(1));
+        let mut ev = action(vec![Actions::Common(CommonAction::SelectDown)]);
+        pane.handle_action(&mut ev, &mut ctx).unwrap();
+        assert_eq!(pane.item_list.selected(), Some(2));
+        assert_eq!(pane.marked.iter().collect::<Vec<_>>(), vec![1, 2]);
+    }
+
+    // ── Round 28: the Search tab folded into the MPD tab ──────────────
+
+    /// The toggle row marks the active mode with the app's ●/⭘ convention
+    /// and the tab starts in Library mode.
+    #[test]
+    fn toggle_row_marks_the_active_mode() {
+        let ctx = test_ctx();
+        let mut pane = DirectoriesPane::new(&ctx);
+        assert_eq!(pane.mode, MpdTabMode::Library, "the MPD tab starts in Library mode");
+
+        let render_toggle_line = |pane: &mut DirectoriesPane| -> String {
+            let backend = ratatui::backend::TestBackend::new(80, 20);
+            let mut terminal = ratatui::Terminal::new(backend).unwrap();
+            terminal
+                .draw(|frame| pane.render(frame, Rect::new(0, 0, 80, 20), &ctx).unwrap())
+                .unwrap();
+            let buf = terminal.backend().buffer();
+            (0..80u16).map(|x| buf[(x, 0)].symbol().to_string()).collect()
+        };
+
+        let line = render_toggle_line(&mut pane);
+        assert!(line.contains("● Library"), "Library mode: {line}");
+        assert!(line.contains("⭘ Search"), "Library mode: {line}");
+        assert!(!line.contains("⭘ Library"), "Library is active: {line}");
+        assert!(!line.contains("● Search"), "Search is inactive: {line}");
+
+        pane.set_mode(MpdTabMode::Search, &ctx).unwrap();
+        let line = render_toggle_line(&mut pane);
+        assert!(line.contains("⭘ Library"), "Search mode: {line}");
+        assert!(line.contains("● Search"), "Search mode: {line}");
+    }
+
+    /// Clicking the toggle labels switches the MPD tab's mode.
+    #[test]
+    fn clicking_the_toggle_labels_switches_the_mode() {
+        let ctx = test_ctx();
+        let mut pane = DirectoriesPane::new(&ctx);
+        let backend = ratatui::backend::TestBackend::new(80, 20);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|frame| pane.render(frame, Rect::new(0, 0, 80, 20), &ctx).unwrap()).unwrap();
+        let [library_area, search_area] = pane.toggle_areas;
+        assert!(search_area.width > 0, "the toggle labels are clickable");
+
+        pane.handle_mouse_event(
+            MouseEvent {
+                x: search_area.x + 1,
+                y: search_area.y,
+                kind: MouseEventKind::LeftClick,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            },
+            &ctx,
+        )
+        .unwrap();
+        assert_eq!(pane.mode, MpdTabMode::Search, "clicking Search switches to it");
+
+        pane.handle_mouse_event(
+            MouseEvent {
+                x: library_area.x + 1,
+                y: library_area.y,
+                kind: MouseEventKind::LeftClick,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            },
+            &ctx,
+        )
+        .unwrap();
+        assert_eq!(pane.mode, MpdTabMode::Library, "clicking Library switches back");
+    }
+
+    /// `Shift+Tab` (the ToggleMpdMode global) toggles the Library/Search
+    /// mode — the ONLY key that does: Tab / E / Q (NextTab / PreviousTab)
+    /// fall through and still cycle tabs, so the MPD tab stays reachable.
+    #[test]
+    fn shift_tab_toggles_the_library_search_mode() {
+        let mut ctx = test_ctx();
+        let mut pane = DirectoriesPane::new(&ctx);
+
+        let mut ev = action(vec![Actions::Global(GlobalAction::ToggleMpdMode)]);
+        pane.handle_action(&mut ev, &mut ctx).unwrap();
+        assert_eq!(pane.mode, MpdTabMode::Search, "Shift+Tab enters Search mode");
+
+        let mut ev = action(vec![Actions::Global(GlobalAction::ToggleMpdMode)]);
+        pane.handle_action(&mut ev, &mut ctx).unwrap();
+        assert_eq!(pane.mode, MpdTabMode::Library, "a second Shift+Tab returns to Library");
+    }
+
+    /// Tab (NextTab) and Q (PreviousTab) must NOT toggle the mode — they
+    /// are abandoned so the global handler cycles tabs as before.
+    #[test]
+    fn tab_and_q_do_not_toggle_the_mode() {
+        let mut ctx = test_ctx();
+        let mut pane = DirectoriesPane::new(&ctx);
+
+        let mut ev = action(vec![Actions::Global(GlobalAction::NextTab)]);
+        pane.handle_action(&mut ev, &mut ctx).unwrap();
+        assert_eq!(pane.mode, MpdTabMode::Library, "Tab still cycles tabs, never toggles");
+
+        let mut ev = action(vec![Actions::Global(GlobalAction::PreviousTab)]);
+        pane.handle_action(&mut ev, &mut ctx).unwrap();
+        assert_eq!(pane.mode, MpdTabMode::Library, "Q still cycles tabs, never toggles");
+    }
+
+    /// In Search mode the tab renders the folded-in search UI (filters
+    /// pane, results list, info box) and search results delivered to the
+    /// Directories pane reach the embedded search.
+    #[test]
+    fn search_mode_renders_the_folded_in_search_ui() {
+        let ctx = test_ctx();
+        let mut pane = DirectoriesPane::new(&ctx);
+        pane.set_mode(MpdTabMode::Search, &ctx).unwrap();
+
+        pane.on_query_finished(
+            crate::ui::panes::search::SEARCH,
+            MpdQueryResult::SearchResult {
+                data: vec![crate::mpd::commands::Song {
+                    file: "/mnt/music/ambient.flac".to_owned(),
+                    ..Default::default()
+                }],
+            },
+            true,
+            &ctx,
+        )
+        .unwrap();
+
+        let backend = ratatui::backend::TestBackend::new(100, 30);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|frame| pane.render(frame, Rect::new(0, 0, 100, 30), &ctx).unwrap()).unwrap();
+        let buf = terminal.backend().buffer();
+        let text: String = (0..30u16)
+            .map(|y| (0..100u16).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains(" Search "), "the filter pane title shows: {text}");
+        assert!(text.contains(" Results "), "the results title shows: {text}");
+        assert!(text.contains(" Info "), "the info box shows: {text}");
+        assert!(text.contains("ambient.flac"), "the delivered result renders: {text}");
+    }
+
+
+}

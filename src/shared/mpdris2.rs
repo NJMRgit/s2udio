@@ -43,3 +43,38 @@ pub fn write_notify_state(cache_dir: Option<&Path>, enabled: bool) {
         log::error!(error:? = err; "Failed to write the mpDris2 notification state");
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn state_file_round_trips_the_toggle() {
+        let dir =
+            std::env::temp_dir().join(format!("s2u-mpdris2-notify-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        write_notify_state(Some(&dir), false);
+        let path = notify_state_path(Some(&dir));
+        assert!(path.exists());
+        let content = std::fs::read_to_string(&path).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(v["notify"], serde_json::Value::Bool(false));
+
+        write_notify_state(Some(&dir), true);
+        let content = std::fs::read_to_string(&path).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(v["notify"], serde_json::Value::Bool(true));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn configured_cache_dir_wins_over_default() {
+        let dir =
+            std::env::temp_dir().join(format!("s2u-mpdris2-notify-path-{}", std::process::id()));
+        let path = notify_state_path(Some(&dir));
+        assert_eq!(path, dir.join(NOTIFY_STATE_FILE));
+    }
+}

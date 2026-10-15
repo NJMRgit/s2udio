@@ -262,6 +262,16 @@ pub fn original_link_for_url(url: &str) -> Option<String> {
         .filter(|original| !original.is_empty())
 }
 
+/// Test helper: drop the live upstream registration for a buffered URL, as a
+/// restart does, so a test can exercise the "proxy cannot serve this row" path.
+#[cfg(test)]
+pub fn forget_registration_for_test(url: &str) {
+    let Some(key) = buffered_key(url) else { return };
+    if let Some(cache) = PROXY.get() {
+        lock(&cache.inner).registrations.remove(key);
+    }
+}
+
 /// Whether a buffered URL needs a fresh resolve of its original link.
 ///
 /// A **complete** entry on this run's port never does (the proxy serves it

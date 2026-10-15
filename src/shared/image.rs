@@ -370,3 +370,189 @@ pub fn get_gif_frames(data: &[u8]) -> Result<Option<GifData<'_>>> {
         Ok(None)
     }
 }
+
+#[cfg(test)]
+mod letterbox_crop_tests {
+    use super::{crop_letterbox, crop_letterbox_bytes};
+    use image::{DynamicImage, Rgb, RgbImage};
+
+    /// A 16:9-ish picture with solid bars top/bottom (the `hqdefault` shape).
+    fn letterboxed(w: u32, h: u32, bar: u32) -> DynamicImage {
+        let mut img = RgbImage::new(w, h);
+        for (x, y, px) in img.enumerate_pixels_mut() {
+            *px = if y < bar || y >= h - bar {
+                Rgb([0, 0, 0])
+            } else {
+                // A non-uniform "picture" so a crop cannot pass by accident.
+                Rgb([(x % 251) as u8, (y % 241) as u8, 128])
+            };
+        }
+        DynamicImage::ImageRgb8(img)
+    }
+
+    /// A picture with solid bars left/right (pillarbox).
+    fn pillarboxed(w: u32, h: u32, bar: u32) -> DynamicImage {
+        let mut img = RgbImage::new(w, h);
+        for (x, y, px) in img.enumerate_pixels_mut() {
+            *px = if x < bar || x >= w - bar {
+                Rgb([0, 0, 0])
+            } else {
+                Rgb([(x % 251) as u8, (y % 241) as u8, 128])
+            };
+        }
+        DynamicImage::ImageRgb8(img)
+    }
+
+    /// Bar-free artwork: fully non-uniform, so nothing may be trimmed.
+    fn plain(w: u32, h: u32) -> DynamicImage {
+        let mut img = RgbImage::new(w, h);
+        for (x, y, px) in img.enumerate_pixels_mut() {
+            *px = Rgb([(x % 251) as u8, (y % 241) as u8, ((x + y) % 239) as u8]);
+        }
+        DynamicImage::ImageRgb8(img)
+    }
+
+    /// The `maxresdefault` shape: a uniform run on ONE edge only, which must
+    /// never be trimmed (it is real artwork that happens to end uniformly).
+    fn one_sided_uniform(w: u32, h: u32, uniform_cols: u32) -> DynamicImage {
+        let mut img = RgbImage::new(w, h);
+        for (x, y, px) in img.enumerate_pixels_mut() {
+            *px = if x >= w - uniform_cols {
+                Rgb([7, 7, 7])
+            } else {
+                Rgb([(x % 251) as u8, (y % 241) as u8, 90])
+            };
+        }
+        DynamicImage::ImageRgb8(img)
+    }
+
+    #[test]
+    fn trims_letterbox_bars() {
+        let img = letterboxed(480, 360, 45);
+        let cropped = crop_letterbox(&img).expect("the bars are a symmetric pair");
+        assert_eq!(cropped.height(), 360 - 90, "top and bottom bars are both trimmed");
+        assert_eq!(cropped.width(), 480, "width is untouched");
+    }
+
+    #[test]
+    fn trims_pillarbox_bars() {
+        let img = pillarboxed(480, 360, 40);
+        let cropped = crop_letterbox(&img).expect("the bars are a symmetric pair");
+        assert_eq!(cropped.width(), 480 - 80, "left and right bars are both trimmed");
+        assert_eq!(cropped.height(), 360);
+    }
+
+    #[test]
+    fn leaves_bar_free_artwork_alone() {
+        assert!(crop_letterbox(&plain(480, 360)).is_none(), "no bars to trim");
+    }
+
+    /// The measured `maxresdefault` case: a long uniform run on one edge and
+    /// none on the other is artwork, not a letterbox.
+    #[test]
+    fn leaves_a_one_sided_uniform_edge_alone() {
+        let img = one_sided_uniform(1280, 720, 69);
+        assert!(
+            crop_letterbox(&img).is_none(),
+            "a one-sided uniform edge is never cropped"
+        );
+    }
+
+    /// A one-sided letterbox (bars top, none bottom) is not a symmetric pair.
+    #[test]
+    fn leaves_a_one_sided_letterbox_alone() {
+        let mut img = RgbImage::new(480, 360);
+        for (x, y, px) in img.enumerate_pixels_mut() {
+            *px = if y < 45 { Rgb([0, 0, 0]) } else { Rgb([(x % 251) as u8, (y % 241) as u8, 128]) };
+        }
+        assert!(crop_letterbox(&DynamicImage::ImageRgb8(img)).is_none());
+    }
+
+    /// A big bar on one side and a sliver on the other is asymmetry, not a
+    /// letterbox: the size ratio guard rejects it.
+    #[test]
+    fn leaves_an_asymmetric_pair_alone() {
+        let mut img = RgbImage::new(480, 360);
+        for (x, y, px) in img.enumerate_pixels_mut() {
+            *px = if y < 80 || y >= 358 {
+                Rgb([0, 0, 0])
+            } else {
+                Rgb([(x % 251) as u8, (y % 241) as u8, 128])
+            };
+        }
+        assert!(
+            crop_letterbox(&DynamicImage::ImageRgb8(img)).is_none(),
+            "80 px against 2 px is not a comparable pair"
+        );
+    }
+
+    /// A solid image is not a letterbox: cropping it would delete the image.
+    #[test]
+    fn refuses_to_crop_away_a_solid_image() {
+        let img = DynamicImage::ImageRgb8(RgbImage::from_pixel(480, 360, Rgb([9, 9, 9])));
+        assert!(crop_letterbox(&img).is_none());
+    }
+
+    /// A pair too small to matter is left alone (`min/max` and fraction).
+    #[test]
+    fn ignores_a_negligible_pair() {
+        // 2 px of 360 = 0.55% per side, together 1.1% < 2%.
+        let img = letterboxed(480, 360, 2);
+        assert!(crop_letterbox(&img).is_none(), "a hairline border is not a letterbox");
+    }
+
+    /// The crop keeps the picture, not the bars: the first row of the result
+    /// is picture content.
+    #[test]
+    fn keeps_the_picture_not_the_bars() {
+        let img = letterboxed(480, 360, 45);
+        let cropped = crop_letterbox(&img).expect("bars are trimmed");
+        let rgb = cropped.to_rgb8();
+        let first = rgb.get_pixel(0, 0).0;
+        assert_ne!(first, [0, 0, 0], "the bar was removed, not kept");
+    }
+
+    // ── the byte-level helper the pane and the MPRIS writers share ──────
+
+    fn jpeg_bytes(img: &DynamicImage) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut enc = image::codecs::jpeg::JpegEncoder::new(&mut out);
+        enc.encode_image(img).expect("encode");
+        out
+    }
+
+    #[test]
+    fn crop_bytes_trims_a_letterboxed_thumbnail() {
+        let data = jpeg_bytes(&letterboxed(480, 360, 45));
+        let out = crop_letterbox_bytes(&data, true);
+        assert_ne!(out, data, "the bars were trimmed");
+        let decoded = image::load_from_memory(&out).expect("decodes");
+        assert!(
+            decoded.height() < 360,
+            "the cropped image is shorter: {}",
+            decoded.height()
+        );
+    }
+
+    #[test]
+    fn crop_bytes_passes_bar_free_artwork_through_byte_identically() {
+        let data = jpeg_bytes(&plain(480, 360));
+        assert_eq!(crop_letterbox_bytes(&data, true), data, "no crop, no re-encode");
+    }
+
+    #[test]
+    fn crop_bytes_returns_undecodable_bytes_verbatim() {
+        let junk = b"not an image at all".to_vec();
+        assert_eq!(crop_letterbox_bytes(&junk, true), junk);
+    }
+
+    #[test]
+    fn crop_bytes_is_disabled_by_the_option() {
+        let data = jpeg_bytes(&letterboxed(480, 360, 45));
+        assert_eq!(
+            crop_letterbox_bytes(&data, false),
+            data,
+            "crop_letterbox: false leaves the bytes untouched"
+        );
+    }
+}

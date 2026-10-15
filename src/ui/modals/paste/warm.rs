@@ -369,3 +369,183 @@ pub fn ensure_mpris_metadata(ctx: &Ctx) {
     crate::core::work::set_expected_mpris_art(None);
     let _ = std::fs::remove_file(mpris_art_path(ctx.config.cache_dir.as_deref()));
 }
+
+
+/// Round 95b/98/105e: the look ahead (one row, swapped in place) that keeps
+/// MPD's next-song prefetch from meeting an unplayable link.
+#[cfg(test)]
+mod warm_next_tests {
+    use super::*;
+    use crate::mpd::commands::{Song, State};
+    use crate::shared::events::WorkRequest;
+    use crate::shared::ytdlp::YtStreamInfo;
+
+    struct Rig {
+        ctx: Ctx,
+        work_rx: crossbeam::channel::Receiver<WorkRequest>,
+        client_rx: crossbeam::channel::Receiver<crate::shared::events::ClientRequest>,
+    }
+
+    fn rig(queue: Vec<Song>, current_id: u32) -> Rig {
+        let app = crossbeam::channel::unbounded();
+        let work = crossbeam::channel::unbounded();
+        let client = crossbeam::channel::unbounded();
+        // Keep every receiver alive: the code under test sends on all three.
+        let work_rx = work.1.clone();
+        let client_rx = client.1.clone();
+        Box::leak(Box::new(app.1.clone()));
+        let mut ctx = crate::tests::fixtures::ctx(
+            (app.0, app.1),
+            (work.0, work.1.clone()),
+            (client.0, client.1.clone()),
+        );
+        ctx.queue = queue;
+        ctx.status.state = State::Play;
+        ctx.status.songid = Some(current_id);
+        Rig { ctx, work_rx, client_rx }
+    }
+
+    fn row(id: u32, file: &str) -> Song {
+        Song { id, file: file.to_owned(), ..Default::default() }
+    }
+
+    fn resolved(id: u32, url: &str) -> Song {
+        row(id, url)
+    }
+
+    fn requests(rx: &crossbeam::channel::Receiver<WorkRequest>) -> usize {
+        rx.try_iter().count()
+    }
+
+    #[test]
+    fn the_next_tagged_link_is_warmed_once_per_pair() {
+        let link = "https://www.youtube.com/watch?v=JJJ#s2u-audio";
+        let rig = rig(vec![resolved(1, "https://rr1.example/vb"), row(2, link)], 1);
+        assert!(rig.work_rx.is_empty());
+
+        warm_next_queue_link(&rig.ctx);
+        assert_eq!(rig.ctx.warmed_next_for.get(), Some((1, 2)), "the pair is marked as warmed");
+        assert_eq!(requests(&rig.work_rx), 1, "one resolve was asked for");
+        assert!(
+            stream_parse_pending(&rig.ctx, link),
+            "the row spins until the resolve lands"
+        );
+
+        // A second call for the same pair must not ask again (the swap's own
+        // queue refresh triggers it once more).
+        warm_next_queue_link(&rig.ctx);
+        assert_eq!(requests(&rig.work_rx), 0, "no second resolve for the same pair");
+    }
+
+    #[test]
+    fn a_fresh_cached_resolve_is_swapped_in_place_without_ytdlp() {
+        let link = "https://www.youtube.com/watch?v=KKK";
+        let tagged = format!("{link}#s2u-audio");
+        let rig = rig(vec![resolved(1, "https://rr1.example/vb"), row(2, &tagged)], 1);
+        rig.ctx.yt_info.borrow_mut().insert(
+            tagged.clone(),
+            YtStreamInfo {
+                url: "https://rr9.example/vb?id=KKK".to_owned(),
+                original_url: link.to_owned(),
+                title: "Cached".to_owned(),
+                resolved_at: Some(crate::ui::modals::paste::now_epoch_secs()),
+                ..Default::default()
+            },
+        );
+
+        warm_next_queue_link(&rig.ctx);
+        assert_eq!(rig.ctx.warmed_next_for.get(), Some((1, 2)));
+        assert_eq!(requests(&rig.work_rx), 0, "a cached resolve runs no yt-dlp");
+        assert_eq!(
+            rig.client_rx.try_iter().count(),
+            1,
+            "the row is replaced in place (an MPD command was queued)"
+        );
+    }
+
+    #[test]
+    fn a_non_link_next_entry_is_left_alone() {
+        let rig = rig(
+            vec![resolved(1, "https://rr1.example/vb"), row(2, "local.mp3")],
+            1,
+        );
+        warm_next_queue_link(&rig.ctx);
+        assert_eq!(rig.ctx.warmed_next_for.get(), None);
+        assert_eq!(requests(&rig.work_rx), 0);
+    }
+
+    #[test]
+    fn a_video_tagged_row_is_not_warmed_by_the_audio_look_ahead() {
+        let rig = rig(
+            vec![
+                resolved(1, "https://rr1.example/vb"),
+                row(2, "https://www.youtube.com/watch?v=LLL#s2u-video"),
+            ],
+            1,
+        );
+        warm_next_queue_link(&rig.ctx);
+        assert_eq!(rig.ctx.warmed_next_for.get(), None);
+        assert_eq!(requests(&rig.work_rx), 0);
+    }
+
+    #[test]
+    fn nothing_happens_without_a_current_song() {
+        let mut rig = rig(vec![row(2, "https://www.youtube.com/watch?v=MMM#s2u-audio")], 1);
+        rig.ctx.status.state = State::Stop;
+        warm_next_queue_link(&rig.ctx);
+        assert_eq!(rig.ctx.warmed_next_for.get(), None);
+        assert_eq!(requests(&rig.work_rx), 0);
+    }
+
+    /// Round 105: a next row that is a *stale resolved stream* (its signed
+    /// URL expired) is warmed from its original link with a ReplaceInPlace —
+    /// without this, MPD would play a few seconds of the dead URL and skip.
+    #[test]
+    fn a_stale_resolved_next_row_is_warmed_in_place() {
+        const EXPIRED: &str =
+            "https://rr2.googlevideo.com/videoplayback?expire=1000000000&id=zz";
+        const WATCH: &str = "https://www.youtube.com/watch?v=QQQ";
+        let rig = rig(
+            vec![resolved(1, "https://rr1.example/vb"), row(2, EXPIRED)],
+            1,
+        );
+        rig.ctx.yt_info.borrow_mut().insert(
+            EXPIRED.to_owned(),
+            YtStreamInfo {
+                url: EXPIRED.to_owned(),
+                original_url: WATCH.to_owned(),
+                title: "Stale".to_owned(),
+                resolved_at: Some(crate::ui::modals::paste::now_epoch_secs()),
+                ..Default::default()
+            },
+        );
+
+        warm_next_queue_link(&rig.ctx);
+
+        assert_eq!(rig.ctx.warmed_next_for.get(), Some((1, 2)));
+        assert!(
+            rig.work_rx.try_iter().any(|request| matches!(
+                request,
+                WorkRequest::ResolveYtStreams { urls, action, .. }
+                    if urls == vec![WATCH.to_owned()]
+                        && matches!(action, YtAction::ReplaceInPlace(found) if found == 2)
+            )),
+            "the original link is re-resolved in place"
+        );
+    }
+
+    /// Round 105: a *live* resolved next row (not expired) is left alone — it
+    /// plays as-is.
+    #[test]
+    fn a_live_resolved_next_row_is_left_alone() {
+        const FRESH: &str =
+            "https://rr2.googlevideo.com/videoplayback?expire=7258118400&id=qq";
+        let rig = rig(
+            vec![resolved(1, "https://rr1.example/vb"), row(2, FRESH)],
+            1,
+        );
+        warm_next_queue_link(&rig.ctx);
+        assert_eq!(rig.ctx.warmed_next_for.get(), None);
+        assert_eq!(requests(&rig.work_rx), 0);
+    }
+}

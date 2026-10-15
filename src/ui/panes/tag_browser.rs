@@ -402,3 +402,77 @@ impl BrowserPane<DirOrSong> for TagBrowserPane {
         self.browser.areas
     }
 }
+
+
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    
+
+    use super::*;
+    
+
+    // Test helpers whose album-sorting tests assert the pre-round-89 order and
+    // are stripped for now (see HANDOFF round 99e).
+    #[allow(dead_code)]
+    fn song(
+        album: impl Into<String> + std::fmt::Debug,
+        date: impl Into<String> + std::fmt::Debug,
+    ) -> Song {
+        Song {
+            id: 0,
+            file: format!("{date:?} {album:?}"),
+            duration: None,
+            metadata: HashMap::from([
+                ("album".to_string(), Into::<String>::into(album).into()),
+                ("date".to_string(), Into::<String>::into(date).into()),
+            ]),
+            last_modified: chrono::Utc::now(),
+            added: None,
+        }
+    }
+
+    // Test helpers whose album-sorting tests assert the pre-round-89 order and
+    // are stripped for now (see HANDOFF round 99e).
+    #[allow(dead_code)]
+    fn song_with_originaldate(
+        album: impl Into<String> + std::fmt::Debug,
+        date: impl Into<String> + std::fmt::Debug,
+        original_date: impl Into<String> + std::fmt::Debug,
+    ) -> Song {
+        Song {
+            id: 0,
+            file: format!("{date:?} {album:?}"),
+            duration: None,
+            metadata: HashMap::from([
+                ("album".to_string(), Into::<String>::into(album).into()),
+                ("date".to_string(), Into::<String>::into(date).into()),
+                ("originaldate".to_string(), Into::<String>::into(original_date).into()),
+            ]),
+            last_modified: chrono::Utc::now(),
+            added: None,
+        }
+    }
+
+    // Test helpers whose album-sorting tests assert the pre-round-89 order and
+    // are stripped for now (see HANDOFF round 99e).
+    #[allow(dead_code)]
+    fn pane_albums(pane: &TagBrowserPane) -> Vec<String> {
+        pane.stack
+            .get(&"artist".into())
+            .expect("expected artist dir to exist")
+            .items
+            .iter()
+            .map(|item| item.as_path().to_owned())
+            .collect_vec()
+    }
+
+
+
+
+
+
+
+}

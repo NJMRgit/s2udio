@@ -816,12 +816,10 @@ impl Ui {
                     modal!(ctx, modal);
                 }
                 GlobalAction::NextTrack if ctx.status.state != State::Stop => {
-                    let keep_state = ctx.config.keep_state_on_song_change;
-                    let state = ctx.status.state;
-                    ctx.command(move |client| {
-                        client.next_keep_state(keep_state, state)?;
-                        Ok(())
-                    });
+                    // Round 112: same as the controls bar's `▶▶` — resolve the
+                    // row the step lands on before MPD is asked to move, so
+                    // MPD never meets a raw stream link it cannot decode.
+                    crate::ui::panes::queue::next_track_resolving(&ctx);
                 }
                 GlobalAction::PreviousTrack if ctx.status.state != State::Stop => {
                     let rewind_to_start = ctx.config.rewind_to_start_sec;
