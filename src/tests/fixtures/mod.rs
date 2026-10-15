@@ -135,7 +135,8 @@ pub fn ctx(
         paste_modal_id: Cell::new(None),
         paste_chapter_warm: RefCell::new(HashSet::new()),
         queue_info_warm: RefCell::new(HashSet::new()),
-        warmed_next_for: Cell::new(None),
+        warmed_ahead_ids: RefCell::new(HashSet::new()),
+        warmed_ahead_for: Cell::new(None),
         pending_next_step: Cell::new(None),
         mpd_music_directory: None,
     }

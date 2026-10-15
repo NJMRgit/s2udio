@@ -10,6 +10,22 @@ use super::{
     stream_parse_pending, youtube_link_of,
 };
 
+/// How many queue rows ahead of the current song the look ahead keeps
+/// resolved.
+///
+/// Measured against the reported playlist storm (the user's log, 2026-10-15):
+/// one row is always behind, because a `yt-dlp` resolve costs ~2.5 s while a
+/// transition costs less, so every row was resolved only *after* MPD had
+/// already reached and skipped it (53 warms in 61 s, median 2.46 s apart).
+///
+/// Four is deliberately modest. The resolve pool has only two workers
+/// (`core::work::RESOLVE_WORKERS`), so a deeper window would queue behind the
+/// same two workers without becoming ready any sooner — it would only add
+/// latency to a user action that needs a resolve of its own (a double-clicked
+/// row, a `▶▶` target). Four covers the transitions while two resolves are in
+/// flight, which is the gap the log showed.
+pub(crate) const LOOK_AHEAD_WINDOW: usize = 4;
+
 /// Ask the work thread for the stream info of pasted links that have none yet
 /// (round 78): the download options need their chapter list, and nothing else
 /// fetches it before the link is played. The open popup refreshes when the
@@ -44,19 +60,26 @@ pub(super) fn warm_chapters(ctx: &Ctx, downloads: &[PastedItem]) {
 }
 
 /// Round 95b (user, restored 105e): while a track plays, resolve the queue
-/// entry **after** it when that entry is still an unresolved audio link. MPD
-/// cannot open a link, so without this it skips past the following entries
-/// until the app's resolve lands (round 104 measured the storm: MPD failing
-/// 5-15 unresolved rows in ~3 s per transition). The look ahead resolves ONE
-/// row ahead; with the round-98 in-place swap, MPD's next-song prefetch finds
-/// a playable URL and the current track is never cut (playing the replacement
-/// was what used to cut it; `ReplaceInPlace` never sends `playid`).
+/// entries **after** it when they are still unresolved audio links. MPD cannot
+/// open a link, so without this it skips past the following entries until the
+/// app's resolve lands (round 104 measured the storm: MPD failing 5-15
+/// unresolved rows in ~3 s per transition). The look ahead resolves
+/// [`LOOK_AHEAD_WINDOW`] rows ahead; with the round-98 in-place swap, MPD's
+/// next-song prefetch finds a playable URL and the current track is never cut
+/// (playing the replacement was what used to cut it; `ReplaceInPlace` never
+/// sends `playid`).
 ///
-/// Only the **next** entry is warmed (never the rest of the playlist), and
-/// only when nothing is known for it yet: a fresh cached resolve, a resolve
-/// already in flight, or a non-link entry all leave the queue alone.
+/// **Why a window and not one row (2026-10-15).** One row ahead is always
+/// behind when a resolve is slower than the transition, which is exactly the
+/// reported "resolving storm" after adding a playlist: the playlist's rows
+/// arrive in one batch as unresolved links, each resolve costs ~2.5 s, so MPD
+/// reaches the warmed row first, fails to decode it, skips, and the next poll
+/// warms the row after that — one row per resolve, walking the playlist. The
+/// user's log measured it: 53 warms in 61 s, median 2.46 s apart, i.e. the
+/// resolve latency itself. Warming a window keeps the pool fed so the row about
+/// to play is resolved before MPD asks for it.
 ///
-/// **Which row is "next" comes from MPD** (`status.nextsongid`), not from
+/// **Which rows come first comes from MPD** (`status.nextsongid`), not from
 /// `current + 1`: in `random` mode MPD plays its own shuffled sequence, so the
 /// row after the current one is usually not the row that plays next, and
 /// warming it left the real next row unresolved (and the round-104 storm in
@@ -64,19 +87,65 @@ pub(super) fn warm_chapters(ctx: &Ctx, downloads: &[PastedItem]) {
 /// reports no `nextsong` (a stopped player, or the end of the queue).
 pub fn warm_next_queue_link(ctx: &Ctx) {
     let Some((idx, current)) = ctx.find_current_song_in_queue() else { return };
-    let next = ctx
+    // The window is per current song: a new track means a new run of rows after it.
+    if ctx.warmed_ahead_for.get() != Some(current.id) {
+        ctx.warmed_ahead_for.set(Some(current.id));
+        ctx.warmed_ahead_ids.borrow_mut().clear();
+    }
+    for song in look_ahead_rows(ctx, idx) {
+        if ctx.warmed_ahead_ids.borrow().contains(&song.id) {
+            continue;
+        }
+        // Only a row the warm actually acted on is remembered. Marking the
+        // whole window up front would poison the rows `warm_row` deliberately
+        // leaves alone (a plain file, a video row), which must stay eligible
+        // when a later poll sees them in the window.
+        if !warm_row(ctx, &song) {
+            continue;
+        }
+        ctx.warmed_ahead_ids.borrow_mut().insert(song.id);
+    }
+}
+
+/// The rows the look ahead warms, nearest first: MPD's own next song followed
+/// by the queue rows after the current one, at most [`LOOK_AHEAD_WINDOW`] of
+/// them.
+///
+/// MPD's pick is first because it is the row that actually plays next; the
+/// `current + 1` run behind it covers the transitions after that, which is what
+/// keeps a batch-imported playlist ahead of playback. Non-audio rows (the video
+/// list, plain files) are skipped rather than counted, so the window is a
+/// window of *resolvable stream rows*, not of arbitrary queue entries.
+fn look_ahead_rows(ctx: &Ctx, idx: usize) -> Vec<crate::mpd::commands::Song> {
+    let mut rows: Vec<crate::mpd::commands::Song> = Vec::with_capacity(LOOK_AHEAD_WINDOW);
+    let mpd_next = ctx
         .status
         .nextsongid
         .and_then(|id| ctx.queue.iter().find(|song| song.id == id))
-        .or_else(|| ctx.queue.get(idx + 1))
         .cloned();
-    let Some(next) = next else { return };
-    // One look ahead per (current, next) pair: the swap below refreshes the
-    // queue, and without this marker each refresh would warm the entry after
-    // the one just warmed (a slow crawl through the whole playlist).
-    if ctx.warmed_next_for.get() == Some((current.id, next.id)) {
-        return;
+    let push = |song: &crate::mpd::commands::Song, rows: &mut Vec<crate::mpd::commands::Song>| {
+        if rows.len() < LOOK_AHEAD_WINDOW && !rows.iter().any(|r| r.id == song.id) {
+            rows.push(song.clone());
+        }
+    };
+    if let Some(song) = &mpd_next {
+        push(song, &mut rows);
     }
+    for song in ctx.queue.iter().skip(idx + 1) {
+        push(song, &mut rows);
+    }
+    rows
+}
+
+/// Warm one queue row — swap it in place for its resolved stream, or re-resolve
+/// an expired one. `ReplaceInPlace` never plays: starting the row is the
+/// caller's job, and a warm-up that played would cut the current track short.
+///
+/// Returns whether the row was acted on. A row this leaves alone (a plain file,
+/// a video row, one already resolving) reports `false` so the caller does not
+/// remember it as warmed — it may become warmable on a later poll.
+fn warm_row(ctx: &Ctx, row: &crate::mpd::commands::Song) -> bool {
+    let next = row;
     let Some((link, intent)) = tagged_stream_entry(&next.file) else {
         // Round 105: the next row is a **stale resolved stream** — a signed
         // googlevideo URL whose `expire=` epoch passed. MPD would open it,
@@ -85,7 +154,7 @@ pub fn warm_next_queue_link(ctx: &Ctx) {
         // anything the error recovery recognizes). Warm its re-resolve from
         // the original link exactly like the tagged row, swapped in place.
         let Some(original) = expired_stream_original_url(ctx, &next.file) else {
-            return;
+            return false;
         };
         // Let a re-resolve that is already in flight land first; the next
         // queue update retries (the marker is only set once something is
@@ -93,12 +162,11 @@ pub fn warm_next_queue_link(ctx: &Ctx) {
         if stream_parse_pending(ctx, &next.file)
             && fresh_cached_stream_info(ctx, &original).is_none()
         {
-            return;
+            return true;
         }
-        ctx.warmed_next_for.set(Some((current.id, next.id)));
         if let Some(info) = fresh_cached_stream_info(ctx, &original) {
             apply_resolved_streams(ctx, vec![info], YtAction::ReplaceInPlace(next.id), Vec::new());
-            return;
+            return true;
         }
         log::debug!(url = next.file.as_str(); "Warming the next queue entry's stream (its URL expired)");
         mark_stream_parse_pending(ctx, std::slice::from_ref(&original));
@@ -109,22 +177,21 @@ pub fn warm_next_queue_link(ctx: &Ctx) {
         }) {
             log::error!(error:? = err; "Failed to request the next entry's stream resolution");
         }
-        return;
+        return true;
     };
     if !intent.is_audio() {
-        return;
+        return false;
     }
     // Let a resolve that is already in flight land first; the next queue
     // update retries (the marker is only set once something is done).
     if stream_parse_pending(ctx, &next.file) && fresh_cached_stream_info(ctx, &link).is_none() {
-        return;
+        return true;
     }
-    ctx.warmed_next_for.set(Some((current.id, next.id)));
     // Round 98: already resolved (the paste popup, an earlier play, a stored
     // playlist entry): swap the row right away, no yt-dlp run.
     if let Some(info) = fresh_cached_stream_info(ctx, &link) {
         apply_resolved_streams(ctx, vec![info], YtAction::ReplaceInPlace(next.id), Vec::new());
-        return;
+        return true;
     }
     log::debug!(link = link.as_str(); "Warming the next queue entry's stream while the current one plays");
     mark_stream_parse_pending(ctx, std::slice::from_ref(&link));
@@ -140,7 +207,9 @@ pub fn warm_next_queue_link(ctx: &Ctx) {
     }) {
         log::error!(error:? = err; "Failed to request the next entry's stream resolution");
     }
+    true
 }
+
 /// Make sure the chapters of the current song are known: sync from the
 /// resolved YouTube info, or fetch them (Jellyfin items via the API, local
 /// files via ffprobe). Called on song change / startup.
@@ -424,7 +493,11 @@ mod warm_next_tests {
         assert!(rig.work_rx.is_empty());
 
         warm_next_queue_link(&rig.ctx);
-        assert_eq!(rig.ctx.warmed_next_for.get(), Some((1, 2)), "the pair is marked as warmed");
+        assert_eq!(rig.ctx.warmed_ahead_for.get(), Some(1), "the window belongs to the current song");
+        assert!(
+            rig.ctx.warmed_ahead_ids.borrow().contains(&2),
+            "the warmed row is remembered"
+        );
         assert_eq!(requests(&rig.work_rx), 1, "one resolve was asked for");
         assert!(
             stream_parse_pending(&rig.ctx, link),
@@ -454,7 +527,7 @@ mod warm_next_tests {
         );
 
         warm_next_queue_link(&rig.ctx);
-        assert_eq!(rig.ctx.warmed_next_for.get(), Some((1, 2)));
+        assert!(rig.ctx.warmed_ahead_ids.borrow().contains(&2));
         assert_eq!(requests(&rig.work_rx), 0, "a cached resolve runs no yt-dlp");
         assert_eq!(
             rig.client_rx.try_iter().count(),
@@ -470,7 +543,7 @@ mod warm_next_tests {
             1,
         );
         warm_next_queue_link(&rig.ctx);
-        assert_eq!(rig.ctx.warmed_next_for.get(), None);
+        assert!(rig.ctx.warmed_ahead_ids.borrow().is_empty());
         assert_eq!(requests(&rig.work_rx), 0);
     }
 
@@ -484,7 +557,7 @@ mod warm_next_tests {
             1,
         );
         warm_next_queue_link(&rig.ctx);
-        assert_eq!(rig.ctx.warmed_next_for.get(), None);
+        assert!(rig.ctx.warmed_ahead_ids.borrow().is_empty());
         assert_eq!(requests(&rig.work_rx), 0);
     }
 
@@ -493,7 +566,7 @@ mod warm_next_tests {
         let mut rig = rig(vec![row(2, "https://www.youtube.com/watch?v=MMM#s2u-audio")], 1);
         rig.ctx.status.state = State::Stop;
         warm_next_queue_link(&rig.ctx);
-        assert_eq!(rig.ctx.warmed_next_for.get(), None);
+        assert_eq!(rig.ctx.warmed_ahead_for.get(), None);
         assert_eq!(requests(&rig.work_rx), 0);
     }
 
@@ -522,7 +595,7 @@ mod warm_next_tests {
 
         warm_next_queue_link(&rig.ctx);
 
-        assert_eq!(rig.ctx.warmed_next_for.get(), Some((1, 2)));
+        assert!(rig.ctx.warmed_ahead_ids.borrow().contains(&2));
         assert!(
             rig.work_rx.try_iter().any(|request| matches!(
                 request,
@@ -545,7 +618,7 @@ mod warm_next_tests {
             1,
         );
         warm_next_queue_link(&rig.ctx);
-        assert_eq!(rig.ctx.warmed_next_for.get(), None);
+        assert!(rig.ctx.warmed_ahead_ids.borrow().is_empty());
         assert_eq!(requests(&rig.work_rx), 0);
     }
 }

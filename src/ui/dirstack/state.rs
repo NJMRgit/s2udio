@@ -114,21 +114,32 @@ impl<T: ScrollingState> DirState<T> {
     /// scrolls past its end). Used at app start to land the queue on the
     /// currently playing song, instead of `select`'s keep-visible or
     /// center behavior.
+    ///
+    /// An **unknown** content length must not drop the selection. A follow jump
+    /// runs on a status poll, before the next render has measured the list, so
+    /// `content_len` can still be `None` for that frame — and returning early
+    /// there is what left the selection behind after adding a playlist and
+    /// pressing play (the row was found, `select_at_top` was called, and
+    /// nothing moved). The length is only needed to clamp; without it the index
+    /// passes through as-is and the render clamps once the real length is
+    /// known, which is exactly how `select` already treats `None`.
     pub fn select_at_top(&mut self, idx: usize) {
-        let Some(content_len) = self.content_len else {
-            return;
-        };
-        if content_len == 0 {
-            self.inner.select_scrolling(None);
-            self.scrollbar_state = self.scrollbar_state.position(0);
-            return;
+        match self.content_len {
+            Some(0) => {
+                self.inner.select_scrolling(None);
+                self.scrollbar_state = self.scrollbar_state.position(0);
+                return;
+            }
+            Some(content_len) => {
+                let idx = idx.min(content_len.saturating_sub(1));
+                self.inner.select_scrolling(Some(idx));
+                let max_offset =
+                    content_len.saturating_sub(self.viewport_len.unwrap_or_default());
+                self.inner.set_offset(idx.min(max_offset));
+                self.scrollbar_state = self.scrollbar_state.position(self.offset());
+            }
+            None => self.inner.select_scrolling(Some(idx)),
         }
-        let idx = idx.min(content_len.saturating_sub(1));
-        self.inner.select_scrolling(Some(idx));
-        let max_offset = content_len
-            .saturating_sub(self.viewport_len.unwrap_or_default());
-        self.inner.set_offset(idx.min(max_offset));
-        self.scrollbar_state = self.scrollbar_state.position(self.offset());
     }
     pub fn next(&mut self, scrolloff: usize, wrap: bool) {
         if wrap {
@@ -516,10 +527,13 @@ mod tests {
         assert_eq!(subject.get_selected(), None);
         assert_eq!(subject.offset(), 0);
 
-        // No content length known yet: no-op.
+        // An unknown length is **not** an empty list: the list has simply not
+        // been measured yet (the follow jump runs before the next render), so
+        // the selection must still move. Treating this as a no-op was the
+        // "selection never lands on the track that starts playing" bug.
         let mut subject: DirState<ListState> = DirState::default();
         subject.select_at_top(3);
-        assert_eq!(subject.get_selected(), None);
+        assert_eq!(subject.get_selected(), Some(3));
     }
 
     #[test]

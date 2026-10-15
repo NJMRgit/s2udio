@@ -368,14 +368,20 @@ pub struct Ctx {
     /// request per link, so a selection that rests does not re-resolve on
     /// every render/debounce tick.
     pub(crate) queue_info_warm: RefCell<HashSet<String>>,
-    /// Round 95b (restored 105e): `(current, next)` song ids the one-entry
-    /// look ahead has already run for. The look ahead swaps the next entry in
-    /// place, and that swap refreshes the queue, so without this marker each
-    /// swap would warm the entry after it and crawl the whole playlist. The
-    /// pair (rather than the current song alone) lets a *different* entry
-    /// become the next one (the user removed the warmed entry) and be warmed
-    /// as usual.
-    pub(crate) warmed_next_for: Cell<Option<(u32, u32)>>,
+    /// 2026-10-15: the song ids the look ahead has already warmed for
+    /// [`Self::warmed_ahead_for`]. The look ahead used to remember only the
+    /// single row it warmed (a `(current, next)` pair), which is why a batch of
+    /// unresolved links stormed: each poll warmed one row, the resolve took
+    /// ~2.5 s, MPD reached that row first and skipped, and the next poll warmed
+    /// the row after it — one row per resolve, walking down the playlist
+    /// (measured live: 53 warms in 61 s, median 2.46 s apart). Remembering the
+    /// whole window lets the look ahead keep several rows resolved ahead
+    /// without re-warming a row it already asked for.
+    pub(crate) warmed_ahead_ids: RefCell<HashSet<u32>>,
+    /// The `current` song id the window in [`Self::warmed_ahead_ids`] belongs
+    /// to. The window is per current song: when playback moves on, the set is
+    /// cleared so the new next rows are warmed.
+    pub(crate) warmed_ahead_for: Cell<Option<u32>>,
     /// Round 112: the queue entry a `▶▶` / `>` step is waiting on, when the
     /// row it would land on is an unresolved stream link. `▶▶` cannot simply
     /// ask MPD to step: MPD lands on the raw link, cannot decode it and skips
@@ -560,7 +566,8 @@ impl Ctx {
             paste_modal_id: Cell::new(None),
             paste_chapter_warm: RefCell::new(HashSet::new()),
             queue_info_warm: RefCell::new(HashSet::new()),
-            warmed_next_for: Cell::new(None),
+            warmed_ahead_ids: RefCell::new(HashSet::new()),
+            warmed_ahead_for: Cell::new(None),
             pending_next_step: Cell::new(None),
             mpd_music_directory,
         };
