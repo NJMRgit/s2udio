@@ -138,6 +138,7 @@ pub fn ctx(
         warmed_ahead_ids: RefCell::new(HashSet::new()),
         warmed_ahead_for: Cell::new(None),
         pending_next_step: Cell::new(None),
+        pending_select_on_growth: Cell::new(None),
         mpd_music_directory: None,
     }
 }

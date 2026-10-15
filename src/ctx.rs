@@ -398,6 +398,17 @@ pub struct Ctx {
     /// playable. This holds that pending step's song id so repeated presses
     /// **coalesce** into one step instead of piling up resolves.
     pub(crate) pending_next_step: Cell<Option<u32>>,
+    /// The index the queue's selection must move to when the next refresh lands
+    /// **with more rows than the pane holds** — a playlist import appended
+    /// content, and the highlight belongs on the first row it added (otherwise
+    /// it stays on whatever old index it happened to hold, which after an add
+    /// reads as "it landed somewhere in the middle of the new tracks").
+    ///
+    /// The growth test is what separates an import from the many refreshes a
+    /// resolve produces: a swap replaces a row (same length) and must leave the
+    /// selection alone, while an append grows the list. A refresh that does not
+    /// grow drops the index rather than applying it to a list without that row.
+    pub(crate) pending_select_on_growth: Cell<Option<usize>>,
     /// The open paste popup's modal id (so a nested flow — e.g. the
     /// "Select files…" picker — can close it once playback starts;
     /// `PopModal` drops the modal without running its close hook, so the
@@ -576,6 +587,7 @@ impl Ctx {
             warmed_ahead_ids: RefCell::new(HashSet::new()),
             warmed_ahead_for: Cell::new(None),
             pending_next_step: Cell::new(None),
+            pending_select_on_growth: Cell::new(None),
             mpd_music_directory,
         };
         if let Some((_, song)) = ctx.find_current_song_in_queue() {

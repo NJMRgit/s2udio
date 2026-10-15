@@ -596,7 +596,49 @@ impl Pane for QueuePane {
             }
             UiEvent::QueueChanged => {
                 let was_stale = self.queue.items.len() != ctx.queue.len();
+                let before = self.queue.items.len();
                 self.queue.items.clone_from(&Self::local_queue(ctx));
+                // The list's measured length is set by `before_show`, i.e. at
+                // the *previous* render, so it still describes the list as it
+                // was. Anything that selects by index here would be clamped
+                // against the stale count (a 3-row list receiving a 5-row
+                // import clamps index 3 to 2), so the length is updated first.
+                self.queue
+                    .state
+                    .set_content_len(Some(self.queue.items.len()));
+                // A playlist import appends rows; the highlight belongs on the
+                // first row it added. The refresh is what makes that row
+                // findable, so the jump is applied here — and only when the
+                // list actually grew, because a resolve's swap replaces a row
+                // without changing the length and must not move the selection.
+                if let Some(want) = ctx.pending_select_on_growth.take() {
+                    // The row is located by **what was not there before**, not by
+                    // a raw index: the pane shows a filtered copy of the queue
+                    // (`local_queue` drops hidden stream rows and the temp-play
+                    // row), so `ctx.queue` indices and pane indices differ. `want`
+                    // is the first-added row's position in the *queue*; matching
+                    // it against the newly-appeared ids keeps the two in step.
+                    let grew = self.queue.items.len() > before;
+                    if grew {
+                        let first_new = self.queue.items[before.min(self.queue.items.len())..]
+                            .first()
+                            .map(|song| song.id);
+                        let idx = first_new
+                            .and_then(|id| self.queue.items.iter().position(|s| s.id == id))
+                            .or(Some(want.min(self.queue.items.len().saturating_sub(1))));
+                        if let Some(idx) = idx {
+                            log::debug!(
+                                idx, added = self.queue.items.len() - before;
+                                "Selecting the first row the queue grew by"
+                            );
+                            self.queue.select_at_top(idx);
+                            if !is_visible {
+                                self.pending_follow_to_top = Some(idx);
+                            }
+                            ctx.render().map_err(anyhow::Error::from)?;
+                        }
+                    }
+                }
                 // 2026-10-15: a `SongChanged` that arrived while the pane's
                 // queue copy was stale could not resolve the playing row, so
                 // its follow jump was dropped. Now that the refreshed queue is

@@ -366,6 +366,17 @@ pub(super) fn enqueue_stream_links(
     let has_current = ctx.find_current_song_in_queue().is_some();
     let position =
         (play && !replace && has_current).then_some(QueuePosition::RelativeAdd(0));
+    // Where the first added row will sit once the enqueue lands: right after the
+    // current song when the rows are inserted there, else at the end. The queue
+    // pane moves the highlight there when the refresh arrives (2026-10-15) — a
+    // playlist import otherwise left the selection on whatever old index it
+    // held, which reads as "it landed in the middle of the new tracks".
+    let first_added_idx = if position.is_some() {
+        ctx.find_current_song_in_queue().map_or(0, |(idx, _)| idx + 1)
+    } else {
+        ctx.queue.len()
+    };
+    ctx.pending_select_on_growth.set(Some(first_added_idx));
     // The row the `play` arm resolves and starts: the first queued link.
     let first_link = uris
         .iter()
