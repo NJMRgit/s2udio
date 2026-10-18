@@ -12,7 +12,7 @@ pub(super) fn handle_queue_update(
     render_wanted: &mut bool,
 ) {
     ctx.queue = queue.unwrap_or_default();
-    ctx.cached_queue_time_total = ctx.queue.iter().filter_map(|s| s.duration).sum();
+    ctx.cached_queue_time_total = crate::ui::modals::paste::queue_total_time(ctx);
     *render_wanted = true;
     log::debug!(len = ctx.queue.len(); "Queue updated");
     // Round 105: a cleared queue wipes the in-flight audio-row markers. A

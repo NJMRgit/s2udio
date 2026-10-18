@@ -250,15 +250,32 @@ pub fn is_buffered_url(url: &str) -> bool {
 /// The original link a buffered URL was registered from — the link a row
 /// must be re-resolved from when its bytes are not (fully) cached. `None`
 /// for a non-buffered URL or an unknown key.
-pub fn original_link_for_url(url: &str) -> Option<String> {
+pub fn original_link_for_url(cache_dir: Option<&Path>, url: &str) -> Option<String> {
     let key = buffered_key(url)?;
-    let cache = PROXY.get()?;
-    let inner = lock(&cache.inner);
-    inner
-        .entries
+    if let Some(cache) = PROXY.get() {
+        let inner = lock(&cache.inner);
+        if let Some(original) = inner
+            .entries
+            .get(key)
+            .map(|entry| entry.original_url.clone())
+            .or_else(|| inner.registrations.get(key).map(|reg| reg.original_url.clone()))
+            .filter(|original| !original.is_empty())
+        {
+            return Some(original);
+        }
+    }
+    // Fall back to the persisted manifest. The proxy is created lazily, so on
+    // a fresh start (a queue restored from MPD, nothing played yet) there is
+    // no in-memory cache at all - but the key -> original-link mapping the
+    // queue rows need was written on a previous run and is still on disk.
+    // Round 111: without this the restored rows showed "Unknown / -".
+    // Consult the root the proxy was actually started with. The proxy takes
+    // the config's `cache_dir`, so the default location is a *different*
+    // directory whenever that is set - reading the wrong one silently returns
+    // None for every row (which is exactly how this fallback first failed).
+    load_manifest(&stream_buffer_root(cache_dir))
         .get(key)
         .map(|entry| entry.original_url.clone())
-        .or_else(|| inner.registrations.get(key).map(|reg| reg.original_url.clone()))
         .filter(|original| !original.is_empty())
 }
 
@@ -343,14 +360,20 @@ fn entry_needs_refresh(entry: Option<&Entry>, registered: bool, reading: bool) -
     }
 }
 
+/// Where the stream-buffer cache lives.
+///
+/// Never falls back to a bare relative path: a test (or a config with no cache
+/// dir) must not drop a `stream-buffer/` in the process cwd.
+fn stream_buffer_root(cache_dir: Option<&Path>) -> PathBuf {
+    cache_dir
+        .map(|dir| dir.join("stream-buffer"))
+        .or_else(|| crate::shared::paths::s2udio_cache_dir().map(|dir| dir.join("stream-buffer")))
+        .unwrap_or_else(|| std::env::temp_dir().join("s2udio-stream-buffer"))
+}
+
 impl StreamCache {
     fn start(cache_dir: Option<&Path>) -> Arc<Self> {
-        // Never fall back to a bare relative path: a test (or a config with
-        // no cache dir) must not drop a `stream-buffer/` in the process cwd.
-        let root = cache_dir
-            .map(|dir| dir.join("stream-buffer"))
-            .or_else(|| crate::shared::paths::s2udio_cache_dir().map(|dir| dir.join("stream-buffer")))
-            .unwrap_or_else(|| std::env::temp_dir().join("s2udio-stream-buffer"));
+        let root = stream_buffer_root(cache_dir);
         let _ = std::fs::create_dir_all(root.join("audio"));
         let _ = std::fs::create_dir_all(root.join("video"));
 
@@ -1561,5 +1584,77 @@ mod tests {
             "the replay did not touch the upstream"
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+/// Round 111: the restored-queue lookup. A buffered row URL must resolve to
+/// its original link through the **persisted manifest**, because that is the
+/// only thing that survives a restart.
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod original_link_tests {
+    use super::*;
+
+    /// A fake cache dir plus the `stream-buffer` root inside it, mirroring the
+    /// real layout: `stream_buffer_root(cache_dir) == cache_dir/stream-buffer`.
+    fn temp_cache(tag: &str) -> (PathBuf, PathBuf) {
+        let cache_dir =
+            std::env::temp_dir().join(format!("s2u-origlink-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&cache_dir);
+        let root = cache_dir.join("stream-buffer");
+        std::fs::create_dir_all(root.join("audio")).unwrap();
+        (cache_dir, root)
+    }
+
+    /// Write a manifest exactly as the proxy does, then resolve a row URL
+    /// against it. This is the whole point of the fallback: a queue restored
+    /// from MPD on a fresh start has no in-memory cache.
+    #[test]
+    fn a_manifest_entry_resolves_a_row_url_without_the_proxy() {
+        let (cache_dir, root) = temp_cache("hit");
+        let key = "f6ae1edea05a880a";
+        let original = "https://www.youtube.com/watch?v=sDNeqfZTu6U";
+        let entry = serde_json::json!({
+            key: {
+                "class": "audio",
+                "original_url": original,
+                "size": 0,
+                "total": null,
+                "complete": false,
+                "content_type": null,
+                "last_used": 0,
+                "failed": false
+            }
+        });
+        std::fs::write(root.join("index.json"), entry.to_string()).unwrap();
+
+        let url = format!("http://127.0.0.1:39235/s2u/audio/{key}");
+        let resolved = original_link_for_url(Some(&cache_dir), &url);
+
+        assert_eq!(
+            resolved.as_deref(),
+            Some(original),
+            "a restarted queue row must resolve through the manifest"
+        );
+        let _ = std::fs::remove_dir_all(&cache_dir);
+    }
+
+    /// An unknown key must return None rather than a wrong link — a wrong link
+    /// would re-resolve the row to a different video entirely.
+    #[test]
+    fn an_unknown_key_resolves_to_nothing() {
+        let (cache_dir, root) = temp_cache("miss");
+        std::fs::write(root.join("index.json"), "{}").unwrap();
+        let url = "http://127.0.0.1:39235/s2u/audio/deadbeefdeadbeef";
+        assert_eq!(original_link_for_url(Some(&cache_dir), url), None);
+        let _ = std::fs::remove_dir_all(&cache_dir);
+    }
+
+    /// A non-buffered URL (a plain YouTube link or a local file) is not this
+    /// function's business and must resolve to nothing.
+    #[test]
+    fn a_non_buffered_url_is_not_matched() {
+        assert_eq!(original_link_for_url(None, "https://www.youtube.com/watch?v=abc"), None);
+        assert_eq!(original_link_for_url(None, "/music/a.flac"), None);
     }
 }

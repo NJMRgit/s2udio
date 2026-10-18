@@ -603,3 +603,168 @@ mod nav_tests {
         assert_eq!(blur.theme.background_color, Some(ratatui::style::Color::Rgb(0xaa, 0xbb, 0xcc)));
     }
 }
+
+/// Round 111 follow-up: the Settings > Advanced page.
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod advanced_tests {
+    use super::super::{
+        SettingsModal,
+        model::{AdvancedRow, ContentRow, Section, SettingsFocus},
+    };
+    use crate::ui::modals::Modal;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+    use crate::ctx::Ctx;
+
+    fn fixture() -> (SettingsModal, Ctx) {
+        let events = crossbeam::channel::unbounded();
+        let work = crossbeam::channel::unbounded();
+        let client = crossbeam::channel::unbounded();
+        let ctx = crate::tests::fixtures::ctx(events, work, client);
+        let modal = SettingsModal::new(&ctx);
+        (modal, ctx)
+    }
+
+    /// The page exists in the sidebar and carries exactly the rows the
+    /// diagnostics block promises. A missing page would be invisible to the
+    /// user; an extra row would be an undocumented control.
+    #[test]
+    fn the_advanced_page_lists_the_diagnostics_rows() {
+        let (mut modal, ctx) = fixture();
+        assert!(
+            Section::all().contains(&Section::Advanced),
+            "Advanced must be reachable from the settings sidebar"
+        );
+        assert_eq!(Section::Advanced.name(), "advanced");
+
+        modal.section = Section::Advanced;
+        modal.refresh_rows(&ctx);
+        let rows = modal.rows.clone();
+        // ContentRow has no PartialEq (it carries non-comparable payloads), so
+        // compare the debug rendering: exact rows, in order.
+        assert_eq!(
+            rows.iter().map(|r| format!("{r:?}")).collect::<Vec<_>>(),
+            vec![
+                format!("{:?}", ContentRow::Advanced(AdvancedRow::DiagnosticsHeader)),
+                format!("{:?}", ContentRow::Advanced(AdvancedRow::MemoryWatchdog)),
+                format!("{:?}", ContentRow::Advanced(AdvancedRow::MemoryWatchdogInterval)),
+            ],
+            "the Advanced page's rows are a contract, not an implementation detail"
+        );
+        // Only the header is a header — otherwise navigation would skip the
+        // two rows the user came here for.
+        assert!(rows[0].is_header());
+        assert!(!rows[1].is_header());
+        assert!(!rows[2].is_header());
+    }
+
+    /// A `ui:` block that names only one toggle must still parse, filling the
+    /// rest from defaults.
+    ///
+    /// Regression guard: without `#[serde(default)]` on `UiSettings` this
+    /// fails with "missing field `show_album_art`", and `AppStateFile::load`
+    /// then silently returns *all* defaults — so hand-writing one setting in
+    /// `state.ron` would quietly discard every other persisted setting.
+    #[test]
+    fn a_partial_ui_block_in_state_ron_still_parses() {
+        let partial = ron::de::from_str::<crate::config::state::AppStateFile>(
+            r#"#![enable(implicit_some)]
+            (
+                ui: (
+                    memory_watchdog: true,
+                    memory_watchdog_interval_secs: 30,
+                ),
+            )"#,
+        )
+        .expect("a partial ui block must parse");
+
+        let ui = partial.ui.expect("the ui block is read");
+        assert!(ui.memory_watchdog, "the named field is applied");
+        assert_eq!(ui.memory_watchdog_interval_secs, 30);
+        assert!(ui.show_album_art, "unnamed fields fall back to their defaults");
+    }
+
+    /// The watchdog defaults off in both the runtime config and a freshly
+    /// parsed config file, so enabling it is always a deliberate act.
+    #[test]
+    fn the_watchdog_defaults_off() {
+        let ui = crate::config::UiSettings::default();
+        assert!(!ui.memory_watchdog, "the watchdog must default off");
+        assert_eq!(
+            ui.memory_watchdog_interval_secs,
+            crate::shared::mem_watch::DEFAULT_INTERVAL_SECS
+        );
+    }
+
+    /// The interval row must be a **stepper**, so Enter/Right focuses it and
+    /// Left/Right adjust it. It was missing from `is_stepper_row`, so those
+    /// keys fell through to `activate`, which for this row did nothing —
+    /// the reported "I can't focus it and adjust with left/right".
+    #[test]
+    fn the_interval_row_is_adjustable() {
+        let (mut modal, mut ctx) = fixture();
+        modal.section = Section::Advanced;
+        modal.refresh_rows(&ctx);
+
+        let idx = modal
+            .rows
+            .iter()
+            .position(|r| {
+                matches!(
+                    r,
+                    ContentRow::Advanced(AdvancedRow::MemoryWatchdogInterval)
+                )
+            })
+            .expect("the Advanced page lists the interval row");
+        assert!(
+            modal.is_stepper_row(idx),
+            "the interval row must be a stepper row, or Enter/Right do nothing"
+        );
+
+        // Right arrow from the content pane enters adjust mode.
+        modal.focus = SettingsFocus::Content;
+        modal.selected = idx;
+        modal.handle_raw_key(key(KeyCode::Right), &mut ctx).unwrap();
+        assert_eq!(
+            modal.adjusting,
+            Some(idx),
+            "Right must put the interval row into adjust mode"
+        );
+
+        // Right again increases, Left decreases — both directions, which is
+        // the half that reported "the value only increases".
+        let start = modal.ui_pending.memory_watchdog_interval_secs;
+        modal.handle_raw_key(key(KeyCode::Right), &mut ctx).unwrap();
+        let up = modal.ui_pending.memory_watchdog_interval_secs;
+        assert!(up > start, "Right increases the interval ({start} -> {up})");
+
+        modal.handle_raw_key(key(KeyCode::Left), &mut ctx).unwrap();
+        assert_eq!(
+            modal.ui_pending.memory_watchdog_interval_secs, start,
+            "Left decreases it back — the value must move both ways"
+        );
+    }
+
+    /// Toggling the row stages the change rather than touching the live
+    /// config: the settings panel's save/discard contract must hold for this
+    /// row like every other.
+    #[test]
+    fn toggling_stages_without_applying() {
+        let (mut modal, mut ctx) = fixture();
+        let before = ctx.config.ui.memory_watchdog;
+        modal.toggle_advanced(&mut ctx, AdvancedRow::MemoryWatchdog).unwrap();
+        assert_ne!(
+            modal.ui_pending.memory_watchdog, before,
+            "the staged value flips"
+        );
+        assert_eq!(
+            ctx.config.ui.memory_watchdog, before,
+            "the live config is untouched until Save"
+        );
+        assert!(modal.has_changes(), "a staged toggle counts as a change");
+    }
+}

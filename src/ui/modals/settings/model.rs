@@ -25,6 +25,10 @@ pub(super) enum Section {
     Mpd,
     Jellyfin,
     Torrent,
+    /// Diagnostics that exist for when something is already suspected:
+    /// currently the in-app memory watchdog. Kept separate from `General` so
+    /// the everyday toggles are not diluted by a debugging switch.
+    Advanced,
 }
 
 /// Which settings pane owns keyboard navigation. Mirrors the tab-pane
@@ -37,7 +41,7 @@ pub(super) enum SettingsFocus {
 }
 
 impl Section {
-    pub(super) fn all() -> [Section; 6] {
+    pub(super) fn all() -> [Section; 7] {
         [
             Section::General,
             Section::Keybinds,
@@ -45,6 +49,7 @@ impl Section {
             Section::Mpd,
             Section::Jellyfin,
             Section::Torrent,
+            Section::Advanced,
         ]
     }
 
@@ -56,6 +61,7 @@ impl Section {
             Section::Mpd => "mpd",
             Section::Jellyfin => "jellyfin",
             Section::Torrent => "torrent",
+            Section::Advanced => "advanced",
         }
     }
 }
@@ -87,6 +93,18 @@ pub(super) enum GeneralRow {
     Monstercat,
     Waves,
     AppearanceHeader,
+}
+
+/// Settings > Advanced rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum AdvancedRow {
+    DiagnosticsHeader,
+    /// Log this process's RSS on a timer, so a long session leaves a memory
+    /// trail in the log. Off by default; see `shared::mem_watch`.
+    MemoryWatchdog,
+    /// How often the watchdog samples. Only meaningful while the toggle above
+    /// is on.
+    MemoryWatchdogInterval,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -274,6 +292,7 @@ pub(super) enum ContentRow {
     Mpv(MpvRow),
     Jellyfin(JellyfinRow),
     Torrent(TorrentRow),
+    Advanced(AdvancedRow),
 }
 
 impl ContentRow {
@@ -284,7 +303,8 @@ impl ContentRow {
             ContentRow::KeyHeader(_) | ContentRow::Mpd(MpdRow::LibraryHeader |
             MpdRow::PlaybackHeader | MpdRow::DevicesHeader) |
             ContentRow::Mpv(MpvRow::Header) | ContentRow::Jellyfin(JellyfinRow::Header) |
-            ContentRow::Torrent(TorrentRow::Header)
+            ContentRow::Torrent(TorrentRow::Header) |
+            ContentRow::Advanced(AdvancedRow::DiagnosticsHeader)
         )
     }
 }

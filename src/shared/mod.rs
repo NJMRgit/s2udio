@@ -14,6 +14,7 @@ pub mod ipc;
 pub mod keys;
 pub mod logging;
 pub mod lrc;
+pub mod mem_watch;
 pub mod macros;
 pub mod mouse_event;
 pub mod mpd_client_ext;

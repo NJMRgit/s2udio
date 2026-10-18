@@ -5,7 +5,7 @@ use crossterm::event::{KeyCode, KeyEvent};
 
 use super::{
     model::{
-        Click, ContentRow, GeneralRow, JellyfinRow, MpvLanguageTarget, MpvRow, MpdRow,
+        AdvancedRow, Click, ContentRow, GeneralRow, JellyfinRow, MpvLanguageTarget, MpvRow, MpdRow,
         PendingRemap, TorrentRow, FPS_MAX, FPS_MIN, FREQ_MAX_LIMIT, FREQ_MIN_LIMIT,
     },
     SettingsModal,
@@ -92,6 +92,27 @@ impl SettingsModal {
                 self.ui_pending.mpdris2_notifications = value;
             }
             _ => unreachable!("toggle_ui called with a non-toggle row"),
+        }
+        ctx.render()?;
+        Ok(())
+    }
+
+    /// Stage the memory watchdog toggle (Settings > Advanced).
+    ///
+    /// Staged like every other settings row: the running watchdog is not
+    /// started or stopped until the panel is saved, and the value persists to
+    /// the config sidecar with the rest of the UI settings.
+    pub(super) fn toggle_advanced(&mut self, ctx: &mut Ctx, row: AdvancedRow) -> Result<()> {
+        match row {
+            AdvancedRow::MemoryWatchdog => {
+                self.ui_pending.memory_watchdog = !self.ui_pending.memory_watchdog;
+            }
+            // The interval is adjusted, not toggled; the header is not
+            // interactive. Reaching either here is a wiring bug, not user
+            // input.
+            AdvancedRow::DiagnosticsHeader | AdvancedRow::MemoryWatchdogInterval => {
+                unreachable!("toggle_advanced called with a non-toggle row")
+            }
         }
         ctx.render()?;
         Ok(())
@@ -255,6 +276,20 @@ impl SettingsModal {
                 }
                 _ => Ok(()),
             },
+            ContentRow::Advanced(AdvancedRow::MemoryWatchdogInterval) => {
+                // Step through a small set of sane intervals rather than
+                // free-typing a number: the useful range is narrow, and a
+                // typed value would need clamping anyway (the watchdog
+                // clamps to MIN_INTERVAL_SECS as a backstop).
+                const STEPS: [u64; 6] = [10, 30, 60, 300, 900, 3600];
+                let current = self.ui_pending.memory_watchdog_interval_secs;
+                let idx = STEPS.iter().position(|s| *s == current).unwrap_or(3) as i64;
+                let next = STEPS[(idx + delta).rem_euclid(STEPS.len() as i64) as usize];
+                self.ui_pending.memory_watchdog_interval_secs = next;
+                ctx.render()?;
+                Ok(())
+            }
+            ContentRow::Advanced(_) => Ok(()),
             ContentRow::KeyTableHeader
             | ContentRow::KeyHeader(_)
             | ContentRow::KeyItem(_) => Ok(()),
@@ -593,6 +628,10 @@ impl SettingsModal {
                 | MpdRow::ReplayGain => self.adjust(ctx, 1),
                 _ => Ok(()),
             },
+            ContentRow::Advanced(AdvancedRow::MemoryWatchdog) => {
+                self.toggle_advanced(ctx, AdvancedRow::MemoryWatchdog)
+            }
+            ContentRow::Advanced(_) => Ok(()),
             ContentRow::KeyTableHeader | ContentRow::KeyHeader(_) => Ok(()),
         }
     }

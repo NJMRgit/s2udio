@@ -45,7 +45,14 @@ pub use search::{FilterKindFile, Search};
 /// are not part of the `config.ron` schema; the panel stages them and
 /// Settings Save persists them to `state.ron` (`AppStateFile::ui`), which
 /// startup re-applies — so they survive restarts.
+/// `#[serde(default)]` so a hand-written or partially-written `state.ron`
+/// still parses. Without it a `ui:` block that names only one toggle fails
+/// with "missing field", and `AppStateFile::load` silently falls back to
+/// *all* defaults — losing every other persisted setting with no error the
+/// user can see (only a log warning). Found by the round-111 memory harness,
+/// which seeds this block to enable the watchdog.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct UiSettings {
     pub show_album_art: bool,
     pub show_lyrics: bool,
@@ -78,6 +85,18 @@ pub struct UiSettings {
     /// unchanged); the radio favourites name is excluded.
     #[serde(default)]
     pub library_playlist_files: bool,
+    /// Settings > Advanced: log this process's RSS on a timer, so a long
+    /// session leaves a memory trail in the log even though it is not being
+    /// measured from outside (round 111 follow-up — see `shared/mem_watch`).
+    /// Defaults **off**: it exists for when something is already suspected,
+    /// and off means no thread is spawned at all.
+    #[serde(default)]
+    pub memory_watchdog: bool,
+    /// Seconds between memory samples. Clamped to a floor by
+    /// `shared::mem_watch::MIN_INTERVAL_SECS` so a mistyped value cannot turn
+    /// the watchdog into a log-spamming loop.
+    #[serde(default = "crate::config::defaults::memory_watchdog_interval_secs")]
+    pub memory_watchdog_interval_secs: u64,
 }
 impl Default for UiSettings {
     fn default() -> Self {
@@ -91,6 +110,9 @@ impl Default for UiSettings {
             show_virtual_devices: false,
             mpdris2_notifications: true,
             library_playlist_files: false,
+            memory_watchdog: false,
+            memory_watchdog_interval_secs:
+                crate::shared::mem_watch::DEFAULT_INTERVAL_SECS,
         }
     }
 }

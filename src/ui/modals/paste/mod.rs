@@ -60,8 +60,9 @@ pub use queue_stream::{queue_search_result, save_video_playlist, video_playlist_
 pub use resolve::{
     apply_resolved_streams, clear_queue_resolve_markers, clear_stream_parse_pending,
     drop_unresolvable_queue_entry, expired_stream_original_url, is_stream_row, load_yt_cache,
-    mark_stream_parse_pending, re_resolve_expired_queue_entry, resolve_tagged_queue_entry,
-    resolve_tagged_queue_entry_in_place, save_yt_cache, song_stream_info, stream_info_for,
+    mark_stream_parse_pending, queue_total_time, re_resolve_expired_queue_entry,
+    resolve_tagged_queue_entry, resolve_tagged_queue_entry_in_place, save_yt_cache,
+    song_stream_info, stream_info_for,
     stream_parse_pending, stream_resolve_pending_for, stream_row_meta, warm_selected_queue_info,
     yt_cache_path,
 };

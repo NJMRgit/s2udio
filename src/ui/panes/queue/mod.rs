@@ -307,20 +307,42 @@ impl QueuePane {
     /// Resolved YouTube-style streams are **queue content** (added via the
     /// paste popup's Add/Append): they stay visible, keyed by their URL in
     /// the yt-info cache.
+    #[cfg(test)]
+    pub(super) fn local_queue_for_test(ctx: &Ctx) -> Vec<Song> {
+        Self::local_queue(ctx)
+    }
+
+    /// Whether a queue row is shown by the Audio list.
+    ///
+    /// The single definition of "visible row", shared by the list and by the
+    /// box title's `N songs` count. They were computed from different sources
+    /// (the list filtered, the title did not), which is how a queue of 98
+    /// buffered streams could read "98 songs" above an empty list — round 111.
+    pub(crate) fn row_is_visible(ctx: &Ctx, song: &Song) -> bool {
+        // Round 91: a pasted stream link is queue content from the moment it
+        // is queued, before any stream exists - the yt-info cache only knows
+        // it once it has been played.
+        let tagged_link = crate::shared::ytdlp::tagged_stream_entry(&song.file).is_some();
+        // Round 111: a buffered stream URL (`/s2u/<class>/<key>`) is this
+        // app's own proxy URL for a queue row, so it is queue content by
+        // construction and must never be treated as a hidden radio stream.
+        // Missing this made a restored queue of web streams render as an
+        // **empty list while the count line still read "N songs"**: every row
+        // was a `http://` URL (so `is_stream_url` said yes), carried no
+        // `#s2u-audio` tag, and — after a restart — was not yet in the
+        // in-memory yt-info map.
+        let buffered = crate::core::stream_cache::is_buffered_url(&song.file);
+        let hidden_stream = crate::ui::panes::radio::is_stream_url(&song.file)
+            && !buffered
+            && !tagged_link
+            && !ctx.yt_info.borrow().contains_key(&song.file);
+        !hidden_stream && Some(song.id) != ctx.temp_play_id.get()
+    }
+
     fn local_queue(ctx: &Ctx) -> Vec<Song> {
-        let temp_play = ctx.temp_play_id.get();
         ctx.queue
             .iter()
-            .filter(|song| {
-                // Round 91: a pasted stream link is queue content from the
-                // moment it is queued, before any stream exists - the yt-info
-                // cache only knows it once it has been played.
-                let tagged_link = crate::shared::ytdlp::tagged_stream_entry(&song.file).is_some();
-                let hidden_stream = crate::ui::panes::radio::is_stream_url(&song.file)
-                    && !tagged_link
-                    && !ctx.yt_info.borrow().contains_key(&song.file);
-                !hidden_stream && Some(song.id) != temp_play
-            })
+            .filter(|song| Self::row_is_visible(ctx, song))
             .cloned()
             .collect()
     }
@@ -1828,5 +1850,208 @@ mod follow_the_track_tests {
             Some(playing_id),
             "the highlighted row is the one MPD is playing"
         );
+    }
+    /// **Adding a playlist lands the highlight on the first row of what was
+    /// added (2026-10-15).**
+    ///
+    /// A playlist import appends its rows to the queue. The pane refreshed its
+    /// list but left the selection where it was, so the highlight stayed on
+    /// whatever old index it happened to hold — which after an add reads as
+    /// "the selection landed somewhere in the middle of the new tracks". The
+    /// user's requirement: the highlight goes to the **first** added row.
+    #[test]
+    fn adding_a_playlist_puts_the_selection_on_the_first_added_row() {
+        let mut r = rig(0, 3);
+        // The user has moved the selection somewhere in the existing queue.
+        r.pane.queue.select_idx(1, 0);
+        assert_eq!(r.selected(), Some(1), "the starting selection");
+
+        // A playlist lands: five link rows are appended.
+        let added: Vec<_> = (0..5)
+            .map(|i| row(200 + i, format!("https://www.youtube.com/watch?v=vid{i}#s2u-audio")))
+            .collect();
+        let first_added = added[0].id;
+        // The import asks for the first added row before its enqueue lands, then
+        // the queue grows and the refresh arrives.
+        r.ctx.pending_select_on_growth.set(Some(r.ctx.queue.len()));
+        r.ctx.queue.extend(added);
+        let mut ev = crate::ui::UiEvent::QueueChanged;
+        r.pane.on_event(&mut ev, true, &r.ctx).expect("QueueChanged is handled");
+
+        let (idx, song) = r.pane.queue.selected_with_idx().expect("something is highlighted");
+        assert_eq!(
+            song.id, first_added,
+            "the highlight must land on the first row the playlist added \
+             (id {first_added}) — got index {idx}, id {}",
+            song.id
+        );
+    }
+
+    /// **A resolve's refresh must not move the selection.**
+    ///
+    /// The growth path exists for a playlist import, but the same `QueueChanged`
+    /// fires constantly for a resolve's in-place swap — which replaces a row and
+    /// leaves the length unchanged. Selecting there would yank the highlight out
+    /// from under the user every time a stream resolved, so the length test is
+    /// what keeps the two apart.
+    #[test]
+    fn a_resolve_refresh_that_does_not_grow_leaves_the_selection_alone() {
+        let mut r = rig(0, 4);
+        r.pane.queue.select_idx(2, 0);
+        let before = r.selected();
+        assert_eq!(before, Some(2), "the starting selection");
+
+        // A swap: the same number of rows, one of them replaced.
+        r.ctx.queue[1] = row(99, "http://127.0.0.1:39235/s2u/audio/swapped");
+        r.ctx.pending_select_on_growth.set(Some(0));
+        let mut ev = crate::ui::UiEvent::QueueChanged;
+        r.pane.on_event(&mut ev, true, &r.ctx).expect("QueueChanged is handled");
+
+        assert_eq!(
+            r.selected(),
+            before,
+            "a refresh that does not grow the list must leave the selection where \
+             the user put it"
+        );
+    }
+
+}
+
+/// Round 111: a queue of **buffered web streams** (the report's 98-item
+/// YouTube playlist). These rows are the stream-buffer proxy URLs s2udio
+/// itself handed to MPD, and they must behave as ordinary queue content:
+/// visible in the list, and counted in the total time.
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod buffered_stream_queue_tests {
+    use super::QueuePane;
+    use crate::mpd::commands::Song;
+
+    /// A proxy URL of the shape MPD actually stores for a stream row.
+    const PROXY: &str = "http://127.0.0.1:39235/s2u/audio/f6ae1edea05a880a";
+
+    fn ctx_with_queue(files: Vec<String>) -> crate::ctx::Ctx {
+        let app = crossbeam::channel::unbounded();
+        let work = crossbeam::channel::unbounded();
+        let client = crossbeam::channel::unbounded();
+        Box::leak(Box::new(app.1.clone()));
+        Box::leak(Box::new(work.1.clone()));
+        Box::leak(Box::new(client.1.clone()));
+        let mut ctx =
+            crate::tests::fixtures::ctx((app.0, app.1), (work.0, work.1), (client.0, client.1));
+        ctx.queue = files
+            .into_iter()
+            .enumerate()
+            .map(|(i, file)| Song { id: i as u32 + 1, file, ..Default::default() })
+            .collect();
+        ctx
+    }
+
+    /// The bug: a restored queue of buffered streams rendered as an empty list
+    /// while the count line still said "N songs". Every row was a `http://`
+    /// URL, so `is_stream_url` matched, and none carried a `#s2u-audio` tag or
+    /// had reached the in-memory yt-info map — so all of them were filtered out
+    /// as "hidden radio streams".
+    #[test]
+    fn buffered_proxy_rows_are_visible_queue_content() {
+        let ctx = ctx_with_queue(vec![PROXY.to_string(), PROXY.replace("f6ae", "aaaa")]);
+        let visible = QueuePane::local_queue_for_test(&ctx);
+        assert_eq!(
+            visible.len(),
+            2,
+            "buffered proxy rows are this app's own queue content and must be listed"
+        );
+    }
+
+    /// The converse, so the fix cannot be "show every http:// URL": a genuine
+    /// remote stream that is not a tagged link and not resolved yet stays
+    /// hidden — that is the radio/temp-entry behaviour this filter exists for.
+    #[test]
+    fn an_unrelated_remote_stream_stays_hidden() {
+        let ctx = ctx_with_queue(vec!["http://stream.example.com/live.mp3".to_string()]);
+        assert!(
+            QueuePane::local_queue_for_test(&ctx).is_empty(),
+            "a non-buffered remote URL is still filtered out"
+        );
+    }
+
+    /// A pasted queue link (tagged `#s2u-audio`, not yet resolved) was already
+    /// visible before this round and must stay visible.
+    #[test]
+    fn a_tagged_link_is_still_visible() {
+        let ctx = ctx_with_queue(vec![
+            "https://www.youtube.com/watch?v=abc123#s2u-audio".to_string()
+        ]);
+        assert_eq!(QueuePane::local_queue_for_test(&ctx).len(), 1);
+    }
+
+    /// The second bug: MPD reports no duration for a web-stream row, so the
+    /// total summed to zero even though each row's Duration cell rendered a
+    /// real value. Local files must be unaffected and nothing double-counted.
+    #[test]
+    fn the_total_counts_each_row_once() {
+        let mut ctx = ctx_with_queue(vec!["/music/a.flac".to_string(), "/music/b.flac".to_string()]);
+        ctx.queue[0].duration = Some(std::time::Duration::from_secs(100));
+        ctx.queue[1].duration = Some(std::time::Duration::from_secs(50));
+        assert_eq!(
+            crate::ui::modals::paste::queue_total_time(&ctx),
+            std::time::Duration::from_secs(150),
+            "MPD-known durations are summed as before"
+        );
+    }
+
+    /// The count line and the list must agree, because they are now the same
+    /// predicate. This is the invariant the bug violated: the title said
+    /// "98 songs" while the list showed none.
+    #[test]
+    fn the_box_count_matches_the_visible_rows() {
+        let ctx = ctx_with_queue(vec![
+            PROXY.to_string(),
+            PROXY.replace("f6ae", "bbbb"),
+            "http://stream.example.com/live.mp3".to_string(),
+            "/music/local.flac".to_string(),
+        ]);
+        let listed = QueuePane::local_queue_for_test(&ctx).len();
+        let counted = ctx
+            .queue
+            .iter()
+            .filter(|song| QueuePane::row_is_visible(&ctx, song))
+            .count();
+        assert_eq!(counted, listed, "the box title's count is the list's row count");
+        // 2 buffered proxy rows + 1 local file; the unrelated stream is hidden.
+        assert_eq!(listed, 3);
+    }
+
+    /// The startup total must use the same helper as the update path, or a
+    /// restored stream queue shows "0:00 total time" until some later queue
+    /// event recomputes it. `Ctx::new` summed `Song.duration` only — the same
+    /// bug in a second place (round 111).
+    ///
+    /// This pins the helper's behaviour on the exact input the startup path
+    /// hands it: MPD-known durations are summed, and a row MPD cannot time is
+    /// not silently dropped from a queue that has other timed rows.
+    #[test]
+    fn the_total_survives_a_mix_of_timed_and_untimed_rows() {
+        let mut ctx = ctx_with_queue(vec![
+            "/music/a.flac".to_string(),
+            PROXY.to_string(),
+            "/music/b.flac".to_string(),
+        ]);
+        ctx.queue[0].duration = Some(std::time::Duration::from_secs(60));
+        ctx.queue[2].duration = Some(std::time::Duration::from_secs(90));
+        assert_eq!(
+            crate::ui::modals::paste::queue_total_time(&ctx),
+            std::time::Duration::from_secs(150),
+            "an untimed stream row must not suppress the timed rows' total"
+        );
+    }
+
+    /// A row MPD cannot time (a stream) and that has no resolved metadata
+    /// contributes zero rather than panicking — the honest answer before its
+    /// resolve lands.
+    #[test]
+    fn an_untimed_unresolved_row_contributes_zero() {
+        let ctx = ctx_with_queue(vec![PROXY.to_string()]);
+        assert_eq!(crate::ui::modals::paste::queue_total_time(&ctx), std::time::Duration::ZERO);
     }
 }

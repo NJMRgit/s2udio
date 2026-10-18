@@ -30,6 +30,14 @@ pub fn i32<const V: i32>() -> i32 {
     V
 }
 
+/// Seconds between memory-watchdog samples (Settings > Advanced).
+///
+/// Delegates to `shared::mem_watch` so the default lives beside the code that
+/// enforces the interval floor, rather than being repeated here.
+pub fn memory_watchdog_interval_secs() -> u64 {
+    crate::shared::mem_watch::DEFAULT_INTERVAL_SECS
+}
+
 pub fn default_radio_playlist() -> String {
     "radio".to_owned()
 }

@@ -8,7 +8,8 @@ use ratatui::{
 use super::{
     appearance::color_hex,
     model::{
-        Click, ContentRow, DeferredButton, GeneralRow, JellyfinRow, MpvRow, MpdRow, TorrentRow,
+        AdvancedRow, Click, ContentRow, DeferredButton, GeneralRow, JellyfinRow, MpvRow, MpdRow,
+        TorrentRow,
     },
     SettingsModal,
 };
@@ -461,6 +462,24 @@ impl SettingsModal {
                 }
                 _ => (Vec::new(), Vec::new(), Vec::new(), None),
             },
+            ContentRow::Advanced(m) => match m {
+                AdvancedRow::MemoryWatchdog => {
+                    Self::toggle_row("memory watchdog", self.ui_pending.memory_watchdog, style)
+                }
+                AdvancedRow::MemoryWatchdogInterval => {
+                    // Round 111: render through the shared stepper row. The
+                    // hand-rolled version registered no `DeferredButton`s, so
+                    // `<`/`>` had no click targets at all and the row-wide
+                    // click was a bare `Inc` — the reported "the controls
+                    // don't function, the value only increases".
+                    self.stepper_row(
+                        "how often it samples",
+                        format!("{}s", self.ui_pending.memory_watchdog_interval_secs),
+                        style,
+                    )
+                }
+                AdvancedRow::DiagnosticsHeader => (Vec::new(), Vec::new(), Vec::new(), None),
+            },
             _ => (Vec::new(), Vec::new(), Vec::new(), None),
         }
     }
@@ -578,6 +597,7 @@ impl SettingsModal {
             ContentRow::Mpd(MpdRow::DevicesHeader) => "outputs & sessions".into(),
             ContentRow::Jellyfin(JellyfinRow::Header) => "Jellyfin server".into(),
             ContentRow::Torrent(TorrentRow::Header) => "rqbit torrent engine".into(),
+            ContentRow::Advanced(AdvancedRow::DiagnosticsHeader) => "diagnostics".into(),
             _ => String::new(),
         }
     }
@@ -706,11 +726,18 @@ impl SettingsModal {
                 spans.push(Span::styled(field_s, style.bold()));
                 hover(Line::from(spans))
             }
+            // The diagnostics header is plain text; the two rows below it go
+            // through the generic label/control path like every other
+            // section's rows.
+            ContentRow::Advanced(AdvancedRow::DiagnosticsHeader) => {
+                Line::from(vec![Span::styled(" diagnostics", dim)])
+            }
             ContentRow::General(_)
             | ContentRow::Mpd(_)
             | ContentRow::Mpv(_)
             | ContentRow::Jellyfin(_)
-            | ContentRow::Torrent(_) => {
+            | ContentRow::Torrent(_)
+            | ContentRow::Advanced(_) => {
                 let (label, control, buttons, row_action) =
                     self.row_main(row, ctx, style, dim, width as usize);
                 if let Some(click) = row_action {

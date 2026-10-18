@@ -41,8 +41,8 @@ pub(crate) use appearance::{
 pub(crate) use model::{PendingRemap, StagedSettings};
 
 use model::{
-    AdjustSnapshot, Click, ContentRow, GeneralRow, JellyfinRow, MpvRow, MpdRow, PwNode, Section,
-    SettingsFocus, StagedCava, TorrentRow, REPLAY_GAIN_SNAPSHOT,
+    AdjustSnapshot, AdvancedRow, Click, ContentRow, GeneralRow, JellyfinRow, MpvRow, MpdRow, PwNode,
+    Section, SettingsFocus, StagedCava, TorrentRow, REPLAY_GAIN_SNAPSHOT,
 };
 
 #[derive(Debug)]
@@ -343,6 +343,11 @@ impl SettingsModal {
                 ContentRow::Torrent(TorrentRow::WebUi),
                 ContentRow::Torrent(TorrentRow::StopEngine),
                 ContentRow::Torrent(TorrentRow::SocksProxy),
+            ],
+            Section::Advanced => vec![
+                ContentRow::Advanced(AdvancedRow::DiagnosticsHeader),
+                ContentRow::Advanced(AdvancedRow::MemoryWatchdog),
+                ContentRow::Advanced(AdvancedRow::MemoryWatchdogInterval),
             ],
         }
     }

@@ -350,6 +350,10 @@ fn run_tui(args: &mut Args) -> Result<()> {
     let (client_tx, client_rx) = unbounded::<ClientRequest>();
     let (event_tx, event_rx) = unbounded::<AppEvent>();
     logging::init(event_tx.clone()).expect("Logger to initialize");
+    // Round 111: install the panic hook right after the logger exists, so
+    // any panic from here on is recorded with a backtrace and flushed to
+    // the (now persistent, appended) log file.
+    logging::install_panic_hook();
     log::debug!(rev = env!("VERGEN_GIT_DESCRIBE"); "s2udio started");
     std::thread::Builder::new()
         .name("dependency_check".to_string())
@@ -489,11 +493,30 @@ fn run_tui(args: &mut Args) -> Result<()> {
         None
     };
     let enable_mouse = ctx.config.enable_mouse;
+
+    // Round 111 follow-up: the optional in-app memory watchdog (Settings >
+    // Advanced). Off by default, and "off" means no thread is spawned at all.
+    // The flag below is how the watchdog learns the app is going away, so it
+    // can log a final summary before it stops.
+    let watchdog_running = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    {
+        let running = Arc::clone(&watchdog_running);
+        crate::shared::mem_watch::spawn(
+            ctx.config.ui.memory_watchdog,
+            ctx.config.ui.memory_watchdog_interval_secs,
+            move || running.load(std::sync::atomic::Ordering::Relaxed),
+        );
+    }
+
     let terminal = Terminal::setup(enable_mouse).context("Failed to setup terminal")?;
     core::input::init(event_tx.clone())?;
     let event_loop_handle = core::event_loop::init(ctx, event_rx, terminal)?;
     info!("Application initialized successfully");
     event_loop_handle.join().expect("event loop to not panic");
+    // Stop the watchdog and let it write its summary line. This is only a
+    // request: it wakes on its own interval and is detached, so a hung
+    // watchdog can never delay the exit.
+    watchdog_running.store(false, std::sync::atomic::Ordering::Relaxed);
     Terminal::restore(enable_mouse);
     Ok(())
 }

@@ -2,7 +2,7 @@ use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::{
-    model::{AdjustSnapshot, ContentRow, GeneralRow, MpdRow, Section, SettingsFocus},
+    model::{AdjustSnapshot, AdvancedRow, ContentRow, GeneralRow, MpdRow, Section, SettingsFocus},
     SettingsModal,
 };
 use crate::{
@@ -89,6 +89,12 @@ impl SettingsModal {
                     | GeneralRow::NoiseReduction
                     | GeneralRow::Device
             )) | Some(ContentRow::Mpd(MpdRow::Crossfade))
+                // Round 111: the Advanced interval is a `w/s`-adjustable
+                // value row like the others. Leaving it out meant Enter and
+                // Right fell through to `activate`, which for that row did
+                // nothing — the reported "can't focus it and adjust with
+                // left/right".
+                | Some(ContentRow::Advanced(AdvancedRow::MemoryWatchdogInterval))
         )
     }
 

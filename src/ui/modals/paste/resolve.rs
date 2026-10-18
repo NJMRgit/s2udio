@@ -19,10 +19,28 @@ use super::{
 /// also what makes a row a **web stream**: a queue/playlist entry whose file is
 /// a cached yt-dlp stream (or a link yt-dlp resolved) can be downloaded.
 pub fn stream_info_for(ctx: &Ctx, url: &str) -> Option<YtStreamInfo> {
+    {
+        let info = ctx.yt_info.borrow();
+        if let Some(found) = info
+            .get(url)
+            .cloned()
+            .or_else(|| info.values().find(|entry| entry.original_url == url).cloned())
+        {
+            return Some(found);
+        }
+    }
+    // Round 111: a **buffered** row's file is this app's own proxy URL
+    // (`/s2u/audio/<key>`), which nothing in the yt-info cache is keyed by —
+    // the cache holds the YouTube link. Resolve the key back to that link
+    // through the stream-buffer manifest, once, here: every consumer of this
+    // primitive (artwork, the queue's info box, MPRIS metadata) then works for
+    // a restored stream row exactly as it does for a freshly added one.
+    let link =
+        crate::core::stream_cache::original_link_for_url(ctx.config.cache_dir.as_deref(), url)?;
     let info = ctx.yt_info.borrow();
-    info.get(url)
+    info.get(&link)
         .cloned()
-        .or_else(|| info.values().find(|entry| entry.original_url == url).cloned())
+        .or_else(|| info.values().find(|entry| entry.original_url == link).cloned())
 }
 /// Round 107: the resolved stream info of a queue row, whichever form its
 /// file takes — the resolved URL, the original link, or an intent-tagged
@@ -207,8 +225,11 @@ pub fn expired_stream_original_url(ctx: &Ctx, url: &str) -> Option<String> {
         if !crate::core::stream_cache::needs_upstream_refresh(url) {
             return None;
         }
-        return crate::core::stream_cache::original_link_for_url(url)
-            .filter(|original| !original.is_empty() && original != url);
+        return crate::core::stream_cache::original_link_for_url(
+            ctx.config.cache_dir.as_deref(),
+            url,
+        )
+        .filter(|original| !original.is_empty() && original != url);
     }
     if !crate::ui::panes::queue::resolved_stream_expired(url) {
         return None;
@@ -419,6 +440,7 @@ enum ReplacementTarget {
 /// Extracted so the choice is testable without driving the MPD client closure
 /// it feeds, and covered end to end by `resolve_e2e_tests`.
 fn replacement_target(
+    cache_dir: Option<&std::path::Path>,
     songs: &[Song],
     song_id: u32,
     stream_keys: &[String],
@@ -433,7 +455,7 @@ fn replacement_target(
     if step_waits
         && let Some(existing) = songs
             .iter()
-            .find(|song| stream_keys.iter().any(|key| key_matches_row(key, &song.file)))
+            .find(|song| stream_keys.iter().any(|key| key_matches_row(cache_dir, key, &song.file)))
             .map(|song| song.id)
     {
         return ReplacementTarget::AlreadySwapped(existing);
@@ -446,7 +468,7 @@ fn replacement_target(
 /// (`…watch?v=ID#s2u-audio`), the resolved player URL, or the buffered proxy URL
 /// keyed by the original link. Comparing the *link* is what ties them together,
 /// so a row the look ahead swapped is recognised as the step's own row.
-fn key_matches_row(key: &str, file: &str) -> bool {
+fn key_matches_row(cache_dir: Option<&std::path::Path>, key: &str, file: &str) -> bool {
     if file == key {
         return true;
     }
@@ -456,7 +478,8 @@ fn key_matches_row(key: &str, file: &str) -> bool {
     }
     // A row the look ahead already swapped: the key is the original link, and
     // the proxy URL remembers it.
-    crate::core::stream_cache::original_link_for_url(file).is_some_and(|link| link == key)
+    crate::core::stream_cache::original_link_for_url(cache_dir, file)
+        .is_some_and(|link| link == key)
 }
 /// Round 107: the URL to hand the player, routed through the local caching
 /// buffer when there is a stable upstream to key on. Audio always buffers
@@ -702,9 +725,19 @@ pub fn apply_resolved_streams(
             // therefore taken over and played: the look ahead did the swap, this
             // resolve supplies the play.
             let step_waits = ctx.pending_next_step.get() == Some(song_id);
+            // Resolved outside the closure: `ctx` is not `Send`, and the
+            // manifest lookup needs the same cache dir the proxy was started
+            // with.
+            let cache_dir = ctx.config.cache_dir.clone();
             ctx.command(move |client| {
                 let songs = client.playlist_info()?.unwrap_or_default();
-                match replacement_target(&songs, song_id, &stream_keys, step_waits) {
+                match replacement_target(
+                    cache_dir.as_deref(),
+                    &songs,
+                    song_id,
+                    &stream_keys,
+                    step_waits,
+                ) {
                     ReplacementTarget::Row(position) => {
                         let _ = client.delete_id(song_id);
                         let new_id =
@@ -894,6 +927,14 @@ pub fn save_yt_cache(
 /// metadata. `None` for local files and for a stream nothing has been
 /// resolved or listed yet.
 pub fn stream_row_meta(ctx: &Ctx, file: &str) -> Option<YtListMeta> {
+    // Round 111: a buffered proxy URL embeds an ephemeral port and a cache
+    // key, so it names nothing the yt-info cache knows. Resolve it back to
+    // the original link through the stream cache's manifest first — that
+    // mapping is persisted, which is what makes a restored queue row show its
+    // title and duration at all.
+    let buffered_link =
+        crate::core::stream_cache::original_link_for_url(ctx.config.cache_dir.as_deref(), file);
+    let file = buffered_link.as_deref().unwrap_or(file);
     let link = untag_stream_link(file);
     // Cheap guard: the lookup below falls back to a scan of the whole
     // resolve cache (`stream_info` matches an entry by its original link),
@@ -919,8 +960,40 @@ pub fn stream_row_meta(ctx: &Ctx, file: &str) -> Option<YtListMeta> {
 /// info for (a resolved YouTube stream, or one being parsed right now).
 /// Everything else (local files, radio stations, Jellyfin items) keeps its
 /// normal rendering.
+/// The queue's total running time.
+///
+/// MPD only knows a duration for media it can read; for a web-stream row it
+/// returns the URL and nothing else, so a queue of 98 YouTube streams summed
+/// to **zero** even though every row's Duration cell rendered a real value
+/// from the yt-info cache (round 111). The total therefore falls back to the
+/// same resolved metadata the rows use, so the number at the bottom of the
+/// pane agrees with the column above it.
+///
+/// The fallback is consulted only when MPD has no duration, so local files are
+/// unaffected and nothing is counted twice.
+pub fn queue_total_time(ctx: &Ctx) -> std::time::Duration {
+    ctx.queue
+        .iter()
+        .filter_map(|song| {
+            song.duration.or_else(|| {
+                stream_row_meta(ctx, &song.file)
+                    .and_then(|meta| meta.duration)
+                    .map(std::time::Duration::from_secs_f64)
+            })
+        })
+        .sum()
+}
+
 pub fn is_stream_row(ctx: &Ctx, file: &str) -> bool {
     if tagged_stream_entry(file).is_some() {
+        return true;
+    }
+    // Round 111: a buffered proxy URL is a web-stream row even though it is
+    // not a tagged link and (after a restart) not yet in yt-info - the row is
+    // still a stream, its metadata just has to be recovered through the
+    // stream cache's manifest. Without this the row lost its Title/Channel
+    // overlay and fell back to a raw `127.0.0.1` filename.
+    if crate::core::stream_cache::is_buffered_url(file) {
         return true;
     }
     crate::ui::panes::radio::is_stream_url(file)
@@ -1358,7 +1431,7 @@ mod stale_stream_tests {
         let swapped = vec!["http://127.0.0.1:39235/s2u/audio/swapped".to_owned()];
         let songs = vec![row(1, "a"), row(2, &swapped[0]), row(3, "c")];
         assert_eq!(
-            replacement_target(&songs, 99, &swapped, true),
+            replacement_target(None, &songs, 99, &swapped, true),
             ReplacementTarget::AlreadySwapped(2),
             "the step's stream is already in the queue under a new id"
         );
@@ -1385,7 +1458,7 @@ mod stale_stream_tests {
             "https://rr1.googlevideo.com/videoplayback?expire=7258118400&id=step".to_owned(),
         ];
         assert_eq!(
-            replacement_target(&songs, 814, &keys, true),
+            replacement_target(None, &songs, 814, &keys, true),
             ReplacementTarget::AlreadySwapped(2),
             "the row is found by the original link the proxy URL was registered \
              from, not by the raw player URL"
@@ -1399,7 +1472,7 @@ mod stale_stream_tests {
         let swapped = vec!["http://127.0.0.1:39235/s2u/audio/swapped".to_owned()];
         let songs = vec![row(1, "a"), row(2, &swapped[0])];
         assert_eq!(
-            replacement_target(&songs, 99, &swapped, false),
+            replacement_target(None, &songs, 99, &swapped, false),
             ReplacementTarget::Nothing,
             "no step is waiting, so nothing is played or re-added"
         );
@@ -1410,7 +1483,7 @@ mod stale_stream_tests {
     fn a_landed_resolve_swaps_and_plays_its_own_row() {
         let songs = vec![row(1, "a"), row(2, "b")];
         assert_eq!(
-            replacement_target(&songs, 2, &[], false),
+            replacement_target(None, &songs, 2, &[], false),
             ReplacementTarget::Row(1)
         );
     }
@@ -1421,7 +1494,7 @@ mod stale_stream_tests {
     fn a_step_whose_stream_is_absent_too_is_dropped() {
         let songs = vec![row(1, "a")];
         assert_eq!(
-            replacement_target(&songs, 99, &["http://x/absent".to_owned()], true),
+            replacement_target(None, &songs, 99, &["http://x/absent".to_owned()], true),
             ReplacementTarget::Nothing
         );
     }
@@ -1500,5 +1573,141 @@ mod song_info_tests {
         let found = song_stream_info(&ctx, &tagged).expect("found via the original link");
         assert_eq!(found.title, "A track");
         assert_eq!(found.description.as_deref(), Some("the description"));
+    }
+
+    /// Round 111 regression: once a stream has played, the row's file is the
+    /// **buffered proxy URL**, and the cached info is still keyed by the
+    /// YouTube link. `song_stream_info` matched neither the proxy URL nor the
+    /// link, so artwork, the description and the info box went blank for every
+    /// restored row — while the queue list's own columns (which use
+    /// `stream_row_meta`) looked correct. That asymmetry is the reported
+    /// "it's not parsing artwork/descriptions, but a freshly added playlist is
+    /// fine".
+    #[test]
+    fn a_buffered_row_finds_its_info_through_the_manifest() {
+        use crate::core::stream_cache;
+
+        let app = crossbeam::channel::unbounded();
+        let work = crossbeam::channel::unbounded();
+        let client = crossbeam::channel::unbounded();
+        Box::leak(Box::new(app.1.clone()));
+        Box::leak(Box::new(work.1.clone()));
+        Box::leak(Box::new(client.1.clone()));
+        let mut ctx =
+            crate::tests::fixtures::ctx((app.0, app.1), (work.0, work.1), (client.0, client.1));
+
+        // Real values taken from the reporter's own caches, so this test
+        // exercises the shape that actually regressed: a real YouTube link, a
+        // real title, a real thumbnail URL.
+        let watch = "https://www.youtube.com/watch?v=BQ2P1K7Yl00";
+        ctx.yt_info.borrow_mut().insert(
+            watch.to_owned(),
+            crate::shared::ytdlp::YtStreamInfo {
+                url: "https://rr1.googlevideo.com/videoplayback?expire=1".to_owned(),
+                original_url: watch.to_owned(),
+                title: "So What".to_owned(),
+                description: Some("a real description".to_owned()),
+                thumbnail: Some("https://i.ytimg.com/vi_webp/BQ2P1K7Yl00/maxresdefault.webp".to_owned()),
+                ..Default::default()
+            },
+        );
+
+        // The row's file is the proxy URL, and the manifest is the only thing
+        // that ties it back to the link.
+        let key = "0f1f8a17fadadf20";
+        let root = std::env::temp_dir()
+            .join(format!("s2u-bufferedinfo-{}", std::process::id()))
+            .join("stream-buffer");
+        let _ = std::fs::remove_dir_all(root.parent().unwrap());
+        std::fs::create_dir_all(root.join("audio")).unwrap();
+        std::fs::write(
+            root.join("index.json"),
+            serde_json::json!({
+                key: { "class": "audio", "original_url": watch, "size": 0, "total": null,
+                       "complete": false, "content_type": null, "last_used": 0, "failed": false }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        ctx.config = std::sync::Arc::new(crate::config::Config {
+            cache_dir: root.parent().map(std::path::Path::to_path_buf),
+            ..(*ctx.config).clone()
+        });
+
+        let url = format!("http://127.0.0.1:39235/s2u/audio/{key}");
+        assert!(
+            stream_cache::is_buffered_url(&url),
+            "the fixture URL must look like a buffered row"
+        );
+
+        let found = song_stream_info(&ctx, &url)
+            .expect("a buffered row must resolve its info through the manifest");
+        assert_eq!(found.title, "So What");
+        assert_eq!(
+            found.description.as_deref(),
+            Some("a real description"),
+            "the description (what the info box shows) must survive too"
+        );
+        assert!(found.thumbnail.is_some(), "artwork needs the thumbnail");
+
+        // The primitive every consumer shares must resolve it too — album art
+        // and the queue info box go through `stream_info_for`, not through
+        // `song_stream_info`.
+        assert!(
+            stream_info_for(&ctx, &url).is_some(),
+            "stream_info_for must resolve a buffered row, or art/info/MPRIS break"
+        );
+        let _ = std::fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    /// A buffered row for a video must resolve as well, so the mpv/MPRIS path
+    /// is covered by the same fix.
+    #[test]
+    fn a_buffered_video_row_resolves_through_the_manifest() {
+        let app = crossbeam::channel::unbounded();
+        let work = crossbeam::channel::unbounded();
+        let client = crossbeam::channel::unbounded();
+        Box::leak(Box::new(app.1.clone()));
+        Box::leak(Box::new(work.1.clone()));
+        Box::leak(Box::new(client.1.clone()));
+        let mut ctx =
+            crate::tests::fixtures::ctx((app.0, app.1), (work.0, work.1), (client.0, client.1));
+
+        let watch = "https://www.youtube.com/watch?v=BUFFEREDVID";
+        ctx.yt_info.borrow_mut().insert(
+            watch.to_owned(),
+            crate::shared::ytdlp::YtStreamInfo {
+                url: "https://rr1.googlevideo.com/videoplayback?expire=2".to_owned(),
+                original_url: watch.to_owned(),
+                title: "A buffered video".to_owned(),
+                ..Default::default()
+            },
+        );
+
+        let key = "feedfacefeedface";
+        let root = std::env::temp_dir()
+            .join(format!("s2u-bufferedvid-{}", std::process::id()))
+            .join("stream-buffer");
+        let _ = std::fs::remove_dir_all(root.parent().unwrap());
+        std::fs::create_dir_all(root.join("video")).unwrap();
+        std::fs::write(
+            root.join("index.json"),
+            serde_json::json!({
+                key: { "class": "video", "original_url": watch, "size": 0, "total": null,
+                       "complete": false, "content_type": null, "last_used": 0, "failed": false }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        ctx.config = std::sync::Arc::new(crate::config::Config {
+            cache_dir: root.parent().map(std::path::Path::to_path_buf),
+            ..(*ctx.config).clone()
+        });
+
+        let url = format!("http://127.0.0.1:39235/s2u/video/{key}");
+        let found = stream_info_for(&ctx, &url).expect("a buffered video row must resolve");
+        assert_eq!(found.title, "A buffered video");
+
+        let _ = std::fs::remove_dir_all(root.parent().unwrap());
     }
 }

@@ -1325,7 +1325,17 @@ impl Property<PropertyKind> {
                                 .sum();
                             (entries.len(), Duration::from_secs_f64(secs))
                         } else {
-                            (ctx.queue.len(), ctx.cached_queue_time_total)
+                            // Count the rows the Audio list actually shows, via
+                            // the same predicate the list filters with — the
+                            // count and the list disagreed once (round 111).
+                            let shown = ctx
+                                .queue
+                                .iter()
+                                .filter(|song| {
+                                    crate::ui::panes::queue::QueuePane::row_is_visible(ctx, song)
+                                })
+                                .count();
+                            (shown, ctx.cached_queue_time_total)
                         };
                         let total = total.to_string();
                         let title = if chapters_on {

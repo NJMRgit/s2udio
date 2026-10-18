@@ -1,6 +1,6 @@
 use std::{io::Write, time::Instant};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use base64::Engine;
 use crossterm::{
     execute,
@@ -46,7 +46,13 @@ impl Backend for Kitty {
         match data {
             Data::ImageData(data) => {
                 try_skip!(
-                    transfer_image_data(w, &data.content, data.img_width, data.img_height),
+                    transfer_image_data(
+                        w,
+                        &data.content,
+                        data.img_width,
+                        data.img_height,
+                        data.is_compressed
+                    ),
                     "Failed to transfer image data"
                 );
 
@@ -113,22 +119,92 @@ impl Backend for Kitty {
         } else {
             let (image, aligned_area) = resize_image(image_data, area, max_size, halign, valign)?;
 
-            let mut e = flate2::write::ZlibEncoder::new(Vec::new(), Compression::new(6));
-            e.write_all(image.to_rgba8().as_raw())
-                .context("Error occurred when writing image bytes to zlib encoder")?;
+            let rgba = image.to_rgba8();
+            let payload = encode_image_payload(rgba.as_raw());
 
-            let content = base64::engine::general_purpose::STANDARD.encode(
-                e.finish().context("Error occurred when flushing image bytes to zlib encoder")?,
+            // Round 111: report the *like-for-like* numbers. The old line
+            // logged `input_bytes = image_data.len()` — the encoded source
+            // file (WebP/JPEG, already compressed) — against
+            // `compressed_bytes = content.len()`, the base64 of the
+            // zlib-compressed **raw RGBA**. Those measure different things,
+            // so the "+65%" in the report could not be read as a real
+            // regression. `raw_bytes` is the correct baseline for a
+            // compression ratio, and it is what decides whether the zlib
+            // pass paid off.
+            log::debug!(
+                source_bytes = image_data.len(),
+                raw_bytes = rgba.as_raw().len(),
+                payload_bytes = payload.len(),
+                compressed = payload.compressed,
+                duration:? = start_time.elapsed();
+                "Image payload prepared"
             );
-
-            log::debug!(input_bytes = image_data.len(), compressed_bytes = content.len(), duration:? = start_time.elapsed(); "Image data compression finished");
             Ok(Data::ImageData(ImageData {
-                content,
+                content: payload.content,
+                is_compressed: payload.compressed,
                 aligned_area: aligned_area.area,
                 img_width: image.width(),
                 img_height: image.height(),
             }))
         }
+    }
+}
+
+/// The kitty payload for one still image, already base64-encoded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EncodedPayload {
+    pub content: String,
+    /// Whether `content` is zlib-compressed (kitty's `o=z`).
+    pub compressed: bool,
+    /// The encoded payload length in bytes, before base64.
+    pub encoded_len: usize,
+}
+
+impl EncodedPayload {
+    /// The base64 payload length in bytes — what actually goes on the wire.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.content.len()
+    }
+}
+
+/// zlib-compress a raw RGBA buffer and base64 it, **falling back to the
+/// uncompressed bytes when zlib does not actually shrink the payload**.
+///
+/// Round 111: the report observed a kitty transfer where the "compressed"
+/// payload was larger than the input. For photographic cover art the raw
+/// RGBA is high-entropy, so zlib's overhead can outweigh its wins; and
+/// because the data is then base64'd, spending CPU to make the payload
+/// bigger is a straight loss on both the wire and the frame budget (this
+/// app redraws art frequently in the quick-access terminal).
+///
+/// The comparison is against the **uncompressed** buffer length, which is
+/// the only honest baseline: base64 inflates by 4/3 either way, so it
+/// cancels out and the decision is made on the raw zlib result.
+#[must_use]
+pub fn encode_image_payload(raw_rgba: &[u8]) -> EncodedPayload {
+    let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), Compression::new(6));
+    let compressed = match encoder.write_all(raw_rgba).and_then(|()| encoder.finish()) {
+        Ok(compressed) => Some(compressed),
+        Err(err) => {
+            log::warn!(err:?; "zlib compression failed, sending the image uncompressed");
+            None
+        }
+    };
+
+    // Only keep the compressed form when it is genuinely smaller than the
+    // raw buffer it replaces.
+    match compressed {
+        Some(compressed) if compressed.len() < raw_rgba.len() => EncodedPayload {
+            encoded_len: compressed.len(),
+            content: base64::engine::general_purpose::STANDARD.encode(&compressed),
+            compressed: true,
+        },
+        _ => EncodedPayload {
+            encoded_len: raw_rgba.len(),
+            content: base64::engine::general_purpose::STANDARD.encode(raw_rgba),
+            compressed: false,
+        },
     }
 }
 
@@ -220,15 +296,24 @@ fn transfer_image_data(
     content: &str,
     img_width: u32,
     img_height: u32,
+    is_compressed: bool,
 ) -> Result<()> {
     let start_time = Instant::now();
-    log::debug!(bytes = content.len(), img_width, img_height; "Transferring compressed image data");
+    log::debug!(
+        bytes = content.len(), img_width, img_height, is_compressed;
+        "Transferring image data"
+    );
     let mut iter = content.chars().peekable();
 
+    // Round 111: `o=z` is now conditional. It used to be hardcoded here
+    // while the encoder decided independently, so a payload that zlib had
+    // inflated could still be *declared* compressed — the terminal would
+    // then fail to inflate it. The flag travels with the payload.
+    let compression = if is_compressed { ",o=z" } else { "" };
     let first: String = iter.by_ref().take(4096).collect();
     tmux_write!(
         w,
-        "\x1b_Gi=1,f=32,U=1,t=d,a=T,m=1,q=2,o=z,s={img_width},v={img_height};{first}\x1b\\"
+        "\x1b_Gi=1,f=32,U=1,t=d,a=T,m=1,q=2{compression},s={img_width},v={img_height};{first}\x1b\\"
     )?;
 
     while iter.peek().is_some() {
@@ -251,6 +336,10 @@ pub enum Data {
 pub struct ImageData {
     #[debug(skip)]
     content: String,
+    /// Whether `content` is zlib-compressed and must be transferred with
+    /// kitty's `o=z`. Carried with the payload so the encoder's decision and
+    /// the transfer flag cannot disagree (round 111).
+    is_compressed: bool,
     img_width: u32,
     img_height: u32,
     aligned_area: Rect,
@@ -573,3 +662,104 @@ const GRID: &[&str] = &[
     "\u{1D243}",
     "\u{1D244}",
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Incompressible (high-entropy) data stands in for photographic cover
+    /// art: zlib cannot shrink it, and its framing overhead makes the
+    /// "compressed" result *larger* than the input. Round 111's report saw
+    /// exactly this shape of result. The encoder must notice and fall back
+    /// to sending the bytes raw.
+    #[test]
+    fn incompressible_data_is_sent_uncompressed() {
+        // A cheap deterministic PRNG: high-entropy, no dependency needed.
+        let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+        let raw: Vec<u8> = (0..64 * 1024)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                (state & 0xFF) as u8
+            })
+            .collect();
+
+        let payload = encode_image_payload(&raw);
+
+        assert!(
+            !payload.compressed,
+            "zlib cannot shrink high-entropy data, so the raw form must be \
+             sent instead of a larger 'compressed' one"
+        );
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(&payload.content)
+            .expect("payload is valid base64");
+        assert!(
+            decoded == raw,
+            "the fallback sends the original bytes intact (got {} bytes, want {})",
+            decoded.len(),
+            raw.len()
+        );
+    }
+
+    /// The other half: when zlib genuinely wins (long runs of one colour,
+    /// the common case for flat art / UI-ish images) it must still be used,
+    /// and the `compressed` flag must agree with the bytes.
+    #[test]
+    fn compressible_data_is_still_compressed() {
+        let raw = vec![0u8; 64 * 1024];
+
+        let payload = encode_image_payload(&raw);
+
+        assert!(payload.compressed, "a buffer of one repeated byte compresses well");
+        assert!(
+            payload.encoded_len < raw.len(),
+            "the compressed form is genuinely smaller: {} vs {} raw bytes",
+            payload.encoded_len,
+            raw.len()
+        );
+        // The payload is base64(zlib(raw)), so it only equals `raw` after
+        // the terminal side's inflate step.
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(&payload.content)
+            .expect("payload is valid base64");
+        assert_eq!(payload.encoded_len, decoded.len(), "encoded_len counts pre-base64 bytes");
+        let mut inflater = flate2::read::ZlibDecoder::new(decoded.as_slice());
+        let mut round_tripped = Vec::new();
+        std::io::Read::read_to_end(&mut inflater, &mut round_tripped)
+            .expect("a compressed payload must inflate");
+        assert!(
+            round_tripped == raw,
+            "the compressed bytes inflate to the original (got {} bytes, want {})",
+            round_tripped.len(),
+            raw.len()
+        );
+        assert_eq!(payload.len(), payload.content.len(), "len() is the base64 length");
+    }
+
+    /// A payload must never be *larger* than the raw input once base64 is
+    /// accounted for, because base64 scales both candidates by the same
+    /// 4/3 — so the raw pre-base64 comparison is the right decision.
+    #[test]
+    fn payload_is_never_worse_than_sending_raw() {
+        for len in [0usize, 1, 2, 3, 1000, 8191, 8192] {
+            let raw = vec![0xABu8; len];
+            let payload = encode_image_payload(&raw);
+            assert!(
+                payload.encoded_len <= raw.len(),
+                "payload of {len} raw bytes grew to {} bytes",
+                payload.encoded_len
+            );
+        }
+    }
+
+    /// An empty buffer is a degenerate case that must not panic and must
+    /// round-trip to empty.
+    #[test]
+    fn empty_input_round_trips() {
+        let payload = encode_image_payload(&[]);
+        assert_eq!(payload.encoded_len, 0);
+        assert!(payload.content.is_empty());
+    }
+}

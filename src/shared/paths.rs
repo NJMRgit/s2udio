@@ -47,6 +47,44 @@ pub fn s2udio_cache_dir() -> Option<PathBuf> {
         .or_else(|| home_dir().map(|home| home.join(".cache")))
         .map(|p| p.join(S2UDIO_CONFIG_NAME))
 }
+/// The s2udio-only state dir (`~/.local/state/s2udio`, XDG
+/// `XDG_STATE_HOME`): things that must **outlive a restart** and are not
+/// regenerable cache — today the log file. The log used to live in
+/// `std::env::temp_dir()`, which is tmpfs on most systems and is truncated
+/// on each launch, so a crash left no artifact at all (the round-111 report
+/// "possible unbounded memory growth / silent death in long sessions" could
+/// not be root-caused for exactly that reason). `S2UDIO_LOG_DIR` overrides
+/// the whole directory so tests and the dev harness can point it at a
+/// scratch dir without touching the real HOME.
+pub fn s2udio_state_dir() -> Option<PathBuf> {
+    if let Some(dir) = ENV.var_os("S2UDIO_LOG_DIR").filter(|value| !value.is_empty()) {
+        return Some(PathBuf::from(dir));
+    }
+    ENV.var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| home_dir().map(|home| home.join(".local/state")))
+        .map(|p| p.join(S2UDIO_CONFIG_NAME))
+}
+/// The s2udio log file path (`~/.local/state/s2udio/s2udio_<uid>.log`).
+/// `S2UDIO_LOG_FILE` overrides the path (takes precedence over
+/// `S2UDIO_LOG_DIR`, so a single-file override wins over the directory).
+/// Returns `None` only when neither an override nor a home dir can be
+/// determined.
+///
+/// Note on the name on disk: with rotation enabled flexi_logger writes the
+/// live file as `<stem>_rCURRENT.log` and renames it to `<stem>_<n>.log`
+/// when it rotates. So `S2UDIO_LOG_FILE=/tmp/x/s2udio.log` produces
+/// `/tmp/x/s2udio_rCURRENT.log` — the *stem* is what the override controls,
+/// not the literal filename. Anything that needs to read the log after the
+/// fact must account for that suffix.
+pub fn s2udio_log_path() -> Option<PathBuf> {
+    if let Some(path) = ENV.var_os("S2UDIO_LOG_FILE").filter(|value| !value.is_empty()) {
+        return Some(PathBuf::from(path));
+    }
+    let uid = rustix::process::geteuid();
+    s2udio_state_dir().map(|dir| dir.join(format!("s2udio_{}.log", uid.as_raw())))
+}
 /// The s2udio config path: `~/.config/s2udio/config.ron` — the single,
 /// full config file (round 23; the round-19 `~/.config/s2udio/config.ron`
 /// overlay is consumed by the one-time migration and retired).
@@ -184,5 +222,90 @@ mod tests {
 
         ENV.remove("HOME");
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    // Round 111 — the report could not attach a crash report because the log
+    // lived in `std::env::temp_dir()` (tmpfs: gone on reboot) and was
+    // truncated on every launch. These three tests pin the replacement
+    // contract: a persistent, XDG-derived location that a test or the dev
+    // harness can redirect.
+
+    #[test]
+    fn state_dir_is_under_xdg_state_home_not_tmp() {
+        let _home_guard = crate::tests::fixtures::HOME_LOCK.lock().unwrap();
+        use crate::shared::env::ENV;
+        // A home that is deliberately NOT under temp_dir(), so the
+        // assertion below can tell "derived from HOME" apart from
+        // "hardcoded to temp_dir()" — the bug the report hit.
+        let home = std::path::PathBuf::from("/s2u-fake-home");
+        ENV.set("HOME".to_string(), home.to_string_lossy().into_owned());
+        ENV.remove("XDG_STATE_HOME");
+        ENV.remove("S2UDIO_LOG_DIR");
+
+        let dir = s2udio_state_dir().expect("state dir resolves from HOME");
+
+        assert_eq!(dir, home.join(".local/state/s2udio"));
+        assert!(
+            !dir.starts_with(std::env::temp_dir()),
+            "the log must be derived from HOME/XDG_STATE_HOME, not dropped in \
+             temp_dir(): tmpfs means a crash artefact would not survive a \
+             reboot — got {dir:?}"
+        );
+
+        let log = s2udio_log_path().expect("log path resolves");
+        assert!(
+            log.starts_with(home.join(".local/state/s2udio")),
+            "the log file lives in the state dir, got {log:?}"
+        );
+
+        ENV.remove("HOME");
+    }
+
+    #[test]
+    fn xdg_state_home_overrides_home() {
+        let _home_guard = crate::tests::fixtures::HOME_LOCK.lock().unwrap();
+        use crate::shared::env::ENV;
+        ENV.set("HOME".to_string(), "/home/should-not-be-used".to_string());
+        ENV.set("XDG_STATE_HOME".to_string(), "/xdg/state".to_string());
+        ENV.remove("S2UDIO_LOG_DIR");
+
+        assert_eq!(s2udio_state_dir(), Some(std::path::PathBuf::from("/xdg/state/s2udio")));
+
+        // A relative XDG_STATE_HOME is not a valid XDG dir; fall back to HOME.
+        ENV.set("XDG_STATE_HOME".to_string(), "relative/path".to_string());
+        assert_eq!(s2udio_state_dir(), Some(std::path::PathBuf::from("/home/should-not-be-used/.local/state/s2udio")));
+
+        ENV.remove("HOME");
+        ENV.remove("XDG_STATE_HOME");
+    }
+
+    #[test]
+    fn log_dir_and_file_overrides_win() {
+        let _home_guard = crate::tests::fixtures::HOME_LOCK.lock().unwrap();
+        use crate::shared::env::ENV;
+        let scratch = std::env::temp_dir().join(format!("s2u-logdir-test-{}", std::process::id()));
+        ENV.set("HOME".to_string(), "/home/ignored".to_string());
+
+        // S2UDIO_LOG_DIR redirects the directory (the dev harness uses this
+        // so it never writes into the operator's real state dir).
+        ENV.set("S2UDIO_LOG_DIR".to_string(), scratch.to_string_lossy().into_owned());
+        ENV.remove("S2UDIO_LOG_FILE");
+        assert_eq!(s2udio_state_dir(), Some(scratch.clone()));
+        let path = s2udio_log_path().expect("log path resolves");
+        assert_eq!(path.parent(), Some(scratch.as_path()));
+        assert!(
+            path.file_name().unwrap().to_string_lossy().starts_with("s2udio_"),
+            "log file name is uid-scoped, got {path:?}"
+        );
+
+        // S2UDIO_LOG_FILE is the more specific override, so it wins outright
+        // over S2UDIO_LOG_DIR rather than being joined onto it.
+        let explicit = scratch.join("exact.log");
+        ENV.set("S2UDIO_LOG_FILE".to_string(), explicit.to_string_lossy().into_owned());
+        assert_eq!(s2udio_log_path(), Some(explicit));
+
+        ENV.remove("HOME");
+        ENV.remove("S2UDIO_LOG_DIR");
+        ENV.remove("S2UDIO_LOG_FILE");
     }
 }

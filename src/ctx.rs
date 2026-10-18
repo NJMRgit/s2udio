@@ -500,7 +500,12 @@ impl Ctx {
                 }
             }
         }
-        let cached_queue_time_total = queue.iter().filter_map(|s| s.duration).sum();
+        // Filled in below, once `Ctx` exists: the total needs `ctx.yt_info` to
+        // time a web-stream row, which MPD cannot. Computing it here the old
+        // way (`queue.iter().filter_map(|s| s.duration)`) is what left a
+        // restored stream queue showing "0:00 total time" until some later
+        // queue event recomputed it (round 111).
+        let cached_queue_time_total = std::time::Duration::ZERO;
         if !supported_commands.contains("albumart")
             || !supported_commands.contains("readpicture")
         {
@@ -522,7 +527,7 @@ impl Ctx {
         state.mpd_library_path = None;
         let _ = state.save();
         scheduler.start();
-        let ctx = Self {
+        let mut ctx = Self {
             ytdlp_manager: YtDlpManager::new(work_sender.clone()),
             mpd_version: client.version(),
             lrc_index: LrcIndex::default(),
@@ -590,6 +595,11 @@ impl Ctx {
             pending_select_on_growth: Cell::new(None),
             mpd_music_directory,
         };
+        // Now that the yt-info cache is reachable through `ctx`, total the
+        // queue with the same helper `handle_queue_update` uses — one
+        // definition of "how long is this queue", so a stream row that MPD
+        // cannot time still contributes (round 111).
+        ctx.cached_queue_time_total = crate::ui::modals::paste::queue_total_time(&ctx);
         if let Some((_, song)) = ctx.find_current_song_in_queue() {
             if let Some(entry) = ctx.yt_info.borrow().get(&song.file) {
                 if !entry.original_url.is_empty() {

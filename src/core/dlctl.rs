@@ -1955,6 +1955,9 @@ fn serve() -> Result<(), String> {
     // without a logger every decision it makes is invisible (see
     // `logging::init_daemon`).
     let _logger = crate::shared::logging::init_daemon();
+    // Round 111: the daemon dies with its stderr on /dev/null, exactly the
+    // situation where a recorded backtrace is the only evidence left.
+    crate::shared::logging::install_panic_hook();
     let daemon = Daemon::new()?;
     daemon.run()
 }
