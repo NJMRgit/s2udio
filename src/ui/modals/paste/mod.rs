@@ -62,9 +62,9 @@ pub use resolve::{
     drop_unresolvable_queue_entry, expired_stream_original_url, is_stream_row, load_yt_cache,
     mark_stream_parse_pending, queue_total_time, re_resolve_expired_queue_entry,
     resolve_tagged_queue_entry, resolve_tagged_queue_entry_in_place, save_yt_cache,
-    song_stream_info, stream_info_for,
-    stream_parse_pending, stream_resolve_pending_for, stream_row_meta, warm_selected_queue_info,
-    yt_cache_path,
+    song_stream_info, stream_info_for, stream_parse_pending, stream_resolve_pending_for,
+    stream_row_meta, video_entry_duration, video_entry_stream_meta, video_queue_total_time,
+    warm_selected_queue_info, yt_cache_path,
 };
 pub use warm::{
     clear_mpv_mpris_art, current_yt_info, delete_mpv_mpris_state, ensure_chapters,

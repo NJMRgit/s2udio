@@ -1319,11 +1319,15 @@ impl Property<PropertyKind> {
                             } else {
                                 ctx.video_playlist.borrow()
                             };
-                            let secs: f64 = entries
-                                .iter()
-                                .filter_map(|e| e.duration)
-                                .sum();
-                            (entries.len(), Duration::from_secs_f64(secs))
+                            // Round 111 parity: a web-stream entry carries no
+                            // duration of its own, so this summed to zero (and
+                            // the audio queue's own fix did not reach here). The
+                            // shared resolver adds the yt-info fallback, so the
+                            // footer agrees with the Duration column.
+                            (
+                                entries.len(),
+                                crate::ui::modals::paste::video_queue_total_time(ctx, &entries),
+                            )
                         } else {
                             // Count the rows the Audio list actually shows, via
                             // the same predicate the list filters with — the
@@ -1937,5 +1941,97 @@ mod hovered_item_tests {
         assert_eq!(hovered_item(Some(Position { x: 15, y: 14 }), inner, 0, 3, 1), None);
         // No mouse at all.
         assert_eq!(hovered_item(None, inner, 0, 20, 1), None);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod queue_box_title_tests {
+    use super::{Property, PropertyKind, PropertyKindOrText, StatusProperty, TagResolutionStrategy};
+    use crate::core::mpv::MpvPlaylistEntry;
+    use crate::shared::ytdlp::YtStreamInfo;
+
+    fn ctx() -> crate::ctx::Ctx {
+        let app = crossbeam::channel::unbounded();
+        let work = crossbeam::channel::unbounded();
+        let client = crossbeam::channel::unbounded();
+        Box::leak(Box::new(app.1.clone()));
+        Box::leak(Box::new(work.1.clone()));
+        Box::leak(Box::new(client.1.clone()));
+        crate::tests::fixtures::ctx((app.0, app.1), (work.0, work.1), (client.0, client.1))
+    }
+
+    /// The box title's text on the Video sub-tab, exactly as the footer
+    /// renders it — the string the user's screenshot showed reading
+    /// `5 videos / 0:00 total time`.
+    fn video_box_title(ctx: &crate::ctx::Ctx) -> String {
+        ctx.queue_tab.set(crate::ctx::QueueTabMode::Video);
+        let property: Property<PropertyKind> = Property {
+            kind: PropertyKindOrText::Property(PropertyKind::Status(
+                StatusProperty::QueueBoxTitle(),
+            )),
+            style: None,
+            default: None,
+        };
+        let span = property
+            .as_span(None, ctx, " ", TagResolutionStrategy::First)
+            .expect("the queue box title is always renderable");
+        match span {
+            either::Either::Left(span) => span.content.to_string(),
+            either::Either::Right(spans) => {
+                spans.iter().map(|s| s.content.as_ref()).collect::<String>()
+            }
+        }
+    }
+
+    /// The reported bug on the surface it was reported on: a video queue of
+    /// web streams totalled `0:00` because the footer summed `entry.duration`,
+    /// which is `None` for every YouTube row. It must total the resolved
+    /// lengths the Duration column shows instead.
+    #[test]
+    fn the_video_box_title_totals_resolved_streams() {
+        let ctx = ctx();
+        ctx.yt_info.borrow_mut().insert(
+            "https://www.youtube.com/watch?v=abc123".to_string(),
+            YtStreamInfo {
+                title: "A video".to_string(),
+                duration: Some(185.0),
+                ..Default::default()
+            },
+        );
+        ctx.video_playlist
+            .borrow_mut()
+            .push(MpvPlaylistEntry::new("A video", "https://www.youtube.com/watch?v=abc123", None));
+
+        assert_eq!(
+            video_box_title(&ctx),
+            "1 videos / 3:05 total time",
+            "the footer counts the resolved stream's length, not zero"
+        );
+    }
+
+    /// A queue of streams nothing has resolved yet honestly reads `0:00`
+    /// rather than a fabricated total — the same answer the audio queue gives
+    /// before a resolve lands.
+    #[test]
+    fn the_video_box_title_is_zero_for_unresolved_streams() {
+        let ctx = ctx();
+        ctx.video_playlist
+            .borrow_mut()
+            .push(MpvPlaylistEntry::new("A video", "https://www.youtube.com/watch?v=abc123", None));
+        assert_eq!(video_box_title(&ctx), "1 videos / 0:00 total time");
+    }
+
+    /// A local video keeps the duration it already carries: the cache fallback
+    /// must not displace a known value or double-count it.
+    #[test]
+    fn the_video_box_title_keeps_a_known_duration() {
+        let ctx = ctx();
+        ctx.video_playlist.borrow_mut().push(MpvPlaylistEntry::new(
+            "local.mp4",
+            "/videos/local.mp4",
+            Some(120.0),
+        ));
+        assert_eq!(video_box_title(&ctx), "1 videos / 2:00 total time");
     }
 }

@@ -116,8 +116,14 @@ impl QueuePane {
                 } else {
                     ctx.config.as_list_text_style()
                 };
-                let duration =
-                    entry.duration.map(|d| fmt.format(d as u64)).unwrap_or_else(|| "-".to_owned());
+                // Round 111 parity with the audio queue's Duration column: an
+                // entry with no duration of its own (a web stream nothing has
+                // probed) falls back to the shared stream metadata, so the row
+                // shows the real length instead of `-` and the column agrees
+                // with the footer total computed from the same lookup.
+                let duration = crate::ui::modals::paste::video_entry_duration(ctx, entry)
+                    .map(|d| fmt.format(d as u64))
+                    .unwrap_or_else(|| "-".to_owned());
                 let prefix = if is_current { "❯ " } else { "  " };
                 let mut title = entry.title.clone();
                 truncate_to_width(&mut title, title_field.saturating_sub(2));
@@ -417,5 +423,116 @@ impl QueuePane {
             self.video_load_entry(idx, ctx);
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use crate::core::mpv::MpvPlaylistEntry;
+    use crate::shared::ytdlp::YtStreamInfo;
+    use crate::ui::modals::paste::{video_entry_duration, video_queue_total_time};
+
+    fn ctx() -> crate::ctx::Ctx {
+        let app = crossbeam::channel::unbounded();
+        let work = crossbeam::channel::unbounded();
+        let client = crossbeam::channel::unbounded();
+        Box::leak(Box::new(app.1.clone()));
+        Box::leak(Box::new(work.1.clone()));
+        Box::leak(Box::new(client.1.clone()));
+        crate::tests::fixtures::ctx((app.0, app.1), (work.0, work.1), (client.0, client.1))
+    }
+
+    const LINK: &str = "https://www.youtube.com/watch?v=abc123";
+
+    /// The reported bug: five queued YouTube videos read `0:00 total time`
+    /// while the Duration cells that had been resolved showed real values.
+    /// The entry carries no duration of its own — nothing probes a stream
+    /// before playback — so the footer must fall back to the resolved info
+    /// the audio queue already reads.
+    #[test]
+    fn a_stream_entry_without_its_own_duration_takes_the_cached_one() {
+        let ctx = ctx();
+        ctx.yt_info.borrow_mut().insert(
+            LINK.to_string(),
+            YtStreamInfo {
+                title: "A video".to_string(),
+                duration: Some(180.0),
+                ..Default::default()
+            },
+        );
+        let entry = MpvPlaylistEntry::new("A video", LINK, None);
+        assert_eq!(video_entry_duration(&ctx, &entry), Some(180.0));
+    }
+
+    /// The cell and the footer are the same lookup, so they cannot disagree
+    /// about one row — the invariant round 111 established for audio.
+    #[test]
+    fn the_total_is_the_sum_of_the_durations_the_rows_show() {
+        let ctx = ctx();
+        ctx.yt_info.borrow_mut().insert(
+            LINK.to_string(),
+            YtStreamInfo {
+                title: "A video".to_string(),
+                duration: Some(180.0),
+                ..Default::default()
+            },
+        );
+        let entries = vec![
+            MpvPlaylistEntry::new("A video", LINK, None),
+            MpvPlaylistEntry::new("local.mp4", "/videos/local.mp4", Some(120.0)),
+        ];
+        assert_eq!(video_queue_total_time(&ctx, &entries), Duration::from_secs(300));
+    }
+
+    /// An entry whose `original_url` holds the canonical link but whose `url`
+    /// is the expired resolved stream URL must still be timed — that is the
+    /// persisted shape mpv's playlist export and the session restore produce.
+    #[test]
+    fn the_original_link_times_an_entry_whose_url_is_the_resolved_stream() {
+        let ctx = ctx();
+        ctx.yt_info.borrow_mut().insert(
+            LINK.to_string(),
+            YtStreamInfo {
+                title: "A video".to_string(),
+                duration: Some(42.0),
+                ..Default::default()
+            },
+        );
+        let mut entry = MpvPlaylistEntry::new(
+            "A video",
+            "https://rr3.googlevideo.com/videoplayback?expire=1",
+            None,
+        );
+        entry.original_url = Some(LINK.to_string());
+        assert_eq!(video_entry_duration(&ctx, &entry), Some(42.0));
+    }
+
+    /// An entry that already knows its duration keeps it: the fallback is a
+    /// fallback, so local files and Jellyfin items are untouched and nothing
+    /// is counted twice.
+    #[test]
+    fn a_known_duration_wins_over_the_cache() {
+        let ctx = ctx();
+        ctx.yt_info.borrow_mut().insert(
+            LINK.to_string(),
+            YtStreamInfo {
+                title: "A video".to_string(),
+                duration: Some(180.0),
+                ..Default::default()
+            },
+        );
+        let entry = MpvPlaylistEntry::new("A video", LINK, Some(7.0));
+        assert_eq!(video_entry_duration(&ctx, &entry), Some(7.0));
+    }
+
+    /// Before a stream's resolve lands nothing is known, so the honest answer
+    /// is zero rather than a fabricated number — and no panic.
+    #[test]
+    fn an_unresolved_stream_contributes_zero() {
+        let ctx = ctx();
+        let entries = vec![MpvPlaylistEntry::new("A video", LINK, None)];
+        assert_eq!(video_queue_total_time(&ctx, &entries), Duration::ZERO);
     }
 }

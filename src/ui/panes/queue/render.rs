@@ -579,6 +579,82 @@ use super::{Areas, QueuePane};
         pane.areas[Areas::Table]
     }
 
+    /// The text actually drawn on table row `row` — the cell contents, not the
+    /// inputs that produced them. Used to assert on the rendered Duration cell
+    /// rather than on the helper behind it: a test on the helper alone would
+    /// still pass if the row stopped calling it.
+    fn row_text(
+        pane: &mut QueuePane,
+        ctx: &crate::ctx::Ctx,
+        table: Rect,
+        row: u16,
+    ) -> String {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|frame| pane.render(frame, Rect::new(0, 0, 80, 24), ctx).unwrap()).unwrap();
+        let buf = terminal.backend().buffer();
+        (table.x..table.x + table.width)
+            .map(|x| buf[(x, table.y + row)].symbol().to_owned())
+            .collect::<String>()
+            .trim_end()
+            .to_owned()
+    }
+
+    /// The reported bug at the surface the user saw: a queued YouTube video
+    /// whose length is known only from the resolve cache rendered `-` in its
+    /// Duration cell. The row must show the real length, formatted like every
+    /// other duration in the app.
+    #[test]
+    fn a_resolved_stream_row_renders_its_real_duration() {
+        let (mut ctx, _tx) = queue_ctx();
+        ctx.yt_info.borrow_mut().insert(
+            "https://www.youtube.com/watch?v=abc123".to_string(),
+            crate::shared::ytdlp::YtStreamInfo {
+                title: "A video".to_string(),
+                duration: Some(185.0),
+                ..Default::default()
+            },
+        );
+        ctx.video_playlist
+            .borrow_mut()
+            .push(crate::core::mpv::MpvPlaylistEntry::new(
+                "A video",
+                "https://www.youtube.com/watch?v=abc123",
+                None,
+            ));
+        let mut pane = video_pane(&mut ctx);
+        let table = render(&mut pane, &ctx);
+
+        let drawn = row_text(&mut pane, &ctx, table, 0);
+        assert!(
+            drawn.ends_with("3:05"),
+            "the Duration cell shows the resolved length (185 s), not `-`: {drawn:?}"
+        );
+    }
+
+    /// The converse, so the fix cannot be "print a duration for every row": a
+    /// stream nothing has resolved yet still renders `-` rather than a
+    /// fabricated number.
+    #[test]
+    fn an_unresolved_stream_row_still_renders_a_dash() {
+        let (mut ctx, _tx) = queue_ctx();
+        ctx.video_playlist
+            .borrow_mut()
+            .push(crate::core::mpv::MpvPlaylistEntry::new(
+                "A video",
+                "https://www.youtube.com/watch?v=abc123",
+                None,
+            ));
+        let mut pane = video_pane(&mut ctx);
+        let table = render(&mut pane, &ctx);
+
+        let drawn = row_text(&mut pane, &ctx, table, 0);
+        assert!(
+            drawn.ends_with('-'),
+            "an unresolved stream keeps the honest `-`: {drawn:?}"
+        );
+    }
+
     fn row_bg(
         pane: &mut QueuePane,
         ctx: &crate::ctx::Ctx,

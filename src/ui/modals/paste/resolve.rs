@@ -983,6 +983,62 @@ pub fn queue_total_time(ctx: &Ctx) -> std::time::Duration {
         })
         .sum()
 }
+/// The video queue's counterpart of [`queue_total_time`]: the same fallback,
+/// applied to an mpv playlist entry instead of an MPD song.
+///
+/// A video-queue entry carries a duration only when it was already known at
+/// the time it was appended (a Jellyfin item, a local file mpv had probed).
+/// For a web stream it is `None` — nothing probes a YouTube link before
+/// playback — so the footer's `N videos / total time` summed to **zero** and
+/// every Duration cell rendered `-`, even though the very same yt-info cache
+/// entry that the audio queue reads holds the length (round 111 fixed exactly
+/// this for the audio queue; the video queue kept the pre-fix behaviour).
+///
+/// The lookup is shared with the audio queue on purpose: both go through
+/// [`stream_row_meta`], so a row's Duration cell and the footer total can
+/// never disagree about the same stream, and a Jellyfin episode or local file
+/// keeps the duration it already had.
+pub fn video_entry_duration(ctx: &Ctx, entry: &crate::core::mpv::MpvPlaylistEntry) -> Option<f64> {
+    entry
+        .duration
+        .or_else(|| video_entry_stream_meta(ctx, entry).and_then(|meta| meta.duration))
+}
+/// The yt-info metadata behind a video-queue row, tried under every name the
+/// row may be known by.
+///
+/// The entry's `url` is the **resolved** yt-dlp stream URL (or a buffered
+/// proxy URL once the stream has been through the buffer), and its
+/// `original_url` is the canonical YouTube/Soundcloud link it came from —
+/// mpv's playlist export, by contrast, only ever has the raw URL. Trying the
+/// canonical link first and the raw URL second covers all three without
+/// caring which path produced the entry.
+pub fn video_entry_stream_meta(
+    ctx: &Ctx,
+    entry: &crate::core::mpv::MpvPlaylistEntry,
+) -> Option<YtListMeta> {
+    let mut candidates: Vec<&str> = Vec::new();
+    if let Some(original) = entry.original_url.as_deref().filter(|url| !url.is_empty()) {
+        candidates.push(original);
+    }
+    if !entry.url.is_empty() {
+        candidates.push(entry.url.as_str());
+    }
+    candidates.into_iter().find_map(|candidate| stream_row_meta(ctx, candidate))
+}
+/// The video queue's total running time, over the entries the Video sub-tab
+/// actually lists. Mirrors [`queue_total_time`] so the footer number and the
+/// Duration column above it are computed from one resolver.
+pub fn video_queue_total_time(
+    ctx: &Ctx,
+    entries: &[crate::core::mpv::MpvPlaylistEntry],
+) -> std::time::Duration {
+    entries
+        .iter()
+        .filter_map(|entry| {
+            video_entry_duration(ctx, entry).map(std::time::Duration::from_secs_f64)
+        })
+        .sum()
+}
 
 pub fn is_stream_row(ctx: &Ctx, file: &str) -> bool {
     if tagged_stream_entry(file).is_some() {
