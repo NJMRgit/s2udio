@@ -3,7 +3,7 @@ use std::{borrow::Cow, collections::HashSet};
 use anyhow::Result;
 use input_section::InputSection;
 use itertools::Itertools;
-pub use list_section::ListSection;
+pub use list_section::{ButtonRowLayout, ListButton, ListSection};
 use modal::MenuModal;
 use multi_action_section::MultiActionSection;
 use ratatui::{
@@ -76,6 +76,16 @@ trait Section {
     fn toggle_selected_check(&mut self) -> bool {
         false
     }
+
+    /// Rows of footer buttons this section wants drawn BELOW the window
+    /// border (the torrent picker). `0` for every other section.
+    fn outside_button_rows(&self) -> u16 {
+        0
+    }
+
+    /// Draws this section's footer buttons into the row the modal reserved
+    /// below the window (see [`Section::outside_button_rows`]).
+    fn render_outside_buttons(&mut self, _area: Rect, _buf: &mut Buffer, _ctx: &Ctx) {}
 
     /// The row index under a screen position (list sections only).
     fn row_idx_at_position(&self, _pos: Position) -> Option<usize> {
@@ -328,6 +338,21 @@ impl Section for SectionType<'_> {
         match self {
             SectionType::Menu(s) => s.toggle_selected(),
             _ => false,
+        }
+    }
+
+    fn outside_button_rows(&self) -> u16 {
+        match self {
+            SectionType::Menu(s) => {
+                if s.has_outside_buttons() { 1 } else { 0 }
+            }
+            SectionType::Multi(_) | SectionType::Input(_) => 0,
+        }
+    }
+
+    fn render_outside_buttons(&mut self, area: Rect, buf: &mut Buffer, ctx: &Ctx) {
+        if let SectionType::Menu(s) = self {
+            s.render_footer_buttons(area, buf, ctx);
         }
     }
 

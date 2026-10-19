@@ -85,6 +85,11 @@ pub struct MenuModal<'a> {
     levels: Vec<SubLevel<'a>>,
     /// A running drag auto-scroll (see `DragScroll`).
     drag_scroll: Option<DragScroll>,
+    /// Caps the window's height to a fraction of the terminal (`(2, 3)` =
+    /// two thirds): the rows scroll instead of the window growing past it.
+    /// `None` (default) lets the window be exactly its content — every menu
+    /// but the torrent picker.
+    height_cap: Option<(u16, u16)>,
 }
 impl Modal for MenuModal<'_> {
     fn id(&self) -> Id {
@@ -119,6 +124,16 @@ impl Modal for MenuModal<'_> {
                 section.cap_window_height(max_level_height);
             }
         }
+        // A height cap (the torrent picker's two thirds) makes the rows of the
+        // popup's own sections scroll instead of the window growing: cap every
+        // section first, so the height computed below already respects it.
+        if let Some((num, den)) = self.height_cap {
+            let cap = frame_area.height.saturating_mul(num) / den.max(1);
+            let cap = cap.max(4);
+            for section in &mut self.sections {
+                section.cap_window_height(cap);
+            }
+        }
         // The popup shows its own sections, or the deepest open level. Both
         // input methods use this one centered window (no flyouts).
         let deepest = self.levels.len().checked_sub(1);
@@ -129,14 +144,28 @@ impl Modal for MenuModal<'_> {
             ),
             None => (menu_window_height(&self.sections), self.title.clone()),
         };
+        // A section may draw its footer buttons BELOW the window border (the
+        // torrent picker: the list stays inside the outline on its own). The
+        // popup then grows by that many rows, and the border covers only the
+        // window part — the buttons sit outside it.
+        let footer_rows = match deepest {
+            Some(idx) => self.levels[idx].sections.iter().map(Section::outside_button_rows).sum(),
+            None => self.sections.iter().map(Section::outside_button_rows).sum(),
+        };
+        let total_height = needed_height.saturating_add(footer_rows);
         let popup_area = self
             .anchor
-            .map(|anchor| anchor_rect(anchor, self.width, needed_height, frame_area))
+            .map(|anchor| anchor_rect(anchor, self.width, total_height, frame_area))
             .unwrap_or_else(|| {
                 frame_area
-                    .centered(constraint!(== self.width), constraint!(== needed_height))
+                    .centered(constraint!(== self.width), constraint!(== total_height))
             });
         self.popup_area = popup_area;
+        let [window_area, footer_area] = Layout::vertical([
+            Constraint::Min(1),
+            Constraint::Length(footer_rows),
+        ])
+        .areas(popup_area);
         match deepest {
             Some(idx) => {
                 let level = &mut self.levels[idx];
@@ -145,20 +174,34 @@ impl Modal for MenuModal<'_> {
                     ctx,
                     &mut level.sections,
                     &mut level.areas,
-                    popup_area,
+                    window_area,
                     title.as_deref(),
                     None,
                 );
+                draw_outside_buttons(
+                    frame,
+                    ctx,
+                    &mut level.sections,
+                    footer_area,
+                );
             }
-            None => draw_menu_window(
-                frame,
-                ctx,
-                &mut self.sections,
-                &mut self.areas,
-                popup_area,
-                title.as_deref(),
-                self.filter.as_deref(),
-            ),
+            None => {
+                draw_menu_window(
+                    frame,
+                    ctx,
+                    &mut self.sections,
+                    &mut self.areas,
+                    window_area,
+                    title.as_deref(),
+                    self.filter.as_deref(),
+                );
+                draw_outside_buttons(
+                    frame,
+                    ctx,
+                    &mut self.sections,
+                    footer_area,
+                );
+            }
         }
         Ok(())
     }
@@ -530,8 +573,17 @@ impl<'a> MenuModal<'a> {
             popup_area: Rect::default(),
             levels: Vec::new(),
             drag_scroll: None,
+            height_cap: None,
         }
     }
+    /// Caps the popup's height to `num/den` of the terminal height (the
+    /// torrent picker uses `(2, 3)`): the list scrolls beyond that instead of
+    /// the window growing to fill the screen.
+    pub fn height_cap_fraction(mut self, num: u16, den: u16) -> Self {
+        self.height_cap = Some((num, den.max(1)));
+        self
+    }
+
     /// The replacement id this modal refreshes in place under (see
     /// [`Modal::replacement_id`]).
     pub fn replacement_id(mut self, id: impl Into<Cow<'static, str>>) -> Self {
@@ -1000,6 +1052,34 @@ fn menu_window_height(sections: &[SectionType<'_>]) -> u16 {
         .map(|section| section.preferred_height() as usize)
         .sum::<usize>() + 1 + sections.len();
     content as u16
+}
+
+/// Draws the footer rows a section asked to have BELOW the window border
+/// (the torrent picker's Stream / Download / Cancel row). One row per
+/// section that asked, top to bottom.
+fn draw_outside_buttons(
+    frame: &mut Frame,
+    ctx: &Ctx,
+    sections: &mut [SectionType<'_>],
+    footer: Rect,
+) {
+    if footer.height == 0 {
+        return;
+    }
+    let wanted: Vec<usize> = sections
+        .iter()
+        .enumerate()
+        .filter(|(_, section)| section.outside_button_rows() > 0)
+        .map(|(idx, _)| idx)
+        .collect();
+    let constraints: Vec<Constraint> =
+        wanted.iter().map(|_| Constraint::Length(1)).collect();
+    let rows = Layout::vertical(constraints).split(footer);
+    for (slot, idx) in wanted.into_iter().enumerate() {
+        if let Some(area) = rows.get(slot) {
+            sections[idx].render_outside_buttons(*area, frame.buffer_mut(), ctx);
+        }
+    }
 }
 
 /// Draws one menu window (its border, title, sections and the separators

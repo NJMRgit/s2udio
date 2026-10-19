@@ -53,6 +53,10 @@ pub struct AppStateFile {
     /// `socks5://127.0.0.1:1080`; "" = explicitly no proxy, absent = keep
     /// the config default.
     pub torrent_socks_proxy: Option<String>,
+    /// "Streaming a torrent also downloads it" (Settings -> torrent).
+    /// Overrides the config default when present; `true` = a stream runs as a
+    /// committed download, so the torrent appears in the Downloads modal.
+    pub torrent_stream_downloads: Option<bool>,
 }
 
 impl AppStateFile {

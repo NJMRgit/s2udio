@@ -308,7 +308,7 @@ fn release_torrent_from_tui(ctx: &Ctx, key: &str, infohash: Option<&str>) {
     // `if let` scrutinee's temporary lives through the whole block.
     let scanned = ctx.torrent_scans.borrow().get(key).cloned();
     if let Some(Ok(scan)) = scanned {
-        let _ = crate::core::torrent::forget_torrent(&scan.engine, &scan.torrent_id);
+        let _ = crate::core::torrent::forget_torrent(scan.engine(), &scan.torrent_id);
         ctx.torrent_scans.borrow_mut().remove(key);
         log::debug!(
             key:?; "Forgot the scanned torrent on its TUI engine (daemon takes over)"
@@ -348,7 +348,7 @@ fn ensure_daemon_started(ctx: &Ctx) {
 /// "Download & Play" (`play: true`) — wait for the daemon's response,
 /// then play through the daemon engine (survives the TUI, R1). For
 /// download-only the Downloads modal shows the progress.
-pub(super) fn commit_to_daemon(
+pub(crate) fn commit_to_daemon(
     ctx: &Ctx,
     item: &PastedItem,
     key: &str,
@@ -412,7 +412,13 @@ pub(super) fn commit_to_daemon(
             .as_ref()
             .map(|scan| scan.torrent_name.clone())
             .unwrap_or_else(|| item.label());
-        status_info!("Downloading {label}… (progress in the Downloads modal)");
+        status_info!("Downloading {label}…");
+        // A download-only commit never waits for the engine (no phase 4), so
+        // there is no "Preparing downloader…" window to show. Instead the
+        // job's own download panel opens as soon as the daemon registers it
+        // (matched by the scan key, `DlJob::source_key`) — the user sees live
+        // progress without leaving the flow or hunting the Downloads modal.
+        *ctx.dl_panel_pending.borrow_mut() = Some(key.to_owned());
     }
     Ok(())
 }
@@ -610,7 +616,8 @@ pub fn prune_empty_engines(ctx: &Ctx) {
             .borrow()
             .values()
             .filter_map(|result| result.as_ref().ok())
-            .map(|scan| scan.engine.base_url().to_owned())
+            .filter_map(|scan| scan.engine_or())
+            .map(|engine| engine.base_url().to_owned())
             .collect();
         if let Some(engine) = ctx.torrent_engine.borrow().as_ref() {
             bases.push(engine.base_url().to_owned());
@@ -623,7 +630,7 @@ pub fn prune_empty_engines(ctx: &Ctx) {
             .borrow()
             .values()
             .filter_map(|result| result.as_ref().ok())
-            .map(|scan| scan.engine.clone())
+            .filter_map(|scan| scan.engine_or().cloned())
             .find(|engine| engine.base_url() == base)
             .or_else(|| ctx.torrent_engine.borrow().clone())
             .filter(|engine| engine.base_url() == base);
@@ -636,7 +643,9 @@ pub fn prune_empty_engines(ctx: &Ctx) {
         }
         log::debug!(base:?; "Pruning an idle TUI torrent engine");
         ctx.torrent_scans.borrow_mut().retain(|_, result| {
-            !(result.as_ref().is_ok_and(|scan| scan.engine.base_url() == base))
+            !(result.as_ref().is_ok_and(|scan| {
+                scan.engine_or().is_some_and(|engine| engine.base_url() == base)
+            }))
         });
         if ctx
             .torrent_engine

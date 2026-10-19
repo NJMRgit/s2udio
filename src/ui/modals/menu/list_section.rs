@@ -58,6 +58,12 @@ pub struct ListSection {
     >,
     /// Footer buttons of a checkbox list (see `add_check_buttons`).
     pub buttons: Vec<ListButton>,
+    /// Where the footer buttons sit in that row (see [`ButtonRowLayout`]).
+    button_layout: ButtonRowLayout,
+    /// `true` = the footer buttons are drawn **outside** the menu window, in
+    /// a row below its border, so the bordered box holds only the list (the
+    /// torrent picker). The modal hands the button row its area.
+    buttons_outside_window: bool,
     /// `Some(idx)` while the footer buttons hold the focus (the list rows are
     /// then rendered unfocused).
     button_focus: Option<usize>,
@@ -120,12 +126,53 @@ struct CheckDrag {
     touched: Vec<(usize, bool)>,
 }
 
+/// How a section's footer button row places its buttons.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ButtonRowLayout {
+    /// Every button packed from the left edge (the historical row).
+    #[default]
+    Left,
+    /// The action buttons packed from the LEFT, the `Cancel` button glued to
+    /// the RIGHT edge (the torrent picker: `[ Stream ] [ Download ]` ...
+    /// `[ Cancel ]`).
+    ActionsLeftCancelRight,
+}
+
 #[derive(derive_more::Debug)]
 pub struct ListButton {
     pub label: String,
     pub kind: ListButtonKind,
     /// Dim and inert while `true` (nothing ticked yet).
     pub disabled: bool,
+    /// A caller-supplied gate on top of the ticked rows (the torrent
+    /// picker's `Stream` also waits for the engine's `live` state). `true`
+    /// (default) = the gate is open; `refresh_buttons` disables the button
+    /// when the gate is shut **or** nothing is ticked, so the two conditions
+    /// compose instead of overriding each other.
+    gate_open: bool,
+}
+
+impl ListButton {
+    /// A choice button: runs the `check_list` callback with the ticked rows
+    /// and this button's index among the choices.
+    pub fn confirm(label: impl Into<String>, choice: usize) -> Self {
+        Self {
+            label: label.into(),
+            kind: ListButtonKind::Confirm(choice),
+            disabled: true,
+            gate_open: true,
+        }
+    }
+
+    /// The `Cancel` button: closes the picker's modal.
+    pub fn cancel(label: impl Into<String>) -> Self {
+        Self {
+            label: label.into(),
+            kind: ListButtonKind::Cancel,
+            disabled: false,
+            gate_open: true,
+        }
+    }
 }
 
 #[allow(dead_code)]
@@ -138,6 +185,8 @@ impl ListSection {
             max_height: None,
             check_confirm: None,
             buttons: Vec::new(),
+            button_layout: ButtonRowLayout::Left,
+            buttons_outside_window: false,
             button_focus: None,
             anchor: None,
             check_drag: None,
@@ -334,6 +383,67 @@ impl ListSection {
         }
     }
 
+    /// Sets explicit footer buttons (the torrent picker). The buttons are
+    /// rendered in the order given by [`button_areas`]; each `Confirm(n)`
+    /// hands its own index to the `check_list` callback. Every `Confirm`
+    /// button starts dim until rows are ticked (see `refresh_buttons`); a
+    /// caller that gates a button on something else (the torrent picker
+    /// gates `Stream` on the engine reporting the torrent `live`) re-applies
+    /// its gate after every refresh with [`set_button_enabled`].
+    pub fn set_buttons(&mut self, buttons: Vec<ListButton>) -> &mut Self {
+        self.buttons = buttons;
+        self.button_focus = None;
+        self.refresh_buttons();
+        self
+    }
+
+    /// Sets where the footer buttons sit in their row (see
+    /// [`ButtonRowLayout`]).
+    pub fn button_layout(&mut self, layout: ButtonRowLayout) -> &mut Self {
+        self.button_layout = layout;
+        self
+    }
+
+    /// Draws the footer buttons **below** the menu window instead of inside
+    /// it, so the bordered box holds only the rows (the torrent picker: the
+    /// episode list sits in the outline on its own, the buttons under it).
+    /// The modal reserves the row and calls [`ListSection::render_footer_buttons`].
+    pub fn buttons_below_window(&mut self, below: bool) -> &mut Self {
+        self.buttons_outside_window = below;
+        self
+    }
+
+    /// Whether this section wants its footer buttons drawn below the window.
+    pub fn has_outside_buttons(&self) -> bool {
+        self.buttons_outside_window && !self.buttons.is_empty()
+    }
+
+    /// Renders the button row into the area the modal reserved below the
+    /// window (see [`ListSection::buttons_below_window`]).
+    pub fn render_footer_buttons(&mut self, area: Rect, buf: &mut Buffer, ctx: &Ctx) {
+        self.areas[ListSectionArea::Buttons] = area;
+        self.render_buttons(buf, ctx);
+    }
+
+    /// Shows `label` as the button's text — used to swap a `Stream` label for
+    /// its spinning form while the button is gated.
+    pub fn set_button_label(&mut self, idx: usize, label: impl Into<String>) {
+        if let Some(button) = self.buttons.get_mut(idx) {
+            button.label = label.into();
+        }
+    }
+
+    /// Opens or shuts a button's caller-supplied gate (the torrent picker's
+    /// `Stream` waits for the engine's `live` state). A shut gate keeps the
+    /// button disabled whatever the ticks are; opening it re-derives the
+    /// button from the rows like any other confirm button.
+    pub fn set_button_enabled(&mut self, idx: usize, enabled: bool) {
+        if let Some(button) = self.buttons.get_mut(idx) {
+            button.gate_open = enabled;
+        }
+        self.refresh_buttons();
+    }
+
     /// Adds the footer buttons of a checkbox list (the picker's
     /// `Download` / `Cancel`): `Download` runs the `check_list` callback with
     /// the ticked rows (dim while nothing is ticked), `Cancel` closes the
@@ -350,11 +460,13 @@ impl ListSection {
                 label: download.into(),
                 kind: ListButtonKind::Confirm(0),
                 disabled: true,
+                gate_open: true,
             },
             ListButton {
                 label: cancel.into(),
                 kind: ListButtonKind::Cancel,
                 disabled: false,
+                gate_open: true,
             },
         ];
         self.button_focus = None;
@@ -379,12 +491,14 @@ impl ListSection {
                 label: (*label).to_owned(),
                 kind: ListButtonKind::Confirm(idx),
                 disabled: true,
+                gate_open: true,
             })
             .collect();
         self.buttons.push(ListButton {
             label: cancel.into(),
             kind: ListButtonKind::Cancel,
             disabled: false,
+            gate_open: true,
         });
         self.button_focus = None;
         self.refresh_buttons();
@@ -474,6 +588,40 @@ impl ListSection {
         let area = self.areas[ListSectionArea::Buttons];
         if area.width == 0 {
             return Vec::new();
+        }
+        match self.button_layout {
+            ButtonRowLayout::ActionsLeftCancelRight => {
+                // `[ Stream ]  [ Download ]` packed from the LEFT, the
+                // `Cancel` button glued to the RIGHT edge.
+                let mut areas = vec![Rect::default(); self.buttons.len()];
+                let width_of = |button: &ListButton| button.label.chars().count() as u16 + 4;
+                let cancel_idx = self
+                    .buttons
+                    .iter()
+                    .position(|button| matches!(button.kind, ListButtonKind::Cancel));
+                // Right edge first, so the left run knows where it must stop.
+                let mut right = area.right();
+                if let Some(idx) = cancel_idx {
+                    let width = width_of(&self.buttons[idx]);
+                    right = right.saturating_sub(width);
+                    areas[idx] = Rect { x: right, y: area.y, width, height: 1 };
+                    right = right.saturating_sub(1);
+                }
+                let mut x = area.x;
+                for idx in 0..self.buttons.len() {
+                    if Some(idx) == cancel_idx {
+                        continue;
+                    }
+                    let width = width_of(&self.buttons[idx]);
+                    if x.saturating_add(width) > right {
+                        break;
+                    }
+                    areas[idx] = Rect { x, y: area.y, width, height: 1 };
+                    x = x.saturating_add(width).saturating_add(1);
+                }
+                return areas;
+            }
+            ButtonRowLayout::Left => {}
         }
         let mut areas = Vec::new();
         let mut x = area.x;
@@ -713,8 +861,10 @@ impl ListSection {
         }
         let any = !self.checked_indices().is_empty();
         for button in &mut self.buttons {
+            // A confirm button needs both a ticked row and its gate open
+            // (the torrent picker's `Stream` waits for the engine's `live`).
             if matches!(button.kind, ListButtonKind::Confirm(_)) {
-                button.disabled = !any;
+                button.disabled = !any || !button.gate_open;
             }
         }
     }
@@ -745,7 +895,7 @@ impl ListSection {
     /// Caps the section's window to `window_height` rows (the picker level uses
     /// 2/3 of the terminal): the list scrolls instead of growing past it.
     pub fn cap_window_height(&mut self, window_height: u16) {
-        let chrome = 2 + u16::from(!self.buttons.is_empty());
+        let chrome = 2 + u16::from(!self.buttons.is_empty() && !self.buttons_outside_window);
         self.max_height = Some(window_height.saturating_sub(chrome).max(1) as usize);
     }
 
@@ -901,18 +1051,23 @@ impl Section for ListSection {
     fn preferred_height(&self) -> u16 {
         let len = self.items.len();
         let rows = self.max_height.map_or(len, |mh| len.min(mh)) as u16;
-        rows + u16::from(!self.buttons.is_empty())
+        // Buttons drawn below the window are not part of its height.
+        rows + u16::from(!self.buttons.is_empty() && !self.buttons_outside_window)
     }
 
     fn render(&mut self, area: Rect, buf: &mut Buffer, filter: Option<&str>, ctx: &Ctx) {
         // A checkbox list keeps its footer buttons on the last row and scrolls
         // the rows above them.
-        let [area, buttons_area] = if self.buttons.is_empty() {
+        let [area, buttons_area] = if self.buttons.is_empty() || self.buttons_outside_window {
             [area, Rect::default()]
         } else {
             Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area)
         };
-        self.areas[ListSectionArea::Buttons] = buttons_area;
+        // An outside button row's area is set by the modal
+        // (`render_footer_buttons`), after the window is drawn.
+        if !self.buttons_outside_window {
+            self.areas[ListSectionArea::Buttons] = buttons_area;
+        }
         let should_show_scrollbar = ctx.config.as_styled_scrollbar().is_some()
             && self.max_height.is_some_and(|h| h < self.items.len());
 
@@ -1043,5 +1198,134 @@ impl Section for ListSection {
 
     fn item_labels_iter(&self) -> Box<dyn Iterator<Item = &str> + '_> {
         Box::new(self.items.iter().map(|i| i.label.as_str()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ratatui::style::Style;
+
+    use super::*;
+
+    /// A section with the torrent picker's button row and one ticked row —
+    /// the picker opens with every file ticked.
+    fn picker_buttons() -> ListSection {
+        let mut section = ListSection::new(Style::default());
+        section.add_check_item("one.mkv  (1.0 GB)", true);
+        section.check_list(|_ctx, _rows, _choice| Ok(()));
+        // The torrent picker's order: Stream, Download, then Cancel — with
+        // the actions packed left and Cancel glued right.
+        section.set_buttons(vec![
+            ListButton::confirm("Stream", 0),
+            ListButton::confirm("Download", 1),
+            ListButton::cancel("Cancel"),
+        ]);
+        section.button_layout(ButtonRowLayout::ActionsLeftCancelRight);
+        section
+    }
+
+    /// Lays the section out over a wide area so the button row has room.
+    fn layout(section: &mut ListSection, width: u16) {
+        // `render` needs a `Ctx`, so the button geometry is exercised by
+        // setting the row `render` would fill — `button_areas` is pure.
+        section.areas[ListSectionArea::Buttons] = Rect { x: 0, y: 2, width, height: 1 };
+    }
+
+    #[test]
+    fn the_actions_pack_left_and_cancel_is_glued_right() {
+        let mut section = picker_buttons();
+        layout(&mut section, 60);
+        let areas = section.button_areas();
+        assert_eq!(areas.len(), 3);
+        // Stream starts at the left edge, Download right after it.
+        assert_eq!(areas[0].x, 0, "Stream is packed to the left");
+        assert!(areas[0].right() < areas[1].x, "Download follows Stream");
+        // Cancel is glued to the right edge, clear of the actions.
+        assert_eq!(areas[2].right(), 60, "Cancel ends at the right edge");
+        assert!(areas[1].right() < areas[2].x, "Cancel is right of Download");
+    }
+
+    #[test]
+    fn left_packed_is_still_the_default() {
+        let mut section = picker_buttons();
+        section.button_layout(ButtonRowLayout::Left);
+        layout(&mut section, 60);
+        let areas = section.button_areas();
+        assert_eq!(areas[0].x, 0);
+        assert!(areas[2].right() < 60, "left-packed buttons do not reach the edge");
+    }
+
+    #[test]
+    fn buttons_below_the_window_take_no_row_inside_it() {
+        // The bordered window holds only the rows; the button row is drawn
+        // by the modal underneath it.
+        let mut section = picker_buttons();
+        section.buttons_below_window(true);
+        assert!(section.has_outside_buttons(), "the modal must reserve a row");
+        // Two rows and no in-window button row.
+        assert_eq!(section.preferred_height(), 1, "only the item row counts");
+        section.buttons_below_window(false);
+        assert!(!section.has_outside_buttons());
+        assert_eq!(section.preferred_height(), 2, "the button row is back inside");
+    }
+
+    /// The picker's button order: 0 = Stream, 1 = Download, 2 = Cancel.
+    const STREAM: usize = 0;
+    const DOWNLOAD: usize = 1;
+
+    #[test]
+    fn a_gated_button_survives_reselecting_rows() {
+        // Download follows the ticks, Stream follows its own gate: ticking
+        // and unticking rows must never re-enable a gated Stream.
+        let mut section = picker_buttons();
+        section.set_button_enabled(STREAM, false);
+        assert!(section.buttons[STREAM].disabled, "Stream starts gated");
+
+        section.toggle_row(0);
+        assert!(section.buttons[DOWNLOAD].disabled, "Download dims with no ticks");
+        assert!(section.buttons[STREAM].disabled, "Stream stays gated");
+
+        section.toggle_row(0);
+        assert!(!section.buttons[DOWNLOAD].disabled, "Download is live again");
+        assert!(section.buttons[STREAM].disabled, "Stream is still gated");
+    }
+
+    #[test]
+    fn changing_the_gate_updates_the_button() {
+        let mut section = picker_buttons();
+        section.set_button_enabled(STREAM, false);
+        assert!(section.buttons[STREAM].disabled);
+        section.set_button_enabled(STREAM, true);
+        assert!(!section.buttons[STREAM].disabled, "the scan going live un-gates Stream");
+    }
+
+    #[test]
+    fn a_live_stream_still_needs_a_ticked_row() {
+        // The gate composes with the ticks: an open gate alone is not enough.
+        let mut section = picker_buttons();
+        section.set_button_enabled(STREAM, true);
+        assert!(!section.buttons[STREAM].disabled, "live and one row ticked");
+        section.toggle_row(0);
+        assert!(section.buttons[STREAM].disabled, "no ticks, no stream");
+    }
+
+    #[test]
+    fn a_gated_button_does_not_activate() {
+        // `activate_button` refuses a disabled button, so a click or Enter on
+        // the spinning Stream starts nothing.
+        let mut section = picker_buttons();
+        section.set_button_enabled(STREAM, false);
+        assert!(section.buttons[STREAM].disabled);
+    }
+
+    #[test]
+    fn the_label_can_swap_for_the_spinner_frame() {
+        let mut section = picker_buttons();
+        section.set_button_label(STREAM, "Stream ⠋");
+        assert_eq!(section.buttons[STREAM].label, "Stream ⠋");
+        // The width follows the label, so the row stays aligned.
+        let before = section.buttons[STREAM].label.chars().count();
+        section.set_button_label(STREAM, "Stream");
+        assert_eq!(section.buttons[STREAM].label.chars().count() + 2, before);
     }
 }

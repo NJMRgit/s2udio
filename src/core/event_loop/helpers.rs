@@ -202,3 +202,45 @@ pub(super) fn complete_stream_download(
     }
     status_info!("Saved {} file(s) to s2udio-downloads", files.len());
 }
+
+/// Opens the download panel for a just-committed download-only job: the
+/// torrent picker's `Download` does not wait for the torrent to be `live`,
+/// so there is no "Preparing downloader…" window — the job's own panel
+/// (`InfoListModal`, the same one the Downloads modal shows) appears as soon
+/// as the daemon registers the job.
+///
+/// Matching is by `DlJob::source_key`, the picker's own scan key: the
+/// daemon generates the job id, so it is not known when the request is
+/// written. Same-source commits coalesce onto one job, so the first match
+/// wins. The pending key is cleared even when no job shows up: a spooled
+/// request that the daemon has not picked up yet must not open a panel
+/// later, out of context.
+pub(super) fn open_pending_download_panel(ctx: &mut Ctx) {
+    let Some(key) = ctx.dl_panel_pending.borrow().clone() else { return };
+    let state = ctx.dl_state.borrow();
+    let job_id = state
+        .as_ref()
+        .and_then(|state| {
+            state
+                .jobs
+                .iter()
+                .find(|job| job.source_key == key)
+                .map(|job| job.job_id.clone())
+        });
+    drop(state);
+    ctx.dl_panel_pending.borrow_mut().take();
+    let Some(job_id) = job_id else {
+        log::debug!(key:?; "Committed download has no daemon job yet (spooled)");
+        return;
+    };
+    if crate::ui::modals::info_list_modal::torrent_info_rows(ctx, &job_id).is_empty() {
+        return;
+    }
+    log::debug!(job_id:?; "Opening the committed download's progress panel");
+    let menu = crate::ui::modals::InfoListModal::builder()
+        .rows(crate::ui::modals::info_list_modal::torrent_info_rows(ctx, &job_id))
+        .title("Download info")
+        .column_widths(crate::ui::modals::info_list_modal::INFO_COLUMN_WIDTHS)
+        .build();
+    crate::shared::macros::modal!(ctx, menu);
+}

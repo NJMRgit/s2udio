@@ -170,6 +170,10 @@ pub(super) enum TorrentRow {
     StopEngine,
     /// SOCKS5 proxy URL for all rqbit traffic (the VPN route); "" = none.
     SocksProxy,
+    /// Streaming a torrent also downloads it (`torrent.stream_downloads`,
+    /// on by default): a stream becomes a committed download, so streamed
+    /// torrents show up in the Downloads modal.
+    StreamDownloads,
 }
 
 /// The cava values the panel manages, staged while the panel is open and
@@ -275,6 +279,9 @@ pub(crate) struct StagedSettings {
     /// rqbit SOCKS5 proxy URL staged in the settings panel; applied to the
     /// engine config + persisted to state.ron on Save ("" = no proxy).
     pub torrent_socks_proxy: String,
+    /// "Streaming a torrent also downloads it" staged in the settings panel;
+    /// applied to the torrent config + persisted to state.ron on Save.
+    pub torrent_stream_downloads: bool,
     /// The MPD replay gain mode cycled in the settings panel; `None` = the
     /// user never touched the row (legacy state.ron stays without the
     /// field and the server mode is left untouched).

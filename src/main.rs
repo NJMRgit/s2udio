@@ -410,6 +410,9 @@ fn run_tui(args: &mut Args) -> Result<()> {
             Some(proxy)
         };
     }
+    if let Some(stream_downloads) = state.torrent_stream_downloads {
+        config.torrent.stream_downloads = stream_downloads;
+    }
     if let Some(ui) = state.ui {
         config.ui = ui;
     }

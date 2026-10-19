@@ -542,6 +542,13 @@ impl SettingsModal {
                     );
                     Ok(())
                 }
+                // A plain toggle: stage it, apply on Save.
+                TorrentRow::StreamDownloads => {
+                    self.torrent_stream_downloads_pending =
+                        !self.torrent_stream_downloads_pending;
+                    ctx.render()?;
+                    Ok(())
+                }
                 TorrentRow::Header => Ok(()),
             },
             ContentRow::Mpd(m) => match m {

@@ -336,6 +336,37 @@ pub struct Ctx {
     /// Item source keys whose scan is still in flight (so reopening the
     /// paste modal does not re-scan; removed when `TorrentScanned` lands).
     pub(crate) torrent_scans_pending: RefCell<HashSet<String>>,
+    /// File lists that landed at **phase 3** of a scan — item source key ->
+    /// (torrent name, files), in scan order with positional indices. The
+    /// torrent picker renders its checkbox rows from this map as soon as the
+    /// metainfo arrives, so the user sees the files and can Download before
+    /// the engine reports the torrent `live`. An entry stays after the scan
+    /// completes: `torrent_scans` only exists once phase 4 passed, and the
+    /// picker needs the rows in both states.
+    #[debug(skip)]
+    pub(crate) torrent_file_lists: RefCell<
+        HashMap<String, (String, Vec<crate::core::torrent::ScannedFile>)>,
+    >,
+    /// The item key of the torrent whose picker modal is open (if any) —
+    /// the key `torrent_scans` / `torrent_file_lists` are indexed by.
+    pub(crate) torrent_picker_key: RefCell<Option<String>>,
+    /// The pasted torrent item the open picker acts on. The picker is
+    /// rebuilt in place on every scan event (the rows appearing, the spinner
+    /// ticking, the Stream button un-gating), so its action cannot live in
+    /// the modal's closure — each rebuild would get a fresh one. The action
+    /// resolves the item from here instead, which keeps every rebuild
+    /// functionally identical.
+    pub(crate) torrent_picker_item:
+        RefCell<Option<crate::ui::modals::paste::PastedItem>>,
+    /// The gated Stream button's animation frame (bumps on every picker
+    /// refresh so the spinner glyph moves while phase 4 is pending).
+    pub(crate) torrent_picker_spinner: std::cell::Cell<usize>,
+    /// A download-only commit that has not shown its progress panel yet:
+    /// the torrent's scan key. The 1 s `DlStatePoll` opens the job's
+    /// download panel (`InfoListModal`) and clears this once the daemon
+    /// registers a job with that `source_key`. Same-source commits coalesce
+    /// onto one job, so one key is enough.
+    pub(crate) dl_panel_pending: RefCell<Option<String>>,
     /// Round 18: per-item cancel signals for in-flight torrent scans (item
     /// source key -> the scan thread's cancel sender). The paste popup's
     /// close hook fires every entry when the user dismisses the popup, so
@@ -585,6 +616,11 @@ impl Ctx {
             torrent_scans_pending: RefCell::new(HashSet::new()),
             torrent_scan_cancels: RefCell::new(HashMap::new()),
             torrent_scan_progress: RefCell::new(HashMap::new()),
+            torrent_file_lists: RefCell::new(HashMap::new()),
+            torrent_picker_key: RefCell::new(None),
+            torrent_picker_item: RefCell::new(None),
+            torrent_picker_spinner: std::cell::Cell::new(0),
+            dl_panel_pending: RefCell::new(None),
             paste_modal_items: RefCell::new(None),
             paste_modal_id: Cell::new(None),
             paste_chapter_warm: RefCell::new(HashSet::new()),

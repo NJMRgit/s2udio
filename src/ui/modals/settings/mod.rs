@@ -78,6 +78,11 @@ pub struct SettingsModal {
     /// Staged rqbit SOCKS5 proxy ("" = no proxy; applied to the engine
     /// config + persisted to state.ron on Save).
     torrent_socks_proxy_pending: String,
+    /// "Streaming a torrent also downloads it" when the panel opened.
+    torrent_stream_downloads_initial: bool,
+    /// Staged "streaming also downloads" toggle (applied to the torrent
+    /// config + persisted to state.ron on Save).
+    torrent_stream_downloads_pending: bool,
     /// UI show/hide toggles when the panel opened (staging baseline).
     ui_initial: UiSettings,
     /// Staged UI show/hide toggles (the live config is untouched until Save).
@@ -195,6 +200,7 @@ impl SettingsModal {
             .socks_proxy
             .clone()
             .unwrap_or_default();
+        let torrent_stream_downloads = ctx.config.torrent.stream_downloads;
         let mut modal = Self {
             id: id::new(),
             section,
@@ -214,6 +220,8 @@ impl SettingsModal {
             editing_jellyfin_row: None,
             torrent_socks_proxy_initial: torrent_socks_proxy.clone(),
             torrent_socks_proxy_pending: torrent_socks_proxy,
+            torrent_stream_downloads_initial: torrent_stream_downloads,
+            torrent_stream_downloads_pending: torrent_stream_downloads,
             adjusting: None,
             adjust_snapshot: None,
             ui_initial,
@@ -340,6 +348,7 @@ impl SettingsModal {
             ],
             Section::Torrent => vec![
                 ContentRow::Torrent(TorrentRow::Header),
+                ContentRow::Torrent(TorrentRow::StreamDownloads),
                 ContentRow::Torrent(TorrentRow::WebUi),
                 ContentRow::Torrent(TorrentRow::StopEngine),
                 ContentRow::Torrent(TorrentRow::SocksProxy),
@@ -397,6 +406,7 @@ impl SettingsModal {
                 .any(|c| !matches!(c, StagedColor::Unchanged))
             || !self.pending_remaps.is_empty() || self.jellyfin_credentials.is_some()
             || self.torrent_socks_proxy_pending != self.torrent_socks_proxy_initial
+            || self.torrent_stream_downloads_pending != self.torrent_stream_downloads_initial
     }
 
     /// The staged changes, handed to the UI to apply on Save.
@@ -412,6 +422,7 @@ impl SettingsModal {
             mpv_svp: self.mpv_svp_pending,
             jellyfin: self.jellyfin_credentials.clone(),
             torrent_socks_proxy: self.torrent_socks_proxy_pending.clone(),
+            torrent_stream_downloads: self.torrent_stream_downloads_pending,
             replay_gain: self.replay_gain_cycled.then_some(self.replay_gain_pending),
         }
     }

@@ -74,7 +74,8 @@ pub use warm::{
 #[cfg(test)]
 pub(crate) use warm::LOOK_AHEAD_WINDOW;
 
-use download::{commit_to_daemon, download_submenu, playlist_download_menu, stream_via_daemon};
+pub(crate) use download::commit_to_daemon;
+use download::{download_submenu, playlist_download_menu, stream_via_daemon};
 use playlist::{
     import_playlist, is_playlist_link, paste_add_to_playlist, paste_audio_uris,
     paste_create_playlist, paste_video_uris, pick_playlist_items,
@@ -149,7 +150,7 @@ pub enum PastedItem {
 }
 impl PastedItem {
     /// Human-readable one-line label for status messages.
-    fn label(&self) -> String {
+    pub(crate) fn label(&self) -> String {
         match self {
             Self::File(path) | Self::VideoFile(path) | Self::Torrent(path) => {
                 std::path::Path::new(path)
@@ -495,112 +496,26 @@ fn paste_menu(ctx: &Ctx, items: Vec<PastedItem>) -> MenuModal<'static> {
                         if multi {
                             section.header(format!("{label}:"));
                         }
-                        match ctx.torrent_scans.borrow().get(&key) {
-                            Some(Ok(scan)) => {
-                                let videos = scan.videos();
-                                if videos.is_empty() && scan.audios().is_empty() {
-                                    section.header("No playable media in this torrent");
-                                } else if videos.len() > 1 {
-                                    let all_item = item.clone();
-                                    let all_key = key.clone();
-                                    section = section.item("Stream all", move |ctx| {
-                                        let indices: Vec<usize> = ctx
-                                            .torrent_scans
-                                            .borrow()
-                                            .get(&all_key)
-                                            .and_then(|r| r.as_ref().ok())
-                                            .map(|s| s.videos().iter().map(|f| f.index).collect())
-                                            .unwrap_or_default();
-                                        play_torrent_route(ctx, &all_item, &all_key, indices, false)
-                                    });
-                                    let dl_item = item.clone();
-                                    let dl_key = key.clone();
-                                    section = section.item("Download all", move |ctx| {
-                                        let indices: Vec<usize> = ctx
-                                            .torrent_scans
-                                            .borrow()
-                                            .get(&dl_key)
-                                            .and_then(|r| r.as_ref().ok())
-                                            .map(|s| s.videos().iter().map(|f| f.index).collect())
-                                            .unwrap_or_default();
-                                        commit_to_daemon(ctx, &dl_item, &dl_key, indices, false)
-                                    });
-                                    let pick_item = item.clone();
-                                    let pick_key = key.clone();
-                                    section = section.item("Select files…", move |ctx| {
-                                        open_torrent_file_picker(ctx, &pick_item, &pick_key)
-                                    });
-                                } else {
-                                    let play_item = item.clone();
-                                    let play_key = key.clone();
-                                    section = section.item("Stream", move |ctx| {
-                                        play_torrent_route(
-                                            ctx,
-                                            &play_item,
-                                            &play_key,
-                                            Vec::new(),
-                                            false,
-                                        )
-                                    });
-                                    let both_item = item.clone();
-                                    let both_key = key.clone();
-                                    section = section.item("Stream and download", move |ctx| {
-                                        play_torrent_route(
-                                            ctx,
-                                            &both_item,
-                                            &both_key,
-                                            Vec::new(),
-                                            true,
-                                        )
-                                    });
-                                    let dl_item = item.clone();
-                                    let dl_key = key.clone();
-                                    section = section.item("Download", move |ctx| {
-                                        commit_to_daemon(ctx, &dl_item, &dl_key, Vec::new(), false)
-                                    });
-                                }
-                            }
-                            Some(Err(err)) => {
-                                section.header(err.clone());
-                            }
-                            None => {
-                                let progress = ctx
-                                    .torrent_scan_progress
-                                    .borrow()
-                                    .get(&key)
-                                    .copied()
-                                    .unwrap_or_default();
-                                section.header(format!(
-                                    "Loading {label}… {}",
-                                    scan_wait_elapsed(progress.elapsed_secs)
-                                ));
-                                section.header("esc to cancel");
-                                if !ctx.torrent_scans_pending.borrow().contains(&key) {
-                                    ctx.torrent_scans_pending.borrow_mut().insert(key.clone());
-                                    let (cancel_tx, cancel_rx) = crossbeam::channel::unbounded();
-                                    ctx.torrent_scan_cancels
-                                        .borrow_mut()
-                                        .insert(key.clone(), cancel_tx);
-                                    let item = torrent_item(item);
-                                    let _ = ctx
-                                        .work_sender
-                                        .send(WorkRequest::ScanTorrent { item, cancel: cancel_rx });
-                                }
-                            }
-                        }
+                        // Each torrent gets one row: it opens the torrent
+                        // picker, which shows the file list and (once the
+                        // scan has its metainfo) the Stream / Download
+                        // buttons. The scan itself starts here, so the
+                        // picker opens onto either the finished list or the
+                        // short "Reading torrent…" wait.
+                        let pick_item = item.clone();
+                        let pick_key = key.clone();
+                        let pick_label = label.clone();
+                        start_torrent_scan(ctx, item, &key);
+                        section = section.item(format!("Open {label}"), move |ctx| {
+                            open_torrent_picker(ctx, &pick_item, &pick_key, &pick_label)
+                        });
                     }
                 } else {
                     section.header("Torrent streaming disabled");
                 }
             }
             section.add_item("Cancel", |_ctx| Ok(()));
-            section.set_on_close(|ctx| {
-                ctx.paste_modal_items.borrow_mut().take();
-                ctx.paste_modal_id.set(None);
-                ctx.paste_chapter_warm.borrow_mut().clear();
-                cancel_in_flight_scans(ctx);
-                ctx.torrent_scans.borrow_mut().retain(|_, result| result.is_ok());
-            });
+            section.set_on_close(on_paste_popup_close);
             Some(section)
         })
         .build();
@@ -629,6 +544,26 @@ fn torrent_item(item: &PastedItem) -> crate::core::torrent::TorrentItem {
         _ => unreachable!("torrent items only"),
     }
 }
+/// A torrent scan's **file list landed** (phase 3): store it so the torrent
+/// picker can render its rows and enable Download, and tell the open picker
+/// to refresh in place. The torrent is usually not `live` yet — Stream stays
+/// gated until `on_torrent_scanned` lands.
+pub fn on_torrent_scan_files(
+    ctx: &Ctx,
+    key: String,
+    name: String,
+    files: Vec<crate::core::torrent::ScannedFile>,
+) {
+    log::debug!(
+        key:?; "on_torrent_scan_files files={} picker_open={}", files.len(), ctx
+        .torrent_picker_key.borrow().is_some()
+    );
+    ctx.torrent_file_lists
+        .borrow_mut()
+        .insert(key, (name, files));
+    crate::ui::modals::torrent_picker::refresh_torrent_picker(ctx);
+}
+
 /// A torrent scan landed (round 17): store the result (or the failure) and
 /// refresh the open paste popup so its `[Torrent]` section shows the play
 /// actions. A result for a closed popup is dropped outright — dropping the
@@ -641,15 +576,24 @@ pub fn on_torrent_scanned(
     ctx.torrent_scans_pending.borrow_mut().remove(&key);
     ctx.torrent_scan_cancels.borrow_mut().remove(&key);
     ctx.torrent_scan_progress.borrow_mut().remove(&key);
+    let picker_open = ctx
+        .torrent_picker_key
+        .borrow()
+        .as_ref()
+        .is_some_and(|open| open == &key);
     log::debug!(
-        key:?; "on_torrent_scanned ok={} popup_open={}", result.is_ok(), ctx
-        .paste_modal_items.borrow().is_some()
+        key:?; "on_torrent_scanned ok={} picker_open={}", result.is_ok(), picker_open
     );
-    if ctx.paste_modal_items.borrow().is_none() {
+    if ctx.paste_modal_items.borrow().is_none() && !picker_open {
         return;
     }
     ctx.torrent_scans.borrow_mut().insert(key, result);
-    refresh_paste_modal(ctx);
+    if picker_open {
+        // Phase 4 landed: the picker's Stream button ungates in place.
+        crate::ui::modals::torrent_picker::refresh_torrent_picker(ctx);
+    } else {
+        refresh_paste_modal(ctx);
+    }
 }
 /// A torrent scan's live progress arrived (round 18): store it and
 /// refresh the open paste popup so its wait window's counter and the
@@ -660,12 +604,35 @@ pub fn on_torrent_scan_progress(
     key: String,
     progress: crate::core::torrent::TorrentScanProgress,
 ) {
-    if ctx.paste_modal_items.borrow().is_none() {
+    let picker_open = ctx.torrent_picker_key.borrow().is_some();
+    if ctx.paste_modal_items.borrow().is_none() && !picker_open {
         return;
     }
     ctx.torrent_scan_progress.borrow_mut().insert(key, progress);
-    refresh_paste_modal(ctx);
+    // The wait may be an open torrent picker (the scan's phase 3/4) or the
+    // paste popup's own `[Torrent]` row — refresh whichever is showing.
+    if ctx.torrent_picker_key.borrow().is_some() {
+        crate::ui::modals::torrent_picker::refresh_torrent_picker(ctx);
+    } else {
+        refresh_paste_modal(ctx);
+    }
 }
+/// The paste popup's close hook: forget the popup's own state, then release
+/// the torrent scans it started — **unless** the torrent picker took them
+/// over. Opening the picker pops the popup on its way in, so this hook runs
+/// while the picker is about to render those very scans; cancelling them here
+/// would kill the engine it lists files from. The picker cancels its own
+/// unfinished scans when it closes.
+fn on_paste_popup_close(ctx: &Ctx) {
+    ctx.paste_modal_items.borrow_mut().take();
+    ctx.paste_modal_id.set(None);
+    ctx.paste_chapter_warm.borrow_mut().clear();
+    if ctx.torrent_picker_key.borrow().is_none() {
+        cancel_in_flight_scans(ctx);
+    }
+    ctx.torrent_scans.borrow_mut().retain(|_, result| result.is_ok());
+}
+
 /// Cancel every in-flight torrent scan (round 18): signal the scan
 /// threads' cancel channels so they stop waiting and drop their engines
 /// (killing rqbit) promptly, then forget the scan bookkeeping. Called by
@@ -689,10 +656,6 @@ fn cancel_in_flight_scans(ctx: &Ctx) {
     ctx.torrent_scan_progress.borrow_mut().clear();
     ctx.torrent_scans_pending.borrow_mut().clear();
 }
-/// The wait window's elapsed counter ("mm:ss", e.g. `00:12`).
-fn scan_wait_elapsed(secs: u64) -> String {
-    format!("{:02}:{:02}", secs / 60, secs % 60)
-}
 /// Rebuild the open paste popup (a torrent scan changed its `[Torrent]`
 /// section). No-op when no paste popup is open.
 pub fn refresh_paste_modal(ctx: &Ctx) {
@@ -708,7 +671,7 @@ pub fn refresh_paste_modal(ctx: &Ctx) {
 /// the daemon engine too when a committed job for the same torrent is
 /// active (§2.2 — one engine per cache dir); otherwise they use the
 /// ephemeral TUI engine exactly as before round 54.
-fn play_torrent_route(
+pub(crate) fn play_torrent_route(
     ctx: &Ctx,
     item: &PastedItem,
     key: &str,
@@ -793,72 +756,70 @@ fn close_paste_popup(ctx: &Ctx) {
     ctx.paste_modal_items.borrow_mut().take();
     cancel_in_flight_scans(ctx);
 }
-/// "Select files…" (round 17): a multi-select modal over the torrent's
-/// video files (name + size); confirming plays the marked files.
+/// Start the scan for a pasted torrent if it is not already running: the
+/// popup calls this while building, so the `[Torrent]` row can open onto a
+/// finished file list instead of an empty wait. Idempotent — a scan that is
+/// in flight (or already landed) is never started twice.
+fn start_torrent_scan(ctx: &Ctx, item: &PastedItem, key: &str) {
+    if ctx.torrent_scans.borrow().contains_key(key) {
+        return;
+    }
+    if ctx.torrent_scans_pending.borrow().contains(key) {
+        return;
+    }
+    ctx.torrent_scans_pending.borrow_mut().insert(key.to_owned());
+    let (cancel_tx, cancel_rx) = crossbeam::channel::unbounded();
+    ctx.torrent_scan_cancels.borrow_mut().insert(key.to_owned(), cancel_tx);
+    let item = torrent_item(item);
+    let _ = ctx.work_sender.send(WorkRequest::ScanTorrent { item, cancel: cancel_rx });
+}
+
+/// Open the torrent picker (the file list with Stream / Download) for a
+/// pasted torrent. The picker owns the whole torrent flow from here: it
+/// renders its rows the moment phase 3 lands and un-gates Stream on phase 4,
+/// refreshing in place.
 ///
-/// Round-18 host finding (2026-08-09): the picker's Enter used to re-read
-/// `Ctx.torrent_scans` via `play_scanned_or_fresh` — but opening the picker
-/// is itself a paste-popup action, and the popup's close hook (run right
-/// after the action, when `MenuModal::destroy` fires) clears
-/// `Ctx.torrent_scans`. By the time the user marked files and pressed
-/// Enter the scan was gone, so the play fell back to the fresh single-file
-/// path ("select files never plays"). Fix: capture the scan when the
-/// picker opens and move it into the picker's confirm closure — the play
-/// builds its entries from the captured scan, independent of the popup
-/// teardown.
-///
-/// Round 20: the picker's buttons are **Play** / **Download & Play** /
-/// **Cancel** (the second starts the download job too), and the captured
-/// scan is a clone — the map keeps its own copy so a repeat paste reuses
-/// the engine (the engine is shared via `Arc`).
-fn open_torrent_file_picker(ctx: &Ctx, item: &PastedItem, key: &str) -> Result<()> {
-    let scan = ctx.torrent_scans.borrow().get(key).cloned().and_then(Result::ok);
-    let Some(scan) = scan else {
-        return play_torrent(ctx, std::slice::from_ref(item));
-    };
-    let mut videos: Vec<(usize, String, u64)> =
-        scan.videos().into_iter().map(|f| (f.index, f.name.clone(), f.length)).collect();
-    videos.sort_by(|a, b| a.1.to_lowercase().cmp(&b.1.to_lowercase()));
-    let title = format!("▶ files — {} ", scan.torrent_name);
-    let item = item.clone();
-    let key = key.to_owned();
-    modal!(
-        ctx,
-        crate::ui::modals::torrent_file_picker::TorrentFilePicker::new(
-            ctx,
-            title,
-            videos,
-            move |ctx, indices, action| {
-                let file_indices: Vec<usize> =
-                    indices.into_iter().filter(|i| *i < scan.files.len()).collect();
-                let download = action
-                    == crate::ui::modals::torrent_file_picker::TorrentPickerAction::DownloadAndPlay;
-                let result = if file_indices.is_empty() {
-                    if download {
-                        commit_to_daemon(ctx, &item, &key, Vec::new(), true)
-                    } else {
-                        play_torrent_route(ctx, &item, &key, Vec::new(), false)
-                    }
-                } else {
-                    if download {
-                        commit_to_daemon(ctx, &item, &key, file_indices.clone(), true)
-                    } else {
-                        play_torrent_route(ctx, &item, &key, file_indices.clone(), false)
-                    }
-                };
-                if let Some(id) = ctx.paste_modal_id.take() {
-                    let _ = ctx
-                        .app_event_sender
-                        .send(crate::AppEvent::UiEvent(crate::ui::UiAppEvent::PopModal(id)));
-                }
-                ctx.paste_modal_items.borrow_mut().take();
-                cancel_in_flight_scans(ctx);
-                result
-            },
-        )
-    );
+/// The paste popup closes behind it — the picker replaces it as the torrent
+/// UI, and keeping the popup open would re-offer the same `[Torrent]` row.
+/// The popup's own close hook runs first (closing it is what the picker row
+/// does), and the scan is NOT cancelled there: the picker is the thing that
+/// needs it.
+fn open_torrent_picker(
+    ctx: &Ctx,
+    item: &PastedItem,
+    key: &str,
+    label: &str,
+) -> Result<()> {
+    if !ctx.config.torrent.enabled {
+        status_warn!("Torrent streaming is disabled in the config");
+        return Ok(());
+    }
+    // Make sure the scan is running even if the popup built before it started.
+    start_torrent_scan(ctx, item, key);
+    // Close the paste popup behind the picker: the picker replaces it as the
+    // torrent UI, and leaving it open would strand it under the picker and
+    // re-offer the same `[Torrent]` row on the way back. Unlike
+    // `close_paste_popup` this must NOT cancel the in-flight scans — the
+    // picker is about to render them.
+    if let Some(id) = ctx.paste_modal_id.take() {
+        let _ = ctx
+            .app_event_sender
+            .send(crate::AppEvent::UiEvent(crate::ui::UiAppEvent::PopModal(id)));
+    }
+    ctx.paste_modal_items.borrow_mut().take();
+    let label = label.to_owned();
+    let picker_key = key.to_owned();
+    // The picker resolves its item from here on every rebuild (see
+    // `TorrentPicker::new`): the popup may close underneath it, so the item
+    // must outlive the popup's item list.
+    *ctx.torrent_picker_item.borrow_mut() = Some(item.clone());
+    *ctx.torrent_picker_key.borrow_mut() = Some(picker_key.clone());
+    let picker =
+        crate::ui::modals::torrent_picker::TorrentPicker::new(ctx, picker_key, label, 0);
+    modal!(ctx, picker);
     Ok(())
 }
+
 /// Insert the synthetic yt-info entries for a torrent play (round 17):
 /// title = file name, channel = torrent name, keyed by each stream URL —
 /// the Queue tab's info box, MPRIS artist and the mpv poll look the info
@@ -897,7 +858,7 @@ pub fn torrent_entries(
         .map(|f| {
             crate::core::mpv::MpvPlaylistEntry::new(
                 f.name.clone(),
-                scan.engine.stream_url(&scan.torrent_id, f.index as u64),
+                scan.engine().stream_url(&scan.torrent_id, f.index as u64),
                 None,
             )
         })
@@ -974,6 +935,209 @@ pub fn handle_paste(ctx: &Ctx, text: &str) -> bool {
     if items.is_empty() {
         return false;
     }
+    // A paste that is nothing but one torrent/magnet opens the torrent
+    // picker straight away: the picker IS the torrent UI (it shows the
+    // label while the metainfo is fetched, then the file list in the same
+    // window). Routing it through the paste popup first would add a
+    // pointless `[Torrent]` + `Open …` step.
+    if let [item] = items.as_slice()
+        && ctx.config.torrent.enabled
+        && matches!(item, PastedItem::Torrent(_) | PastedItem::Magnet(_))
+    {
+        return open_torrent_picker(ctx, item, &torrent_item_key(item), &item.label())
+            .is_ok();
+    }
     show_paste_modal(ctx, items);
     true
+}
+
+#[cfg(test)]
+mod picker_handoff_tests {
+    //! The paste popup hands its torrents to the torrent picker, and the
+    //! picker outlives the popup. These pin the scan bookkeeping across that
+    //! hand-off: the popup's close hook must not kill the scans the picker is
+    //! about to render, while a picker closed before its scan completes must
+    //! still kill its engine.
+
+    use super::*;
+
+    fn test_ctx() -> Ctx {
+        crate::tests::fixtures::ctx(
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1.clone()),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+        )
+    }
+
+    fn scanned_files() -> Vec<crate::core::torrent::ScannedFile> {
+        vec![crate::core::torrent::ScannedFile {
+            index: 0,
+            name: "movie.mkv".to_owned(),
+            length: 100,
+        }]
+    }
+
+    #[test]
+    fn the_popups_close_hook_spares_the_scan_the_picker_is_rendering() {
+        // The picker opens onto a scan that is still running (or finished):
+        // the popup is popped underneath it and its close hook runs. Cancelling
+        // here would kill the engine and leave the picker with no file list.
+        let ctx = test_ctx();
+        let key = "magnet:?xt=urn:btih:0123456789abcdef".to_owned();
+        let (cancel_tx, cancel_rx) = crossbeam::channel::unbounded();
+        ctx.torrent_scan_cancels.borrow_mut().insert(key.clone(), cancel_tx);
+        ctx.torrent_scans_pending.borrow_mut().insert(key.clone());
+        // The picker has taken ownership.
+        *ctx.torrent_picker_key.borrow_mut() = Some(key.clone());
+
+        // The real close hook: with a picker owning the torrent, the scans
+        // are left alone.
+        on_paste_popup_close(&ctx);
+
+        assert!(
+            ctx.torrent_scan_cancels.borrow().contains_key(&key),
+            "the scan's cancel channel survives the popup teardown"
+        );
+        assert!(
+            ctx.torrent_scans_pending.borrow().contains(&key),
+            "the scan is still tracked as pending"
+        );
+        assert!(cancel_rx.try_recv().is_err(), "no cancel signal was sent");
+    }
+
+    #[test]
+    fn the_popup_still_cancels_scans_nobody_took_over() {
+        // A plain dismissal (Esc on the popup) must keep the old behaviour:
+        // the engine dies promptly.
+        let ctx = test_ctx();
+        let key = "magnet:?xt=urn:btih:0123456789abcdef".to_owned();
+        let (cancel_tx, cancel_rx) = crossbeam::channel::unbounded();
+        ctx.torrent_scan_cancels.borrow_mut().insert(key.clone(), cancel_tx);
+        ctx.torrent_scans_pending.borrow_mut().insert(key.clone());
+
+        on_paste_popup_close(&ctx);
+
+        assert!(cancel_rx.try_recv().is_ok(), "the scan is cancelled");
+        assert!(ctx.torrent_scan_cancels.borrow().is_empty(), "bookkeeping cleared");
+    }
+
+    #[test]
+    fn closing_the_picker_mid_scan_cancels_its_engine() {
+        // No completed scan: closing the picker must not orphan rqbit.
+        let ctx = test_ctx();
+        let key = "magnet:?xt=urn:btih:0123456789abcdef".to_owned();
+        let (cancel_tx, cancel_rx) = crossbeam::channel::unbounded();
+        ctx.torrent_scan_cancels.borrow_mut().insert(key.clone(), cancel_tx);
+        ctx.torrent_scans_pending.borrow_mut().insert(key.clone());
+        *ctx.torrent_picker_key.borrow_mut() = Some(key.clone());
+
+        crate::ui::modals::torrent_picker::clear_picker_for_test(&ctx, &key);
+
+        assert!(cancel_rx.try_recv().is_ok(), "the unfinished scan is cancelled");
+        assert!(ctx.torrent_picker_key.borrow().is_none(), "picker state cleared");
+    }
+
+    #[test]
+    fn closing_the_picker_after_the_scan_keeps_the_engine() {
+        // A completed scan backs a download job / a repeat paste: keep it.
+        let ctx = test_ctx();
+        let key = "magnet:?xt=urn:btih:0123456789abcdef".to_owned();
+        let (cancel_tx, cancel_rx) = crossbeam::channel::unbounded();
+        ctx.torrent_scan_cancels.borrow_mut().insert(key.clone(), cancel_tx);
+        ctx.torrent_scans.borrow_mut().insert(
+            key.clone(),
+            Ok(crate::core::torrent::TorrentScan {
+                engine: None,
+                torrent_id: "1".to_owned(),
+                torrent_name: "fake.torrent".to_owned(),
+                info_hash: None,
+                files: scanned_files(),
+            }),
+        );
+        *ctx.torrent_picker_key.borrow_mut() = Some(key.clone());
+
+        crate::ui::modals::torrent_picker::clear_picker_for_test(&ctx, &key);
+
+        assert!(cancel_rx.try_recv().is_err(), "a completed scan is not cancelled");
+        assert!(ctx.torrent_scans.borrow().contains_key(&key), "the scan is kept");
+    }
+}
+
+#[cfg(test)]
+mod paste_entry_tests {
+    //! Which modal a paste opens: a torrent-only paste goes straight to the
+    //! torrent picker (the picker is the torrent UI), everything else keeps
+    //! the consolidated paste popup.
+
+    use super::*;
+
+    fn ctx_with_torrent(enabled: bool) -> Ctx {
+        let (app_tx, app_rx) = crossbeam::channel::unbounded();
+        let ctx = crate::tests::fixtures::ctx(
+            (app_tx, app_rx),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+        );
+        let mut config = (*ctx.config).clone();
+        config.torrent.enabled = enabled;
+        odr(config, ctx)
+    }
+
+    fn odr(config: crate::config::Config, ctx: Ctx) -> Ctx {
+        Ctx { config: std::sync::Arc::new(config), ..ctx }
+    }
+
+    #[test]
+    fn a_magnet_paste_opens_the_torrent_picker_directly() {
+        let ctx = ctx_with_torrent(true);
+        let opened = handle_paste(&ctx, "magnet:?xt=urn:btih:0123456789abcdef");
+        assert!(opened, "a magnet is recognized");
+        assert!(
+            ctx.torrent_picker_key.borrow().is_some(),
+            "the picker took the paste directly (no popup in between)"
+        );
+        assert!(
+            ctx.paste_modal_items.borrow().is_none(),
+            "no paste popup was opened for a pure torrent paste"
+        );
+        assert!(
+            ctx.torrent_picker_item.borrow().is_some(),
+            "the picker knows which torrent it acts on"
+        );
+    }
+
+    #[test]
+    fn a_mixed_paste_still_opens_the_popup() {
+        let ctx = ctx_with_torrent(true);
+        let opened = handle_paste(
+            &ctx,
+            // A direct stream URL parses without touching the disk (a local
+            // path has to exist to be recognized).
+            "magnet:?xt=urn:btih:0123456789abcdef\nhttps://example.com/song.mp3",
+        );
+        assert!(opened);
+        assert!(
+            ctx.paste_modal_items.borrow().is_some(),
+            "a mixed paste keeps the consolidated popup"
+        );
+        assert!(
+            ctx.torrent_picker_key.borrow().is_none(),
+            "the picker is not opened directly for a mixed paste"
+        );
+    }
+
+    #[test]
+    fn a_torrent_paste_with_the_feature_disabled_opens_no_picker() {
+        let ctx = ctx_with_torrent(false);
+        let opened = handle_paste(&ctx, "magnet:?xt=urn:btih:0123456789abcdef");
+        assert!(opened, "the paste is still recognized");
+        assert!(
+            ctx.torrent_picker_key.borrow().is_none(),
+            "a disabled torrent feature must not open the picker"
+        );
+        assert!(
+            ctx.paste_modal_items.borrow().is_some(),
+            "it falls back to the popup, which shows the disabled notice"
+        );
+    }
 }

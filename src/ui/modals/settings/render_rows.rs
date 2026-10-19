@@ -387,6 +387,11 @@ impl SettingsModal {
                 _ => (Vec::new(), Vec::new(), Vec::new(), None),
             },
             ContentRow::Torrent(m) => match m {
+                TorrentRow::StreamDownloads => Self::toggle_row(
+                    "stream also downloads",
+                    self.torrent_stream_downloads_pending,
+                    style,
+                ),
                 TorrentRow::WebUi => {
                     let running = self.torrent_webui_running(ctx);
                     let desc = if running {

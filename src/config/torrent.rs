@@ -45,6 +45,17 @@ pub struct Torrent {
     /// Keep the engine + partial files after playback ends (`true`) or kill
     /// it immediately (`false` — default; minimizes P2P seeding).
     pub keep_after_play: bool,
+    /// **Streaming a torrent also downloads it** (`true` — default): the
+    /// picker's `Stream` runs as a committed download, so the file lands in
+    /// `~/Downloads/s2udio-downloads` and the torrent shows up in the
+    /// Downloads modal like any other download. `false` = a plain stream that
+    /// dies with the session and leaves nothing behind.
+    ///
+    /// Playback always runs through the **downloader daemon's** engine when
+    /// this is on: the TUI engine and the daemon engine cannot share one
+    /// cache dir (round 54, §2.2), so the stream is served by the engine that
+    /// is also doing the downloading.
+    pub stream_downloads: bool,
     /// SOCKS5 proxy URL (e.g. `socks5://127.0.0.1:1080`) for ALL outgoing
     /// rqbit connections — the VPN route for torrent traffic. Passed to
     /// rqbit as `--socks-url`; when set, incoming connections are disabled
@@ -66,6 +77,7 @@ impl Default for Torrent {
             cache_dir: defaults::default_torrent_cache_dir(),
             auto_pick_file: true,
             keep_after_play: false,
+            stream_downloads: true,
             socks_proxy: None,
         }
     }
@@ -85,6 +97,7 @@ pub struct TorrentFile {
     pub cache_dir: Option<PathBuf>,
     pub auto_pick_file: Option<bool>,
     pub keep_after_play: Option<bool>,
+    pub stream_downloads: Option<bool>,
     pub socks_proxy: Option<String>,
 }
 
@@ -109,7 +122,67 @@ impl From<TorrentFile> for Torrent {
                 .unwrap_or_else(|| tilde_expand_path(&defaults::default_torrent_cache_dir())),
             auto_pick_file: value.auto_pick_file.unwrap_or(true),
             keep_after_play: value.keep_after_play.unwrap_or(false),
+            stream_downloads: value.stream_downloads.unwrap_or(true),
             socks_proxy: value.socks_proxy,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn streaming_downloads_is_on_by_default() {
+        // The user's default: a streamed torrent always shows up in
+        // Downloads, so a stream keeps the file unless deliberately turned
+        // off.
+        assert!(Torrent::default().stream_downloads);
+    }
+
+    /// The shipped example config is a real `config.ron`: parsing it is the
+    /// same path a user's file goes through (RON only accepts the implicit
+    /// `Some` form inside a full document, so fragments are not used here).
+    fn parse_example(mutate: impl Fn(&str) -> String) -> TorrentFile {
+        let example = include_str!("../../assets/example_config.ron");
+        let text = mutate(example);
+        ron::from_str::<crate::config::ConfigFile>(&text)
+            .expect("the example config parses")
+            .torrent
+    }
+
+    #[test]
+    fn a_config_without_the_key_keeps_the_default() {
+        // Every older `config.ron` predates the field: its line is dropped,
+        // and the runtime value must still be the default (on).
+        let file = parse_example(|text| {
+            text.lines()
+                .filter(|line| !line.contains("stream_downloads"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        });
+        assert_eq!(file.stream_downloads, None, "the key is genuinely absent");
+        assert!(
+            Torrent::from(file).stream_downloads,
+            "an absent key means the default (on)"
+        );
+    }
+
+    #[test]
+    fn the_key_can_turn_it_off() {
+        let file = parse_example(|text| text.replace("stream_downloads: true", "stream_downloads: false"));
+        assert_eq!(file.stream_downloads, Some(false));
+        assert!(!Torrent::from(file).stream_downloads, "the user opted out");
+    }
+
+    #[test]
+    fn the_shipped_example_config_carries_the_key() {
+        // `assets/example_config.ron` documents every option and is compiled
+        // in — a new key must appear there too.
+        let example = include_str!("../../assets/example_config.ron");
+        assert!(
+            example.contains("stream_downloads"),
+            "the example config must document the new torrent option"
+        );
     }
 }

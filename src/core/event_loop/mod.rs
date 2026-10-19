@@ -408,6 +408,7 @@ fn main_task<B: Backend + std::io::Write>(
                         }
                     }
                     drop(notified);
+                    helpers::open_pending_download_panel(&mut ctx);
                     if let Err(err) = ui.on_event(UiEvent::DownloadsUpdated, &mut ctx) {
                         log::error!(error:? = err; "UI failed to handle DownloadsUpdated event");
                     }
@@ -461,9 +462,15 @@ fn main_task<B: Backend + std::io::Write>(
                     // run on the `s2udio dl` daemon.
                     let entries = crate::ui::modals::paste::torrent_entries(&scan, &file_indices);
                     let torrent_name = scan.torrent_name.clone();
+                    let Some(engine) = scan.engine_or().cloned() else {
+                        log::warn!(
+                            "Scanned torrent without an engine; cannot start playback"
+                        );
+                        continue;
+                    };
                     helpers::start_torrent_playback(
                         &mut ctx,
-                        scan.engine,
+                        engine,
                         scan.torrent_id.clone(),
                         torrent_name,
                         entries,

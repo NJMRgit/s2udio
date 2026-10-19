@@ -635,6 +635,28 @@ pub fn pick_playable_file(
     }
     None
 }
+/// The files of a scan that the picker puts in its list: every file with a
+/// **video or audio** extension, in scan order (each keeps its positional
+/// index, so the stream URL stays `stream_url(id, index)`). Non-media cruft
+/// (`.nfo`, `.srt`, `.jpg`, subs) is never offered as a row — nothing can
+/// play it — but stays in the torrent and in the download jobs (rqbit
+/// downloads every included file anyway).
+pub fn media_files(files: &[ScannedFile]) -> Vec<&ScannedFile> {
+    files.iter().filter(|f| f.is_video() || f.is_audio()).collect()
+}
+/// Whether the engine reports the torrent as **live**: its stream endpoint
+/// will serve requests, i.e. the torrent finished initialising (a re-added
+/// torrent checksum-validates its existing cache files first, and a stream
+/// requested during that window errors → mpv exits 2 — the round-18 host
+/// finding).
+///
+/// The picker's Stream button is gated on exactly this: phase 4 of the
+/// scan. The comparison is case-insensitive because the state is rqbit's
+/// own string (`live` in v9) — a capitalised form must not silently gate
+/// playback forever.
+pub fn torrent_state_is_live(state: Option<&str>) -> bool {
+    state.is_some_and(|state| state.eq_ignore_ascii_case("live"))
+}
 /// The torrent's file list, waiting **open-ended** for the metadata to
 /// arrive (round 18). A magnet's file list only appears once the metainfo
 /// has been fetched from peers (local `.torrent` files are instant).
@@ -693,7 +715,12 @@ pub struct TorrentScan {
     /// The running rqbit engine (shared: the scan map keeps it alive for
     /// reuse while playback holds a clone in `Ctx.torrent_engine` — round
     /// 20 duplicate-paste fix).
-    pub engine: Arc<TorrentEngine>,
+    ///
+    /// `None` never comes from a real scan — the scan thread always fills
+    /// it. It exists so surfaces that only render the listing (the torrent
+    /// picker and its tests) can build a scan without spawning rqbit; every
+    /// engine-touching caller goes through [`TorrentScan::engine`].
+    pub engine: Option<Arc<TorrentEngine>>,
     pub torrent_id: String,
     pub torrent_name: String,
     /// The torrent's infohash (canonical lowercase hex, from rqbit's
@@ -703,6 +730,38 @@ pub struct TorrentScan {
     /// active.
     pub info_hash: Option<String>,
     pub files: Vec<ScannedFile>,
+}
+
+/// The parts of a [`TorrentScan`] the UI reads **without** touching the
+/// engine: the torrent's name and its file list. Split out so surfaces that
+/// only render metadata (the torrent picker, its tests) never need a live
+/// engine value — a `TorrentScan` cannot be built without spawning rqbit.
+#[derive(Debug, Clone)]
+pub struct TorrentListing {
+    pub torrent_name: String,
+    pub files: Vec<ScannedFile>,
+}
+
+impl TorrentScan {
+    /// The scan's engine. A scan produced by [`scan_torrent`] always has one;
+    /// an engine-less scan (UI/test construction) panics rather than handing
+    /// back a silently wrong value — every engine-touching path must go
+    /// through [`TorrentScan::engine_or`] when it can handle the absence.
+    pub fn engine(&self) -> &Arc<TorrentEngine> {
+        self.engine
+            .as_ref()
+            .expect("a scanned torrent always carries its engine")
+    }
+
+    /// The scan's engine when it has one (see [`TorrentScan::engine`]).
+    pub fn engine_or(&self) -> Option<&Arc<TorrentEngine>> {
+        self.engine.as_ref()
+    }
+
+    /// This scan's engine-free view.
+    pub fn listing(&self) -> TorrentListing {
+        TorrentListing { torrent_name: self.torrent_name.clone(), files: self.files.clone() }
+    }
 }
 impl TorrentScan {
     /// The torrent's video files, in scan order (each carries its
@@ -807,33 +866,47 @@ pub fn scan_torrent(
         std::thread::sleep(READY_POLL_INTERVAL);
     };
     let _ = add_thread;
+    // The file list is reported to the UI **once**, as soon as the metainfo
+    // arrives (phase 3) — before the torrent is live. The torrent picker
+    // renders its rows and enables Download from it while Stream stays gated
+    // on phase 4, so the user no longer waits for the checksum validation of
+    // a re-added torrent before seeing what the torrent holds.
+    let mut files_reported = false;
     loop {
         if cancel.try_recv().is_ok() {
             return Err("Scan cancelled".to_owned());
         }
         match torrent_details(&engine, &torrent_id) {
             Ok(details) if !details.files.is_empty() => {
+                let files: Vec<ScannedFile> = details
+                    .files
+                    .iter()
+                    .enumerate()
+                    .map(|(index, f)| ScannedFile {
+                        index,
+                        name: f.name.clone(),
+                        length: f.length,
+                    })
+                    .collect();
+                let torrent_name =
+                    details.name.clone().unwrap_or_else(|| item.label());
+                if !files_reported {
+                    files_reported = true;
+                    let _ = progress.send(crate::shared::events::AppEvent::WorkDone(Ok(
+                        crate::shared::events::WorkDone::TorrentScanFiles {
+                            key: item.source_key(),
+                            name: torrent_name.clone(),
+                            files: files.clone(),
+                        },
+                    )));
+                }
+                // Phase 4: the engine must be willing to serve streams.
                 let live = torrent_stats(&engine, &torrent_id)
                     .ok()
-                    .and_then(|stats| stats.state)
-                    .is_some_and(|state| state == "live");
-                if live {
-                    let files: Vec<ScannedFile> = details
-                        .files
-                        .iter()
-                        .enumerate()
-                        .map(|(index, f)| ScannedFile {
-                            index,
-                            name: f.name.clone(),
-                            length: f.length,
-                        })
-                        .collect();
-                    let torrent_name = details
-                        .name
-                        .clone()
-                        .unwrap_or_else(|| item.label());
+                    .and_then(|stats| stats.state);
+                if torrent_state_is_live(live.as_deref()) {
                     return Ok(TorrentScan {
-                        engine: Arc::new(engine),
+                        engine: Some(Arc::new(engine)),
                         torrent_id,
                         torrent_name,
                         info_hash: details
@@ -1067,9 +1140,10 @@ mod tests {
     use std::net::TcpListener;
 
     use super::{
-        Torrent, TorrentSource, add_torrent, start_engine, torrent_details,
-        torrent_stats,
+        ScannedFile, Torrent, TorrentItem, TorrentSource, add_torrent, scan_torrent,
+        start_engine, torrent_details, torrent_stats,
     };
+    use crate::shared::events::{AppEvent, WorkDone};
 
     /// The tests mutate `S2UDIO_RQBIT_BIN` and spawn fake servers; serialize
     /// them so a parallel run can't cross wires.
@@ -1181,8 +1255,234 @@ PY
             cache_dir: std::env::temp_dir().join(format!("rqbit-cache-{}", std::process::id())),
             auto_pick_file: true,
             keep_after_play: false,
+            stream_downloads: true,
             socks_proxy: None,
         }
+    }
+
+
+    #[test]
+    fn scan_reports_the_file_list_before_the_torrent_is_live() {
+        let _guard = RQBIT_ENV_LOCK.lock().unwrap();
+        let files = r#"[{"name":"ep1.mkv","length":100,"included":true},
+                        {"name":"ep2.mkv","length":200,"included":true}]"#;
+        let bin = split_fake_engine("files-first", files, "initializing");
+        let port = 31080;
+        unsafe {
+            std::env::set_var("S2UDIO_RQBIT_BIN", &bin);
+        }
+        let config = split_test_config(port);
+        let (cancel_tx, cancel_rx) = crossbeam::channel::unbounded();
+        let (progress_tx, progress_rx) = crossbeam::channel::unbounded();
+        let item = TorrentItem::Magnet("magnet:?xt=urn:btih:0123456789abcdef".to_owned());
+        let item_key = item.source_key();
+        let handle = std::thread::spawn(move || {
+            scan_torrent(&item, &config, &cancel_rx, &progress_tx)
+        });
+
+        // Phase 3 lands while the engine still reports `initializing`: the file
+        // list must reach the UI so the picker can render its rows and offer
+        // Download, with Stream still gated.
+        let mut saw_files = None;
+        for _ in 0..40 {
+            match progress_rx.recv_timeout(std::time::Duration::from_secs(5)) {
+                Ok(AppEvent::WorkDone(Ok(WorkDone::TorrentScanFiles { key, name, files }))) => {
+                    saw_files = Some((key, name, files));
+                    break;
+                }
+                Ok(_) => continue,
+                Err(err) => panic!("no file-list event: {err}"),
+            }
+        }
+        let (key, name, files) = saw_files.expect("the scan reports its file list at phase 3");
+        assert_eq!(key, item_key, "the file list is keyed by the item");
+        assert_eq!(name, "fake.torrent");
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0].name, "ep1.mkv");
+        assert_eq!(files[1].index, 1, "positional indices are preserved");
+        assert!(!handle.is_finished(), "the scan is still gated on phase 4");
+
+        // Cancel: the scan is cancellable exactly as before the split.
+        cancel_tx.send(()).unwrap();
+        let err = handle.join().expect("scan thread joins").expect_err("cancel aborts");
+        assert!(err.contains("cancelled"), "{err}");
+        unsafe {
+            std::env::remove_var("S2UDIO_RQBIT_BIN");
+        }
+    }
+
+    #[test]
+    fn scan_reports_the_file_list_once_even_when_the_wait_is_long() {
+        let _guard = RQBIT_ENV_LOCK.lock().unwrap();
+        let files = r#"[{"name":"movie.mkv","length":100,"included":true}]"#;
+        let bin = split_fake_engine("files-once", files, "initializing");
+        let port = 31081;
+        unsafe {
+            std::env::set_var("S2UDIO_RQBIT_BIN", &bin);
+        }
+        let config = split_test_config(port);
+        let (cancel_tx, cancel_rx) = crossbeam::channel::unbounded();
+        let (progress_tx, progress_rx) = crossbeam::channel::unbounded();
+        let item = TorrentItem::Magnet("magnet:?xt=urn:btih:0123456789abcdef".to_owned());
+        let handle = std::thread::spawn(move || {
+            scan_torrent(&item, &config, &cancel_rx, &progress_tx)
+        });
+
+        // The file list arrives once; the per-second progress ticks that follow
+        // must not repeat it (a repeat would rebuild the picker and drop marks).
+        let mut files_events = 0;
+        let mut progress_events = 0;
+        while progress_events < 2 {
+            match progress_rx.recv_timeout(std::time::Duration::from_secs(5)) {
+                Ok(AppEvent::WorkDone(Ok(WorkDone::TorrentScanFiles { .. }))) => files_events += 1,
+                Ok(AppEvent::WorkDone(Ok(WorkDone::TorrentScanProgress { .. }))) => {
+                    progress_events += 1;
+                }
+                Ok(_) => {}
+                Err(err) => panic!("progress stopped: {err}"),
+            }
+        }
+        assert_eq!(files_events, 1, "the file list is reported exactly once");
+
+        cancel_tx.send(()).unwrap();
+        let _ = handle.join();
+        unsafe {
+            std::env::remove_var("S2UDIO_RQBIT_BIN");
+        }
+    }
+
+    #[test]
+    fn scan_does_not_report_a_file_list_before_metainfo_arrives() {
+        let _guard = RQBIT_ENV_LOCK.lock().unwrap();
+        // No files yet (cold magnet): phase 3 has not happened, so no file-list
+        // event may fire — the UI must keep showing the wait, not an empty list.
+        let bin = split_fake_engine("no-metainfo", "[]", "initializing");
+        let port = 31082;
+        unsafe {
+            std::env::set_var("S2UDIO_RQBIT_BIN", &bin);
+        }
+        let config = split_test_config(port);
+        let (cancel_tx, cancel_rx) = crossbeam::channel::unbounded();
+        let (progress_tx, progress_rx) = crossbeam::channel::unbounded();
+        let item = TorrentItem::Magnet("magnet:?xt=urn:btih:0123456789abcdef".to_owned());
+        let handle = std::thread::spawn(move || {
+            scan_torrent(&item, &config, &cancel_rx, &progress_tx)
+        });
+
+        let first = progress_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("a progress tick arrives");
+        match first {
+            AppEvent::WorkDone(Ok(WorkDone::TorrentScanProgress { .. })) => {}
+            other => panic!("expected a progress tick, got {other:?}"),
+        }
+        cancel_tx.send(()).unwrap();
+        let _ = handle.join();
+        unsafe {
+            std::env::remove_var("S2UDIO_RQBIT_BIN");
+        }
+    }
+
+    #[test]
+    fn live_gate_only_accepts_the_engines_own_live_state() {
+        // The picker's Stream button is gated on exactly the engine's state
+        // comparison, so the predicate is unit tested independently of the
+        // engine: rqbit reports `live`; anything else (including the
+        // capitalised form a future rqbit might send) is not live.
+        assert!(super::torrent_state_is_live(Some("live")));
+        assert!(super::torrent_state_is_live(Some("Live")));
+        assert!(!super::torrent_state_is_live(Some("initializing")));
+        assert!(!super::torrent_state_is_live(Some("Initializing")));
+        assert!(!super::torrent_state_is_live(Some("paused")));
+        assert!(!super::torrent_state_is_live(Some("error")));
+        assert!(!super::torrent_state_is_live(None));
+    }
+
+    #[test]
+    fn a_file_list_without_media_still_renders_no_playable_rows() {
+        // Scan yields a list; the picker's row set is the media subset.
+        let scan_files = vec![
+            ScannedFile { index: 0, name: "readme.nfo".to_owned(), length: 10 },
+            ScannedFile { index: 1, name: "movie.mkv".to_owned(), length: 100 },
+            ScannedFile { index: 2, name: "poster.jpg".to_owned(), length: 20 },
+            ScannedFile { index: 3, name: "track.flac".to_owned(), length: 50 },
+        ];
+        let media = super::media_files(&scan_files);
+        let names: Vec<&str> = media.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, vec!["movie.mkv", "track.flac"], "media only, scan order");
+        }
+
+    fn split_test_config(port: u16) -> Torrent {
+        Torrent {
+            port,
+            cache_dir: std::env::temp_dir()
+                .join(format!("rqbit-split-cache-{}", std::process::id())),
+            ..Torrent::default()
+        }
+    }
+
+    /// A fake engine whose `/torrents/{id}` answers `files_json` and whose
+    /// `stats/v1` reports `state` — the shape the phase-3/phase-4 split is
+    /// asserted against.
+    fn split_fake_engine(tag: &str, files_json: &str, state: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("rqbit-split-{tag}-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let bin = dir.join("rqbit");
+        let script = format!(
+            r#"#!/bin/sh
+port=""
+prev=""
+for arg in "$@"; do
+    case "$arg" in
+        --http-api-listen-addr=*) port="${{arg#*=}}" ;;
+        --http-api-listen-addr) prev="$arg" ;;
+        127.0.0.1:*) [ "$prev" = "--http-api-listen-addr" ] && port="$arg" ;;
+    esac
+    [ "$arg" != "--http-api-listen-addr" ] && prev=""
+done
+port="${{port##*:}}"
+exec python3 - "$port" "{files}" "{state}" <<'PY'
+import http.server, sys
+
+port = int(sys.argv[1])
+files = sys.argv[2]
+state = sys.argv[3]
+
+class H(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+    def _send(self, body):
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def do_GET(self):
+        if self.path == "/stats":
+            self._send(b"{{}}")
+        elif self.path.startswith("/torrents/") and self.path.endswith("/stats/v1"):
+            body = ('{{"state":"%s","progress_bytes":0,"total_bytes":100,'
+                    '"finished":false,"live":{{"download_speed":'
+                    '{{"mbps":0.0,"human_readable":"0.00 MiB/s"}}}}}}' % state).encode()
+            self._send(body)
+        elif self.path.startswith("/torrents/"):
+            self._send(('{{"name":"fake.torrent","files":%s}}' % files).encode())
+        else:
+            self._send(b"{{}}")
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", 0))
+        self.rfile.read(length)
+        self._send(b'{{"id":1,"details":{{}},"output_folder":"","seen_peers":null}}')
+
+http.server.ThreadingHTTPServer(("127.0.0.1", port), H).serve_forever()
+PY
+"#,
+            files = files_json.replace('"', "\\\""),
+            state = state
+        );
+        std::fs::write(&bin, script).unwrap();
+        std::process::Command::new("chmod").arg("+x").arg(&bin).status().unwrap();
+        bin
     }
 
     #[test]
@@ -1687,7 +1987,7 @@ PY
             std::env::remove_var("S2UDIO_RQBIT_BIN");
         }
         super::TorrentScan {
-            engine: std::sync::Arc::new(engine),
+            engine: Some(std::sync::Arc::new(engine)),
             torrent_id: "1".to_owned(),
             torrent_name: "Fake Pack".to_owned(),
             info_hash: None,
@@ -1766,7 +2066,7 @@ PY
         assert_eq!(scan.files[0].name, "movie.mkv");
         assert!(scan.files[0].is_video());
         // The stream URL of the scanned file addresses it by index.
-        let url = scan.engine.stream_url(&scan.torrent_id, scan.files[0].index as u64);
+        let url = scan.engine().stream_url(&scan.torrent_id, scan.files[0].index as u64);
         assert!(url.contains("/torrents/1/stream/0"), "{url}");
     }
 
@@ -1847,16 +2147,32 @@ PY
         });
 
         // The fake serves files but reports `state: initializing`: the
-        // scan must keep waiting and ticking progress — NOT return Ok.
+        // file list reaches the UI (phase 3 — rows + Download), then the scan
+        // keeps waiting and ticking progress — it does NOT return Ok.
         let first = progress_rx
             .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the file list arrives while initializing");
+        assert!(
+            matches!(
+                first,
+                crate::shared::events::AppEvent::WorkDone(Ok(
+                    crate::shared::events::WorkDone::TorrentScanFiles { .. }
+                ))
+            ),
+            "phase 3 reports the file list before the torrent is live: {first:?}"
+        );
+        let second = progress_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
             .expect("progress arrives while initializing");
-        assert!(matches!(
-            first,
-            crate::shared::events::AppEvent::WorkDone(Ok(
-                crate::shared::events::WorkDone::TorrentScanProgress { .. }
-            ))
-        ));
+        assert!(
+            matches!(
+                second,
+                crate::shared::events::AppEvent::WorkDone(Ok(
+                    crate::shared::events::WorkDone::TorrentScanProgress { .. }
+                ))
+            ),
+            "phase 4 keeps the scan waiting with progress ticks: {second:?}"
+        );
         assert!(!handle.is_finished(), "scan waits while the torrent initializes");
 
         // The torrent goes live: the scan completes with the file list.

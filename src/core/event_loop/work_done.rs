@@ -76,6 +76,13 @@ pub(super) fn handle_work_done(
             }
             *render_wanted = true;
         }
+        WorkDone::TorrentScanFiles { key, name, files } => {
+            // Phase 3 of the scan: the file list is known — the torrent
+            // picker renders its rows from it and enables Download, while
+            // Stream stays gated on phase 4 (`TorrentScanned`).
+            crate::ui::modals::paste::on_torrent_scan_files(ctx, key, name, files);
+            *render_wanted = true;
+        }
         WorkDone::TorrentScanned { key, result, .. } => {
             // Round 17: a popup scan landed — store the engine
             // + file list (or the failure) and refresh the
@@ -124,7 +131,7 @@ pub(super) fn handle_work_done(
             ctx.torrent_scans.borrow_mut().insert(
                 key,
                 Ok(crate::core::torrent::TorrentScan {
-                    engine: engine.clone(),
+                    engine: Some(engine.clone()),
                     torrent_id: torrent_id.clone(),
                     torrent_name: torrent_name.clone(),
                     info_hash: info_hash.clone(),

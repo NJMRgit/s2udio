@@ -278,12 +278,17 @@ pub(crate) enum WorkRequest {
     },
     /// Scan a pasted torrent/magnet (round 17): start the engine, add the
     /// torrent, wait (round 18: **open-ended**, no deadline) for its
-    /// metainfo and hand the running engine + file list back as
-    /// `WorkDone::TorrentScanned`. The popup shows a live wait window
-    /// (elapsed counter + DL-speed / needed-speed check, refreshed by
-    /// `WorkDone::TorrentScanProgress`) until the scan lands, then offers
-    /// the play actions driven by the file list (single-file vs
-    /// multi-video). The scan runs on its own thread.
+    /// metainfo. The scan reports **two phases**:
+    ///
+    /// 1. `WorkDone::TorrentScanFiles` — the metainfo arrived: the file
+    ///    list is known and the torrent picker renders its rows (Download
+    ///    is already usable).
+    /// 2. `WorkDone::TorrentScanned` — the engine reports the torrent
+    ///    `live` and can serve streams, which un-gates the picker's
+    ///    Stream button.
+    ///
+    /// `WorkDone::TorrentScanProgress` ticks once a second throughout, for
+    /// the picker's wait line. The scan runs on its own thread.
     ScanTorrent {
         item: crate::core::torrent::TorrentItem,
         /// Per-scan cancel signal (round 18): the paste popup's close hook
@@ -401,6 +406,21 @@ pub(crate) enum WorkDone {
         /// The scan outcome: the running engine + torrent id + file list,
         /// or the error (dead magnet, missing engine binary, …).
         result: Result<crate::core::torrent::TorrentScan, String>,
+    },
+    /// A torrent scan's **file list landed** (phase 3 of the scan): the
+    /// metainfo arrived and the file list is known, but the engine may not
+    /// serve streams yet (`live`, phase 4). The torrent picker renders its
+    /// rows from this event and gates ONLY its Stream button on phase 4 —
+    /// Download is already usable. Sent **once** per scan, before
+    /// `TorrentScanned`.
+    TorrentScanFiles {
+        /// The item's raw source string — the same key as `TorrentScanned`.
+        key: String,
+        /// The torrent's name from its metainfo.
+        name: String,
+        /// The full file list, in scan order with positional indices (the
+        /// picker filters it with `torrent::media_files`).
+        files: Vec<crate::core::torrent::ScannedFile>,
     },
     /// A torrent scan's live progress (round 18): one event per second
     /// while the scan waits for a magnet's metainfo. The paste popup's

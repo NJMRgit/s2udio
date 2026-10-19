@@ -26,9 +26,17 @@ use crate::{
 /// `button` is the 0-based index of the confirmed button.
 #[derive(Debug)]
 pub struct ListConfirm<V> {
+    /// Which footer button was confirmed (0-based). The torrent picker was
+    /// the only reader; it now renders its own buttons (`ListSection`), so
+    /// this is kept for multi-button pickers that need the choice.
+    #[allow(dead_code)]
     pub button: usize,
     pub value: Option<V>,
     pub index: usize,
+    /// The marked row indices (multi-select pickers). The torrent file
+    /// picker was the only multi-select `ListModal`; marking now lives in
+    /// the torrent picker's checkbox rows.
+    #[allow(dead_code)]
     pub marked: Vec<usize>,
 }
 #[derive(Debug, PartialEq, Eq)]

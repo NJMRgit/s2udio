@@ -1413,6 +1413,11 @@ impl Ui {
                     Some(staged.torrent_socks_proxy.clone())
                 };
                 state.torrent_socks_proxy = Some(staged.torrent_socks_proxy.clone());
+                // "Streaming a torrent also downloads it" (Settings ->
+                // torrent): takes effect immediately for the next stream and
+                // persists to state.ron.
+                config.torrent.stream_downloads = staged.torrent_stream_downloads;
+                state.torrent_stream_downloads = Some(staged.torrent_stream_downloads);
                 if let Err(err) = state.save() {
                     status_warn!("Failed to save state: {err}");
                 }

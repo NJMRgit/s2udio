@@ -30,7 +30,7 @@ pub mod remap_keys;
 pub mod select_modal;
 pub mod settings;
 pub mod tab_help;
-pub mod torrent_file_picker;
+pub mod torrent_picker;
 pub mod yt_search;
 
 #[allow(unused)]

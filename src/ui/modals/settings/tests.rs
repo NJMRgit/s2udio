@@ -292,6 +292,46 @@ mod nav_tests {
     }
 
     #[test]
+    fn the_stream_also_downloads_toggle_is_staged_until_saved() {
+        use super::super::model::{Section, TorrentRow};
+
+        // Keep the app-event receiver alive: `activate` renders, and a
+        // dropped receiver would fail the send.
+        let (app_tx, _app_rx) = crossbeam::channel::unbounded();
+        let mut ctx = crate::tests::fixtures::ctx(
+            (app_tx, _app_rx),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+        );
+        assert!(ctx.config.torrent.stream_downloads, "the default is on");
+        let mut modal = SettingsModal::new(&ctx);
+        modal.section = Section::Torrent;
+        modal.refresh_rows(&ctx);
+
+        assert!(
+            modal
+                .rows
+                .iter()
+                .any(|r| matches!(r, ContentRow::Torrent(TorrentRow::StreamDownloads))),
+            "the torrent section carries the toggle"
+        );
+        assert!(modal.torrent_stream_downloads_pending, "it opens showing the current value");
+
+        select_row(&mut modal, |r| matches!(r, ContentRow::Torrent(TorrentRow::StreamDownloads)));
+        modal.activate(&mut ctx).unwrap();
+        assert!(
+            !modal.torrent_stream_downloads_pending,
+            "activating the row flips the staged value"
+        );
+        assert!(
+            ctx.config.torrent.stream_downloads,
+            "the live config is untouched until Save"
+        );
+        assert!(modal.has_changes(), "the panel now has an unsaved change");
+        assert!(!modal.staged_settings().torrent_stream_downloads);
+    }
+
+    #[test]
     fn toggles_and_cava_are_staged_until_saved() {
         let (app_tx, _app_rx) = crossbeam::channel::unbounded();
         let mut ctx = crate::tests::fixtures::ctx(
