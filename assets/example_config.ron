@@ -67,13 +67,7 @@
     torrent: (
         enabled: true,
         port: 3030,
-        min_download_speed_kbps: 500,
-        warmup_secs: 5,
-        max_wait_secs: 15,
-        no_peers_timeout_secs: 30,
         cache_dir: "~/.cache/s2udio/torrents",
-        auto_pick_file: true,
-        keep_after_play: false,
         // Streaming a torrent also downloads it: the file is kept in
         // ~/Downloads/s2udio-downloads and the torrent appears in the
         // Downloads modal. `false` = stream only, nothing kept.

@@ -7,15 +7,20 @@ use super::{defaults, utils::tilde_expand_path};
 /// Torrent streaming configuration (drag&drop `.torrent` / `magnet:`).
 ///
 /// Streaming runs through the **rqbit** engine (a single static binary,
-/// subprocess + localhost HTTP server, exactly like the s2u-yt wrapper):
-/// dropping a torrent offers **Play (stream)** in the paste popup; the
-/// engine downloads pieces on demand and mpv plays the stream URL, with an
-/// explicit bandwidth gate before playback starts (no play when the peer
-/// speed is below `min_download_speed_kbps`).
+/// subprocess + localhost HTTP server, exactly like the s2u-yt wrapper): a
+/// pasted torrent opens the picker, the engine fetches pieces on demand and
+/// mpv plays the stream URL.
 ///
-/// Full plan: `docs/design/Backend/torrent-streaming.md` (M1 = this
-/// engine bootstrap + config; M2+ wire the classification, popup, gate,
-/// playback and lifecycle).
+/// Design: `docs/design/Backend/torrent-streaming.md`.
+///
+/// **Removed 2026-10-19** — five keys that no code ever read: the
+/// never-built bandwidth gate (`min_download_speed_kbps`, `warmup_secs`,
+/// `max_wait_secs`, `no_peers_timeout_secs` — the metainfo wait is
+/// open-ended by design, and rqbit's own stats are the only speed signal),
+/// plus `auto_pick_file` (the picker lists every media file, so picking for
+/// the user is gone) and `keep_after_play` (no cache-cleanup policy was ever
+/// implemented — the cache dir simply persists). Older `config.ron` files
+/// that still carry them keep parsing: unknown keys are ignored.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Torrent {
     /// Master switch: `false` still classifies torrents/magnets in the
@@ -24,27 +29,9 @@ pub struct Torrent {
     /// Preferred HTTP API port for the rqbit server. When the port is
     /// already in use the engine scans `port+1 ..= port+20` for a free one.
     pub port: u16,
-    /// The bandwidth gate threshold: playback starts only once the median
-    /// measured download speed reaches this many KB/s.
-    pub min_download_speed_kbps: u32,
-    /// Minimum sampling window before the gate can pass (avoids a lucky
-    /// instant burst).
-    pub warmup_secs: u64,
-    /// Hard deadline of the gate; when it expires without the speed
-    /// threshold, the user gets Retry / Play anyway / Cancel.
-    pub max_wait_secs: u64,
-    /// How long to wait for any peer before aborting a dead magnet with
-    /// "No peers found".
-    pub no_peers_timeout_secs: u64,
     /// Where rqbit stores the partial/streaming files. Created on first
-    /// use; cleared on app exit unless `keep_after_play` is true.
+    /// use; it persists (there is no cache-cleanup policy).
     pub cache_dir: PathBuf,
-    /// Multi-file torrents: pick the single largest playable file silently
-    /// (`true`) or always ask (`false`).
-    pub auto_pick_file: bool,
-    /// Keep the engine + partial files after playback ends (`true`) or kill
-    /// it immediately (`false` — default; minimizes P2P seeding).
-    pub keep_after_play: bool,
     /// **Streaming a torrent also downloads it** (`true` — default): the
     /// picker's `Stream` runs as a committed download, so the file lands in
     /// `~/Downloads/s2udio-downloads` and the torrent shows up in the
@@ -70,13 +57,7 @@ impl Default for Torrent {
         Self {
             enabled: true,
             port: defaults::default_torrent_port(),
-            min_download_speed_kbps: defaults::default_torrent_min_speed_kbps(),
-            warmup_secs: defaults::default_torrent_warmup_secs(),
-            max_wait_secs: defaults::default_torrent_max_wait_secs(),
-            no_peers_timeout_secs: defaults::default_torrent_no_peers_timeout_secs(),
             cache_dir: defaults::default_torrent_cache_dir(),
-            auto_pick_file: true,
-            keep_after_play: false,
             stream_downloads: true,
             socks_proxy: None,
         }
@@ -90,13 +71,7 @@ impl Default for Torrent {
 pub struct TorrentFile {
     pub enabled: Option<bool>,
     pub port: Option<u16>,
-    pub min_download_speed_kbps: Option<u32>,
-    pub warmup_secs: Option<u64>,
-    pub max_wait_secs: Option<u64>,
-    pub no_peers_timeout_secs: Option<u64>,
     pub cache_dir: Option<PathBuf>,
-    pub auto_pick_file: Option<bool>,
-    pub keep_after_play: Option<bool>,
     pub stream_downloads: Option<bool>,
     pub socks_proxy: Option<String>,
 }
@@ -106,22 +81,10 @@ impl From<TorrentFile> for Torrent {
         Self {
             enabled: value.enabled.unwrap_or(true),
             port: value.port.unwrap_or_else(defaults::default_torrent_port),
-            min_download_speed_kbps: value
-                .min_download_speed_kbps
-                .unwrap_or_else(defaults::default_torrent_min_speed_kbps),
-            warmup_secs: value.warmup_secs.unwrap_or_else(defaults::default_torrent_warmup_secs),
-            max_wait_secs: value
-                .max_wait_secs
-                .unwrap_or_else(defaults::default_torrent_max_wait_secs),
-            no_peers_timeout_secs: value
-                .no_peers_timeout_secs
-                .unwrap_or_else(defaults::default_torrent_no_peers_timeout_secs),
             cache_dir: value
                 .cache_dir
                 .map(|v| tilde_expand_path(&v))
                 .unwrap_or_else(|| tilde_expand_path(&defaults::default_torrent_cache_dir())),
-            auto_pick_file: value.auto_pick_file.unwrap_or(true),
-            keep_after_play: value.keep_after_play.unwrap_or(false),
             stream_downloads: value.stream_downloads.unwrap_or(true),
             socks_proxy: value.socks_proxy,
         }
@@ -166,6 +129,60 @@ mod tests {
             Torrent::from(file).stream_downloads,
             "an absent key means the default (on)"
         );
+    }
+
+    #[test]
+    fn a_config_still_carrying_the_removed_keys_keeps_parsing() {
+        // Every config.ron written before 2026-10-19 carries the bandwidth
+        // gate, auto-pick and keep-after-play keys. Removing them from the
+        // schema must not make s2udio reject the file (serde ignores unknown
+        // fields, and this pins that: a `deny_unknown_fields` added later
+        // would break every existing install).
+        let file = parse_example(|text| {
+            text.replace(
+                "cache_dir: \"~/.cache/s2udio/torrents\",",
+                "cache_dir: \"~/.cache/s2udio/torrents\",\n\
+                 min_download_speed_kbps: 500,\n\
+                 warmup_secs: 5,\n\
+                 max_wait_secs: 15,\n\
+                 no_peers_timeout_secs: 30,\n\
+                 auto_pick_file: true,\n\
+                 keep_after_play: false,",
+            )
+        });
+        let torrent = Torrent::from(file);
+        assert_eq!(torrent.port, 3030, "the live keys still apply");
+        assert!(torrent.stream_downloads, "and the new default survives");
+    }
+
+    #[test]
+    fn a_pre_picker_config_file_still_loads() {
+        // The exact shape a config.ron had before 2026-10-19 (taken from the
+        // host's live file): every key this change removed, and neither of
+        // the two keys added since. It must parse and fall back to the
+        // defaults for the new keys — a parse failure would silently discard
+        // the whole file, since s2udio falls back to stock defaults.
+        let file = parse_example(|text| {
+            let start = text.find("    torrent: (").expect("the example has a torrent block");
+            let end = text.find("    keybinds: (").expect("and a keybinds block after it");
+            let old_block = "    torrent: (\n\
+                 \x20       enabled: true,\n\
+                 \x20       port: 3030,\n\
+                 \x20       min_download_speed_kbps: 500,\n\
+                 \x20       warmup_secs: 5,\n\
+                 \x20       max_wait_secs: 15,\n\
+                 \x20       no_peers_timeout_secs: 30,\n\
+                 \x20       cache_dir: \"~/.cache/s2udio/torrents\",\n\
+                 \x20       auto_pick_file: true,\n\
+                 \x20       keep_after_play: false,\n\
+                 \x20   ),\n";
+            format!("{}{old_block}{}", &text[..start], &text[end..])
+        });
+        let torrent = Torrent::from(file);
+        assert_eq!(torrent.port, 3030);
+        assert!(torrent.enabled);
+        assert!(torrent.stream_downloads, "the new key defaults to on");
+        assert_eq!(torrent.socks_proxy, None, "and the other new key to none");
     }
 
     #[test]

@@ -50,28 +50,6 @@ pub fn default_torrent_port() -> u16 {
     3030
 }
 
-/// KB/s threshold for the torrent bandwidth gate (default 500 KB/s —
-/// comfortably above typical 720p–1080p encodings).
-pub fn default_torrent_min_speed_kbps() -> u32 {
-    500
-}
-
-/// Minimum sampling window of the bandwidth gate before it can pass.
-pub fn default_torrent_warmup_secs() -> u64 {
-    5
-}
-
-/// Hard deadline of the bandwidth gate before the Retry / Play anyway /
-/// Cancel dialog shows.
-pub fn default_torrent_max_wait_secs() -> u64 {
-    15
-}
-
-/// How long to wait for any peer before aborting a dead magnet.
-pub fn default_torrent_no_peers_timeout_secs() -> u64 {
-    30
-}
-
 /// Where rqbit stores the streaming/partial files. Must exist before the
 /// engine starts (rqbit requires the download folder to exist). Round 23:
 /// the s2udio cache dir, not the legacy rmpc one.

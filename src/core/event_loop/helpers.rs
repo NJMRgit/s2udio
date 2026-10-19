@@ -30,8 +30,8 @@ pub(super) fn start_torrent_playback(
     // ref is pushed below, after the stop.
     stop_finished_plain_streams(ctx, Some((engine.base_url().to_owned(), torrent_id.clone())));
     // Keep the engine alive for the whole session (the last Arc clone's
-    // Drop kills the rqbit child on app exit). M4 adds the
-    // keep_after_play/cleanup policy.
+    // Drop kills the rqbit child on app exit). There is no cache-cleanup
+    // policy: the torrent cache dir simply persists.
     *ctx.torrent_engine.borrow_mut() = Some(engine.clone());
     status_info!("Streaming {torrent_name}…");
     // Now-playing info: each file's name is its mpv entry title; the

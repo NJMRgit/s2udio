@@ -786,14 +786,16 @@ impl TorrentScan {
     }
 }
 /// The live progress of an in-flight torrent scan (round 18): whole
-/// seconds since the scan started and the engine's current download speed
-/// in KB/s (0 until peers deliver data — or stats are not available yet).
-/// The paste popup's wait window renders the elapsed counter and the
-/// DL-speed / needed-speed check (✓/✗) from it.
+/// seconds since the scan started, for the picker's wait line.
+///
+/// It used to also carry the engine's download speed in KB/s. Nothing read
+/// it after the wait window dropped its `DL …` row (round 20), so the
+/// per-second `stats/v1` sampling that fed it was pure overhead — and the
+/// bandwidth gate it was meant for was never built (its config keys are
+/// gone too).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct TorrentScanProgress {
     pub elapsed_secs: u64,
-    pub download_speed_kbps: f64,
 }
 /// Scan a pasted torrent (round 17 + round 18): start the engine, add the
 /// torrent, wait (open-ended) for its metainfo and return the running
@@ -857,7 +859,6 @@ pub fn scan_torrent(
                             key: item.source_key(),
                             progress: TorrentScanProgress {
                                 elapsed_secs: started.elapsed().as_secs(),
-                                download_speed_kbps: 0.0,
                             },
                         }),
                     ),
@@ -922,13 +923,6 @@ pub fn scan_torrent(
         }
         if last_progress.elapsed() >= SCAN_PROGRESS_INTERVAL {
             last_progress = Instant::now();
-            let download_speed_kbps = torrent_stats(&engine, &torrent_id)
-                .ok()
-                .and_then(|stats| stats.live)
-                .and_then(|live| live.download_speed)
-                .and_then(|speed| speed.mbps)
-                .map(|mbps| mbps * 125.0)
-                .unwrap_or(0.0);
             let _ = progress
                 .send(
                     crate::shared::events::AppEvent::WorkDone(
@@ -936,7 +930,6 @@ pub fn scan_torrent(
                             key: item.source_key(),
                             progress: TorrentScanProgress {
                                 elapsed_secs: started.elapsed().as_secs(),
-                                download_speed_kbps,
                             },
                         }),
                     ),
@@ -1248,13 +1241,7 @@ PY
         Torrent {
             enabled: true,
             port,
-            min_download_speed_kbps: 500,
-            warmup_secs: 5,
-            max_wait_secs: 15,
-            no_peers_timeout_secs: 30,
             cache_dir: std::env::temp_dir().join(format!("rqbit-cache-{}", std::process::id())),
-            auto_pick_file: true,
-            keep_after_play: false,
             stream_downloads: true,
             socks_proxy: None,
         }
@@ -2101,7 +2088,6 @@ PY
             )) => {
                 assert_eq!(key, item_key, "progress is keyed by the item");
                 assert!(progress.elapsed_secs >= 1, "counter ticks");
-                assert_eq!(progress.download_speed_kbps, 0.0, "fake reports 0 Mbps");
             }
             other => panic!("expected a progress event, got {other:?}"),
         }
