@@ -1127,7 +1127,7 @@ pub fn move_completed_file(
 
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::sync::{LazyLock, Mutex};
 
     use std::net::TcpListener;

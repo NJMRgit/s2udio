@@ -80,6 +80,10 @@ const JOB_POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// first completion — after it the move runs even if a probe still looks
 /// live, so a stale `/proc` match can never defer a download forever.
 const MOVE_DEFER_BACKSTOP: Duration = Duration::from_secs(6 * 60 * 60);
+/// How long a `play: true` enqueue (or a re-stream) may wait for the engine
+/// to report its torrent `live` before the wait is answered with an error.
+/// The download itself is unaffected: it keeps running either way.
+const STREAM_READY_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Round 107: whether a completed job's move is still held for a live
 /// stream. `deferred` is the current marker/probe result, `since` is when
@@ -777,6 +781,36 @@ enum AddOutcome {
     Failed(String),
 }
 
+/// The policy for answering a queued play/stream response: only once the
+/// engine reports the torrent `live`, because rqbit answers HTTP 500 on the
+/// stream endpoint while it initializes (it is checksum-validating a
+/// re-added torrent's cache files) — handing mpv that URL made "stream"
+/// behave exactly like "download" (2026-10-19, user report).
+///
+/// `Wait` while initializing, `Timeout` once [`STREAM_READY_TIMEOUT`] has
+/// passed: the download itself keeps running either way, only the playback
+/// wait gives up.
+fn pending_gate(live: bool, since: Option<Instant>) -> PendingGate {
+    if live {
+        return PendingGate::Answer;
+    }
+    match since {
+        Some(since) if since.elapsed() >= STREAM_READY_TIMEOUT => PendingGate::Timeout,
+        _ => PendingGate::Wait,
+    }
+}
+
+/// What to do with a queued play/stream response (see [`pending_gate`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingGate {
+    /// The torrent is live: answer now.
+    Answer,
+    /// Still initializing: keep waiting.
+    Wait,
+    /// Waited long enough: answer with an error.
+    Timeout,
+}
+
 /// Per-job daemon state (engine + add bookkeeping + pending responses).
 struct JobRuntime {
     job: DlJob,
@@ -792,6 +826,10 @@ struct JobRuntime {
     /// held while a live stream references the job's files, and forced
     /// once the backstop has elapsed.
     move_defer_since: Option<Instant>,
+    /// When the first response that has to wait for the engine's `live`
+    /// state was queued (`None` = nothing waiting). Anchor for
+    /// [`STREAM_READY_TIMEOUT`].
+    pending_since: Option<Instant>,
 }
 
 /// The daemon: owns the engines, consumes the spool, writes the state.
@@ -838,6 +876,7 @@ impl Daemon {
                     add_cancel: None,
                     pending_responses: Vec::new(),
                     move_defer_since: None,
+                    pending_since: None,
                 });
                 let len = self.runtimes.len();
                 self.start_add(len - 1);
@@ -850,6 +889,7 @@ impl Daemon {
                     add_cancel: None,
                     pending_responses: Vec::new(),
                     move_defer_since: None,
+                    pending_since: None,
                 });
             }
         }
@@ -1047,6 +1087,7 @@ impl Daemon {
                     add_cancel: None,
                     pending_responses: Vec::new(),
                     move_defer_since: None,
+                    pending_since: None,
                 });
                 let len = self.runtimes.len();
                 self.start_add(len - 1);
@@ -1077,12 +1118,16 @@ impl Daemon {
                     request_id: id,
                     kind: ResponseKind::Stream(file_indices),
                 };
-                if self.engine_ready(idx) {
+                if self.engine_ready(idx) && self.torrent_is_live(idx) {
                     self.respond(idx, pending);
                 } else if self.runtimes[idx].job.status.active()
                     || self.runtimes[idx].add_result.is_some()
                 {
+                    // The engine exists but has not finished initializing:
+                    // answering now hands the caller an HTTP 500 URL. Queue
+                    // it; `poll_jobs` answers once the torrent is live.
                     self.runtimes[idx].pending_responses.push(pending);
+                    self.runtimes[idx].pending_since.get_or_insert_with(Instant::now);
                 } else {
                     self.respond_error(&pending.request_id, "The downloader job for this torrent is not active");
                 }
@@ -1386,10 +1431,47 @@ impl Daemon {
                 .map(|e| e.cache_dir().display().to_string())
                 .unwrap_or_default(),
         });
-        let pending: Vec<PendingResponse> = runtime.pending_responses.drain(..).collect();
         runtime.add_result = None;
         runtime.add_cancel = None;
+        if !runtime.pending_responses.is_empty() {
+            // A play/stream response carries stream URLs: answering before
+            // the engine reports the torrent `live` hands mpv a URL that
+            // answers HTTP 500 (rqbit serves nothing while it initializes —
+            // the picker's own Stream gate waits for the same state).
+            // `poll_jobs` answers it as soon as the torrent is live.
+            runtime.pending_since.get_or_insert_with(Instant::now);
+        }
         self.dirty = true;
+    }
+
+    /// Whether the engine reports this runtime's torrent `live` (its stream
+    /// endpoint serves). `false` when the stats call fails — the caller then
+    /// keeps waiting rather than handing out a URL that might 500.
+    fn torrent_is_live(&self, idx: usize) -> bool {
+        let Some(runtime) = self.runtimes.get(idx) else { return false };
+        let (Some(engine), Some(torrent_id)) =
+            (runtime.engine.as_ref(), runtime.job.torrent_id.as_deref())
+        else {
+            return false;
+        };
+        crate::core::torrent::torrent_stats(engine, torrent_id)
+            .ok()
+            .is_some_and(|stats| {
+                crate::core::torrent::torrent_state_is_live(stats.state.as_deref())
+            })
+    }
+
+    /// Whether a queued play/stream response may be answered yet (see
+    /// [`pending_gate`]).
+    fn pending_gate(&self, idx: usize, live: bool) -> PendingGate {
+        pending_gate(live, self.runtimes[idx].pending_since)
+    }
+
+    /// Answers every queued play/stream response for runtime `idx` and
+    /// forgets the wait anchor.
+    fn answer_pending(&mut self, idx: usize) {
+        let pending: Vec<PendingResponse> = self.runtimes[idx].pending_responses.drain(..).collect();
+        self.runtimes[idx].pending_since = None;
         for pending in pending {
             self.respond(idx, pending);
         }
@@ -1514,6 +1596,32 @@ impl Daemon {
             };
             match stats {
                 Ok(stats) => {
+                    // A queued play/stream response waits for `live` (see
+                    // `pending_gate`): rqbit answers HTTP 500 until then.
+                    if !self.runtimes[idx].pending_responses.is_empty() {
+                        let live = crate::core::torrent::torrent_state_is_live(
+                            stats.state.as_deref(),
+                        );
+                        match self.pending_gate(idx, live) {
+                            PendingGate::Answer => self.answer_pending(idx),
+                            PendingGate::Wait => {}
+                            PendingGate::Timeout => {
+                                let ids: Vec<String> = self.runtimes[idx]
+                                    .pending_responses
+                                    .iter()
+                                    .map(|p| p.request_id.clone())
+                                    .collect();
+                                self.runtimes[idx].pending_responses.clear();
+                                self.runtimes[idx].pending_since = None;
+                                for request_id in ids {
+                                    self.respond_error(
+                                        &request_id,
+                                        "The torrent did not become ready to stream in time; it keeps downloading — stream it from the Downloads modal once it is ready",
+                                    );
+                                }
+                            }
+                        }
+                    }
                     let runtime = &mut self.runtimes[idx];
                     runtime.job.progress_percent = job_progress(&stats, &runtime.job.kept_files);
                     let kept_pairs: Vec<(usize, u64)> = kept
@@ -2009,5 +2117,156 @@ mod move_defer_tests {
             .checked_sub(MOVE_DEFER_BACKSTOP + Duration::from_secs(1))
             .expect("the clock is monotonic");
         assert!(!stream_move_deferred(true, Some(past_backstop)));
+    }
+}
+
+#[cfg(test)]
+mod pending_gate_tests {
+    use std::time::{Duration, Instant};
+
+    use super::{PendingGate, STREAM_READY_TIMEOUT, pending_gate};
+
+    #[test]
+    fn a_live_torrent_is_answered_immediately() {
+        assert_eq!(pending_gate(true, None), PendingGate::Answer);
+        assert_eq!(
+            pending_gate(true, Some(Instant::now())),
+            PendingGate::Answer,
+            "live wins even while young"
+        );
+    }
+
+    #[test]
+    fn an_initializing_torrent_keeps_the_wait_queued() {
+        // The bug this fixes: answering here handed mpv a URL that rqbit
+        // answered with HTTP 500, so Stream behaved like Download.
+        assert_eq!(pending_gate(false, None), PendingGate::Wait);
+        assert_eq!(pending_gate(false, Some(Instant::now())), PendingGate::Wait);
+    }
+
+    #[test]
+    fn a_torrent_that_never_comes_live_times_out() {
+        let past = Instant::now() - STREAM_READY_TIMEOUT - Duration::from_secs(1);
+        assert_eq!(pending_gate(false, Some(past)), PendingGate::Timeout);
+    }
+
+    #[test]
+    fn going_live_after_a_long_wait_still_streams() {
+        // Timeout is evaluated only while the torrent is NOT live: a slow
+        // torrent that finally initializes is answered, not rejected.
+        let past = Instant::now() - STREAM_READY_TIMEOUT - Duration::from_secs(1);
+        assert_eq!(pending_gate(true, Some(past)), PendingGate::Answer);
+    }
+}
+
+#[cfg(test)]
+mod stream_gate_tests {
+    //! The regression this pins (user report 2026-10-19): with
+    //! `stream_downloads` on, pressing Stream enqueued a `play: true` job
+    //! and the daemon answered it *before* rqbit served the torrent, so the
+    //! TUI's pre-launch probe got HTTP 500 and playback never started —
+    //! Stream behaved exactly like Download. The daemon now holds the
+    //! response until the engine reports the torrent `live`.
+
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    use super::*;
+    use crate::core::torrent::tests::{RQBIT_ENV_LOCK, fake_engine_bin};
+
+    fn test_config() -> crate::config::torrent::Torrent {
+        crate::config::torrent::Torrent {
+            enabled: true,
+            port: 31090,
+            cache_dir: std::env::temp_dir()
+                .join(format!("dl-gate-cache-{}", std::process::id())),
+            stream_downloads: true,
+            socks_proxy: None,
+        }
+    }
+
+    fn play_request(id: &str) -> DlJobRequest {
+        DlJobRequest::Enqueue {
+            id: id.to_owned(),
+            infohash: Some("0123456789abcdef".to_owned()),
+            source_key: "magnet:?xt=urn:btih:0123456789abcdef".to_owned(),
+            torrent_item: crate::core::dlctl::DlTorrentItem::Magnet(
+                "magnet:?xt=urn:btih:0123456789abcdef".to_owned(),
+            ),
+            torrent_name: None,
+            files: Vec::new(),
+            play: true,
+        }
+    }
+
+    /// Poll the daemon like its serve loop does, returning true as soon as
+    /// the response file for `id` exists.
+    fn poll_until_answered(daemon: &mut Daemon, id: &str, budget: Duration) -> bool {
+        let started = Instant::now();
+        while started.elapsed() < budget {
+            // The serve loop's own order: an add completes in `resume_adds`,
+            // and `poll_jobs` then drives the jobs it produced.
+            daemon.resume_adds();
+            daemon.poll_jobs();
+            if response_path(id).is_some_and(|path| path.exists()) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        false
+    }
+
+    #[test]
+    fn a_play_response_waits_for_the_torrent_to_be_live() {
+        let _guard = RQBIT_ENV_LOCK.lock().unwrap();
+        // Isolate the daemon's response/state files from the real cache dir.
+        let xdg = std::env::temp_dir().join(format!("dl-gate-xdg-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&xdg);
+        // `paths::s2udio_cache_dir` reads `ENV`, which is an in-memory map in
+        // test builds — `std::env::set_var` would not reach it, and the
+        // response files would be written to whatever path resolves instead.
+        crate::shared::env::ENV
+            .set("XDG_CACHE_HOME".to_owned(), xdg.to_string_lossy().into_owned());
+
+        let (bin, log) = fake_engine_bin("dl-stream-gate");
+        let not_live = log.with_file_name("not-live");
+        std::fs::write(&not_live, "").unwrap();
+        unsafe {
+            std::env::set_var("S2UDIO_RQBIT_BIN", &bin);
+        }
+
+        let mut daemon = Daemon {
+            config: Arc::new(test_config()),
+            started_at: now_unix(),
+            runtimes: Vec::new(),
+            dirty: false,
+        };
+        let id = new_request_id();
+        daemon.handle_request(play_request(&id));
+
+        // The engine reports `initializing`: the play response must NOT be
+        // written — answering now is what handed mpv an HTTP 500 URL.
+        assert!(
+            !poll_until_answered(&mut daemon, &id, Duration::from_secs(3)),
+            "the response was answered before the torrent was live"
+        );
+
+        // The torrent finishes initializing: the queued response is written.
+        std::fs::remove_file(&not_live).unwrap();
+        assert!(
+            poll_until_answered(&mut daemon, &id, Duration::from_secs(15)),
+            "the response was never answered after the torrent went live"
+        );
+        let response = take_response(&id).expect("the response file parses");
+        assert!(!response.files.is_empty(), "it carries the stream URLs");
+        assert!(response.error.is_none());
+
+        // Cleanup: the engine child dies with the daemon value.
+        drop(daemon);
+        crate::shared::env::ENV.remove("XDG_CACHE_HOME");
+        unsafe {
+            std::env::remove_var("S2UDIO_RQBIT_BIN");
+        }
+        let _ = std::fs::remove_dir_all(&xdg);
     }
 }

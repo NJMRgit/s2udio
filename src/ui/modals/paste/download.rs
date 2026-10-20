@@ -568,11 +568,17 @@ fn should_retry_daemon_stream(retried: bool, job: Option<&crate::core::dlctl::Dl
 /// `false` when the job is no longer known or no longer active — the caller
 /// then reports the failure instead.
 fn retry_daemon_stream(ctx: &Ctx, response: &crate::core::dlctl::DlJobResponse) -> bool {
-    let job = ctx
-        .dl_state
-        .borrow()
-        .as_ref()
-        .and_then(|state| state.jobs.iter().find(|job| job.job_id == response.job_id).cloned());
+    // The cached `ctx.dl_state` is refreshed by the 1 s poll, so right after
+    // an enqueue it can still be empty — which is exactly when the first
+    // probe fails. Fall back to the daemon's own on-disk state instead of
+    // concluding the job is gone.
+    let find = |state: Option<&crate::core::dlctl::DlStateFile>| {
+        state.and_then(|state| {
+            state.jobs.iter().find(|job| job.job_id == response.job_id).cloned()
+        })
+    };
+    let job = find(ctx.dl_state.borrow().as_ref())
+        .or_else(|| find(crate::core::dlctl::read_state().as_ref()));
     if !should_retry_daemon_stream(false, job.as_ref()) {
         log::debug!(job_id:? = response.job_id, status:? = job.as_ref().map(|j| j.status);
             "The failed stream's job cannot be retried; reporting the failure");
