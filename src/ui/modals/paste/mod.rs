@@ -28,6 +28,8 @@ use anyhow::Result;
 
 mod download;
 mod parse;
+#[cfg(test)]
+mod play_e2e_tests;
 mod playlist;
 #[path = "queue-stream.rs"]
 mod queue_stream;

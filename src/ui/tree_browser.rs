@@ -561,6 +561,18 @@ pub(in crate::ui) trait TreeBrowserCore: Pane {
     /// Drop the temporary entry on the stop transition itself (streams
     /// keep the same queue entry while playing, so SongChanged never fires
     /// for them; after stop MPD still reports the last songid).
+    ///
+    /// **This may only run on `PlaybackStateChanged`, never on
+    /// `UiEvent::Player`.** `Player` is dispatched from the idle event
+    /// *before* the status query that same event issues has answered, so
+    /// `ctx.status` still describes the state from before the command. A
+    /// play started on a stopped MPD therefore arrived here reading `Stop`
+    /// and deleted the very entry it had just started — the reported "the
+    /// paste popup's Play does nothing on a dragged file", which left
+    /// neither playback nor a row behind (`Add to queue and play` was
+    /// unaffected: it records no temp entry). The stale reading is also
+    /// what makes `Player` useless for this cleanup: it cannot tell a
+    /// fresh stop from the state the play is leaving behind.
     fn temp_play_on_stop(&mut self, ctx: &Ctx) {
         if ctx.status.state == State::Stop
             && let Some(temp) = self.temp_play_id()
@@ -602,23 +614,49 @@ pub(in crate::ui) trait TreeBrowserCore: Pane {
     }
 
     /// Record the queue id of a temp-play query result (shared by the
-    /// panes' `on_query_finished` play arms).
+    /// panes' `on_query_finished` play arms) and drop the entry it
+    /// replaces.
+    ///
+    /// A temp row is hidden from the queue list, so nothing else ever
+    /// removes an orphan one: before this, a second play (a pasted file, a
+    /// radio station) left the previous row in MPD's queue for good — one
+    /// per play — even though the last one no longer played anything. The
+    /// removal is queued *after* the new entry is playing (this result
+    /// arrives once `playid` succeeded), so it can never take the playing
+    /// row with it.
     fn handle_play_result(
         &mut self,
         any: Box<dyn std::any::Any + Send + Sync>,
         ctx: &Ctx,
     ) -> Result<()> {
         if let Ok(boxed) = any.downcast::<u32>() {
-            self.set_temp_play_id(Some(*boxed));
-            ctx.temp_play_id.set(Some(*boxed));
+            let id = *boxed;
+            let previous = ctx.temp_play_id.get().filter(|prev| *prev != id);
+            self.set_temp_play_id(Some(id));
+            ctx.temp_play_id.set(Some(id));
+            if let Some(prev) = previous {
+                ctx.command(move |client| {
+                    // Best-effort: MPD may have dropped the row already (a
+                    // stop, `consume` mode, another client). That is the
+                    // entry's normal end, not a failure worth a status line.
+                    if let Err(err) = client.delete_id(prev) {
+                        log::debug!(error:? = err, id = prev; "Could not drop the previous temp play entry");
+                    }
+                    Ok(())
+                });
+            }
         }
         Ok(())
     }
 
     /// The tree/items temp-play event arms (`SongChanged`,
-    /// `PlaybackStateChanged`, `Player`, `Reconnected`) — the shared part
-    /// of the three panes' `on_event` bodies. Returns whether the event
-    /// was handled.
+    /// `PlaybackStateChanged`, `Reconnected`) — the shared part of the three
+    /// panes' `on_event` bodies. Returns whether the event was handled.
+    ///
+    /// `UiEvent::Player` is deliberately **not** one of them: it carries the
+    /// status from before the command that raised it (see
+    /// [`TreeBrowserCore::temp_play_on_stop`]), so acting on its `Stop`
+    /// killed the entry a play had just started.
     fn handle_tree_events(
         &mut self,
         event: &mut UiEvent,
@@ -627,7 +665,7 @@ pub(in crate::ui) trait TreeBrowserCore: Pane {
     ) -> Result<bool> {
         match event {
             UiEvent::SongChanged => self.cleanup_temp_play(ctx),
-            UiEvent::PlaybackStateChanged | UiEvent::Player => self.temp_play_on_stop(ctx),
+            UiEvent::PlaybackStateChanged => self.temp_play_on_stop(ctx),
             UiEvent::Reconnected => self.on_reconnected(ctx)?,
             _ => return Ok(false),
         }
