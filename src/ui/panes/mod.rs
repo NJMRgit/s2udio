@@ -390,6 +390,123 @@ pub(crate) trait Pane {
         Ok(())
     }
 }
+/// The info box's content for the **Video** list's highlighted entry, before
+/// it is ever played (2026-10-20).
+///
+/// The audio list's info box describes the selected MPD song; the Video list
+/// holds mpv playlist entries, which carry only a title and (sometimes) a
+/// length until something resolves them. This builds the same `PreviewGroup`
+/// shape the song info uses — metadata first, then the `[YouTube]` title and
+/// description the playing path shows — from the entry itself plus the
+/// selection-time metadata resolve, so a **merely selected** video has a real
+/// info box instead of an empty one until playback.
+///
+/// `pending` is the row's resolve being in flight: the box then states
+/// `Resolving <spinner>` rather than looking finished-but-empty, the same way
+/// the song info box does for a queue row.
+pub(crate) fn video_selection_groups(
+    key_style: ratatui::style::Style,
+    group_style: ratatui::style::Style,
+    ctx: &Ctx,
+    entry: Option<&crate::core::mpv::MpvPlaylistEntry>,
+    info: Option<&crate::shared::ytdlp::YtStreamInfo>,
+    pending: bool,
+) -> Vec<crate::shared::mpd_query::PreviewGroup> {
+    use ratatui::text::{Line, Span};
+    let separator = Span::from(": ");
+    let spacer = Span::from(" ");
+    let mut result = Vec::new();
+    let mut metadata_group = crate::shared::mpd_query::PreviewGroup::new(None, Some(group_style));
+    let title = info
+        .map(|info| info.title.clone())
+        .filter(|title| !title.trim().is_empty())
+        .or_else(|| entry.map(|entry| entry.title.clone()))
+        .filter(|title| !title.trim().is_empty());
+    if let Some(title) = title {
+        metadata_group.push(
+            Line::from(vec![
+                spacer.clone(),
+                Span::styled("Title", key_style),
+                separator.clone(),
+                Span::from(title),
+            ])
+            .into(),
+        );
+    }
+    if let Some(channel) = info.and_then(|info| info.channel.clone()).filter(|c| !c.is_empty()) {
+        metadata_group.push(
+            Line::from(vec![
+                spacer.clone(),
+                Span::styled("Channel", key_style),
+                separator.clone(),
+                Span::from(channel),
+            ])
+            .into(),
+        );
+    }
+    let duration = info
+        .and_then(|info| info.duration)
+        .or_else(|| entry.and_then(|entry| entry.duration))
+        .filter(|secs| *secs > 0.0);
+    if let Some(duration) = duration {
+        metadata_group.push(
+            Line::from(vec![
+                spacer.clone(),
+                Span::styled("Duration", key_style),
+                separator.clone(),
+                Span::from(ctx.config.duration_format.format(duration as u64)),
+            ])
+            .into(),
+        );
+    }
+    if !metadata_group.items.is_empty() {
+        result.push(metadata_group);
+    }
+    if let Some(info) = info {
+        let mut yt_group = crate::shared::mpd_query::PreviewGroup::new(Some(" [YouTube] "), Some(group_style));
+        if !info.title.is_empty() {
+            yt_group.push(
+                Line::from(vec![
+                    spacer.clone(),
+                    Span::styled("Title", key_style),
+                    separator.clone(),
+                    Span::from(info.title.clone()),
+                ])
+                .into(),
+            );
+        }
+        if let Some(description) = &info.description {
+            for (idx, line) in description.lines().take(15).enumerate() {
+                let label =
+                    if idx == 0 { Span::styled("Description", key_style) } else { Span::raw(" ") };
+                let mut row_spans = vec![spacer.clone(), label, separator.clone()];
+                let (spans, _) = crate::ui::panes::lyrics::linkify_line(
+                    line,
+                    ratatui::style::Style::default(),
+                );
+                row_spans.extend(spans);
+                yt_group.push(Line::from(row_spans).into());
+            }
+        }
+        result.push(yt_group);
+    } else if pending {
+        let mut pending_group = crate::shared::mpd_query::PreviewGroup::new(Some(" [YouTube] "), Some(group_style));
+        pending_group.push(
+            Line::from(vec![
+                spacer.clone(),
+                Span::styled("Resolving", key_style),
+                separator.clone(),
+                Span::styled(
+                    crate::ui::panes::queue::spinner_frame().to_owned(),
+                    ratatui::style::Style::default(),
+                ),
+            ])
+            .into(),
+        );
+        result.push(pending_group);
+    }
+    result
+}
 pub(crate) mod browser {
     use itertools::Itertools;
     use ratatui::{style::Style, text::{Line, Span}};

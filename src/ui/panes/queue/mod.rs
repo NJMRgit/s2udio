@@ -193,24 +193,28 @@ impl QueuePane {
     ///
     /// A row that cannot be resolved yet is therefore **remembered** and
     /// replayed by the `QueueChanged` arm, once the refresh makes it findable.
+    ///
+    /// **The deferral is a decision too (2026-10-20).** "Not findable" is *not*
+    /// the same thing as "a new track we should follow": `find_current_song_in_queue`
+    /// returns `None` for a stopped player, and the row-resolve flow stops MPD
+    /// on purpose ("Holding MPD while the requested row resolves") while
+    /// `status.songid` still names the **previous** track. Arming a deferral
+    /// from that id meant the later `QueueChanged` replayed a jump to the row
+    /// that had just stopped, so starting an unresolved stream snapped the
+    /// selection back to the previous item instead of leaving it on the row
+    /// that was resolving and then playing (reported 2026-10-20).
+    ///
+    /// So the same three conditions decide here as everywhere else — a *new*
+    /// track, the option on, and the gate not suppressed by the user's own
+    /// navigation — and only a decided jump is remembered. A declined one
+    /// clears the pending id: it is not owed to anyone.
     fn follow_current_song(&mut self, ctx: &Ctx, is_visible: bool) -> Result<()> {
-        let Some((_idx, song)) = ctx.find_current_song_in_queue() else {
-            if let Some(song_id) = ctx.status.songid {
-                log::debug!(
-                    song_id;
-                    "The playing row is not in the queue copy yet; deferring the follow jump"
-                );
-                self.pending_follow_song_id = Some(song_id);
-            } else {
-                // No song at all: nothing to defer to any more.
-                self.pending_follow_song_id = None;
-            }
+        let found = ctx.find_current_song_in_queue().map(|(_, song)| song.id);
+        let Some(song_id) = found.or(ctx.status.songid) else {
+            // No song at all: nothing to follow and nothing to defer to.
+            self.pending_follow_song_id = None;
             return Ok(());
         };
-        // A newer track change supersedes any deferral still waiting for a row
-        // that never turned up.
-        self.pending_follow_song_id = None;
-        let song_id = song.id;
         // One decision per track change: a repeated SongChanged for the same
         // track (a re-render, a resume, a second status update) must not re-run
         // the jump and yank a selection the user has since moved.
@@ -224,10 +228,27 @@ impl QueuePane {
         if new_track {
             log::debug!(
                 song_id, enabled = follow_enabled, follows = decided,
-                visible = is_visible;
+                visible = is_visible, found = found.is_some();
                 "The queue selection's follow decision for this track change"
             );
         }
+        if found.is_none() {
+            // The row is not in the queue copy yet (a swap's refresh has not
+            // landed). Remember the jump only if one was actually decided.
+            if decided {
+                log::debug!(
+                    song_id;
+                    "The playing row is not in the queue copy yet; deferring the follow jump"
+                );
+                self.pending_follow_song_id = Some(song_id);
+            } else {
+                self.pending_follow_song_id = None;
+            }
+            return Ok(());
+        }
+        // A newer track change supersedes any deferral still waiting for a row
+        // that never turned up.
+        self.pending_follow_song_id = None;
         if !decided {
             return Ok(());
         }

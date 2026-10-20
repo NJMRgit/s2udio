@@ -139,9 +139,10 @@ pub struct LyricsPane {
     info_area: Rect,
     /// Number of rows in the current info view (for the scroll bounds).
     info_items_len: usize,
-    /// Id of the song whose info is currently shown (reset the scroll when
-    /// it changes).
-    info_song_id: Option<u32>,
+    /// The item whose info is currently shown (reset the scroll when it
+    /// changes). A string so the song info (`song:<id>`) and the Video list's
+    /// selected-entry info (`video:<link>`) can share one field.
+    info_song_id: Option<String>,
     /// The video (item id / title) whose info is currently shown (reset
     /// the scroll when it changes).
     info_video_key: Option<String>,
@@ -1118,6 +1119,54 @@ impl LyricsPane {
                 ctx.config.theme.preview_metadata_group_style,
                 ctx,
             );
+        self.render_info_groups(frame, area, ctx, preview, Some(format!("song:{}", song.id)));
+    }
+    /// The Video list's selected-entry info (2026-10-20): what the box shows
+    /// while a video is highlighted and nothing is playing, before its first
+    /// play. Mirrors the song info's rendering — same groups, same scroll
+    /// behaviour — but the content comes from the mpv playlist entry and the
+    /// selection-time metadata resolve instead of an MPD song.
+    fn render_video_selection_info(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) {
+        let key = ctx.video_selected.borrow().clone();
+        let entry = key.as_deref().and_then(|key| {
+            ctx.video_playlist
+                .borrow()
+                .iter()
+                .find(|entry| entry.lookup_url() == key)
+                .cloned()
+        });
+        let info = key
+            .as_deref()
+            .and_then(|key| crate::ui::modals::paste::song_stream_info(ctx, key));
+        let pending = key
+            .as_deref()
+            .is_some_and(|key| crate::ui::modals::paste::stream_parse_pending(ctx, key));
+        let groups = crate::ui::panes::video_selection_groups(
+            ctx.config.theme.preview_label_style,
+            ctx.config.theme.preview_metadata_group_style,
+            ctx,
+            entry.as_ref(),
+            info.as_ref(),
+            pending,
+        );
+        self.render_info_groups(
+            frame,
+            area,
+            ctx,
+            groups,
+            key.map(|key| format!("video:{key}")),
+        );
+    }
+    /// Render already-built info groups (the song info and the Video list's
+    /// selected-entry info share this).
+    fn render_info_groups(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        ctx: &Ctx,
+        preview: Vec<crate::shared::mpd_query::PreviewGroup>,
+        key: Option<String>,
+    ) {
         let mut items: Vec<ListItem> = Vec::new();
         for group in preview {
             if let Some(name) = group.name {
@@ -1133,8 +1182,8 @@ impl LyricsPane {
         }
         self.info_items_len = items.len();
         self.info_area = area;
-        if self.info_song_id != Some(song.id) {
-            self.info_song_id = Some(song.id);
+        if self.info_song_id != key {
+            self.info_song_id = key;
             self.info_state = ListState::default();
         }
         let overflow = items.len() > area.height as usize;
@@ -1510,6 +1559,12 @@ impl Pane for LyricsPane {
             self.edit_btn_area = Rect::default();
             self.word_areas.clear();
             self.pressed_btn = None;
+            // The Video list is the list on screen: its highlight, not the
+            // audio queue's, is what the box describes (2026-10-20).
+            if ctx.queue_tab.get() == crate::ctx::QueueTabMode::Video {
+                self.render_video_selection_info(frame, area, ctx);
+                return Ok(());
+            }
             let selected = || {
                 ctx.queue_selected_id
                     .get()

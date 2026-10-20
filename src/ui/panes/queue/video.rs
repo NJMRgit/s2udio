@@ -74,6 +74,25 @@ impl QueuePane {
             }
         }
 
+        // 2026-10-20: publish the highlight, so a merely-selected video gets
+        // what a merely-selected audio row already gets — its metadata is
+        // resolved (debounced `WarmQueueSelection`), and the info box and the
+        // album-art box follow it. Driven from the render pass for the same
+        // reason the audio selection is (`render.rs`): every selection route
+        // (keys, wheel, mouse, the playing-video follow) funnels through here.
+        let selected_key = self
+            .video_state
+            .selected()
+            .and_then(|idx| playlist.get(idx))
+            .map(|entry| entry.lookup_url().to_owned());
+        if ctx.video_selected.borrow().as_deref() != selected_key.as_deref() {
+            let resolvable = selected_key.is_some();
+            *ctx.video_selected.borrow_mut() = selected_key;
+            if resolvable {
+                super::schedule_selection_warm(ctx);
+            }
+        }
+
         if playlist.is_empty() {
             let style = ctx.config.as_list_text_style().add_modifier(Modifier::DIM);
             frame.render_widget(

@@ -257,6 +257,15 @@ pub fn warm_selected_queue_info(ctx: &Ctx) {
     if ctx.status.state == crate::mpd::commands::State::Play {
         return;
     }
+    // The Queue tab's Video list publishes its highlight through its own
+    // channel: its rows are mpv playlist entries, not MPD songs, so the audio
+    // branch below could never see them. A merely-selected video needs the
+    // same resolve the audio list's selection gets (2026-10-20 report: the
+    // video queue parsed nothing until the entry played).
+    if ctx.queue_tab.get() == crate::ctx::QueueTabMode::Video {
+        warm_selected_video_info(ctx);
+        return;
+    }
     let Some(id) = ctx.queue_selected_id.get() else { return };
     let Some(song) = ctx.queue.iter().find(|song| song.id == id) else { return };
     // Only an unresolved audio-tagged link needs this; a resolved row, a
@@ -287,6 +296,44 @@ pub fn warm_selected_queue_info(ctx: &Ctx) {
         meta_only: true,
     }) {
         log::error!(error:? = err; "Failed to request the selected row's stream metadata");
+    }
+}
+/// The Video list's half of [`warm_selected_queue_info`] (2026-10-20).
+///
+/// The highlight comes from [`Ctx::video_selected`], published by the Video
+/// list's render, and the key is the entry's canonical link
+/// (`MpvPlaylistEntry::lookup_url`) — the same string `video_entry_stream_meta`
+/// and the persisted video playlist use, so a restored queue warms under the
+/// same key it reads back.
+///
+/// Only a link yt-dlp can resolve is asked for: a local file, a torrent stream
+/// or an already-resolved URL has nothing coming. Display metadata only — the
+/// full resolve happens when the entry plays.
+fn warm_selected_video_info(ctx: &Ctx) {
+    let Some(key) = ctx.video_selected.borrow().clone() else { return };
+    if key.is_empty() {
+        return;
+    }
+    // The entry played or its info landed since the selection moved.
+    if crate::ui::modals::paste::song_stream_info(ctx, &key).is_some() {
+        return;
+    }
+    if key.parse::<crate::shared::ytdlp::YtDlpContent>().is_err() {
+        return;
+    }
+    // One request per link, shared with the audio warm's bookkeeping: the key
+    // space is the original link either way.
+    if !ctx.queue_info_warm.borrow_mut().insert(key.clone()) {
+        return;
+    }
+    log::debug!(link = key.as_str(); "Warming the selected video row's stream metadata");
+    mark_stream_parse_pending(ctx, std::slice::from_ref(&key));
+    if let Err(err) = ctx.work_sender.send(WorkRequest::ResolveYtStreams {
+        urls: vec![key],
+        action: YtAction::Refresh,
+        meta_only: true,
+    }) {
+        log::error!(error:? = err; "Failed to request the selected video's stream metadata");
     }
 }
 /// Round 74 (74-1): remember the start offsets carried by the pasted links
@@ -444,19 +491,29 @@ fn replacement_target(
     songs: &[Song],
     song_id: u32,
     stream_keys: &[String],
-    step_waits: bool,
 ) -> ReplacementTarget {
     if let Some(position) = replacement_position(songs, song_id) {
         return ReplacementTarget::Row(position);
     }
-    // The id is gone. A step that is still waiting must not be dropped: the
-    // look ahead has already put this stream in the queue, so playing it is
-    // exactly what the step asked for.
-    if step_waits
-        && let Some(existing) = songs
-            .iter()
-            .find(|song| stream_keys.iter().any(|key| key_matches_row(cache_dir, key, &song.file)))
-            .map(|song| song.id)
+    // The id is gone. When a row already holds **this very stream** the look
+    // ahead swapped that row in place, so the row still exists — under a new
+    // id — and playing it is exactly what the play request asked for.
+    //
+    // This is not step-specific (2026-10-20). It was gated on `step_waits` —
+    // a `▶▶` step waiting for the row — which meant a **user's** play of an
+    // unresolved stream was dropped whenever the look ahead had warmed that same
+    // row first. That is the common case, not the rare one: the one-entry look
+    // ahead warms the row after the current track, and the user then clicks that
+    // very row. The log shows the shape: `Holding MPD while the requested row
+    // resolves song_id="63"`, then the look ahead's in-place swap lands
+    // (`Prepared the next queue entry's stream song_id="63"`), and the user's own
+    // landing finds neither the id nor — with the gate — a row to play, so
+    // nothing starts until they click again ("playback doesn't start after
+    // resolve; I have to double-click").
+    if let Some(existing) = songs
+        .iter()
+        .find(|song| stream_keys.iter().any(|key| key_matches_row(cache_dir, key, &song.file)))
+        .map(|song| song.id)
     {
         return ReplacementTarget::AlreadySwapped(existing);
     }
@@ -721,9 +778,11 @@ pub fn apply_resolved_streams(
             // whose log reads `stepping="true"` then
             // "The resolved queue entry is gone; not re-adding it".
             //
-            // When a step is waiting, the row already holding this stream is
-            // therefore taken over and played: the look ahead did the swap, this
-            // resolve supplies the play.
+            // The row already holding this stream is therefore taken over and
+            // played — for a user's play as much as for a step: the look ahead
+            // did the swap, this resolve supplies the play intent. (2026-10-20:
+            // this used to require `step_waits`, so a click on a row the look
+            // ahead had warmed started nothing.)
             let step_waits = ctx.pending_next_step.get() == Some(song_id);
             // Resolved outside the closure: `ctx` is not `Send`, and the
             // manifest lookup needs the same cache dir the proxy was started
@@ -731,13 +790,7 @@ pub fn apply_resolved_streams(
             let cache_dir = ctx.config.cache_dir.clone();
             ctx.command(move |client| {
                 let songs = client.playlist_info()?.unwrap_or_default();
-                match replacement_target(
-                    cache_dir.as_deref(),
-                    &songs,
-                    song_id,
-                    &stream_keys,
-                    step_waits,
-                ) {
+                match replacement_target(cache_dir.as_deref(), &songs, song_id, &stream_keys) {
                     ReplacementTarget::Row(position) => {
                         let _ = client.delete_id(song_id);
                         let new_id =
@@ -746,8 +799,8 @@ pub fn apply_resolved_streams(
                     }
                     ReplacementTarget::AlreadySwapped(existing) => {
                         log::debug!(
-                            song_id, existing;
-                            "The step's row was swapped in by the look ahead; playing it"
+                            song_id, existing, stepping = step_waits;
+                            "The row was swapped in by the look ahead; playing it"
                         );
                         client.play_id(existing)?;
                     }
@@ -1487,7 +1540,7 @@ mod stale_stream_tests {
         let swapped = vec!["http://127.0.0.1:39235/s2u/audio/swapped".to_owned()];
         let songs = vec![row(1, "a"), row(2, &swapped[0]), row(3, "c")];
         assert_eq!(
-            replacement_target(None, &songs, 99, &swapped, true),
+            replacement_target(None, &songs, 99, &swapped),
             ReplacementTarget::AlreadySwapped(2),
             "the step's stream is already in the queue under a new id"
         );
@@ -1514,23 +1567,10 @@ mod stale_stream_tests {
             "https://rr1.googlevideo.com/videoplayback?expire=7258118400&id=step".to_owned(),
         ];
         assert_eq!(
-            replacement_target(None, &songs, 814, &keys, true),
+            replacement_target(None, &songs, 814, &keys),
             ReplacementTarget::AlreadySwapped(2),
             "the row is found by the original link the proxy URL was registered \
              from, not by the raw player URL"
-        );
-    }
-
-    /// Without a waiting step the row is simply gone: never re-add it (a cleared
-    /// queue, a consume-mode removal).
-    #[test]
-    fn a_landed_resolve_for_a_gone_row_is_dropped_when_no_step_waits() {
-        let swapped = vec!["http://127.0.0.1:39235/s2u/audio/swapped".to_owned()];
-        let songs = vec![row(1, "a"), row(2, &swapped[0])];
-        assert_eq!(
-            replacement_target(None, &songs, 99, &swapped, false),
-            ReplacementTarget::Nothing,
-            "no step is waiting, so nothing is played or re-added"
         );
     }
 
@@ -1539,7 +1579,7 @@ mod stale_stream_tests {
     fn a_landed_resolve_swaps_and_plays_its_own_row() {
         let songs = vec![row(1, "a"), row(2, "b")];
         assert_eq!(
-            replacement_target(None, &songs, 2, &[], false),
+            replacement_target(None, &songs, 2, &[]),
             ReplacementTarget::Row(1)
         );
     }
@@ -1550,7 +1590,7 @@ mod stale_stream_tests {
     fn a_step_whose_stream_is_absent_too_is_dropped() {
         let songs = vec![row(1, "a")];
         assert_eq!(
-            replacement_target(None, &songs, 99, &["http://x/absent".to_owned()], true),
+            replacement_target(None, &songs, 99, &["http://x/absent".to_owned()]),
             ReplacementTarget::Nothing
         );
     }

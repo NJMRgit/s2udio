@@ -19,6 +19,14 @@ pub struct AlbumArtPane {
     /// one is known. Compared (not just the file) so the box picks the
     /// thumbnail up the moment the selection-time metadata resolve lands.
     paused_art_yt: Option<String>,
+    /// 2026-10-20 (diagnostics): the last gate state this pane ran under, so
+    /// a frozen box can be diagnosed from the log. The pane has four silent
+    /// early-returns — a modal is open, mpv owns the box, a song is playing,
+    /// or the selection drives it — and every one of them leaves the image
+    /// exactly as it is. Without this, "the artwork stopped updating" left no
+    /// trace at all in a 30 000-line session log. Logged only when it
+    /// *changes*, never per frame.
+    last_gate: Option<&'static str>,
 }
 const ALBUM_ART: &str = "album_art";
 /// Result id of a YouTube thumbnail download (shown as album art while the
@@ -35,6 +43,7 @@ impl AlbumArtPane {
             fetch_needed: false,
             paused_art_file: None,
             paused_art_yt: None,
+            last_gate: None,
         }
     }
     /// The YouTube info of the current song when it is a resolved
@@ -221,13 +230,15 @@ impl AlbumArtPane {
         }
         Self::derived_stream_thumbnail(&song_uri).unwrap_or(song_uri)
     }
-    /// The thumbnail a **tagged stream link** implies without any resolve:
-    /// the video id is in the link, so `i.ytimg.com/vi/<id>/hqdefault.jpg`
-    /// is known up front. `None` for anything that is not a YouTube link
-    /// (a local file, a radio URL, a SoundCloud/NicoVideo link).
+    /// The thumbnail a stream link implies without any resolve: the video id
+    /// is in the link, so `i.ytimg.com/vi/<id>/hqdefault.jpg` is known up
+    /// front. Works for a **tagged** queue row and for the Video list's bare
+    /// canonical link alike — only the tag differs, the id is in both. `None`
+    /// for anything that is not a YouTube-style link (a local file, a radio
+    /// URL, a SoundCloud/NicoVideo link).
     fn derived_stream_thumbnail(song_uri: &str) -> Option<String> {
         use crate::shared::ytdlp::YtDlpContent;
-        let (link, _) = crate::shared::ytdlp::tagged_stream_entry(song_uri)?;
+        let link = crate::shared::ytdlp::untag_stream_link(song_uri);
         match link.parse::<YtDlpContent>().ok()? {
             YtDlpContent::Single(item) => item.kind.derived_thumbnail(&item.id),
             YtDlpContent::Playlist(_) => None,
@@ -256,6 +267,14 @@ impl AlbumArtPane {
     /// holds when the pane comes back on screen without the selection
     /// having changed, and collapses on a cleared selection.
     fn check_selected_art(&mut self, ctx: &Ctx) -> Result<()> {
+        // The Video list's highlight is an mpv playlist entry, not an MPD
+        // song, so it has its own channel and its own branch (2026-10-20):
+        // while that list is the one on screen the box follows **it**, which
+        // is what makes a merely-selected video show its thumbnail before it
+        // plays — the same rule the audio list already had.
+        if ctx.queue_tab.get() == crate::ctx::QueueTabMode::Video {
+            return self.check_selected_video_art(ctx);
+        }
         let file = Self::selected_queue_song(ctx).map(|song| song.file.clone());
         // Round 107: a selected stream row shows its resolved thumbnail. The
         // selection-time warm may land after the row was selected, so the
@@ -328,6 +347,31 @@ impl AlbumArtPane {
             None => self.collapse(ctx),
         }
     }
+    /// The Video list's selection-driven art (2026-10-20).
+    ///
+    /// The entry's resolved thumbnail wins once the selection-time warm lands;
+    /// until then the one derived from its video id is fetched, so the box
+    /// fills in immediately instead of after the 3-5 s resolve. Nothing to
+    /// show (a local file, a torrent, a plain URL) leaves the box exactly as
+    /// it is — collapsing on every selection would strobe it while the entry's
+    /// resolve is in flight.
+    fn check_selected_video_art(&mut self, ctx: &Ctx) -> Result<()> {
+        let Some(key) = ctx.video_selected.borrow().clone() else { return Ok(()) };
+        let thumb = crate::ui::modals::paste::song_stream_info(ctx, &key)
+            .and_then(|info| info.thumbnail)
+            .filter(|thumb| !thumb.is_empty())
+            .or_else(|| Self::derived_stream_thumbnail(&key));
+        if thumb.is_none() || thumb == self.paused_art_yt {
+            return Ok(());
+        }
+        self.paused_art_yt = thumb.clone();
+        self.paused_art_file = Some(key);
+        ctx.album_art_collapsed.set(false);
+        if let Some(thumbnail) = thumb {
+            Self::fetch_yt_thumbnail(ctx, thumbnail);
+        }
+        Ok(())
+    }
     /// Draw the encoded image queued by the last `UiEvent::ImageEncoded`
     /// after the frame's buffer flush (the flush would otherwise overwrite
     /// the kitty placeholder cells and delete the transient image — the
@@ -346,6 +390,36 @@ impl AlbumArtPane {
         // the modal's own frame rewrote the art pane's cells. Every other
         // show path in this pane is already `is_modal_open`-guarded; this
         // one was not. The pane re-shows on `ModalClosed`.
+        // Diagnostics (2026-10-20): state which gate the pane is behind, once
+        // per transition. A frozen box is one of these four, and each of them
+        // returns silently below.
+        let gate = if self.is_modal_open {
+            "modal-open"
+        } else if crate::core::mpv::mpv_is_ui_source(ctx) {
+            "video-owned"
+        } else if ctx.status.state == State::Play
+            && ctx.find_current_song_in_queue().is_some()
+        {
+            "playing"
+        } else {
+            "selection"
+        };
+        if self.last_gate != Some(gate) {
+            self.last_gate = Some(gate);
+            log::debug!(
+                gate,
+                state:? = ctx.status.state,
+                mpv_active = ctx.mpv.active,
+                mpv_paused = ctx.mpv.paused,
+                collapsed = ctx.album_art_collapsed.get(),
+                queue_mode:? = ctx.queue_tab.get(),
+                queue_selected:? = ctx.queue_selected_id.get(),
+                video_selected:? = ctx.video_selected.borrow().as_deref(),
+                held_file:? = self.paused_art_file.as_deref(),
+                showing = self.album_art.is_showing();
+                "Album art: update gate"
+            );
+        }
         if self.is_modal_open {
             return Ok(());
         }

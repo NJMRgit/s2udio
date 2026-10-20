@@ -34,6 +34,22 @@ pub enum QueueTabMode {
     Radio,
 }
 pub const FETCH_SONG_STICKERS: &str = "fetch_song_stickers";
+/// The inputs one look-ahead evaluation decides on: the current song, MPD's
+/// own next pick, and the queue length. Two evaluations with the same key see
+/// the same window, so the second one can only repeat the first one's verdict.
+pub(crate) type LookAheadKey = (u32, Option<u32>, usize);
+/// [`Ctx::look_ahead`]'s state: when the last evaluation ran and on which key
+/// (so an unchanged window is not re-walked on every status poll), plus the
+/// key whose verdicts were already logged (so the diagnostic line states each
+/// window's decision once, not once per poll).
+#[derive(Default, Debug)]
+pub(crate) struct LookAheadState {
+    /// `(when, key)` of the last evaluation. `None` until the first one, so a
+    /// fresh session always evaluates.
+    pub last: Option<(std::time::Instant, LookAheadKey)>,
+    /// The key whose window was already written to the log.
+    pub logged: Option<LookAheadKey>,
+}
 /// Round 95: how long a requested-but-unanswered stream resolve keeps the
 /// queue's spinner alive. A work thread that never reports back (a dropped
 /// result, a hung yt-dlp) must not leave a row spinning forever.
@@ -131,6 +147,19 @@ pub struct Ctx {
     /// The id of the song currently selected in the queue pane (kept in sync
     /// by the queue's render); the lyrics pane shows its info when paused.
     pub(crate) queue_selected_id: Cell<Option<u32>>,
+    /// The entry the Queue tab's **Video** list currently highlights, as its
+    /// lookup key (`MpvPlaylistEntry::lookup_url()`: the canonical link when
+    /// one is known, else the entry's url/path). Kept in sync by the Video
+    /// list's render.
+    ///
+    /// The audio list publishes its highlight as [`Self::queue_selected_id`];
+    /// video entries have no MPD ids, so this is that channel's video
+    /// counterpart. While the Queue list is in Video mode the selection-time
+    /// metadata warm, the info box and the album-art box read it, so a
+    /// **merely selected** video resolves and shows its title, description
+    /// and thumbnail without being played (2026-10-20: it used to parse
+    /// nothing until playback, unlike an audio row).
+    pub(crate) video_selected: RefCell<Option<String>>,
     /// Lyrics edit mode is on (round 35): the lyrics pane sets it when the
     /// pencil toggles edit mode; the cava pane swaps the visualizer for an
     /// edit-controls legend while it is set.
@@ -420,6 +449,13 @@ pub struct Ctx {
     /// to. The window is per current song: when playback moves on, the set is
     /// cleared so the new next rows are warmed.
     pub(crate) warmed_ahead_for: Cell<Option<u32>>,
+    /// 2026-10-20: the look ahead's evaluation gate. It is called from every
+    /// status poll, and `status_update_interval_ms` can be 16 ms, so an
+    /// unchanged window was re-walked and re-stated in the log ~60×/s even
+    /// when its verdict was "nothing to warm" — measured live as 30 418
+    /// look-ahead lines in ~3 minutes, with the 8 MiB log rotating every 2-3
+    /// minutes. See [`crate::ui::modals::paste::warm_next_queue_link`].
+    pub(crate) look_ahead: RefCell<LookAheadState>,
     /// Round 112: the queue entry a `▶▶` / `>` step is waiting on, when the
     /// row it would land on is an unresolved stream link. `▶▶` cannot simply
     /// ask MPD to step: MPD lands on the raw link, cannot decode it and skips
@@ -569,6 +605,7 @@ impl Ctx {
             active_tab,
             supported_commands,
             queue_selected_id: Cell::new(None),
+            video_selected: RefCell::new(None),
             lyrics_edit_mode: Cell::new(false),
             album_art_collapsed: Cell::new(false),
             temp_play_id: Cell::new(None),
@@ -627,6 +664,7 @@ impl Ctx {
             queue_info_warm: RefCell::new(HashSet::new()),
             warmed_ahead_ids: RefCell::new(HashSet::new()),
             warmed_ahead_for: Cell::new(None),
+            look_ahead: RefCell::new(crate::ctx::LookAheadState::default()),
             pending_next_step: Cell::new(None),
             pending_select_on_growth: Cell::new(None),
             mpd_music_directory,
