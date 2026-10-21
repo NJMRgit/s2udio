@@ -135,8 +135,8 @@ impl Default for QueueTableColumnsFile {
             // **Brightness (2026-10-20, user):** the Title and the Duration are
             // the cells you scan a queue for and carry the bright tone
             // (`#d0d0d0`); the Artist - Album group is deliberately
-            // desaturated to `#9a9a9a` (154, against the bright 208) so the two
-            // levels read at a glance.
+            // desaturated to the queue's original grey (`#8f8f8f`) so the two
+            // read as secondary.
             SongTableColumnFile {
                 prop: PropertyFile {
                     kind: PropertyKindFileOrText::Group(vec![
@@ -147,14 +147,14 @@ impl Default for QueueTableColumnsFile {
                             default: Some(Box::new(PropertyFile {
                                 kind: PropertyKindFileOrText::Text("Unknown".to_string()),
                                 style: Some(StyleFile {
-                                    fg: Some("#9a9a9a".to_string()),
+                                    fg: Some("#8f8f8f".to_string()),
                                     bg: None,
                                     modifiers: None,
                                 }),
                                 default: None,
                             })),
                             style: Some(StyleFile {
-                                fg: Some("#9a9a9a".to_string()),
+                                fg: Some("#8f8f8f".to_string()),
                                 bg: None,
                                 modifiers: None,
                             }),
@@ -171,14 +171,14 @@ impl Default for QueueTableColumnsFile {
                             default: Some(Box::new(PropertyFile {
                                 kind: PropertyKindFileOrText::Text("Unknown Album".to_string()),
                                 style: Some(StyleFile {
-                                    fg: Some("#9a9a9a".to_string()),
+                                    fg: Some("#8f8f8f".to_string()),
                                     bg: None,
                                     modifiers: None,
                                 }),
                                 default: None,
                             })),
                             style: Some(StyleFile {
-                                fg: Some("#9a9a9a".to_string()),
+                                fg: Some("#8f8f8f".to_string()),
                                 bg: None,
                                 modifiers: None,
                             }),
@@ -452,8 +452,8 @@ mod tests {
         let album_fg = parts[2].style.and_then(|style| style.fg);
         assert_eq!(
             artist_fg,
-            Some(Color::Rgb(0x9a, 0x9a, 0x9a)),
-            "the artist - album group sits a clear step below the bright tone"
+            Some(Color::Rgb(0x8f, 0x8f, 0x8f)),
+            "the artist - album group stays desaturated at the queue's original grey"
         );
         assert_eq!(album_fg, artist_fg, "the album matches the artist, not white");
         assert_ne!(
