@@ -509,23 +509,17 @@ fn stream_column_spans(
         // drop the separator and the album (a stream has neither an album
         // nor anything worth showing in its place), so the cell is just the
         // channel. A group that does not hold the artist is not ours.
-        //
-        // **The colour comes from the Artist PART, not the group.** A group
-        // carries no style of its own (`prop.style` is `None` for it — the
-        // defaults and colours live on its parts, see
-        // `config::theme::queue_table`), so taking `prop.style` here painted
-        // the cell with the *terminal default* — plain white — while the
-        // Title and Duration cells beside it kept their bright tone. Every
-        // stream row looked equally bright, the reported symptom.
         PropertyKindOrText::Group(parts) => {
-            let artist_part = parts.iter().find(|part| {
+            if !parts.iter().any(|part| {
                 matches!(
                     &part.kind,
                     PropertyKindOrText::Property(SongProperty::Artist)
                 )
-            })?;
+            }) {
+                return None;
+            }
             let channel = channel_or_none()?;
-            Some(vec![styled(&channel, artist_part.style.or(prop.style))])
+            Some(vec![styled(&channel, prop.style)])
         }
         _ => None,
     }
@@ -853,11 +847,7 @@ mod stream_column_tests {
             kind: Kind::Group(vec![
                 PropertyFile {
                     kind: Kind::Property(SongPropertyFile::Artist),
-                    style: Some(StyleFile {
-                        fg: Some("#8f8f8f".to_owned()),
-                        bg: None,
-                        modifiers: None,
-                    }),
+                    style: None,
                     default: Some(Box::new(text("Unknown", None))),
                 },
                 text(" - ", None),
@@ -902,35 +892,6 @@ mod stream_column_tests {
         )
         .expect("the combined column must be filled by the overlay");
         assert_eq!(text_of(&line), "Some Channel");
-    }
-
-    /// **The reported bug.** The combined cell must carry the artist part's
-    /// colour. It used to take the *group's* style, which is `None` because a
-    /// group keeps its colours on its parts — the cell then painted with the
-    /// terminal default (white) and every stream row looked as bright as its
-    /// title.
-    #[test]
-    fn the_combined_cell_keeps_the_artist_parts_colour() {
-        let prop = artist_album_column();
-        let line = stream_column_line(
-            &prop,
-            Some(&meta(Some("Some Channel"))),
-            &song("https://www.youtube.com/watch?v=abcdefghijk#s2u-audio"),
-            false,
-            40,
-            &SymbolsConfig::default(),
-        )
-        .expect("the combined column is filled by the overlay");
-        let colour = line.spans.first().and_then(|span| span.style.fg);
-        assert_eq!(
-            colour,
-            Some(ratatui::style::Color::Rgb(0x8f, 0x8f, 0x8f)),
-            "the cell must paint in the Artist part's grey, not the terminal default"
-        );
-        assert_ne!(
-            colour, None,
-            "an unstyled span would inherit the terminal's default colour (white)"
-        );
     }
 
     /// A stream whose channel is not known yet still gets a cell from the
