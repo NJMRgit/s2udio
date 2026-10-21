@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::{borrow::Cow, collections::HashSet};
 
 use anyhow::Result;
 use ratatui::{
@@ -426,16 +426,25 @@ pub(super) fn truncate_to_width(s: &mut String, max_cols: usize) {
     *s = out;
 }
 
-/// The queue-table cell of a YouTube-style stream row for the Title / Album
-/// / Artist / Duration columns: the resolved stream info or the flat
-/// playlist listing (both via `stream_row_meta`) — title in Title, channel
-/// in Artist, the duration in Duration. Ellipsized to the column width.
-/// `None` for every other column, and for a column the row has no value for
-/// (the caller then renders the row's own property, i.e. the column default).
+/// The queue-table cell of a YouTube-style stream row for the Title /
+/// Artist / Album / Artist-Album / Duration columns: the resolved stream info
+/// or the flat playlist listing (both via `stream_row_meta`) — title in
+/// Title, channel in Artist, the duration in Duration. Ellipsized to the
+/// column width. `None` for every other column, and for a column the row has
+/// no value for (the caller then renders the row's own property, i.e. the
+/// column default).
 ///
 /// Round 95 (user): the Album cell of such a row is **empty** — the album
 /// only ever repeated the title. The Duration cell shows the spinning frame
 /// while the row's duration is still unknown and its parse is in flight.
+///
+/// 2026-10-20 (user): the default layout puts the artist and the album in
+/// **one** column (`ARTIST - ALBUM`). A group reaches this function as a whole
+/// so the cell is built from the stream's own values; handled per *part* it
+/// would read as a column of unknown kind and the caller would fall back to
+/// the row's property — the raw `#s2u-audio` link and no channel at all.
+/// A stream has no album, so the group renders its **channel only**: no
+/// dangling separator, and nothing where the blank album used to be.
 fn stream_column_line(
     prop: &Property<SongProperty>,
     meta: Option<&crate::shared::ytdlp::YtListMeta>,
@@ -444,26 +453,37 @@ fn stream_column_line(
     max_len: usize,
     symbols: &crate::config::theme::SymbolsConfig,
 ) -> Option<Line<'static>> {
+    stream_column_spans(prop, meta, song, spinning)
+        .map(|spans| ellipsize_spans(spans, max_len, symbols))
+}
+
+/// The un-ellipsized spans of a stream row's cell, or `None` when the column
+/// is not one this overlay fills (or the row has no value for it).
+fn stream_column_spans(
+    prop: &Property<SongProperty>,
+    meta: Option<&crate::shared::ytdlp::YtListMeta>,
+    song: &Song,
+    spinning: bool,
+) -> Option<Vec<Span<'static>>> {
     use crate::config::theme::properties::{PropertyKindOrText, SongProperty};
-    let text = match &prop.kind {
+    let hidden = || Some(Vec::new());
+    let channel_or_none = || {
+        meta.and_then(|meta| meta.channel.clone()).filter(|channel| !channel.is_empty())
+    };
+    match &prop.kind {
         PropertyKindOrText::Property(SongProperty::Title) => {
             let title = meta.map(|meta| meta.title.clone()).unwrap_or_default();
             if title.is_empty() {
                 return None;
             }
-            title
+            Some(vec![styled(&title, prop.style)])
         }
         // Round 95 (user): never repeat the title as the album of a
         // YouTube-style stream — the cell stays empty.
-        PropertyKindOrText::Property(SongProperty::Album) => String::new(),
+        PropertyKindOrText::Property(SongProperty::Album) => hidden(),
         PropertyKindOrText::Property(SongProperty::Artist) => {
-            let channel = meta
-                .and_then(|meta| meta.channel.clone())
-                .unwrap_or_default();
-            if channel.is_empty() {
-                return None;
-            }
-            channel
+            let channel = channel_or_none()?;
+            Some(vec![styled(&channel, prop.style)])
         }
         PropertyKindOrText::Property(SongProperty::Duration) => {
             // MPD knows the length of a local file (and of a stream it has
@@ -477,32 +497,97 @@ fn stream_column_line(
                 // `m:ss`, and `h:mm:ss` past the hour.
                 Some(seconds) => {
                     use crate::shared::ext::duration::DurationExt;
-                    std::time::Duration::from_secs(seconds.max(0.0).round() as u64)
-                        .to_string()
+                    let text = std::time::Duration::from_secs(seconds.max(0.0).round() as u64)
+                        .to_string();
+                    Some(vec![styled(&text, prop.style)])
                 }
-                None if spinning => spinner_frame().to_owned(),
-                None => return None,
+                None if spinning => Some(vec![styled(spinner_frame(), prop.style)]),
+                None => None,
             }
         }
-        _ => return None,
-    };
-    let mut text = text;
-    if text.width() > max_len {
-        let mut out = String::new();
-        let mut used = 0;
-        let budget = max_len.saturating_sub(symbols.ellipsis.width());
-        for grapheme in text.graphemes(true) {
+        // The grouped `ARTIST - ALBUM` column: build it from the parts, but
+        // drop the separator and the album (a stream has neither an album
+        // nor anything worth showing in its place), so the cell is just the
+        // channel. A group that does not hold the artist is not ours.
+        //
+        // **The colour comes from the Artist PART, not the group.** A group
+        // carries no style of its own (`prop.style` is `None` for it — the
+        // defaults and colours live on its parts, see
+        // `config::theme::queue_table`), so taking `prop.style` here painted
+        // the cell with the *terminal default* — plain white — while the
+        // Title and Duration cells beside it kept their bright tone. Every
+        // stream row looked equally bright, the reported symptom.
+        PropertyKindOrText::Group(parts) => {
+            let artist_part = parts.iter().find(|part| {
+                matches!(
+                    &part.kind,
+                    PropertyKindOrText::Property(SongProperty::Artist)
+                )
+            })?;
+            let channel = channel_or_none()?;
+            Some(vec![styled(&channel, artist_part.style.or(prop.style))])
+        }
+        _ => None,
+    }
+}
+
+/// A span with `style`, falling back to the column's own style.
+fn styled(text: &str, style: Option<Style>) -> Span<'static> {
+    Span::styled(text.to_owned(), style.unwrap_or_default())
+}
+
+/// Truncate a row of spans to `max_len` display cells, spending the last
+/// cells on the ellipsis symbol. Whole spans are kept while they fit; the
+/// span that overflows is cut on a grapheme boundary.
+fn ellipsize_spans(
+    spans: Vec<Span<'static>>,
+    max_len: usize,
+    symbols: &crate::config::theme::SymbolsConfig,
+) -> Line<'static> {
+    let mut line = Line::from(spans);
+    let mut remaining = max_len;
+    let mut idx = 0;
+    let ellipsis_width = symbols.ellipsis.width();
+    while remaining > 0 {
+        let Some(span) = line.spans.get_mut(idx) else {
+            break;
+        };
+        let width = span.width();
+        if width < remaining {
+            remaining -= width;
+            idx += 1;
+            continue;
+        }
+        if width == remaining {
+            line.spans.truncate(idx + 1);
+            break;
+        }
+        if remaining < ellipsis_width {
+            span.content = Cow::Owned(symbols.ellipsis.clone());
+            line.spans.truncate(idx + 1);
+            break;
+        }
+        let target = remaining - ellipsis_width;
+        let owned = std::mem::take(&mut span.content).into_owned();
+        let mut acc = 0;
+        let mut cut_at = 0;
+        for (i, grapheme) in owned.grapheme_indices(true) {
             let w = grapheme.width();
-            if used + w > budget {
+            if acc + w > target {
+                cut_at = i;
                 break;
             }
-            out.push_str(grapheme);
-            used += w;
+            acc += w;
+            cut_at = i + grapheme.len();
         }
-        out.push_str(&symbols.ellipsis);
-        text = out;
+        let mut text = owned;
+        text.truncate(cut_at);
+        text.push_str(&symbols.ellipsis);
+        span.content = Cow::Owned(text);
+        line.spans.truncate(idx + 1);
+        break;
     }
-    Some(Line::from(Span::styled(text, prop.style.unwrap_or_default())))
+    line
 }
 
 #[derive(Default)]
@@ -725,5 +810,201 @@ use super::{Areas, QueuePane};
         // A cleared queue has nothing to resolve.
         assert!(!selection_moved(Some(7), None));
         assert!(!selection_moved(None, None));
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod stream_column_tests {
+    use super::*;
+    use crate::{
+        config::theme::{
+            SymbolsConfig,
+            properties::{
+                PropertyFile, PropertyKindFileOrText as Kind, PropertyKindOrText,
+                SongPropertyFile,
+            },
+            style::StyleFile,
+        },
+        shared::ytdlp::YtListMeta,
+    };
+
+    fn song(file: &str) -> Song {
+        Song { id: 1, file: file.to_owned(), ..Default::default() }
+    }
+
+    fn meta(channel: Option<&str>) -> YtListMeta {
+        YtListMeta {
+            title: "A stream title".to_owned(),
+            channel: channel.map(str::to_owned),
+            duration: Some(95.0),
+        }
+    }
+
+    /// The default `ARTIST - ALBUM` column, converted exactly as the config
+    /// turns it into a property.
+    fn artist_album_column() -> Property<SongProperty> {
+        let text = |value: &str, style: Option<StyleFile>| PropertyFile {
+            kind: Kind::Text(value.to_owned()),
+            style,
+            default: None,
+        };
+        PropertyFile {
+            kind: Kind::Group(vec![
+                PropertyFile {
+                    kind: Kind::Property(SongPropertyFile::Artist),
+                    style: Some(StyleFile {
+                        fg: Some("#8f8f8f".to_owned()),
+                        bg: None,
+                        modifiers: None,
+                    }),
+                    default: Some(Box::new(text("Unknown", None))),
+                },
+                text(" - ", None),
+                PropertyFile {
+                    kind: Kind::Property(SongPropertyFile::Album),
+                    style: Some(StyleFile {
+                        fg: Some("white".to_owned()),
+                        bg: None,
+                        modifiers: None,
+                    }),
+                    default: Some(Box::new(text(
+                        "Unknown Album",
+                        Some(StyleFile { fg: Some("white".to_owned()), ..Default::default() }),
+                    ))),
+                },
+            ]),
+            style: None,
+            default: None,
+        }
+        .convert()
+        .expect("the grouped column must convert")
+    }
+
+    fn text_of(line: &Line<'_>) -> String {
+        line.spans.iter().map(|span| span.content.as_ref()).collect()
+    }
+
+    /// A web stream has a channel and no album: the combined cell is the
+    /// channel ALONE — no ` - ` left dangling and no blank album beside it.
+    /// That is the reported complaint ("eliminate the blank album on things
+    /// like web streams") in one assertion.
+    #[test]
+    fn a_stream_row_shows_its_channel_in_the_combined_column() {
+        let prop = artist_album_column();
+        let line = stream_column_line(
+            &prop,
+            Some(&meta(Some("Some Channel"))),
+            &song("https://www.youtube.com/watch?v=abcdefghijk#s2u-audio"),
+            false,
+            40,
+            &SymbolsConfig::default(),
+        )
+        .expect("the combined column must be filled by the overlay");
+        assert_eq!(text_of(&line), "Some Channel");
+    }
+
+    /// **The reported bug.** The combined cell must carry the artist part's
+    /// colour. It used to take the *group's* style, which is `None` because a
+    /// group keeps its colours on its parts — the cell then painted with the
+    /// terminal default (white) and every stream row looked as bright as its
+    /// title.
+    #[test]
+    fn the_combined_cell_keeps_the_artist_parts_colour() {
+        let prop = artist_album_column();
+        let line = stream_column_line(
+            &prop,
+            Some(&meta(Some("Some Channel"))),
+            &song("https://www.youtube.com/watch?v=abcdefghijk#s2u-audio"),
+            false,
+            40,
+            &SymbolsConfig::default(),
+        )
+        .expect("the combined column is filled by the overlay");
+        let colour = line.spans.first().and_then(|span| span.style.fg);
+        assert_eq!(
+            colour,
+            Some(ratatui::style::Color::Rgb(0x8f, 0x8f, 0x8f)),
+            "the cell must paint in the Artist part's grey, not the terminal default"
+        );
+        assert_ne!(
+            colour, None,
+            "an unstyled span would inherit the terminal's default colour (white)"
+        );
+    }
+
+    /// A stream whose channel is not known yet still gets a cell from the
+    /// overlay (empty here) rather than the raw `#s2u-audio` link, which is
+    /// what the un-overlaid property would print.
+    #[test]
+    fn a_stream_row_without_a_channel_is_never_the_raw_link() {
+        let prop = artist_album_column();
+        let line = stream_column_line(
+            &prop,
+            Some(&meta(None)),
+            &song("https://www.youtube.com/watch?v=abcdefghijk#s2u-audio"),
+            false,
+            40,
+            &SymbolsConfig::default(),
+        );
+        if let Some(line) = line {
+            let text = text_of(&line);
+            assert!(
+                !text.contains("youtube.com"),
+                "the combined cell must never fall back to the link: {text}"
+            );
+            assert!(!text.contains(" - "), "no dangling separator: {text}");
+        }
+    }
+
+    /// The single-property columns keep working: title and the channel in
+    /// their own Artist column.
+    #[test]
+    fn single_property_columns_are_unchanged() {
+        let symbols = SymbolsConfig::default();
+        let title = Property::<SongProperty> {
+            kind: PropertyKindOrText::Property(SongProperty::Title),
+            style: None,
+            default: None,
+        };
+        let artist = Property::<SongProperty> {
+            kind: PropertyKindOrText::Property(SongProperty::Artist),
+            style: None,
+            default: None,
+        };
+        let meta = meta(Some("Some Channel"));
+        let title_line =
+            stream_column_line(&title, Some(&meta), &song("x"), false, 40, &symbols)
+                .expect("title is ours");
+        assert_eq!(text_of(&title_line), "A stream title");
+        let artist_line =
+            stream_column_line(&artist, Some(&meta), &song("x"), false, 40, &symbols)
+                .expect("artist is ours");
+        assert_eq!(text_of(&artist_line), "Some Channel");
+    }
+
+    /// A long channel is ellipsized to the column, like every other cell.
+    #[test]
+    fn a_long_channel_is_ellipsized() {
+        let prop = artist_album_column();
+        let long = "A very long channel name that will not fit";
+        let line = stream_column_line(
+            &prop,
+            Some(&meta(Some(long))),
+            &song("x"),
+            false,
+            12,
+            &SymbolsConfig::default(),
+        )
+        .expect("the combined column is filled");
+        let symbols = SymbolsConfig::default();
+        let text = text_of(&line);
+        assert!(text.width() <= 12, "the cell must fit the column: {text:?}");
+        assert!(
+            text.ends_with(&symbols.ellipsis),
+            "long text ends in the themed ellipsis {:?}: {text:?}",
+            symbols.ellipsis
+        );
+        assert!(long.starts_with(text.trim_end_matches(&symbols.ellipsis)), "it is a prefix: {text:?}");
     }
 }

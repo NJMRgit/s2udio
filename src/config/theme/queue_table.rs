@@ -94,37 +94,102 @@ impl Default for QueueTableColumnsFile {
         QueueTableColumnsFile(vec![
             SongTableColumnFile {
                 prop: PropertyFile {
-                    kind: PropertyKindFileOrText::Property(SongPropertyFile::Artist),
-                    default: Some(Box::new(PropertyFile {
-                        kind: PropertyKindFileOrText::Text("Unknown".to_string()),
-                        style: None,
-                        default: None,
-                    })),
-                    style: None,
-                },
-                label: None,
-                label_prop: Some(PropertyFile {
-                    kind: PropertyKindFileOrText::Text("Artist".to_string()),
-                    default: None,
-                    style: None,
-                }),
-                width_percent: None,
-                width: Some("20%".to_string()),
-                alignment: None,
-            },
-            SongTableColumnFile {
-                prop: PropertyFile {
                     kind: PropertyKindFileOrText::Property(SongPropertyFile::Title),
                     default: Some(Box::new(PropertyFile {
                         kind: PropertyKindFileOrText::Text("Unknown".to_string()),
-                        style: None,
+                        style: Some(StyleFile {
+                            fg: Some("#d0d0d0".to_string()),
+                            bg: None,
+                            modifiers: None,
+                        }),
                         default: None,
                     })),
-                    style: None,
+                    style: Some(StyleFile {
+                        fg: Some("#d0d0d0".to_string()),
+                        bg: None,
+                        modifiers: None,
+                    }),
                 },
                 label: None,
                 label_prop: Some(PropertyFile {
                     kind: PropertyKindFileOrText::Text("Title".to_string()),
+                    default: None,
+                    style: None,
+                }),
+                width_percent: None,
+                width: Some("50%".to_string()),
+                alignment: None,
+            },
+            // **Artist and Album share one column, `ARTIST - ALBUM`.**
+            // Two separate columns spent a third of the row on an Album cell
+            // that is empty on exactly the content that needs the room: a web
+            // stream has a channel and no album, so its album cell was blank
+            // while its title was truncated. The Title leads the row (the
+            // column everyone scans for) and takes the freed space.
+            //
+            // A group's default only applies when one of its **parts** has no
+            // value (`Song::as_line` falls back per part), so the defaults sit
+            // on the parts — and a part without a style converts to
+            // `Style::default()`, so every colour below is set explicitly.
+            //
+            // **Brightness (2026-10-20, user):** the Title and the Duration are
+            // the cells you scan a queue for and carry the bright tone
+            // (`#d0d0d0`); the Artist - Album group is deliberately
+            // desaturated to `#9a9a9a` (154, against the bright 208) so the two
+            // levels read at a glance.
+            SongTableColumnFile {
+                prop: PropertyFile {
+                    kind: PropertyKindFileOrText::Group(vec![
+                        PropertyFile {
+                            kind: PropertyKindFileOrText::Property(
+                                SongPropertyFile::Artist,
+                            ),
+                            default: Some(Box::new(PropertyFile {
+                                kind: PropertyKindFileOrText::Text("Unknown".to_string()),
+                                style: Some(StyleFile {
+                                    fg: Some("#9a9a9a".to_string()),
+                                    bg: None,
+                                    modifiers: None,
+                                }),
+                                default: None,
+                            })),
+                            style: Some(StyleFile {
+                                fg: Some("#9a9a9a".to_string()),
+                                bg: None,
+                                modifiers: None,
+                            }),
+                        },
+                        PropertyFile {
+                            kind: PropertyKindFileOrText::Text(" - ".to_string()),
+                            default: None,
+                            style: None,
+                        },
+                        PropertyFile {
+                            kind: PropertyKindFileOrText::Property(
+                                SongPropertyFile::Album,
+                            ),
+                            default: Some(Box::new(PropertyFile {
+                                kind: PropertyKindFileOrText::Text("Unknown Album".to_string()),
+                                style: Some(StyleFile {
+                                    fg: Some("#9a9a9a".to_string()),
+                                    bg: None,
+                                    modifiers: None,
+                                }),
+                                default: None,
+                            })),
+                            style: Some(StyleFile {
+                                fg: Some("#9a9a9a".to_string()),
+                                bg: None,
+                                modifiers: None,
+                            }),
+                        },
+                    ]),
+                    default: None,
+                    style: None,
+                },
+                label: None,
+                label_prop: Some(PropertyFile {
+                    kind: PropertyKindFileOrText::Text("Artist - Album".to_string()),
                     default: None,
                     style: None,
                 }),
@@ -134,41 +199,21 @@ impl Default for QueueTableColumnsFile {
             },
             SongTableColumnFile {
                 prop: PropertyFile {
-                    kind: PropertyKindFileOrText::Property(SongPropertyFile::Album),
+                    kind: PropertyKindFileOrText::Property(SongPropertyFile::Duration),
                     default: Some(Box::new(PropertyFile {
-                        kind: PropertyKindFileOrText::Text("Unknown Album".to_string()),
+                        kind: PropertyKindFileOrText::Text("-".to_string()),
                         style: Some(StyleFile {
-                            fg: Some("white".to_string()),
+                            fg: Some("#d0d0d0".to_string()),
                             bg: None,
                             modifiers: None,
                         }),
                         default: None,
                     })),
                     style: Some(StyleFile {
-                        fg: Some("white".to_string()),
+                        fg: Some("#d0d0d0".to_string()),
                         bg: None,
                         modifiers: None,
                     }),
-                },
-                label: None,
-                label_prop: Some(PropertyFile {
-                    kind: PropertyKindFileOrText::Text("Album".to_string()),
-                    default: None,
-                    style: None,
-                }),
-                width_percent: None,
-                width: Some("30%".to_string()),
-                alignment: None,
-            },
-            SongTableColumnFile {
-                prop: PropertyFile {
-                    kind: PropertyKindFileOrText::Property(SongPropertyFile::Duration),
-                    default: Some(Box::new(PropertyFile {
-                        kind: PropertyKindFileOrText::Text("-".to_string()),
-                        style: None,
-                        default: None,
-                    })),
-                    style: None,
                 },
                 label: None,
                 label_prop: Some(PropertyFile {
@@ -318,5 +363,136 @@ impl PropertyFile<SongPropertyFile> {
                 .map(|v| -> Result<_> { Ok(Box::new((*v).convert_text_group_only()?)) })
                 .transpose()?,
         })
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use ratatui::style::Color;
+
+    use super::*;
+    use crate::config::theme::properties::PropertyKindOrText;
+
+    /// The default queue layout is Title | Artist - Album | Duration: the
+    /// title **leads** the row (2026-10-20, user), and the artist and album
+    /// share ONE column (which frees the Album column's third of the row for
+    /// the title, and leaves no blank album cell on a web stream).
+    #[test]
+    fn the_default_layout_combines_artist_and_album() {
+        let columns = QueueTableColumns::try_from(QueueTableColumnsFile::default())
+            .expect("the defaults must parse");
+        let labels: Vec<String> = columns
+            .0
+            .iter()
+            .map(|column| column.label.as_string(None, "", Default::default(), &test_ctx())
+                .unwrap_or_default())
+            .collect();
+        assert_eq!(labels, vec!["Title", "Artist - Album", "Duration"]);
+
+        let widths: Vec<String> =
+            columns.0.iter().map(|column| format!("{:?}", column.width)).collect();
+        assert_eq!(
+            widths,
+            vec![
+                "Percent(50)".to_owned(),
+                "Percent(35)".to_owned(),
+                "Percent(15)".to_owned()
+            ],
+            "the title leads and takes the freed space; the combined column and the \
+             title split the Album column's old 30%"
+        );
+
+        // The second column is the group: artist, ` - `, album.
+        let PropertyKindOrText::Group(parts) = &columns.0[1].prop.kind else {
+            panic!("the Artist - Album column must be a group");
+        };
+        let kinds: Vec<String> = parts
+            .iter()
+            .map(|part| match &part.kind {
+                PropertyKindOrText::Property(SongProperty::Artist) => "Artist".to_owned(),
+                PropertyKindOrText::Property(SongProperty::Album) => "Album".to_owned(),
+                PropertyKindOrText::Text(text) => format!("Text({text})"),
+                other => format!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(kinds, vec!["Artist", "Text( - )", "Album"]);
+
+        // Each part carries its own missing-value default, because a group's
+        // own default never applies while its parts resolve (`Song::as_line`).
+        assert!(
+            parts[0].default.as_ref().is_some_and(|d| matches!(
+                &d.kind,
+                PropertyKindOrText::Text(text) if text == "Unknown"
+            )),
+            "the artist part needs its own Unknown default"
+        );
+        assert!(
+            parts[2].default.as_ref().is_some_and(|d| matches!(
+                &d.kind,
+                PropertyKindOrText::Text(text) if text == "Unknown Album"
+            )),
+            "the album part needs its own Unknown Album default"
+        );
+        // **Brightness roles (2026-10-20, user).** The title and the duration
+        // are the scanned cells and carry one bright tone; the artist and the
+        // album are secondary and share one desaturated tone. Pinned here so a
+        // later default edit cannot quietly flatten the two levels.
+        let fg = |column: &SongTableColumn| {
+            column.prop.style.and_then(|style| style.fg)
+        };
+        let title_fg = fg(&columns.0[0]);
+        let duration_fg = fg(&columns.0[2]);
+        assert_eq!(title_fg, Some(Color::Rgb(0xd0, 0xd0, 0xd0)), "the title is bright");
+        assert_eq!(
+            duration_fg, title_fg,
+            "the duration is as bright as the title — both are scanned cells"
+        );
+        let artist_fg = parts[0].style.and_then(|style| style.fg);
+        let album_fg = parts[2].style.and_then(|style| style.fg);
+        assert_eq!(
+            artist_fg,
+            Some(Color::Rgb(0x9a, 0x9a, 0x9a)),
+            "the artist - album group sits a clear step below the bright tone"
+        );
+        assert_eq!(album_fg, artist_fg, "the album matches the artist, not white");
+        assert_ne!(
+            artist_fg,
+            Some(Color::White),
+            "the group is desaturated: nothing in it is ANSI white"
+        );
+        assert_ne!(
+            title_fg, artist_fg,
+            "the title and the artist must keep two distinct levels"
+        );
+        // Each cell's missing-value default is the same tone as its value, so
+        // `Unknown` never reads brighter than the text beside it.
+        assert_eq!(
+            parts[0]
+                .default
+                .as_ref()
+                .and_then(|d| d.style)
+                .and_then(|style| style.fg),
+            artist_fg
+        );
+        assert_eq!(
+            columns.0[0]
+                .prop
+                .default
+                .as_ref()
+                .and_then(|d| d.style)
+                .and_then(|style| style.fg),
+            title_fg
+        );
+    }
+
+    /// A context is needed to resolve a label only when it is not plain text;
+    /// the labels above are text, but `as_string` takes one regardless.
+    fn test_ctx() -> crate::ctx::Ctx {
+        crate::tests::fixtures::ctx(
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+        )
     }
 }
