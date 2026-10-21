@@ -1313,12 +1313,31 @@ impl LyricsPane {
         let has_context = !context_left.is_empty() || !context_right.is_empty();
         let header_h = 1 + usize::from(has_context) + usize::from(!body.is_empty());
         let credits_h = credits.len();
+        // **One column of margin on each side.** Every other info box in this
+        // pane is laid out against the area `render_frame` hands back, which
+        // keeps that margin; the stream/video box used to be drawn on the raw
+        // pane area, so its text sat flush against the left border and ran
+        // into the right one (reported 2026-10-20).
+        let area = Rect {
+            x: area.x.saturating_add(1),
+            width: area.width.saturating_sub(2),
+            ..area
+        };
         let [header_area, body_area, credits_area] = Layout::vertical([
                 Constraint::Length(header_h as u16),
                 Constraint::Min(0),
                 Constraint::Length(credits_h as u16),
             ])
             .areas(area);
+        // The description list is laid out from `body_area`'s top, so the
+        // header rows above it must not be claimed by the body as well. The
+        // stored `info_area` is this shifted rect, so hover and scrolling use
+        // the same cells the text occupies.
+        let body_area = Rect {
+            y: body_area.y.saturating_add(header_h as u16),
+            height: body_area.height.saturating_sub(header_h as u16),
+            ..body_area
+        };
         let duration = if crate::core::mpv::mpv_is_ui_source(ctx) {
             ctx.mpv.duration
         } else {
@@ -2259,5 +2278,109 @@ mod schedule_tests {
             "already on the anchor: the word selection is preserved"
         );
         std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod info_margin_tests {
+    use ratatui::{Terminal, backend::TestBackend};
+
+    use crate::{
+        shared::ytdlp::YtStreamInfo,
+        ui::panes::{Pane, lyrics::LyricsPane},
+    };
+
+    fn ctx() -> crate::ctx::Ctx {
+        let app = crossbeam::channel::unbounded();
+        let work = crossbeam::channel::unbounded();
+        let client = crossbeam::channel::unbounded();
+        Box::leak(Box::new(app.1.clone()));
+        Box::leak(Box::new(work.1.clone()));
+        Box::leak(Box::new(client.1.clone()));
+        crate::tests::fixtures::ctx((app.0, app.1), (work.0, work.1), (client.0, client.1))
+    }
+
+    /// The row text of a test buffer: one string per line, with each cell's
+    /// symbol (a styled blank counts as a space).
+    fn lines(terminal: &Terminal<TestBackend>) -> Vec<String> {
+        let buffer = terminal.backend().buffer();
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    /// **The reported bug.** The stream/video info box was drawn on the raw
+    /// pane area, so its text sat flush against the left border and ran into
+    /// the right one. Every other info box in this pane keeps one column of
+    /// margin on each side; this one must too.
+    #[test]
+    fn the_stream_info_box_keeps_a_column_of_margin_each_side() {
+        let mut ctx = ctx();
+        let link = "https://www.youtube.com/watch?v=abcdefghijk";
+        ctx.yt_info.borrow_mut().insert(
+            link.to_owned(),
+            YtStreamInfo {
+                title: "Smooth".to_owned(),
+                channel: Some("Santana".to_owned()),
+                description: Some(
+                    "Official Video for \"Smooth\" by Santana, with a body long enough \
+                     to need more than one line of the info box so the wrap width is \
+                     exercised as well."
+                        .to_owned(),
+                ),
+                duration: Some(256.0),
+                ..Default::default()
+            },
+        );
+        // A song is present but the box renders from the stream info.
+        let song = crate::mpd::commands::Song {
+            id: 1,
+            file: link.to_owned(),
+            ..Default::default()
+        };
+        ctx.queue = vec![song];
+        ctx.status.state = crate::mpd::commands::State::Play;
+        ctx.status.songid = Some(1);
+
+        let backend = TestBackend::new(60, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut pane = LyricsPane::new(&ctx);
+        terminal
+            .draw(|frame| {
+                pane.render(frame, frame.area(), &ctx).unwrap();
+            })
+            .unwrap();
+
+        let rendered = lines(&terminal);
+        let text_rows: Vec<&String> =
+            rendered.iter().filter(|row| row.trim_end().chars().any(|c| c != ' ')).collect();
+        assert!(!text_rows.is_empty(), "the info box must render something: {rendered:#?}");
+
+        for (idx, row) in rendered.iter().enumerate() {
+            let trimmed = row.trim_end();
+            if trimmed.is_empty() {
+                continue;
+            }
+            assert!(
+                !trimmed.starts_with(' ') || trimmed.chars().next() == Some(' '),
+                "row {idx} keeps its left margin"
+            );
+            assert_eq!(
+                row.chars().next(),
+                Some(' '),
+                "row {idx} must start one column in, got {:?}",
+                row
+            );
+            assert!(
+                trimmed.chars().count() < 60,
+                "row {idx} must not run into the right border, got {:?}",
+                trimmed
+            );
+        }
     }
 }
