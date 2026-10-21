@@ -4,6 +4,9 @@ pub mod command;
 pub mod config_watcher;
 pub mod event_loop;
 pub mod input;
+/// One running instance per user: the lock file that refuses a second TUI
+/// (two of them resolve the same queue rows and fight over playback).
+pub mod instance_lock;
 pub mod lyrics_watcher;
 pub mod mpv;
 /// `s2udio rq start|stop|open` — shell control of the standalone rqbit

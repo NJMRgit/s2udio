@@ -14,6 +14,7 @@ use crate::{
         Config, ConfigFile, cli::{Args, Command, RemoteCmd},
         cli_config::CliConfig,
     },
+    core::instance_lock,
     mpd::{client::Client, mpd_client::MpdClient, proto_client::SocketClient},
     shared::{
         config_read::{
@@ -354,6 +355,25 @@ fn run_tui(args: &mut Args) -> Result<()> {
     // any panic from here on is recorded with a backtrace and flushed to
     // the (now persistent, appended) log file.
     logging::install_panic_hook();
+    // **One running instance per user.** Two TUIs drive the same MPD queue
+    // while each keeps its own stream-buffer proxy, look ahead and
+    // entry-resolve bookkeeping — and all of it keys on queue ids that only
+    // stay stable while one writer owns the queue. The reported result was a
+    // queue of pasted stream links that never played: both instances resolved
+    // the same rows, both replaced them (a new id each time), and each one's
+    // play landed on an id the other had already swapped out. See
+    // `core::instance_lock` and `backend/diagnostics` §One instance per user.
+    // Held until this function returns; the kernel releases it on exit, so a
+    // crash never leaves a lock behind.
+    let _instance_lock = match instance_lock::claim()? {
+        instance_lock::Claim::Held(lock) => {
+            Some(lock)
+        }
+        instance_lock::Claim::MultipleAllowed => None,
+    };
+    if let Some(lock) = &_instance_lock {
+        log::debug!(path:? = lock.path(); "Holding the single-instance lock");
+    }
     log::debug!(rev = env!("VERGEN_GIT_DESCRIBE"); "s2udio started");
     std::thread::Builder::new()
         .name("dependency_check".to_string())
