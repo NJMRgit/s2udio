@@ -1,11 +1,15 @@
-use std::{io::Write, os::unix::net::UnixStream, path::PathBuf, time::Duration};
+use std::{
+    io::Write,
+    os::unix::net::UnixStream,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use anyhow::Result;
 use commands::query_tab::QueryCommand;
 use crossbeam::channel::Sender;
 use in_flight_ipc::{InFlightIpcCommand, IpcCommandError};
 use ipc_stream::IpcStream;
-use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use strum::IntoDiscriminant;
 
@@ -17,8 +21,9 @@ use crate::{
         cli::{RemoteCmd, RemoteCmdDiscriminants},
     },
     shared::ipc::commands::{
-        index_lrc::IndexLrcCommand, keybind::KeybindCommand, set::SetIpcCommand,
-        status_message::StatusMessageCommand, switch_tab::SwitchTabCommand, tmux::TmuxHookCommand,
+        index_lrc::IndexLrcCommand, keybind::KeybindCommand, raise::RaiseCommand,
+        set::SetIpcCommand, status_message::StatusMessageCommand, switch_tab::SwitchTabCommand,
+        tmux::TmuxHookCommand,
     },
 };
 
@@ -32,25 +37,34 @@ pub fn get_socket_path(pid: u32) -> PathBuf {
     temp
 }
 
+/// Whether `filename` is an s2udio IPC socket name.
+///
+/// Sockets are pid-scoped and named `s2u-<pid>.sock`; the `rmpc-` prefix is
+/// the legacy name and stays recognised so an upgrade does not strand a
+/// running session. This is the same pairing the stale-socket sweeper uses
+/// (`core/socket.rs`), and it must stay in sync with [`get_socket_path`] —
+/// the listing used to match only `rmpc-`, so a pid-less remote command found
+/// nothing at all and silently did nothing.
+fn is_socket_name(filename: &str) -> bool {
+    (filename.starts_with("s2u-") || filename.starts_with("rmpc-")) && filename.ends_with(".sock")
+}
+
+/// Every s2udio socket file in `dir`, sorted so fan-out order is stable.
+fn socket_paths_in(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let mut paths = Vec::new();
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let filename = entry.file_name();
+        if is_socket_name(&filename.to_string_lossy()) {
+            paths.push(entry.path());
+        }
+    }
+    paths.sort();
+    Ok(paths)
+}
+
 pub fn list_all_socket_paths() -> Result<impl Iterator<Item = PathBuf>> {
-    let res: Vec<_> = std::fs::read_dir(std::env::temp_dir())?
-        .map(|entry| -> Result<Option<_>> {
-            let entry = entry?;
-            let filename = entry.file_name();
-            let filename = filename.to_string_lossy();
-            if filename.starts_with("rmpc-") && filename.ends_with(".sock") {
-                Ok(Some(entry.path()))
-            } else {
-                Ok(None)
-            }
-        })
-        .filter_map(|entry| match entry {
-            Ok(Some(val)) => Some(Ok(val)),
-            Ok(None) => None,
-            Err(err) => Some(Err(err)),
-        })
-        .try_collect()?;
-    Ok(res.into_iter())
+    Ok(socket_paths_in(&std::env::temp_dir())?.into_iter())
 }
 
 pub(crate) trait SocketCommandExecute {
@@ -71,6 +85,7 @@ pub(crate) enum SocketCommand {
     Set(Box<SetIpcCommand>),
     Keybind(KeybindCommand),
     SwitchTab(SwitchTabCommand),
+    Raise(RaiseCommand),
     Query(QueryCommand),
 }
 
@@ -89,6 +104,7 @@ impl SocketCommandExecute for SocketCommand {
             SocketCommand::Set(cmd) => cmd.execute(event_tx, work_tx, stream, config),
             SocketCommand::Keybind(cmd) => cmd.execute(event_tx, work_tx, stream, config),
             SocketCommand::SwitchTab(cmd) => cmd.execute(event_tx, work_tx, stream, config),
+            SocketCommand::Raise(cmd) => cmd.execute(event_tx, work_tx, stream, config),
             SocketCommand::Query(cmd) => cmd.execute(event_tx, work_tx, stream, config),
         }
     }
@@ -169,5 +185,52 @@ impl RemoteCmd {
         }
 
         ExitCode::from(0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn scratch_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("s2u-ipc-{}-{tag}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("create scratch dir");
+        dir
+    }
+
+    #[test]
+    fn socket_listing_finds_both_prefixes_and_ignores_other_files() {
+        let dir = scratch_dir("listing");
+        for name in [
+            "s2u-11.sock",
+            "rmpc-22.sock",
+            "s2u-33.txt",
+            "other.sock",
+            "s2u-44.sock.bak",
+        ] {
+            fs::write(dir.join(name), b"").expect("write fixture");
+        }
+
+        let found: Vec<String> = socket_paths_in(&dir)
+            .expect("list sockets")
+            .iter()
+            .map(|path| path.file_name().expect("file name").to_string_lossy().into_owned())
+            .collect();
+
+        // Sorted, and only the two socket names.
+        assert_eq!(found, vec!["rmpc-22.sock", "s2u-11.sock"]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_bound_socket_name_is_discoverable() {
+        // The listing and the binder must agree on the name, or a pid-less
+        // remote command runs over an empty list and silently does nothing
+        // (the regression this fix removes).
+        let path = get_socket_path(4321);
+        let name = path.file_name().expect("socket name").to_string_lossy();
+        assert!(is_socket_name(&name), "{name} is not a socket name");
     }
 }
