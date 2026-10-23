@@ -653,6 +653,25 @@ fn main_task<B: Backend + std::io::Write>(
                     }
                     render_wanted = true;
                 }
+                AppEvent::RemoteRaise { tab, mut stream } => {
+                    // Reuse the tab-switch arm so an unknown tab produces the
+                    // same message it does for `remote switchtab`.
+                    if let Some(tab_name) = tab {
+                        let _ = ctx.app_event_sender.send(AppEvent::RemoteSwitchTab { tab_name });
+                    }
+                    // Raising spawns window-manager tools and may poll the
+                    // journal: never do it on the UI thread.
+                    std::thread::spawn(move || match crate::shared::raise::run() {
+                        Ok(backend) => {
+                            log::info!(backend:% = backend; "Raised the s2udio window");
+                            stream.insert_response("backend", backend);
+                        }
+                        Err(err) => {
+                            status_error!("Could not raise the s2udio window: {err}");
+                            stream.error(err.to_string());
+                        }
+                    });
+                }
                 AppEvent::IpcQuery { mut stream, targets } => {
                     for target in targets {
                         match target {

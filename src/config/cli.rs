@@ -372,6 +372,12 @@ pub enum RemoteCmd {
     Keybind { key: String },
     /// Switch to a specific tab by name
     SwitchTab { tab: String },
+    /// Bring the running s2udio window to the front
+    Raise {
+        /// Tab to switch to after the window is raised
+        #[arg(long)]
+        tab: Option<String>,
+    },
     /// Query the currently active tab name
     Query { #[arg(required = true)] targets: Vec<RemoteCommandQuery> },
 }

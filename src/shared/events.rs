@@ -541,6 +541,10 @@ pub(crate) enum AppEvent {
     RemoteSwitchTab {
         tab_name: String,
     },
+    RemoteRaise {
+        tab: Option<String>,
+        stream: IpcStream,
+    },
     IpcQuery {
         stream: IpcStream,
         targets: Vec<RemoteCommandQuery>,

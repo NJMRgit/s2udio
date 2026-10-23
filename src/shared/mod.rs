@@ -23,6 +23,7 @@ pub mod mpdris2;
 pub mod paths;
 pub mod percent;
 pub mod playlist_file;
+pub mod raise;
 pub mod ring_vec;
 pub mod song_ext;
 pub mod string_util;

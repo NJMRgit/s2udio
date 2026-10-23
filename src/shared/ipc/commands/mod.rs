@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use index_lrc::IndexLrcCommand;
 use keybind::KeybindCommand;
 use query_tab::QueryCommand;
+use raise::RaiseCommand;
 use set::SetIpcCommand;
 use status_message::StatusMessageCommand;
 use switch_tab::SwitchTabCommand;
@@ -18,6 +19,7 @@ use crate::{
 pub(super) mod index_lrc;
 pub mod keybind;
 pub(super) mod query_tab;
+pub(super) mod raise;
 pub(super) mod set;
 pub(super) mod status_message;
 pub mod switch_tab;
@@ -75,6 +77,9 @@ impl TryFrom<&RemoteCmd> for SocketCommand {
             }
             RemoteCmd::SwitchTab { tab } => {
                 Ok(SocketCommand::SwitchTab(SwitchTabCommand { tab: tab.clone() }))
+            }
+            RemoteCmd::Raise { tab } => {
+                Ok(SocketCommand::Raise(RaiseCommand { tab: tab.clone() }))
             }
             RemoteCmd::Query { targets } => {
                 Ok(SocketCommand::Query(QueryCommand { targets: targets.clone() }))
