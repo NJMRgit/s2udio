@@ -576,7 +576,17 @@ impl RadioPane {
     /// removed again once the song changes or playback stops).
     fn play_selected(&mut self, ctx: &Ctx) -> Result<()> {
         let Some(station) = self.selected_station() else { return Ok(()) };
-        let url = station.url;
+        Self::play_station(ctx, &station);
+        Ok(())
+    }
+    /// Start `station` as the temporary queue entry every play path here uses
+    /// (`crate::shared::temp_play`): the result is routed to this pane, which
+    /// records the row so it can be dropped when playback moves on, and a
+    /// station MPD refuses to open leaves no hidden row behind and reports
+    /// `Could not play <station> — <reason>`.
+    fn play_station(ctx: &Ctx, station: &RadioStation) {
+        let url = station.url.clone();
+        let label = station.name.clone();
         ctx.query()
             .id(PLAY)
             .replace_id(PLAY)
@@ -584,11 +594,9 @@ impl RadioPane {
                 tree: TreeBrowserArgs::default(),
             })
             .query(move |client| {
-                let id = client.add_id(&url, None)?;
-                client.play_id(id)?;
+                let id = crate::shared::temp_play::add_and_play(client, &url, &label)?;
                 Ok(MpdQueryResult::Any(Box::new(id)))
             });
-        Ok(())
     }
     /// `d`/`→`/Enter on the region tree: expand a country, or enter a
     /// leaf region — the cursor moves to its station list.
@@ -708,13 +716,14 @@ impl RadioPane {
                         .add_item(
                             "Play now",
                             {
-                                let url = url.clone();
+                                // The menu's play goes through the same
+                                // temporary-entry path as `d`/double-click:
+                                // a command result never reaches the pane, so
+                                // this row used to be recorded nowhere and
+                                // was never dropped again.
+                                let station = station.clone();
                                 move |ctx| {
-                                    ctx.command(move |client| {
-                                        let id = client.add_id(&url, None)?;
-                                        client.play_id(id)?;
-                                        Ok(())
-                                    });
+                                    Self::play_station(ctx, &station);
                                     Ok(())
                                 }
                             },
@@ -1930,5 +1939,137 @@ mod paste_play_tests {
         )
         .unwrap();
         assert_eq!(pane.station_list.offset(), 0, "wheel up scrolls the stations viewport back");
+    }
+}
+
+/// **End to end** against a scripted MPD: a station that does not open.
+///
+/// The reported defect (2026-10-24): selecting a web radio station that MPD
+/// could not open left its `addid` row in the queue for good. A temp row is
+/// hidden from the Queue pane and only a successful play records its id, so
+/// each retry added one more dead row nothing could ever remove — and MPD
+/// later walked over them. The play is now transactional
+/// (`crate::shared::temp_play`): the row is dropped again, the failure names
+/// the station, and the pane records nothing.
+#[cfg(test)]
+mod station_failure_tests {
+    use super::{PLAY, RadioPane, RadioStation, StationRow};
+    use crate::{
+        ctx::Ctx,
+        shared::events::ClientRequest,
+        tests::fixtures::{ctx as pane_ctx_fixture, fake_mpd_server::FakeMpdServer},
+        ui::{panes::Pane, tree_browser::TreeBrowserCore},
+    };
+
+    const STATION: &str = "http://streams.calmradio.com:1228/";
+    const NAME: &str = "CALMRADIO.COM - Solo Piano";
+
+    struct Rig {
+        ctx: Ctx,
+        pane: RadioPane,
+        client: crate::mpd::client::Client<'static>,
+        client_rx: crossbeam::channel::Receiver<ClientRequest>,
+        server: FakeMpdServer,
+    }
+
+    impl Rig {
+        fn new() -> Self {
+            // One row already queued, so the queue is not empty when the
+            // station is added.
+            let server = FakeMpdServer::start(vec![(1, "/music/local.flac".to_owned())]);
+            server.state().failing_uris.push(STATION.to_owned());
+            let client = server.client();
+            let app = crossbeam::channel::unbounded();
+            let work = crossbeam::channel::unbounded();
+            let client_channel = crossbeam::channel::unbounded();
+            let client_rx = client_channel.1.clone();
+            let ctx = pane_ctx_fixture(
+                (app.0, app.1),
+                (work.0, work.1),
+                (client_channel.0, client_channel.1),
+            );
+            let mut pane = RadioPane::new(&ctx);
+            pane.stations = vec![StationRow::Favourite(RadioStation {
+                name: NAME.to_owned(),
+                url: STATION.to_owned(),
+            })];
+            pane.station_list.select(Some(0));
+            Self { ctx, pane, client, client_rx, server }
+        }
+
+        /// Run the queued requests exactly as the client thread does; returns
+        /// the play query's error, when it has one.
+        fn run_play(&mut self) -> Option<String> {
+            let request = self.client_rx.try_recv().expect("the station play dispatched a query");
+            let ClientRequest::Query(query) = request else {
+                panic!("a station play must go through a query, got a command");
+            };
+            assert_eq!(query.id, PLAY, "the result must reach the radio pane");
+            match (query.callback)(&mut self.client) {
+                Ok(_) => None,
+                Err(err) => Some(err.to_string()),
+            }
+        }
+    }
+
+    /// The row a refused station play added is gone again, and the failure
+    /// names the station instead of MPD's internal `playid` command error.
+    #[test]
+    fn a_station_mpd_cannot_open_leaves_no_hidden_row() {
+        let mut rig = Rig::new();
+        rig.pane.play_selected(&rig.ctx).expect("the play is dispatched");
+
+        let message = rig.run_play().expect("the refused station reports a failure");
+        assert_eq!(
+            message,
+            format!("Could not play {NAME} — got HTTP status 503"),
+            "the status line names the station and MPD's reason"
+        );
+
+        assert!(
+            !rig.server.files().iter().any(|file| file == STATION),
+            "the dead station must not stay in MPD's queue: {:?}",
+            rig.server.files()
+        );
+        let commands = rig.server.commands();
+        assert!(
+            commands.iter().any(|command| command.starts_with("addid ")),
+            "the row was added: {commands:?}"
+        );
+        assert!(
+            commands.iter().any(|command| command.starts_with("playid ")),
+            "playid was attempted: {commands:?}"
+        );
+        assert!(
+            commands.iter().any(|command| command.starts_with("deleteid ")),
+            "the row of the refused play was dropped: {commands:?}"
+        );
+        assert_eq!(rig.pane.temp_play_id(), None, "a failed play records no temp id");
+    }
+
+    /// The same path with a station MPD *does* open keeps its row, records
+    /// the temp id and lets the Queue pane hide it — the fix must not turn a
+    /// working station into a dropped row.
+    #[test]
+    fn a_station_that_opens_keeps_its_row_and_temp_id() {
+        let mut rig = Rig::new();
+        rig.server.state().failing_uris.clear();
+        rig.pane.play_selected(&rig.ctx).expect("the play is dispatched");
+
+        assert!(rig.run_play().is_none(), "the station starts");
+        let id = rig
+            .server
+            .snapshot()
+            .iter()
+            .find(|row| row.file == STATION)
+            .map(|row| row.id)
+            .expect("the station row stays queued");
+        assert_eq!(rig.server.playing_file().as_deref(), Some(STATION));
+
+        rig.pane
+            .on_query_finished(PLAY, crate::MpdQueryResult::Any(Box::new(id)), false, &rig.ctx)
+            .expect("the result is accepted");
+        assert_eq!(rig.pane.temp_play_id(), Some(id));
+        assert_eq!(rig.ctx.temp_play_id.get(), Some(id));
     }
 }

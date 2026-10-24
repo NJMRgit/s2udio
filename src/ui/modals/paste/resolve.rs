@@ -139,6 +139,23 @@ pub fn re_resolve_expired_queue_entry(ctx: &Ctx, file: &str, song_id: u32, play:
     resolve_queue_entry_with(ctx, file, song_id, play)
 }
 
+/// Whether MPD's decode-error recovery has anything to do for a queue row.
+///
+/// The recovery exists for rows the app can **re-resolve**: a tagged audio
+/// link, or a resolved stream whose signed URL (or buffered entry) is stale.
+/// A **radio station** — a plain http(s) URL nothing was resolved from — a
+/// Jellyfin stream, a torrent stream and a local file are none of those: the
+/// recovery cannot help them, and (2026-10-24) they must not spend its budget
+/// either. A run of station retries used to exhaust the four-per-ten-second
+/// budget, after which the next *genuine* unresolved row was left to MPD to
+/// skip silently.
+pub fn decode_error_row_is_resolvable(ctx: &Ctx, file: &str) -> bool {
+    if let Some((_, intent)) = tagged_stream_entry(file) {
+        return intent.is_audio();
+    }
+    expired_stream_original_url(ctx, file).is_some()
+}
+
 /// The shared body of the three entry points above; `play` decides whether the
 /// replacement starts playing ([`YtAction::ReplaceAndPlay`]) or is only put
 /// in place ([`YtAction::ReplaceInPlace`]).
@@ -669,13 +686,20 @@ pub fn apply_resolved_streams(
         YtAction::Play => {
             arm_start_offsets(ctx, &info, &player_urls);
             let url = urls[0].clone();
+            let label = info
+                .first()
+                .map(|item| item.title.trim().to_owned())
+                .filter(|title| !title.is_empty())
+                .unwrap_or_else(|| "the stream".to_owned());
+            // One transactional temp play: a stream MPD refuses to open
+            // leaves no hidden row behind and the status line names what
+            // failed (`shared::temp_play`).
             ctx.query()
                 .id(PASTE_PLAY)
                 .replace_id(PASTE_PLAY)
                 .target(PaneType::Radio { tree: TreeBrowserArgs::default() })
                 .query(move |client| {
-                    let id = client.add_id(&url, None)?;
-                    client.play_id(id)?;
+                    let id = crate::shared::temp_play::add_and_play(client, &url, &label)?;
                     Ok(crate::MpdQueryResult::Any(Box::new(id)))
                 });
         }

@@ -53,6 +53,14 @@ pub struct FakeMpdState {
     /// round `94dafaa` measured after an in-place swap. Recorded so a test can
     /// see the stale-id play that used to be swallowed.
     pub refused_playids: Vec<u32>,
+    /// Stream URIs MPD cannot open. A `playid` on such a row answers the
+    /// decoder ACK a dead station produces (`Failed to decode "…"; got HTTP
+    /// status 503`) and the row **stays queued**, exactly as MPD 0.24 does.
+    pub failing_uris: Vec<String>,
+    /// A media failure that arrives *after* `playid` was accepted: MPD
+    /// reports it only in `status`'s `error:` field, with the player stopped
+    /// on the row. This is the async half of the same defect.
+    pub error_field: Option<String>,
 }
 
 impl FakeMpdState {
@@ -64,6 +72,8 @@ impl FakeMpdState {
             playing: None,
             commands: Vec::new(),
             refused_playids: Vec::new(),
+            failing_uris: Vec::new(),
+            error_field: None,
         }
     }
 
@@ -281,8 +291,19 @@ fn handle_command(command: &str, state: &Arc<Mutex<FakeMpdState>>) -> String {
                 // measured after an in-place swap. Modelling the refusal is
                 // what makes a stale-id play fail here the way it fails live.
                 Some(id) if state.position_of(id).is_some() => {
-                    state.playing = Some(id);
-                    "OK\n".to_owned()
+                    let uri = state.file_of(id).unwrap_or_default().to_owned();
+                    if state.failing_uris.iter().any(|failing| *failing == uri) {
+                        // Open failure reported on the command itself: the
+                        // row stays in the playlist.
+                        state.error_field =
+                            Some(format!("Failed to decode \"{uri}\"; got HTTP status 503"));
+                        format!(
+                            "ACK [5@0] {{playid}} Failed to decode \"{uri}\"; got HTTP status 503\n"
+                        )
+                    } else {
+                        state.playing = Some(id);
+                        "OK\n".to_owned()
+                    }
                 }
                 Some(id) => {
                     state.refused_playids.push(id);
@@ -308,10 +329,20 @@ fn handle_command(command: &str, state: &Arc<Mutex<FakeMpdState>>) -> String {
                 None => "ACK [2@0] {deleteid} Bad song id\n".to_owned(),
             }
         }
-        "status" => "volume: 100\nrepeat: 0\nrandom: 1\nsingle: 0\nconsume: 0\n\
-                     playlist: 1\nplaylistlength: 3\nstate: play\nsong: 0\n\
-                     songid: 1\nnextsong: 1\nnextsongid: 2\nOK\n"
-            .to_owned(),
+        "status" => {
+            // The fixed literal the resolve/look-ahead tests rely on, plus a
+            // failure MPD reports only in `error:` (the async half of a
+            // stream that did not open).
+            let mut body = "volume: 100\nrepeat: 0\nrandom: 1\nsingle: 0\nconsume: 0\n\
+                            playlist: 1\nplaylistlength: 3\nstate: play\nsong: 0\n\
+                            songid: 1\nnextsong: 1\nnextsongid: 2\n"
+                .to_owned();
+            if let Some(error) = &state.error_field {
+                body.push_str(&format!("error: {error}\n"));
+            }
+            body.push_str("OK\n");
+            body
+        }
         "currentsong" => {
             let body = state
                 .playing

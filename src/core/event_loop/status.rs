@@ -92,6 +92,161 @@ impl StatusState {
     }
 }
 
+/// What MPD's `error:` field means for the app.
+///
+/// The status bar has one line per distinct error string, so the decision of
+/// what to say and what to do is made once here, not inline in the status
+/// handler.
+#[derive(Debug, PartialEq, Eq)]
+enum MpdErrorPlan {
+    /// Not a failed decode — a broken database, a state-dir problem, a lost
+    /// file. MPD's own text plus the setup advice is the right report
+    /// (round 52, GitHub issue #1 symptom 3).
+    Other,
+    /// A queue row the app can **re-resolve**: a tagged `#s2u-audio` link
+    /// (round 91) or a resolved stream whose signed URL / buffered entry went
+    /// stale (round 105). The budgeted recovery runs, as before.
+    Recover { uri: String, song_id: u32 },
+    /// A stream MPD could not open and nothing can be resolved from — a radio
+    /// station, a Jellyfin stream, a torrent stream, a local file.
+    ///
+    /// `temp_id` is `Some` when MPD is stopped on the row the app itself
+    /// started as a temporary play: `playid` had already been accepted, so
+    /// the pane recorded the id, and the failure surfaced later through this
+    /// field. The hidden row is then dropped and the failure is reported.
+    /// `None` covers rows the app does not own right now (a stale hidden row
+    /// MPD skipped, a next-song prefetch): only the log needs those — an
+    /// interactive play already reported its own failure.
+    OpenFailed { uri: String, reason: String, temp_id: Option<u32> },
+}
+
+/// Report MPD's `error:` field, and recover what can be recovered.
+///
+/// Three classes, in [`MpdErrorPlan`]:
+///
+/// - a broken db / state dir keeps MPD's message and the setup advice;
+/// - a row the app can re-resolve runs the round-91/105 recovery under the
+///   2026-10-15 budget;
+/// - a stream nothing can be resolved from (a radio station, a Jellyfin
+///   stream, a local file) says why it did not play and drops the hidden
+///   temp row when it is the one the app started.
+///
+/// **A failed station never spends the resolve budget** (2026-10-24). It used
+/// to: the budget was checked before the row's kind was known, so every
+/// station that was down — and every retry of one — took a recovery slot. A
+/// burst of station retries then exhausted the four-per-ten-second budget and
+/// the next *genuine* unresolved YouTube row was left to MPD to skip, silently.
+fn handle_mpd_error(ctx: &Ctx, state: &mut StatusState, err: &str) {
+    match plan_mpd_error(ctx, err) {
+        MpdErrorPlan::Other => {
+            status_warn!("MPD: {err} — re-run setup.sh or check the MPD state dir permissions");
+        }
+        MpdErrorPlan::Recover { uri, song_id } => {
+            // 2026-10-15: every entry MPD skips would spawn a full `yt-dlp`
+            // resolve, so a run of unresolved rows turns into an unbounded
+            // chain (the resolve storm). Once the budget is spent the row is
+            // left to MPD and said once: the queue degrades to skipping
+            // instead of stalling on resolves.
+            if !state.may_recover_decode_error(Instant::now()) {
+                log::warn!(
+                    song_id, uri = uri.as_str();
+                    "Too many stream decode failures in a row; leaving the rest to MPD"
+                );
+                status_warn!(
+                    "Several queued streams failed to open; skipping them instead of resolving each one"
+                );
+                state.last_reported_mpd_error = Some(err.to_owned());
+                return;
+            }
+            // Round 98: play the replacement only when MPD is actually stuck
+            // on this entry (it is the current song, or playback is stopped).
+            // A next-song **prefetch** failure names an entry MPD has not
+            // reached yet; playing it there cut the current track short, so
+            // such an entry is only swapped in place and MPD plays it when it
+            // gets there.
+            let stuck = ctx.status.songid == Some(song_id) || ctx.status.state == State::Stop;
+            let resolved = if crate::shared::ytdlp::tagged_stream_entry(&uri).is_some() {
+                if stuck {
+                    crate::ui::modals::paste::resolve_tagged_queue_entry(ctx, &uri, song_id)
+                } else {
+                    crate::ui::modals::paste::resolve_tagged_queue_entry_in_place(
+                        ctx, &uri, song_id,
+                    )
+                }
+            } else {
+                crate::ui::modals::paste::re_resolve_expired_queue_entry(ctx, &uri, song_id, stuck)
+            };
+            if resolved {
+                state.last_reported_mpd_error = Some(err.to_owned());
+            }
+        }
+        MpdErrorPlan::OpenFailed { uri, reason, temp_id } => {
+            if let Some(id) = temp_id {
+                // The station this play started did not open even though
+                // `playid` had returned. The pane recorded the row as a temp
+                // entry; nothing else would ever remove it (a temp row is
+                // hidden from the Queue pane), so it is dropped here and the
+                // user is told why, instead of MPD's internal command error
+                // plus the state-dir advice.
+                let reason =
+                    if reason.is_empty() { "MPD could not open it".to_owned() } else { reason };
+                status_error!("Could not play the stream — {reason}");
+                ctx.temp_play_id.set(None);
+                ctx.command(move |client| {
+                    // Best-effort: a stop or `consume` may have dropped it.
+                    if let Err(err) = client.delete_id(id) {
+                        log::debug!(
+                            error:? = err, id, uri = uri.as_str();
+                            "Could not drop the stream row MPD failed to open"
+                        );
+                    }
+                    Ok(())
+                });
+            } else {
+                log::warn!(
+                    uri = uri.as_str(), reason = reason.as_str();
+                    "MPD could not open a stream the app did not start"
+                );
+            }
+            state.last_reported_mpd_error = Some(err.to_owned());
+        }
+    }
+}
+
+/// Classify MPD's `error:` field for [`handle_mpd_error`].
+fn plan_mpd_error(ctx: &Ctx, err: &str) -> MpdErrorPlan {
+    let Some((uri, reason)) = decode_failure(err) else {
+        return MpdErrorPlan::Other;
+    };
+    let song_id = ctx.queue.iter().find(|song| song.file == uri).map(|song| song.id);
+    if let Some(song_id) = song_id
+        && crate::ui::modals::paste::decode_error_row_is_resolvable(ctx, &uri)
+    {
+        return MpdErrorPlan::Recover { uri, song_id };
+    }
+    // Only a stopped player on the row the app started can be the async half
+    // of a temporary play: the `playid` ACK path never sets this field, and a
+    // row MPD is still playing is not a failure to clean up.
+    let temp_id = song_id.filter(|id| {
+        ctx.temp_play_id.get() == Some(*id)
+            && ctx.status.songid == Some(*id)
+            && ctx.status.state == State::Stop
+    });
+    MpdErrorPlan::OpenFailed { uri, reason, temp_id }
+}
+
+/// MPD's decode failure names the row it could not open and the decoder's
+/// reason: `Failed to decode "http://…"; got HTTP status 503`.
+///
+/// `None` for any other `error:` field (a broken db, a lost file), which keeps
+/// the generic report.
+fn decode_failure(err: &str) -> Option<(String, String)> {
+    let rest = err.strip_prefix("Failed to decode \"")?;
+    let (uri, rest) = rest.split_once('"')?;
+    let reason = rest.trim_start_matches(';').trim().to_owned();
+    Some((uri.to_owned(), reason))
+}
+
 pub(super) fn apply_replay_gain(ctx: &Ctx) {
     let Some(mode) = crate::config::state::AppStateFile::load().mpd_replay_gain else {
         return;
@@ -175,99 +330,16 @@ pub(super) fn handle_mpd_command_finished(
             let current_updating_db = ctx.status.updating_db;
             let current_playlist = ctx.status.lastloadedplaylist.take();
             let previous_status = std::mem::replace(&mut ctx.status, status);
-            // Round 52 (GitHub issue #1 symptom 3): surface
-            // MPD's `error:` field — a broken db / state dir
-            // appears verbatim there — in the status bar. One
-            // message per distinct error string (a per-poll
-            // repeat stays quiet); a recovery line when the
-            // error clears.
+            // One message per distinct error string (a per-poll repeat stays
+            // quiet); a recovery line when the error clears. What the message
+            // is, and whether anything is recovered, depends on the failure:
+            // see [`handle_mpd_error`].
             if let Some(err) = &ctx.status.error {
                 if state.last_reported_mpd_error.as_deref() != Some(err.as_str()) {
-                    status_warn!(
-                        "MPD: {err} — re-run setup.sh or check the MPD state dir permissions"
-                    );
-                    state.last_reported_mpd_error = Some(err.clone());
+                    handle_mpd_error(ctx, state, err);
                 }
             } else if state.last_reported_mpd_error.take().is_some() {
                 status_info!("MPD: error cleared — MPD is ready");
-            }
-            // Round 91: MPD cannot open a queued stream
-            // **link** (the `watch?v=ID#s2u-audio`
-            // placeholder a queued web stream starts as): it
-            // reports the failed decode in `error:` and leaves
-            // NO current song, so the song-id hooks never see
-            // that entry and the queue would stall silently.
-            // Round 105: the error can also name a **resolved
-            // stream whose signed URL expired** — the same
-            // silence, except MPD has just played a few
-            // seconds of the dead URL and skipped on. Recover
-            // here: the entry the error names is resolved (a
-            // tagged link) or re-resolved from its original
-            // link (an expired stream) and replaced. The
-            // generic MPD warning is suppressed for this case
-            // (the row was never something MPD was meant to
-            // open as-is).
-            let error_link = ctx
-                .status
-                .error
-                .as_deref()
-                .and_then(|err| err.split('"').nth(1))
-                .map(str::to_owned)
-                .and_then(|uri| {
-                    ctx.queue
-                        .iter()
-                        .find(|song| song.file == uri)
-                        .map(|song| (uri.clone(), song.id))
-                });
-            if let Some((uri, song_id)) = error_link {
-                // 2026-10-15: the recovery budget. Every entry MPD skips spawns
-                // a full `yt-dlp` resolve, so a run of unresolved rows turns
-                // into an unbounded chain (the resolve storm). Once the budget
-                // is spent the row is left to MPD and said once: the queue
-                // degrades to skipping instead of stalling on resolves.
-                if !state.may_recover_decode_error(std::time::Instant::now()) {
-                    log::warn!(
-                        song_id, uri = uri.as_str();
-                        "Too many stream decode failures in a row; leaving the rest to MPD"
-                    );
-                    status_warn!(
-                        "Several queued streams failed to open; skipping them instead of resolving each one"
-                    );
-                    state.last_reported_mpd_error = ctx.status.error.clone();
-                } else {
-                    // Round 98: play the replacement only when MPD
-                    // is actually stuck on this entry (it is the
-                    // current song, or playback is stopped). A
-                    // next-song **prefetch** failure names an
-                    // entry MPD has not reached yet; playing it
-                    // there cut the current track short, so such
-                    // an entry is only swapped in place and MPD
-                    // plays it when it gets there.
-                    let stuck =
-                        ctx.status.songid == Some(song_id) || ctx.status.state == State::Stop;
-                    // Round 105: a row the error names that is
-                    // neither a tagged link nor an expired stream
-                    // (a radio URL, a plain http URL) resolves to
-                    // `false` and keeps today's behavior.
-                    let resolved = if crate::shared::ytdlp::tagged_stream_entry(&uri).is_some() {
-                        if stuck {
-                            crate::ui::modals::paste::resolve_tagged_queue_entry(
-                                ctx, &uri, song_id,
-                            )
-                        } else {
-                            crate::ui::modals::paste::resolve_tagged_queue_entry_in_place(
-                                ctx, &uri, song_id,
-                            )
-                        }
-                    } else {
-                        crate::ui::modals::paste::re_resolve_expired_queue_entry(
-                            ctx, &uri, song_id, stuck,
-                        )
-                    };
-                    if resolved {
-                        state.last_reported_mpd_error = ctx.status.error.clone();
-                    }
-                }
             }
             let new_playlist = ctx.status.lastloadedplaylist.as_ref();
             let mut song_changed = false;
@@ -893,5 +965,167 @@ mod decode_recovery_budget_tests {
             state.may_recover_decode_error(at(DECODE_RECOVERY_WINDOW.as_secs())),
             "the window has elapsed, so one slot is free"
         );
+    }
+}
+
+#[cfg(test)]
+mod mpd_error_plan_tests {
+    use super::{
+        DECODE_RECOVERY_LIMIT, MpdErrorPlan, StatusState, handle_mpd_error, plan_mpd_error,
+    };
+    use crate::{
+        ctx::Ctx,
+        mpd::commands::{Song, State},
+        shared::events::{ClientRequest, WorkRequest},
+        ui::modals::paste::YtAction,
+    };
+
+    const STATION: &str = "http://streams.calmradio.com:1228/";
+
+    fn station_failure() -> String {
+        format!("Failed to decode \"{STATION}\"; got HTTP status 503")
+    }
+
+    fn rig(
+        queue: Vec<(u32, &str)>,
+        songid: Option<u32>,
+        state: State,
+    ) -> (
+        Ctx,
+        crossbeam::channel::Receiver<ClientRequest>,
+        crossbeam::channel::Receiver<WorkRequest>,
+    ) {
+        let app = crossbeam::channel::unbounded();
+        let work = crossbeam::channel::unbounded();
+        let client = crossbeam::channel::unbounded();
+        // The fixture's receivers must stay alive: the code under test sends
+        // on all three channels.
+        Box::leak(Box::new(app.1.clone()));
+        let work_rx = work.1.clone();
+        let client_rx = client.1.clone();
+        let mut ctx = crate::tests::fixtures::ctx(
+            (app.0, app.1),
+            (work.0, work.1),
+            (client.0, client.1),
+        );
+        ctx.queue = queue
+            .into_iter()
+            .map(|(id, file)| Song { id, file: file.to_owned(), ..Default::default() })
+            .collect();
+        ctx.status.songid = songid;
+        ctx.status.state = state;
+        (ctx, client_rx, work_rx)
+    }
+
+    /// A station that did not open is not something the app can resolve: the
+    /// failure names the station's row, and the row is the temp entry the app
+    /// started (MPD is stopped on it), so it is reported and dropped.
+    #[test]
+    fn a_dead_station_is_an_open_failure_of_its_temp_row() {
+        let (ctx, _client_rx, _work_rx) = rig(vec![(7, STATION)], Some(7), State::Stop);
+        ctx.temp_play_id.set(Some(7));
+
+        assert_eq!(
+            plan_mpd_error(&ctx, &station_failure()),
+            MpdErrorPlan::OpenFailed {
+                uri: STATION.to_owned(),
+                reason: "got HTTP status 503".to_owned(),
+                temp_id: Some(7),
+            }
+        );
+    }
+
+    /// A row MPD is *still playing* is not a failure to clean up: the status
+    /// line may say the stream stuttered, but deleting its row would stop the
+    /// station.
+    #[test]
+    fn a_playing_station_failure_does_not_own_its_row() {
+        let (ctx, _client_rx, _work_rx) = rig(vec![(7, STATION)], Some(7), State::Play);
+        ctx.temp_play_id.set(Some(7));
+
+        let plan = plan_mpd_error(&ctx, &station_failure());
+        assert!(
+            matches!(plan, MpdErrorPlan::OpenFailed { temp_id: None, .. }),
+            "a playing row is left alone, got {plan:?}"
+        );
+    }
+
+    /// A tagged link keeps the round-91 recovery, whatever its state.
+    #[test]
+    fn a_tagged_link_is_still_recoverable() {
+        let link = "https://www.youtube.com/watch?v=ABCDEF#s2u-audio";
+        let (ctx, _client_rx, _work_rx) = rig(vec![(9, link)], Some(9), State::Stop);
+        let err = format!("Failed to decode \"{link}\"; avformat_open_input() failed");
+
+        assert_eq!(
+            plan_mpd_error(&ctx, &err),
+            MpdErrorPlan::Recover { uri: link.to_owned(), song_id: 9 }
+        );
+    }
+
+    /// Anything that is not a decode failure keeps the generic report.
+    #[test]
+    fn a_state_directory_error_is_not_a_decode_failure() {
+        let (ctx, _client_rx, _work_rx) = rig(Vec::new(), None, State::Stop);
+        assert_eq!(
+            plan_mpd_error(&ctx, "Failed to open \"/home/u/.config/mpd/state\": Input/output error"),
+            MpdErrorPlan::Other
+        );
+    }
+
+    /// **The reported defect's second half.** A station that is down can be
+    /// retried as often as the user likes without spending the resolve
+    /// budget: the four-per-ten-seconds allowance exists for the `yt-dlp`
+    /// resolves, and a radio row has nothing to resolve. Before this, a run of
+    /// station retries consumed it and the next genuine unresolved row was
+    /// left to MPD to skip.
+    #[test]
+    fn a_failed_station_never_spends_the_resolve_budget() {
+        let (ctx, client_rx, work_rx) = rig(vec![(7, STATION)], Some(7), State::Stop);
+        ctx.temp_play_id.set(Some(7));
+        let err = station_failure();
+        let mut state = StatusState::new();
+
+        for _ in 0..(DECODE_RECOVERY_LIMIT + 3) {
+            // The caller reports each distinct error string once; the test
+            // forces every round through to model a user retrying.
+            state.last_reported_mpd_error = None;
+            handle_mpd_error(&ctx, &mut state, &err);
+        }
+
+        assert!(
+            state.decode_recoveries.is_empty(),
+            "a station failure is not a resolve: the budget is untouched"
+        );
+        assert_eq!(work_rx.try_iter().count(), 0, "nothing is resolved for a radio URL");
+        let commands = client_rx
+            .try_iter()
+            .filter(|request| matches!(request, ClientRequest::Command(_)))
+            .count();
+        assert_eq!(commands, 1, "the hidden station row is dropped exactly once");
+        assert_eq!(ctx.temp_play_id.get(), None, "the temp entry is no longer tracked");
+    }
+
+    /// A tagged row's failure still queues its resolve and spends the budget —
+    /// the radio fix must not weaken round 91/105.
+    #[test]
+    fn a_tagged_failure_still_resolves_and_spends_the_budget() {
+        let link = "https://www.youtube.com/watch?v=ABCDEF#s2u-audio";
+        let (ctx, _client_rx, work_rx) = rig(vec![(9, link)], Some(9), State::Stop);
+        let err = format!("Failed to decode \"{link}\"; avformat_open_input() failed");
+        let mut state = StatusState::new();
+
+        handle_mpd_error(&ctx, &mut state, &err);
+
+        let requests: Vec<WorkRequest> = work_rx.try_iter().collect();
+        assert_eq!(requests.len(), 1, "the link is resolved through yt-dlp");
+        assert!(
+            matches!(
+                requests[0],
+                WorkRequest::ResolveYtStreams { action: YtAction::ReplaceAndPlay(9), .. }
+            ),
+            "the stuck row is resolved and played"
+        );
+        assert_eq!(state.decode_recoveries.len(), 1, "one recovery was spent");
     }
 }

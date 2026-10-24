@@ -800,27 +800,33 @@ impl DirectoriesPane {
         let Some(DirOrSong::Song(song)) = self.selected_item() else {
             return Ok(());
         };
-        self.drop_temp_play(ctx);
         let file = song.file.clone();
+        // The media's display name is what a refused play names in the status
+        // line (`Could not play <name> — <reason>`).
+        let label = std::path::Path::new(&file)
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| file.clone());
         if crate::ui::modals::paste::downloads_dir()
             .is_some_and(|dir| std::path::Path::new(&file).starts_with(&dir))
         {
-            let title = std::path::Path::new(&file)
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| file.clone());
             crate::core::mpv::play_video_entries(
                 ctx,
-                vec![crate ::core::mpv::MpvPlaylistEntry::new(title, file, None)],
+                vec![crate ::core::mpv::MpvPlaylistEntry::new(label, file, None)],
             );
             return Ok(());
         }
+        // No pre-drop any more: the entry a new play replaces is dropped by
+        // `handle_play_result` once the new one is playing. Deleting the
+        // playing row first stops MPD (it drops the current song), so a slow
+        // or failed new play left silence behind.
         self.play_temp_url(
             ctx,
             PLAY_FILE,
             PaneType::Directories {
                 tree: TreeBrowserArgs::default(),
             },
+            label,
             file,
         );
         Ok(())

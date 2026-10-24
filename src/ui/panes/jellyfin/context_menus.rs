@@ -27,27 +27,26 @@ impl JellyfinPane {
                 |section| {
                     let mut section = section;
                     if is_audio_item {
+                        // The same labelled, transactional temp play the
+                        // pane's own Enter path uses.
+                        let play_item_name = item_name.clone();
                         section = section
                             .item(
                                 "Play now",
                                 move |ctx| {
-                                    ctx.query()
-                                        .id(JF_PLAY)
-                                        .replace_id(JF_PLAY)
-                                        .target(PaneType::Jellyfin {
-                                            tree: TreeBrowserArgs::default(),
-                                        })
-                                        .query(move |client| {
-                                            let id = client.add_id(&play_url, None)?;
-                                            client.play_id(id)?;
-                                            Ok(MpdQueryResult::Any(Box::new(id)))
-                                        });
+                                    jellyfin_play_temp(
+                                        ctx,
+                                        play_url.clone(),
+                                        play_item_name.clone(),
+                                    );
                                     Ok(())
                                 },
                             );
                     } else {
                         let mpv_url = play_url.clone();
                         let season_id = item.season_id.clone();
+                        let mpv_name = item_name.clone();
+                        let mpd_name = item_name.clone();
                         section = section
                             .item(
                                 "Play with MPV (video)",
@@ -55,7 +54,7 @@ impl JellyfinPane {
                                     JellyfinPane::play_video(
                                         ctx,
                                         mpv_url.clone(),
-                                        item_name.clone(),
+                                        mpv_name.clone(),
                                         item_id.clone(),
                                         season_id.clone(),
                                     )
@@ -65,7 +64,7 @@ impl JellyfinPane {
                             .item(
                                 "Play audio with MPD",
                                 move |ctx| {
-                                    jellyfin_play_temp(ctx, play_url.clone());
+                                    jellyfin_play_temp(ctx, play_url.clone(), mpd_name.clone());
                                     Ok(())
                                 },
                             );
@@ -131,27 +130,25 @@ impl JellyfinPane {
                 |section| {
                     let mut section = section;
                     if is_audio_item {
+                        // The same labelled, transactional temp play the
+                        // pane's own Enter path uses.
+                        let play_item_name = item_name.clone();
                         section = section
                             .item(
                                 "Play now",
                                 move |ctx| {
-                                    ctx.query()
-                                        .id(JF_PLAY)
-                                        .replace_id(JF_PLAY)
-                                        .target(PaneType::Jellyfin {
-                                            tree: TreeBrowserArgs::default(),
-                                        })
-                                        .query(move |client| {
-                                            let id = client.add_id(&play_url, None)?;
-                                            client.play_id(id)?;
-                                            Ok(MpdQueryResult::Any(Box::new(id)))
-                                        });
+                                    jellyfin_play_temp(
+                                        ctx,
+                                        play_url.clone(),
+                                        play_item_name.clone(),
+                                    );
                                     Ok(())
                                 },
                             );
                     } else {
                         let mpv_url = play_url.clone();
                         let season_id = item.season_id.clone();
+                        let item_name = item_name.clone();
                         section = section
                             .item(
                                 "Play with MPV (video)",

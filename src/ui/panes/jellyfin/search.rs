@@ -156,6 +156,7 @@ impl JellyfinPane {
                 PaneType::Jellyfin {
                     tree: TreeBrowserArgs::default(),
                 },
+                item.name.clone(),
                 url,
             );
             status_info!("Playing {}", item.name);

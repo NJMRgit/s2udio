@@ -27,6 +27,7 @@ pub mod raise;
 pub mod ring_vec;
 pub mod song_ext;
 pub mod string_util;
+pub mod temp_play;
 pub mod terminal;
 pub mod tmux;
 pub mod ytdlp;

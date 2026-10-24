@@ -84,7 +84,7 @@ impl JellyfinPane {
         };
         match ctx.config.video.playback {
             crate::config::video::VideoPlaybackMode::Mpv => start_episode(ctx),
-            crate::config::video::VideoPlaybackMode::Mpd => jellyfin_play_temp(ctx, url),
+            crate::config::video::VideoPlaybackMode::Mpd => jellyfin_play_temp(ctx, url, name),
             crate::config::video::VideoPlaybackMode::Ask => {
                 let menu = MenuModal::new(ctx)
                     .width(60)
@@ -102,11 +102,12 @@ impl JellyfinPane {
                                     },
                                 );
                             let mpd_url = url.clone();
+                            let mpd_name = name.clone();
                             section = section
                                 .item(
                                     "Play audio with MPD",
                                     move |ctx| {
-                                        jellyfin_play_temp(ctx, mpd_url);
+                                        jellyfin_play_temp(ctx, mpd_url, mpd_name.clone());
                                         Ok(())
                                     },
                                 );
@@ -136,6 +137,7 @@ impl JellyfinPane {
                     PaneType::Jellyfin {
                         tree: TreeBrowserArgs::default(),
                     },
+                    item.name.clone(),
                     url,
                 );
                 status_info!("Playing {}", item.name);
@@ -162,7 +164,10 @@ impl JellyfinPane {
 /// Play a Jellyfin stream URL as a temporary (queue-free) MPD entry. Used by
 /// the Ask menu's "Play audio with MPD" option, where the pane itself cannot
 /// be borrowed (the menu stores the closure for later).
-pub(super) fn jellyfin_play_temp(ctx: &Ctx, url: String) {
+///
+/// One transactional play (`crate::shared::temp_play`): a stream MPD cannot
+/// open leaves no hidden queue row behind and the status line names it.
+pub(super) fn jellyfin_play_temp(ctx: &Ctx, url: String, label: String) {
     ctx.query()
         .id(JF_PLAY)
         .replace_id(JF_PLAY)
@@ -170,8 +175,7 @@ pub(super) fn jellyfin_play_temp(ctx: &Ctx, url: String) {
             tree: TreeBrowserArgs::default(),
         })
         .query(move |client| {
-            let id = client.add_id(&url, None)?;
-            client.play_id(id)?;
+            let id = crate::shared::temp_play::add_and_play(client, &url, &label)?;
             Ok(MpdQueryResult::Any(Box::new(id)))
         });
 }

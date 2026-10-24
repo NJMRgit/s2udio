@@ -34,7 +34,7 @@ pub fn client() -> TestMpdClient {
         ("artist_3", "album_1"),
         ("artist_3", "album_2"),
     ];
-    let songs = s
+    let songs: Vec<Song> = s
         .iter()
         .flat_map(|(artist, album)| {
             (0..10).map(|i| Song {
@@ -59,6 +59,8 @@ pub fn client() -> TestMpdClient {
         TestPlaylist { name: "playlist_4".to_string(), songs_indices: (30..40).collect() },
     ];
 
+    // MPD never reuses a song id: a new row gets the next free one.
+    let next_id = songs.iter().map(|song| song.id).max().map_or(1, |max| max + 1);
     TestMpdClient {
         songs,
         playlists,
@@ -68,6 +70,9 @@ pub fn client() -> TestMpdClient {
         status: Status::default(),
         calls: HashMap::default(),
         rx: BufReader::new(Box::new(Cursor::new(String::new()))),
+        next_id,
+        deleted_ids: Vec::new(),
+        fail_play_with: None,
     }
 }
 
@@ -85,6 +90,14 @@ pub struct TestMpdClient {
     pub status: Status,
     pub calls: HashMap<String, u32>,
     pub rx: BufReader<Box<dyn BufRead>>,
+    /// The next id an `addid` hands out, the way MPD numbers new rows.
+    pub next_id: u32,
+    /// Every id a `deleteid` removed, in order.
+    pub deleted_ids: Vec<u32>,
+    /// When set, every `playid` fails with this decoder message — the ACK a
+    /// station that is down produces (`Failed to decode "…"; got HTTP status
+    /// 503`). The row stays queued, as it does on MPD 0.24.
+    pub fail_play_with: Option<String>,
 }
 
 impl TestMpdClient {
@@ -231,6 +244,17 @@ impl MpdClient for TestMpdClient {
     }
 
     fn play_id(&mut self, id: u32) -> MpdResult<()> {
+        self.calls.entry("play_id".to_string()).or_default().add_assign(1);
+        if let Some(message) = self.fail_play_with.clone() {
+            // The decoder ACK: the row exists and stays queued, but playback
+            // never starts.
+            return Err(MpdError::Mpd(crate::mpd::errors::MpdFailureResponse {
+                code: crate::mpd::errors::ErrorCode::UnknownCmd,
+                command_list_index: 0,
+                command: "playid".to_owned(),
+                message,
+            }));
+        }
         match self.queue.iter().enumerate().find(|(_idx, s)| self.songs[**s].id == id) {
             Some((idx, _)) => {
                 self.current_song_idx = Some(idx);
@@ -285,8 +309,20 @@ impl MpdClient for TestMpdClient {
         todo!("Not yet implemented")
     }
 
-    fn add_id(&mut self, _uri: &str, _position: Option<QueuePosition>) -> MpdResult<u32> {
-        todo!("Not yet implemented")
+    fn add_id(&mut self, uri: &str, position: Option<QueuePosition>) -> MpdResult<u32> {
+        self.calls.entry("add_id".to_string()).or_default().add_assign(1);
+        let id = self.next_id;
+        self.next_id += 1;
+        let idx = self.songs.len();
+        self.songs.push(Song { id, file: uri.to_owned(), ..Default::default() });
+        // Only the absolute form matters for the temp-play tests; a relative
+        // position on a queue that holds nothing yet is the queue's end too.
+        let position = match position {
+            Some(QueuePosition::Absolute(position)) => position.min(self.queue.len()),
+            _ => self.queue.len(),
+        };
+        self.queue.insert(position, idx);
+        Ok(id)
     }
 
     fn clear(&mut self) -> MpdResult<()> {
@@ -304,8 +340,28 @@ impl MpdClient for TestMpdClient {
         todo!("Not yet implemented")
     }
 
-    fn delete_id(&mut self, _id: u32) -> MpdResult<()> {
-        todo!("Not yet implemented")
+    fn delete_id(&mut self, id: u32) -> MpdResult<()> {
+        self.calls.entry("delete_id".to_string()).or_default().add_assign(1);
+        let Some(idx) = self.queue.iter().position(|song| self.songs[*song].id == id) else {
+            return Err(MpdError::Mpd(crate::mpd::errors::MpdFailureResponse {
+                code: crate::mpd::errors::ErrorCode::NoExist,
+                command_list_index: 0,
+                command: "deleteid".to_owned(),
+                message: "No such song".to_owned(),
+            }));
+        };
+        let song_idx = self.queue.remove(idx);
+        self.deleted_ids.push(id);
+        if self.current_song_idx == Some(idx) {
+            self.current_song_idx = None;
+            self.status.state = crate::mpd::commands::State::Stop;
+        } else if self.current_song_idx.is_some_and(|current| current > idx) {
+            self.current_song_idx = self.current_song_idx.map(|current| current - 1);
+        }
+        // Leave the `songs` entry in place: its id is what the queue rows map
+        // through, and removing it would renumber the rest.
+        let _ = song_idx;
+        Ok(())
     }
 
     fn add_tag_id(&mut self, _id: u32, _tag: &str, _value: &str) -> MpdResult<()> {

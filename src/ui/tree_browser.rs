@@ -552,7 +552,12 @@ pub(in crate::ui) trait TreeBrowserCore: Pane {
             self.set_temp_play_id(None);
             ctx.temp_play_id.set(None);
             ctx.command(move |client| {
-                client.delete_id(temp)?;
+                // Best-effort: the row can be gone already (the decode-error
+                // recovery drops a station MPD could not open, `consume` mode
+                // eats rows). That is the entry's normal end, not a failure.
+                if let Err(err) = client.delete_id(temp) {
+                    log::debug!(error:? = err, id = temp; "Could not drop the temp play entry");
+                }
                 Ok(())
             });
         }
@@ -580,35 +585,40 @@ pub(in crate::ui) trait TreeBrowserCore: Pane {
             self.set_temp_play_id(None);
             ctx.temp_play_id.set(None);
             ctx.command(move |client| {
-                client.delete_id(temp)?;
+                // Best-effort: the app's decode-error recovery drops a station
+                // MPD could not open, so the row can be gone already.
+                if let Err(err) = client.delete_id(temp) {
+                    log::debug!(error:? = err, id = temp; "Could not drop the temp play entry");
+                }
                 Ok(())
             });
         }
     }
 
-    /// Drop any previous temporary entry (repeatedly playing files must
-    /// never grow the queue: the SongChanged cleanup below only fires when
-    /// the song actually moves on, which can lag or miss consecutive
-    /// plays).
-    fn drop_temp_play(&mut self, ctx: &Ctx) {
-        if let Some(prev) = self.temp_play_id() {
-            self.set_temp_play_id(None);
-            ctx.temp_play_id.set(None);
-            ctx.command(move |client| {
-                client.delete_id(prev)?;
-                Ok(())
-            });
-        }
-    }
-
-    /// Play a stream URL as a temporary (queue-free) MPD entry: drop any
-    /// previous one, then `addid` + `playid`. The result arrives via
-    /// [`TreeBrowserCore::handle_play_result`] and records the id.
-    fn play_temp_url(&mut self, ctx: &Ctx, id: &'static str, pane: PaneType, url: String) {
-        self.drop_temp_play(ctx);
+    /// Play a stream URL as a temporary (queue-free) MPD entry and hand the
+    /// new row's id back through [`TreeBrowserCore::handle_play_result`],
+    /// which records it and drops the entry it replaces.
+    ///
+    /// The play is transactional (`crate::shared::temp_play`): a stream MPD
+    /// refuses to open leaves **no hidden queue row** behind, and the failure
+    /// names the media (`Could not play <label> — got HTTP status 503`) instead
+    /// of MPD's internal command error.
+    ///
+    /// The entry this play replaces is dropped *after* the new one starts, by
+    /// `handle_play_result` — never here. Deleting the playing temp row first
+    /// stops MPD (it drops the current song), so a slow or failing new stream
+    /// would leave the user in silence; the after-the-fact removal cannot take
+    /// the row that is playing.
+    fn play_temp_url(
+        &mut self,
+        ctx: &Ctx,
+        id: &'static str,
+        pane: PaneType,
+        label: String,
+        url: String,
+    ) {
         ctx.query().id(id).replace_id(id).target(pane).query(move |client| {
-            let id = client.add_id(&url, None)?;
-            client.play_id(id)?;
+            let id = crate::shared::temp_play::add_and_play(client, &url, &label)?;
             Ok(MpdQueryResult::Any(Box::new(id)))
         });
     }

@@ -169,41 +169,20 @@ pub(super) fn play_item(ctx: &Ctx, item: &PastedItem) -> Result<()> {
             if uri != *path {
                 status_info!("Playing {} (MPD path: {uri})", item.label());
             }
-            ctx.query()
-                .id(PASTE_PLAY)
-                .replace_id(PASTE_PLAY)
-                .target(PaneType::Radio {
-                    tree: TreeBrowserArgs::default(),
-                })
-                .query(move |client| {
-                    let id = client.add_id(&uri, None)?;
-                    client.play_id(id)?;
-                    Ok(crate::MpdQueryResult::Any(Box::new(id)))
-                });
+            paste_play_temp(ctx, uri, item.label());
             Ok(())
         }
         PastedItem::Url(url) => {
-            let url = url.clone();
-            ctx.query()
-                .id(PASTE_PLAY)
-                .replace_id(PASTE_PLAY)
-                .target(PaneType::Radio {
-                    tree: TreeBrowserArgs::default(),
-                })
-                .query(move |client| {
-                    let id = client.add_id(&url, None)?;
-                    client.play_id(id)?;
-                    Ok(crate::MpdQueryResult::Any(Box::new(id)))
-                });
+            paste_play_temp(ctx, url.clone(), failure_label(item));
             Ok(())
         }
         PastedItem::VideoFile(path) => {
             let uri = mpd_addable_path(path);
-            paste_play_temp(ctx, uri);
+            paste_play_temp(ctx, uri, item.label());
             Ok(())
         }
         PastedItem::VideoUrl(url) => {
-            paste_play_temp(ctx, url.clone());
+            paste_play_temp(ctx, url.clone(), failure_label(item));
             Ok(())
         }
         PastedItem::Yt(url) => yt_play_audio(ctx, url),
@@ -212,8 +191,20 @@ pub(super) fn play_item(ctx: &Ctx, item: &PastedItem) -> Result<()> {
         }
     }
 }
+/// What a refused play calls the item in the status line: a file keeps its
+/// name, a URL is just "the stream" (a raw URL there is noise).
+fn failure_label(item: &PastedItem) -> String {
+    match item {
+        PastedItem::File(_) | PastedItem::VideoFile(_) => item.label(),
+        _ => "the stream".to_owned(),
+    }
+}
 /// Play a pasted item's audio through MPD as a temporary entry.
-fn paste_play_temp(ctx: &Ctx, url: String) {
+///
+/// One transactional `addid` + `playid` (`crate::shared::temp_play`): a file
+/// or stream MPD cannot open leaves no hidden queue row behind, and the failure
+/// carries the item's label.
+fn paste_play_temp(ctx: &Ctx, url: String, label: String) {
     ctx.query()
         .id(PASTE_PLAY)
         .replace_id(PASTE_PLAY)
@@ -221,8 +212,7 @@ fn paste_play_temp(ctx: &Ctx, url: String) {
             tree: TreeBrowserArgs::default(),
         })
         .query(move |client| {
-            let id = client.add_id(&url, None)?;
-            client.play_id(id)?;
+            let id = crate::shared::temp_play::add_and_play(client, &url, &label)?;
             Ok(crate::MpdQueryResult::Any(Box::new(id)))
         });
 }

@@ -87,6 +87,7 @@ use queue_stream::{
     video_playlist_uris,
 };
 use resolve::fresh_cached_stream_info;
+pub(crate) use resolve::decode_error_row_is_resolvable;
 use warm::warm_chapters;
 
 /// Result id of the paste "play" query (routed through the Radio pane, which
