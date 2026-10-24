@@ -117,7 +117,23 @@ pub(super) fn fresh_cached_stream_info(
 /// "play" arm asks for the entry it just queued. `false` means nothing was
 /// sent (not a tagged audio link, or its resolve is already pending).
 pub fn resolve_tagged_queue_entry(ctx: &Ctx, file: &str, song_id: u32) -> bool {
-    resolve_queue_entry_with(ctx, file, song_id, true)
+    resolve_queue_entry_with(ctx, file, song_id, true, None)
+}
+
+/// The **user asked for this row to play** form of
+/// [`resolve_tagged_queue_entry`] (2026-10-25): the request is stamped with a
+/// fresh play generation, so a newer play request supersedes it — its queued
+/// job is skipped and its late result is dropped instead of playing a row the
+/// user has already moved on from. The automatic decode-error recovery keeps
+/// using the unstamped form: it is not the user's play intent.
+pub fn play_tagged_queue_entry(ctx: &Ctx, file: &str, song_id: u32) -> bool {
+    resolve_queue_entry_with(
+        ctx,
+        file,
+        song_id,
+        true,
+        Some(crate::shared::ytdlp::play_request::next()),
+    )
 }
 
 /// Round 98: the same as [`resolve_tagged_queue_entry`], but the replacement
@@ -126,7 +142,7 @@ pub fn resolve_tagged_queue_entry(ctx: &Ctx, file: &str, song_id: u32) -> bool {
 /// (a next-song prefetch failure), where playing the replacement would cut
 /// the current track short.
 pub fn resolve_tagged_queue_entry_in_place(ctx: &Ctx, file: &str, song_id: u32) -> bool {
-    resolve_queue_entry_with(ctx, file, song_id, false)
+    resolve_queue_entry_with(ctx, file, song_id, false, None)
 }
 
 /// Round 105: resolve a queue entry that is a **stale resolved stream** — a
@@ -136,7 +152,20 @@ pub fn resolve_tagged_queue_entry_in_place(ctx: &Ctx, file: &str, song_id: u32) 
 /// path. Returns `false` when the row is not an expired stream with a
 /// remembered original link, or its resolve is already pending.
 pub fn re_resolve_expired_queue_entry(ctx: &Ctx, file: &str, song_id: u32, play: bool) -> bool {
-    resolve_queue_entry_with(ctx, file, song_id, play)
+    resolve_queue_entry_with(ctx, file, song_id, play, None)
+}
+
+/// The **user asked for this row to play** form of
+/// [`re_resolve_expired_queue_entry`] (2026-10-25): stamped like
+/// [`play_tagged_queue_entry`], so a newer play request supersedes it.
+pub fn play_expired_queue_entry(ctx: &Ctx, file: &str, song_id: u32) -> bool {
+    resolve_queue_entry_with(
+        ctx,
+        file,
+        song_id,
+        true,
+        Some(crate::shared::ytdlp::play_request::next()),
+    )
 }
 
 /// Whether MPD's decode-error recovery has anything to do for a queue row.
@@ -159,7 +188,13 @@ pub fn decode_error_row_is_resolvable(ctx: &Ctx, file: &str) -> bool {
 /// The shared body of the three entry points above; `play` decides whether the
 /// replacement starts playing ([`YtAction::ReplaceAndPlay`]) or is only put
 /// in place ([`YtAction::ReplaceInPlace`]).
-fn resolve_queue_entry_with(ctx: &Ctx, file: &str, song_id: u32, play: bool) -> bool {
+fn resolve_queue_entry_with(
+    ctx: &Ctx,
+    file: &str,
+    song_id: u32,
+    play: bool,
+    play_stamp: Option<u64>,
+) -> bool {
     // What the row must be resolved FROM: an audio-tagged link itself, or —
     // round 105 — the original link of a resolved stream whose signed URL has
     // expired. Everything else (a live resolved URL, a local file, a radio
@@ -209,6 +244,7 @@ fn resolve_queue_entry_with(ctx: &Ctx, file: &str, song_id: u32, play: bool) -> 
         urls: vec![object],
         action,
         meta_only: false,
+        play_stamp,
     }) {
         log::error!(error:? = err; "Failed to request stream resolution");
         return false;
@@ -307,6 +343,8 @@ pub fn warm_selected_queue_info(ctx: &Ctx) {
     if let Err(err) = ctx.work_sender.send(WorkRequest::ResolveYtStreams {
         urls: vec![link],
         action: YtAction::Refresh,
+        // A metadata warm is not the user's play intent.
+        play_stamp: None,
         // Round 111: display metadata only — a merely-selected row needs its
         // title/artwork, not a playable URL. The full resolve runs when the
         // row actually plays.
@@ -348,6 +386,8 @@ fn warm_selected_video_info(ctx: &Ctx) {
     if let Err(err) = ctx.work_sender.send(WorkRequest::ResolveYtStreams {
         urls: vec![key],
         action: YtAction::Refresh,
+        // A metadata warm is not the user's play intent.
+        play_stamp: None,
         meta_only: true,
     }) {
         log::error!(error:? = err; "Failed to request the selected video's stream metadata");

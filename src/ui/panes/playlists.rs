@@ -480,7 +480,14 @@ fn resolve_stored_entries(ctx: &Ctx, links: Vec<String>, play: bool, replace: bo
     };
     let _ = ctx
         .work_sender
-        .send(WorkRequest::ResolveYtStreams { urls: links, action, meta_only: false })
+        .send(WorkRequest::ResolveYtStreams {
+            urls: links,
+            action,
+            meta_only: false,
+            // Building the queue is not the user's current play intent: these
+            // rows must survive any newer play request.
+            play_stamp: None,
+        })
         .map_err(|err| log::error!(error:? = err; "Failed to request stream resolution"));
     status_info!("Resolving {count} playlist entry/entries…");
 }
@@ -491,12 +498,21 @@ fn resolve_stored_entries(ctx: &Ctx, links: Vec<String>, play: bool, replace: bo
 /// how the video arm plays links everywhere else.
 fn play_stored_stream_entry(ctx: &Ctx, link: &str, intent: StreamIntent, entry_uri: &str) {
     if intent.is_audio() {
+        // 2026-10-25: a **play request**. Its generation lets a newer one
+        // supersede it (the pool skips the stale job, the event loop drops its
+        // late result), and recording it as the pending play lets the pane
+        // re-target it when the highlight moves to another stream entry — a
+        // resolve that takes seconds must not play the entry the user has
+        // already left.
+        let generation = crate::shared::ytdlp::play_request::next();
+        ctx.set_pending_play(generation, entry_uri.to_owned());
         let _ = ctx
             .work_sender
             .send(WorkRequest::ResolveYtStreams {
                 urls: vec![link.to_owned()],
                 action: crate::ui::modals::paste::YtAction::AddAfterCurrentAndPlay,
                 meta_only: false,
+                play_stamp: Some(generation),
             })
             .map_err(|err| log::error!(error:? = err; "Failed to request stream resolution"));
         status_info!("Resolving the playlist entry…");
@@ -1043,6 +1059,54 @@ impl PlaylistsPane {
             self.songs_move(dir, ctx)
         }
     }
+    /// The pending play follows the highlighted **stream** entry (2026-10-25).
+    ///
+    /// Double-clicking a stream entry starts a resolve that plays it when it
+    /// lands. Moving the highlight to another stream entry before that
+    /// **supersedes** the resolve — the old one is cancelled (its queued job is
+    /// skipped, its late result dropped) and the entry now pointed at is
+    /// resolved instead, so the entry the user is looking at is the one that
+    /// plays. A highlight that lands on anything else (a local file, a video
+    /// entry) cancels the pending play without starting a new one: there is
+    /// nothing to resolve there, and the user has moved off the entry they
+    /// asked for.
+    ///
+    /// Driven from the render pass for the same reason the queue's selection
+    /// warm is: it is the one place every selection route (keys, wheel, mouse,
+    /// scrollbar) funnels through.
+    fn follow_pending_play(&mut self, ctx: &Ctx) {
+        let Some(pending) = ctx.pending_play.borrow().clone() else {
+            return;
+        };
+        if self.stack.path().is_empty() {
+            // At the root the highlight is a playlist name: no entry to
+            // resolve, and browsing playlists is not a play request.
+            return;
+        }
+        let Some(DirOrSong::Song(song)) = self.stack.current().selected().cloned() else {
+            return;
+        };
+        if song.file == pending.entry {
+            return;
+        }
+        ctx.take_pending_play();
+        crate::shared::ytdlp::play_request::cancel_current();
+        if let Some((link, intent)) = tagged_stream_entry(&song.file)
+            && intent.is_audio()
+        {
+            log::debug!(
+                entry = song.file.as_str();
+                "Play resolve re-targeted to the highlighted playlist entry"
+            );
+            play_stored_stream_entry(ctx, &link, intent, &song.file);
+        } else {
+            log::debug!(
+                pending = pending.entry.as_str(), entry = song.file.as_str();
+                "Pending playlist play cancelled: the highlight left its entry"
+            );
+        }
+    }
+
     /// Open the highlighted playlist (enter it) or play the highlighted
     /// song — the `d`/`→`/Enter action of the MPD / Jellyfin scheme.
     fn open_or_play(&mut self, ctx: &Ctx) -> Result<()> {
@@ -2366,6 +2430,9 @@ impl Pane for PlaylistsPane {
             ])
             .areas(area);
         self.render_toggle(frame, toggle_area, ctx);
+        if self.mode == PlaylistsTabMode::Playlists {
+            self.follow_pending_play(ctx);
+        }
         match self.mode {
             PlaylistsTabMode::Playlists => self.render_library(frame, content, ctx),
             PlaylistsTabMode::Search => self.render_search(frame, content, ctx),
@@ -3112,7 +3179,17 @@ impl SongListCore<DirOrSong, ListState> for PlaylistsPane {
                 self.songs_dir_mut().and_then(|dir| dir.selected().cloned())
             && let Some((link, intent)) = tagged_stream_entry(&song.file)
         {
-            play_stored_stream_entry(ctx, &link, intent, &song.file);
+            // Already resolving this very entry (the highlight re-target
+            // started it): asking again would queue a second, identical
+            // resolve whose predecessor the pool would only skip.
+            let already_pending = ctx
+                .pending_play
+                .borrow()
+                .as_ref()
+                .is_some_and(|pending| pending.entry == song.file);
+            if !already_pending {
+                play_stored_stream_entry(ctx, &link, intent, &song.file);
+            }
             return Ok(());
         }
         if self.stack.path().is_empty() {
@@ -3405,5 +3482,188 @@ impl BrowserPane<DirOrSong> for PlaylistsPane {
     }
     fn browser_areas(&self) -> EnumMap<BrowserArea, Rect> {
         self.browser.areas
+    }
+}
+
+/// 2026-10-25: a play resolve follows the highlight.
+///
+/// Double-clicking a stream entry starts a `yt-dlp` resolve that plays it when
+/// it lands (seconds). The report: clicking another entry before it resolved
+/// did **not** cancel the first resolve — the entry left behind could still
+/// take over playback. The pane now re-targets the pending play at the entry
+/// the user is pointing at.
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod pending_play_tests {
+    use super::{PlaylistsPane, play_stored_stream_entry};
+    use crate::{
+        ctx::Ctx,
+        mpd::commands::Song,
+        shared::{events::WorkRequest, ytdlp::play_request},
+        ui::{dir_or_song::DirOrSong, dirstack::Path},
+    };
+
+    const A: &str = "https://www.youtube.com/watch?v=AAAAAAAAAAA#s2u-audio";
+    const B: &str = "https://www.youtube.com/watch?v=BBBBBBBBBBB#s2u-audio";
+    const LOCAL: &str = "/music/local.flac";
+
+    fn song(file: &str, id: u32) -> Song {
+        Song { id, file: file.to_owned(), ..Default::default() }
+    }
+
+    fn rig() -> (
+        Ctx,
+        PlaylistsPane,
+        crossbeam::channel::Receiver<WorkRequest>,
+    ) {
+        let app = crossbeam::channel::unbounded();
+        let work = crossbeam::channel::unbounded();
+        let work_rx = work.1.clone();
+        let ctx = crate::tests::fixtures::ctx(
+            (app.0, app.1),
+            (work.0, work.1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+        );
+        let mut pane = PlaylistsPane::new(&ctx);
+        // The root lists one playlist, selected, so entering it lands on the
+        // songs dir the way `open_selected_playlist` does.
+        {
+            let root = pane.stack.root_mut();
+            root.items = vec![DirOrSong::playlist_name_only("Test list".to_owned())];
+            root.state.set_content_len(Some(1));
+            root.state.select(Some(0), 0);
+        }
+        pane.stack.insert(
+            Path::new().join("Test list"),
+            vec![
+                DirOrSong::Song(song(A, 1)),
+                DirOrSong::Song(song(B, 2)),
+                DirOrSong::Song(song(LOCAL, 3)),
+            ],
+        );
+        pane.stack.enter();
+        assert!(!pane.stack.path().is_empty(), "the rig must be inside the playlist");
+        (ctx, pane, work_rx)
+    }
+
+    fn select(pane: &mut PlaylistsPane, idx: usize) {
+        let dir = pane.stack.current_mut();
+        // `select` clamps against the measured length, which a test-built
+        // list has not reported yet.
+        let len = dir.len();
+        dir.state.set_content_len(Some(len));
+        dir.select_idx(idx, 0);
+    }
+
+    fn requests(work_rx: &crossbeam::channel::Receiver<WorkRequest>) -> Vec<WorkRequest> {
+        work_rx.try_iter().collect()
+    }
+
+    /// Starting the play for entry A stamps it and records it as the pending
+    /// play.
+    #[test]
+    fn playing_a_stream_entry_records_the_pending_play() {
+        let _guard = crate::tests::fixtures::PLAY_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (ctx, _pane, work_rx) = rig();
+        play_stored_stream_entry(&ctx, A, crate::shared::ytdlp::StreamIntent::Audio, A);
+
+        let pending = ctx.pending_play.borrow().clone().expect("the play is pending");
+        assert_eq!(pending.entry, A);
+        assert!(play_request::is_current(pending.generation));
+        let requests = requests(&work_rx);
+        assert_eq!(requests.len(), 1);
+        assert!(
+            matches!(&requests[0], WorkRequest::ResolveYtStreams { play_stamp: Some(stamp), .. } if *stamp == pending.generation),
+            "the request carries the play generation"
+        );
+    }
+
+    /// Moving the highlight to another stream entry **cancels** the first
+    /// resolve (its generation is superseded) and resolves the new entry.
+    #[test]
+    fn moving_the_highlight_retargets_the_pending_play() {
+        let _guard = crate::tests::fixtures::PLAY_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (ctx, mut pane, work_rx) = rig();
+        play_stored_stream_entry(&ctx, A, crate::shared::ytdlp::StreamIntent::Audio, A);
+        let first = ctx.pending_play.borrow().clone().expect("A is pending");
+        let _ = requests(&work_rx);
+
+        select(&mut pane, 1); // B
+        pane.follow_pending_play(&ctx);
+
+        assert!(
+            !play_request::is_current(first.generation),
+            "the resolve for the entry left behind is superseded"
+        );
+        let retargeted = ctx.pending_play.borrow().clone().expect("B is pending now");
+        assert_eq!(retargeted.entry, B);
+        assert!(play_request::is_current(retargeted.generation));
+        let requests = requests(&work_rx);
+        assert_eq!(requests.len(), 1, "the new entry is resolved");
+        assert!(
+            matches!(&requests[0], WorkRequest::ResolveYtStreams { urls, play_stamp: Some(stamp), .. }
+                if urls == &vec![B.replace("#s2u-audio", "")] && *stamp == retargeted.generation),
+            "the new request resolves B"
+        );
+    }
+
+    /// A highlight that lands on a local file cancels the pending play without
+    /// starting a resolve: there is nothing to parse there.
+    #[test]
+    fn moving_to_a_local_file_cancels_without_resolving() {
+        let _guard = crate::tests::fixtures::PLAY_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (ctx, mut pane, work_rx) = rig();
+        play_stored_stream_entry(&ctx, A, crate::shared::ytdlp::StreamIntent::Audio, A);
+        let first = ctx.pending_play.borrow().clone().expect("A is pending");
+        let _ = requests(&work_rx);
+
+        select(&mut pane, 2); // local.flac
+        pane.follow_pending_play(&ctx);
+
+        assert!(!play_request::is_current(first.generation), "the resolve is cancelled");
+        assert_eq!(ctx.pending_play.borrow().clone(), None, "nothing is pending");
+        assert!(requests(&work_rx).is_empty(), "a local file is not resolved");
+    }
+
+    /// A render that did not move off the pending entry does nothing (the hook
+    /// runs every frame).
+    #[test]
+    fn staying_on_the_pending_entry_changes_nothing() {
+        let _guard = crate::tests::fixtures::PLAY_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (ctx, mut pane, work_rx) = rig();
+        play_stored_stream_entry(&ctx, A, crate::shared::ytdlp::StreamIntent::Audio, A);
+        let first = ctx.pending_play.borrow().clone().expect("A is pending");
+        let _ = requests(&work_rx);
+
+        select(&mut pane, 0); // still A
+        pane.follow_pending_play(&ctx);
+
+        assert!(play_request::is_current(first.generation), "the resolve is untouched");
+        assert_eq!(ctx.pending_play.borrow().clone(), Some(first));
+        assert!(requests(&work_rx).is_empty());
+    }
+
+    /// The `YtDlpItem` the resolve produces carries the link, and the host tag
+    /// stays out of the request.
+    #[test]
+    fn the_request_carries_the_plain_link() {
+        let _guard = crate::tests::fixtures::PLAY_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (ctx, _pane, work_rx) = rig();
+        play_stored_stream_entry(&ctx, "https://youtu.be/CCCCCCCCCCC", crate::shared::ytdlp::StreamIntent::Audio, "https://youtu.be/CCCCCCCCCCC#s2u-audio");
+        let requests = requests(&work_rx);
+        assert!(matches!(
+            &requests[0],
+            WorkRequest::ResolveYtStreams { urls, .. } if urls == &vec!["https://youtu.be/CCCCCCCCCCC".to_owned()]
+        ));
     }
 }

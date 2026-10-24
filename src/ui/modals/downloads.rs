@@ -517,6 +517,11 @@ impl DownloadsModal {
                                             urls: vec![item.inner.to_url()],
                                             action: crate::ui::modals::paste::YtAction::PlayVideo,
                                             meta_only: false,
+                                            // "Stream (mpv)" is a play-now
+                                            // request: a newer one supersedes it.
+                                            play_stamp: Some(
+                                                crate::shared::ytdlp::play_request::next(),
+                                            ),
                                         },
                                     ) {
                                         status_warn!("{err}");

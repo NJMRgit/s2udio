@@ -1,3 +1,4 @@
+pub mod play_request;
 mod cli;
 mod downloader;
 mod error;

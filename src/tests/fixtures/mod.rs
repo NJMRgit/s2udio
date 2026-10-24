@@ -14,6 +14,11 @@ use rstest::fixture;
 /// temp dir and race each other when run in parallel.
 pub static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Serializes tests that touch the process-global play-request generation
+/// (`shared::ytdlp::play_request`): a play request bumping it in another test
+/// would make a supersede assertion flaky.
+pub static PLAY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 use crate::{
     config::{Config, tabs::TabName},
     core::scheduler::Scheduler,
@@ -114,6 +119,7 @@ pub fn ctx(
         chapters: RefCell::new(HashMap::new()),
         queue_tab: Cell::new(QueueTabMode::Audio),
         playlist_import: RefCell::new(None),
+        pending_play: RefCell::new(None),
         video_playlist: RefCell::new(Vec::new()),
         queue_table_width: Cell::new(None),
         mpv_custom_subtitle_lang: std::cell::RefCell::new(None),

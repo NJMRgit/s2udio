@@ -68,7 +68,9 @@ pub(super) fn play_queue_song(song: &Song, ctx: &Ctx) {
         // id when the stream lands, so playback begins exactly once, on the
         // right row.
         hold_mpd_while_resolving(ctx, song.id);
-        crate::ui::modals::paste::resolve_tagged_queue_entry(ctx, &song.file, song.id);
+        // A user play request (2026-10-25): a newer one supersedes it, so a
+        // slow resolve cannot play a row the user has already left.
+        crate::ui::modals::paste::play_tagged_queue_entry(ctx, &song.file, song.id);
         return;
     }
     // Round 105/107: a **stale resolved row** — an expired googlevideo URL,
@@ -79,7 +81,7 @@ pub(super) fn play_queue_song(song: &Song, ctx: &Ctx) {
     if crate::ui::modals::paste::expired_stream_original_url(ctx, &song.file).is_some() {
         // `false` means a resolve for this entry is already in flight; its
         // replacement plays when it lands, so do not hand MPD the row either.
-        crate::ui::modals::paste::re_resolve_expired_queue_entry(ctx, &song.file, song.id, true);
+        crate::ui::modals::paste::play_expired_queue_entry(ctx, &song.file, song.id);
         return;
     }
     if resolved_stream_expired(&song.file) {
@@ -271,9 +273,9 @@ pub(crate) fn next_track_resolving(ctx: &Ctx) {
     // helpers (the second re-resolves from its remembered original link); both
     // end in the same `ReplaceAndPlay` arm.
     let pending = if crate::shared::ytdlp::tagged_stream_entry(&song.file).is_some() {
-        crate::ui::modals::paste::resolve_tagged_queue_entry(ctx, &song.file, song.id)
+        crate::ui::modals::paste::play_tagged_queue_entry(ctx, &song.file, song.id)
     } else {
-        crate::ui::modals::paste::re_resolve_expired_queue_entry(ctx, &song.file, song.id, true)
+        crate::ui::modals::paste::play_expired_queue_entry(ctx, &song.file, song.id)
     };
     if !pending {
         // The resolve was declined (already in flight, or the row stopped

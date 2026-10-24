@@ -134,6 +134,14 @@ pub(crate) enum WorkRequest {
         urls: Vec<String>,
         /// What to do with the resolved streams once they are known.
         action: crate::ui::modals::paste::YtAction,
+        /// The play-request generation for a **user "play this now"**
+        /// resolve (2026-10-25, `shared::ytdlp::play_request`); `None` for
+        /// every other resolve (queue appends, the look-ahead swap, metadata
+        /// warms, the automatic decode-error recovery). A stale generation
+        /// means a newer play request has superseded this one: the pool skips
+        /// the job and the result is dropped, so a slow resolve can never
+        /// play the entry the user has moved on from.
+        play_stamp: Option<u64>,
         /// Round 111: fetch only the display metadata (title, channel,
         /// duration, thumbnail) with `yt-dlp --print`, skipping the stream
         /// URL, the chapters and the description — ~1.6 s instead of the full
@@ -323,6 +331,10 @@ pub(crate) enum WorkDone {
         action: crate::ui::modals::paste::YtAction,
         /// URLs that could not be resolved.
         failures: Vec<String>,
+        /// The play-request generation the resolve was stamped with, echoed
+        /// back so the event loop can drop a superseded result and clear the
+        /// pending play it belonged to (2026-10-25).
+        play_stamp: Option<u64>,
     },
     /// Result of a Jellyfin API fetch, routed to the Jellyfin pane.
     JellyfinFetched {

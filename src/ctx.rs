@@ -35,6 +35,24 @@ pub(crate) struct PlaylistImport {
     pub(crate) video: bool,
 }
 
+/// A user "play this now" resolve that is still in flight (2026-10-25).
+///
+/// The Playlists tab sets one when a stream entry starts resolving for
+/// playback. While it is set, moving the highlight to another stream entry
+/// **supersedes** it: the old resolve is cancelled (its late result is
+/// dropped) and the newly highlighted entry is resolved instead — the entry
+/// the user is pointing at is the one that plays. The event loop clears the
+/// record when the resolve's result arrives, whichever way it goes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PendingPlay {
+    /// The play-request generation the resolve was stamped with
+    /// (`shared::ytdlp::play_request`).
+    pub(crate) generation: u64,
+    /// The entry the resolve started for (the stored URI, i.e. the tagged
+    /// link for a stream).
+    pub(crate) entry: String,
+}
+
 /// The sub-page shown in the Queue tab's body: the MPD queue (Audio),
 /// the mpv video playlist (Video), the current track's chapters, or the
 /// radio browser (Round 62 Q2 — Radio left the Libraries group and lives
@@ -284,6 +302,11 @@ pub struct Ctx {
     /// the listing's result (rows land, or the import fails), so the row
     /// cannot outlive it.
     pub(crate) playlist_import: RefCell<Option<PlaylistImport>>,
+    /// The user's in-flight "play this now" resolve, if any (2026-10-25).
+    /// See [`PendingPlay`]: the Playlists tab re-targets it when the highlight
+    /// moves, so a slow resolve follows the user's selection instead of
+    /// playing the entry they left behind.
+    pub(crate) pending_play: RefCell<Option<PendingPlay>>,
     /// Width of the queue table area (set by the QueuePane's layout pass),
     /// so the QueueHeaderPane's chapters header (Chapter | Time | Duration)
     /// renders into the same width and its labels sit exactly above the
@@ -656,6 +679,7 @@ impl Ctx {
             chapters: RefCell::new(HashMap::new()),
             queue_tab: Cell::new(QueueTabMode::Audio),
             playlist_import: RefCell::new(None),
+            pending_play: RefCell::new(None),
             video_playlist: RefCell::new(Vec::new()),
             queue_table_width: Cell::new(None),
             mpv_custom_subtitle_lang: std::cell::RefCell::new(None),
@@ -705,6 +729,8 @@ impl Ctx {
                             urls: vec![entry.original_url.clone()],
                             action: crate::ui::modals::paste::YtAction::Refresh,
                             meta_only: true,
+                            // A metadata refresh is not a play request.
+                            play_stamp: None,
                         });
                 }
                 if !entry.chapters.is_empty() {
@@ -779,6 +805,26 @@ impl Ctx {
     }
     pub(crate) fn set_modal_mouse_pos(&self, pos: Option<ratatui::layout::Position>) {
         self.modal_mouse_pos.set(pos);
+    }
+    /// Record a user "play this now" resolve (2026-10-25): its play-request
+    /// generation and the entry it is for.
+    pub(crate) fn set_pending_play(&self, generation: u64, entry: String) {
+        self.pending_play
+            .replace(Some(PendingPlay { generation, entry }));
+    }
+    /// The current pending play, taken out of the slot (a re-target or a
+    /// cancel owns it from here).
+    pub(crate) fn take_pending_play(&self) -> Option<PendingPlay> {
+        self.pending_play.take()
+    }
+    /// The resolve stamped `generation` came back: forget the pending play —
+    /// but only if it is still that request (a newer one may have replaced
+    /// it).
+    pub(crate) fn clear_pending_play(&self, generation: u64) {
+        let mut slot = self.pending_play.borrow_mut();
+        if slot.as_ref().is_some_and(|pending| pending.generation == generation) {
+            *slot = None;
+        }
     }
     pub(crate) fn finish_frame(&mut self) {
         self.needs_render.replace(false);

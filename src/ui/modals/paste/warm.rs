@@ -73,6 +73,9 @@ pub(super) fn warm_chapters(ctx: &Ctx, downloads: &[PastedItem]) {
         action: YtAction::Refresh,
         // The chapters/download options only need display metadata.
         meta_only: true,
+        // A metadata warm is not the user's play intent: it must survive any
+        // newer play request.
+        play_stamp: None,
     });
 }
 
@@ -313,6 +316,7 @@ fn warm_row(ctx: &Ctx, row: &crate::mpd::commands::Song) -> bool {
             urls: vec![original],
             action: YtAction::ReplaceInPlace(next.id),
             meta_only: false,
+            play_stamp: None,
         }) {
             log::error!(error:? = err; "Failed to request the next entry's stream resolution");
         }
@@ -343,6 +347,7 @@ fn warm_row(ctx: &Ctx, row: &crate::mpd::commands::Song) -> bool {
         urls: vec![link],
         action: YtAction::ReplaceInPlace(next.id),
         meta_only: false,
+        play_stamp: None,
     }) {
         log::error!(error:? = err; "Failed to request the next entry's stream resolution");
     }

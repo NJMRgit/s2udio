@@ -55,9 +55,10 @@ pub fn init(
                     urls,
                     action,
                     meta_only,
+                    play_stamp,
                 } = req
                 {
-                    resolves.submit(urls, action, meta_only);
+                    resolves.submit(urls, action, meta_only, play_stamp);
                     continue;
                 }
                 let result = handle_work_request(
@@ -98,6 +99,9 @@ struct ResolveJob {
     urls: Vec<String>,
     action: crate::ui::modals::paste::YtAction,
     meta_only: bool,
+    /// The play-request generation (`shared::ytdlp::play_request`), `None`
+    /// for a resolve that is not the user's current play intent.
+    play_stamp: Option<u64>,
 }
 
 impl ResolvePool {
@@ -110,6 +114,18 @@ impl ResolvePool {
                 .name(format!("yt-resolve-{idx}"))
                 .spawn(move || {
                     while let Ok(job) = rx.recv() {
+                        // 2026-10-25: a play request superseded while this job
+                        // waited is not run at all — the user moved on, and
+                        // its result would be dropped anyway.
+                        if let Some(stamp) = job.play_stamp
+                            && !crate::shared::ytdlp::play_request::is_current(stamp)
+                        {
+                            log::debug!(
+                                generation = stamp;
+                                "Skipping a superseded play resolve"
+                            );
+                            continue;
+                        }
                         let (info, failures) = if job.meta_only {
                             crate::shared::ytdlp::resolve_meta_urls(&job.urls)
                         } else {
@@ -119,6 +135,7 @@ impl ResolvePool {
                             info,
                             action: job.action,
                             failures,
+                            play_stamp: job.play_stamp,
                         });
                         try_skip!(
                             event_tx.send(AppEvent::WorkDone(result)),
@@ -139,9 +156,10 @@ impl ResolvePool {
         urls: Vec<String>,
         action: crate::ui::modals::paste::YtAction,
         meta_only: bool,
+        play_stamp: Option<u64>,
     ) {
         try_skip!(
-            self.tx.send(ResolveJob { urls, action, meta_only }),
+            self.tx.send(ResolveJob { urls, action, meta_only, play_stamp }),
             "Failed to queue a stream resolve"
         );
     }
@@ -213,7 +231,7 @@ fn handle_work_request(
         }
         // Round 111: reached only if a caller bypasses the pool (the `work`
         // thread intercepts these); kept as the full, synchronous resolve.
-        WorkRequest::ResolveYtStreams { urls, action, meta_only } => {
+        WorkRequest::ResolveYtStreams { urls, action, meta_only, play_stamp } => {
             let (info, failures) = if meta_only {
                 crate::shared::ytdlp::resolve_meta_urls(&urls)
             } else {
@@ -223,6 +241,7 @@ fn handle_work_request(
                 info,
                 action,
                 failures,
+                play_stamp,
             })
         }
         WorkRequest::PlayTorrent { item } => {

@@ -15,6 +15,24 @@ use crate::{
 
 use super::{helpers, mpv, status::StatusState};
 
+/// Whether a resolve result must be **dropped** because a newer play request
+/// superseded it (2026-10-25).
+///
+/// Clears the pending-play record that belonged to it: a cancelled request
+/// must not block the next one, and its entry never plays.
+fn is_superseded_play(ctx: &Ctx, play_stamp: Option<u64>) -> bool {
+    let Some(generation) = play_stamp else {
+        // Not a play request: queue appends, the look-ahead swap, metadata
+        // warms and the automatic recovery are never superseded.
+        return false;
+    };
+    if crate::shared::ytdlp::play_request::is_current(generation) {
+        return false;
+    }
+    ctx.clear_pending_play(generation);
+    true
+}
+
 pub(super) fn handle_work_done(
     result: WorkDone,
     ctx: &mut Ctx,
@@ -23,7 +41,35 @@ pub(super) fn handle_work_done(
     render_wanted: &mut bool,
 ) {
     match result {
-        WorkDone::YtStreamsResolved { info, action, failures } => {
+        WorkDone::YtStreamsResolved { info, action, failures, play_stamp } => {
+            // 2026-10-25: a play resolve the user has already moved on from
+            // is **dropped**: a newer play request superseded it, so applying
+            // it would insert or play the entry they left behind (the
+            // Playlists tab's "the first resolve is never cancelled"). Its
+            // parse markers still come down, so nothing spins forever.
+            if is_superseded_play(ctx, play_stamp) {
+                log::debug!(generation:? = play_stamp; "Dropping a superseded play resolve");
+                let mut keys: Vec<String> = Vec::new();
+                for item in &info {
+                    keys.push(item.url.clone());
+                    if !item.original_url.is_empty() {
+                        keys.push(item.original_url.clone());
+                    }
+                }
+                for failure in &failures {
+                    if let Some((url, _)) = failure.split_once(": ") {
+                        keys.push(url.to_owned());
+                    }
+                }
+                crate::ui::modals::paste::clear_stream_parse_pending(ctx, &keys);
+                *render_wanted = true;
+                return;
+            }
+            if let Some(generation) = play_stamp {
+                // The play request landed: it is no longer pending (the
+                // entry it named is about to play, or it failed below).
+                ctx.clear_pending_play(generation);
+            }
             // Round 95: the resolve landed (for good or ill) —
             // those rows stop spinning in the queue's Duration
             // column.
@@ -395,5 +441,70 @@ fn route_jellyfin_result(id: &'static str, data: JellyfinResult, ctx: &mut Ctx, 
         ctx,
     ) {
         log::error!(error:? = err; "UI failed to handle jellyfin result");
+    }
+}
+
+/// 2026-10-25: a play resolve the user has moved on from never lands.
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod superseded_play_tests {
+    use super::is_superseded_play;
+    use crate::{ctx::Ctx, shared::ytdlp::play_request};
+
+    fn rig() -> Ctx {
+        crate::tests::fixtures::ctx(
+            (
+                crossbeam::channel::unbounded().0,
+                crossbeam::channel::unbounded().1,
+            ),
+            (
+                crossbeam::channel::unbounded().0,
+                crossbeam::channel::unbounded().1,
+            ),
+            (
+                crossbeam::channel::unbounded().0,
+                crossbeam::channel::unbounded().1,
+            ),
+        )
+    }
+
+    /// A newer play request makes the older resolve's result stale: it is
+    /// dropped and its pending-play record goes with it.
+    #[test]
+    fn a_stale_play_resolve_is_dropped() {
+        let _guard = crate::tests::fixtures::PLAY_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let ctx = rig();
+        let stale = play_request::next();
+        ctx.set_pending_play(stale, "entry-a".to_owned());
+        let _newer = play_request::next();
+
+        assert!(is_superseded_play(&ctx, Some(stale)));
+        assert_eq!(ctx.pending_play.borrow().clone(), None, "the record is cleared");
+    }
+
+    /// The current play request's result is applied.
+    #[test]
+    fn the_current_play_resolve_is_applied() {
+        let _guard = crate::tests::fixtures::PLAY_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let ctx = rig();
+        let current = play_request::next();
+        ctx.set_pending_play(current, "entry-a".to_owned());
+
+        assert!(!is_superseded_play(&ctx, Some(current)));
+        assert!(ctx.pending_play.borrow().is_some(), "it is still pending");
+    }
+
+    /// Only play requests carry a stamp; everything else is never dropped.
+    #[test]
+    fn an_unstamped_resolve_is_never_dropped() {
+        let _guard = crate::tests::fixtures::PLAY_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let ctx = rig();
+        assert!(!is_superseded_play(&ctx, None));
     }
 }

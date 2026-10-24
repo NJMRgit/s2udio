@@ -13,7 +13,7 @@ use crate::{
 
 use super::{
     PASTE_PLAY, PastedItem, YtAction, music_directory, play_torrent,
-    resolve_tagged_queue_entry, s2udio_cache_path,
+    play_tagged_queue_entry, s2udio_cache_path,
 };
 
 /// Convert an absolute local path to the MPD-relative path when it lives
@@ -82,6 +82,8 @@ pub(super) fn play_video_now(ctx: &Ctx, vids: &[PastedItem]) {
                 urls: yt_urls(vids),
                 action: YtAction::PlayVideo,
                 meta_only: false,
+                // Play-now: a newer play request supersedes this resolve.
+                play_stamp: Some(crate::shared::ytdlp::play_request::next()),
             });
         return;
     }
@@ -106,6 +108,8 @@ pub(super) fn queue_videos(ctx: &Ctx, vids: &[PastedItem], after_current: bool, 
                 urls: yt_urls(vids),
                 action,
                 meta_only: false,
+                play_stamp: play
+                    .then(crate::shared::ytdlp::play_request::next),
             });
         return;
     }
@@ -139,7 +143,12 @@ pub(super) fn queue_videos(ctx: &Ctx, vids: &[PastedItem], after_current: bool, 
         };
         let _ = ctx
             .work_sender
-            .send(WorkRequest::ResolveYtStreams { urls: links, action, meta_only: false });
+            .send(WorkRequest::ResolveYtStreams {
+                urls: links,
+                action,
+                meta_only: false,
+                play_stamp: play.then(crate::shared::ytdlp::play_request::next),
+            });
     }
 }
 /// The stored-playlist URIs of the given video items: local files keep
@@ -225,6 +234,8 @@ fn yt_play_audio(ctx: &Ctx, url: &str) -> Result<()> {
             urls: vec![url.to_owned()],
             action: YtAction::Play,
             meta_only: false,
+            // Play-now: a newer play request supersedes this resolve.
+            play_stamp: Some(crate::shared::ytdlp::play_request::next()),
         })
         .map_err(|err| anyhow::anyhow!("Failed to request stream resolution: {err}"))?;
     status_info!("Resolving YouTube link…");
@@ -327,7 +338,8 @@ pub(super) fn enqueue_items(
             Ok(song.map(|song| song.id))
         });
         if let Ok(Some(song_id)) = inserted {
-            resolve_tagged_queue_entry(ctx, &tagged, song_id);
+            // The paste's "play" arm is a user play request (2026-10-25).
+            play_tagged_queue_entry(ctx, &tagged, song_id);
         } else {
             status_warn!("Cannot find the queued stream entry to resolve");
         }
@@ -395,7 +407,8 @@ pub(super) fn enqueue_stream_links(
                 // multiple entries" on a freshly imported playlist. The
                 // replacement starts this row by id once the stream lands.
                 crate::ui::panes::queue::hold_mpd_while_resolving(ctx, song_id);
-                resolve_tagged_queue_entry(ctx, &link, song_id);
+                // The import's autoplay is a user play request (2026-10-25).
+                play_tagged_queue_entry(ctx, &link, song_id);
             }
             _ => status_warn!("Cannot find the queued stream entry to resolve"),
         }
