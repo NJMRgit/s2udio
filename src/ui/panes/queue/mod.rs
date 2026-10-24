@@ -105,6 +105,12 @@ pub struct QueuePane {
     /// moving while a queued stream resolve is in flight. Armed only while
     /// such a row is on screen, so the animation costs nothing otherwise.
     loading_tick: Option<crate::shared::id::Id>,
+    /// The audio list has scrolled to the pasted-playlist import's loading
+    /// row (2026-10-24): the scroll happens once, on the frame the import
+    /// starts, so a later redraw cannot yank a list the user is reading.
+    import_loading_shown: bool,
+    /// The Video list's half of [`QueuePane::import_loading_shown`].
+    video_import_loading_shown: bool,
     /// Round 111: the queue row the selection-time metadata warm was last
     /// scheduled for. The warm is driven from the render pass — the one
     /// place every selection route funnels through (`w`/`s`, the arrows, a
@@ -499,6 +505,8 @@ impl QueuePane {
             video_band: crate::ui::band::BandState::default(),
             toggle_areas: [Rect::default(); 4],
             loading_tick: None,
+            import_loading_shown: false,
+            video_import_loading_shown: false,
             warmed_selection_id: None,
             follow: follow::FollowGate::default(),
             followed_song_id: None,

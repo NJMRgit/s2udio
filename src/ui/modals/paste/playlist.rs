@@ -36,9 +36,65 @@ pub(super) fn is_playlist_link(url: &str) -> bool {
 /// full downloads. `audio` queues them for MPD (the audio queue), else for
 /// the video playlist; `autoplay` starts the first entry that lands.
 pub(super) fn import_playlist(ctx: &Ctx, url: &str, audio: bool, autoplay: bool) {
+    // 2026-10-24: listing a 1000+ track playlist takes seconds, so say so
+    // where the rows will land: switch to that queue and mark the import in
+    // flight (the Queue list paints its loading row until the listings land).
+    begin_playlist_import(ctx, !audio);
     let action = PlaylistAction::QueueStreams { audio, autoplay };
     if let Err(err) = ctx.ytdlp_manager.resolve_playlist(url, action) {
+        // Nothing will ever land: drop the loading row again.
+        finish_playlist_import(ctx);
         status_error!("Failed to add the playlist: {err}");
+    }
+}
+
+/// The import is under way: show the queue it is adding to.
+///
+/// Switches to the Queue tab (when the user is elsewhere) and to the list the
+/// rows will land in — the audio queue or the Video list — and marks
+/// [`Ctx::playlist_import`] so that list paints its `Loading playlist…` row.
+/// Switching at dispatch time (not when the rows arrive) is the point: the
+/// listing itself is the slow part.
+pub(crate) fn begin_playlist_import(ctx: &Ctx, video: bool) {
+    ctx.playlist_import
+        .replace(Some(crate::ctx::PlaylistImport { video }));
+    ctx.queue_tab.set(if video {
+        crate::ctx::QueueTabMode::Video
+    } else {
+        crate::ctx::QueueTabMode::Audio
+    });
+    let on_queue_tab = ctx
+        .active_tab
+        .as_str()
+        .eq_ignore_ascii_case(crate::config::tabs::QUEUE_TAB_NAME);
+    // A config can drop the Queue tab from its tab list; switching to a tab
+    // that is not laid out would leave the user on a blank page, so the import
+    // then only marks itself (the rows still land in the queue).
+    let queue_tab_configured = ctx
+        .config
+        .tabs
+        .names
+        .iter()
+        .any(|name| name.as_str().eq_ignore_ascii_case(crate::config::tabs::QUEUE_TAB_NAME));
+    if !on_queue_tab && queue_tab_configured {
+        let queue_tab: crate::config::tabs::TabName =
+            crate::config::tabs::QUEUE_TAB_NAME.into();
+        if let Err(err) = ctx.app_event_sender.send(crate::AppEvent::UiEvent(
+            crate::ui::UiAppEvent::ChangeTab(queue_tab),
+        )) {
+            log::error!(
+                error:? = err;
+                "Could not switch to the Queue tab for the playlist import"
+            );
+        }
+    }
+    let _ = ctx.render();
+}
+
+/// The listing is over — its rows landed, or it failed: drop the loading row.
+pub(crate) fn finish_playlist_import(ctx: &Ctx) {
+    if ctx.playlist_import.replace(None).is_some() {
+        let _ = ctx.render();
     }
 }
 
@@ -406,6 +462,10 @@ pub fn queue_playlist_streams(
         status_warn!("The playlist has no tracks to add");
         return;
     }
+    // 2026-10-24: the listing is over and its rows are about to land — the
+    // import's `Loading playlist…` row goes now (whichever way the import was
+    // started, the marker lives here rather than in each caller).
+    finish_playlist_import(ctx);
     remember_yt_list_meta(ctx, &items);
     let count = items.len();
     if audio {
@@ -468,4 +528,167 @@ pub fn queue_stored_stream_links(
         );
     }
     true
+}
+
+/// 2026-10-24: the loading row a pasted playlist import shows while its
+/// listing runs — the wait is spent in `yt-dlp --flat-playlist`, before any
+/// row exists, so the import switches to the queue it is adding to and marks
+/// itself in flight for the Queue pane to paint.
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod playlist_import_loading_tests {
+    use super::{begin_playlist_import, finish_playlist_import, import_playlist};
+    use crate::{
+        ctx::{Ctx, QueueTabMode},
+        shared::events::{AppEvent, WorkRequest},
+        ui::UiAppEvent,
+    };
+
+    const PLAYLIST: &str = "https://www.youtube.com/playlist?list=PL1234567890";
+
+    fn rig() -> (
+        Ctx,
+        crossbeam::channel::Receiver<AppEvent>,
+        crossbeam::channel::Receiver<WorkRequest>,
+    ) {
+        let app = crossbeam::channel::unbounded();
+        let app_rx = app.1.clone();
+        let work = crossbeam::channel::unbounded();
+        let work_rx = work.1.clone();
+        let mut ctx = crate::tests::fixtures::ctx(
+            (app.0, app.1),
+            (work.0, work.1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+        );
+        // The fixture starts on a non-Queue tab, like the user does.
+        ctx.active_tab = crate::config::tabs::TabName::from("test_tab");
+        (ctx, app_rx, work_rx)
+    }
+
+    fn switched_to_queue(app_rx: &crossbeam::channel::Receiver<AppEvent>) -> bool {
+        app_rx.try_iter().any(|event| {
+            matches!(
+                event,
+                AppEvent::UiEvent(UiAppEvent::ChangeTab(tab))
+                    if tab.as_str().eq_ignore_ascii_case(crate::config::tabs::QUEUE_TAB_NAME)
+            )
+        })
+    }
+
+    /// Starting an import switches the TUI to the queue it is adding to (the
+    /// tab and the target list) and marks the import in flight, so the queue
+    /// list paints its loading row.
+    #[test]
+    fn a_playlist_import_switches_to_its_queue_and_marks_itself() {
+        let (ctx, app_rx, _work_rx) = rig();
+        import_playlist(&ctx, PLAYLIST, false, false);
+
+        assert!(
+            switched_to_queue(&app_rx),
+            "starting an import must switch to the Queue tab"
+        );
+        assert_eq!(
+            ctx.queue_tab.get(),
+            QueueTabMode::Video,
+            "a video import lands in the Video list"
+        );
+        assert_eq!(
+            *ctx.playlist_import.borrow(),
+            Some(crate::ctx::PlaylistImport { video: true }),
+            "the import is marked in flight for the loading row"
+        );
+    }
+
+    /// The audio target switches to the audio list instead.
+    #[test]
+    fn an_audio_import_selects_the_audio_list() {
+        let (ctx, _app_rx, _work_rx) = rig();
+        import_playlist(&ctx, PLAYLIST, true, true);
+        assert_eq!(ctx.queue_tab.get(), QueueTabMode::Audio);
+        assert_eq!(*ctx.playlist_import.borrow(), Some(crate::ctx::PlaylistImport { video: false }));
+    }
+
+    /// Already on the Queue tab: only the list may change, never a tab jump
+    /// (which would re-enter the tab and reset the session's view).
+    #[test]
+    fn a_queue_tab_import_does_not_re_switch_the_tab() {
+        let (mut ctx, app_rx, _work_rx) = rig();
+        ctx.active_tab =
+            crate::config::tabs::TabName::from(crate::config::tabs::QUEUE_TAB_NAME);
+        ctx.queue_tab.set(QueueTabMode::Video);
+
+        begin_playlist_import(&ctx, false);
+
+        assert!(!switched_to_queue(&app_rx), "already there: no tab switch");
+        assert_eq!(ctx.queue_tab.get(), QueueTabMode::Audio, "the list still follows");
+    }
+
+    /// The listing is over: the marker is cleared, whatever the outcome.
+    #[test]
+    fn finishing_clears_the_marker() {
+        let (ctx, _app_rx, _work_rx) = rig();
+        begin_playlist_import(&ctx, true);
+        assert!(ctx.playlist_import.borrow().is_some());
+
+        finish_playlist_import(&ctx);
+        assert_eq!(ctx.playlist_import.borrow().clone(), None);
+    }
+
+    /// A link the manager cannot even parse fails before the listing starts;
+    /// the marker must not be left behind for a loading row nothing will ever
+    /// replace.
+    #[test]
+    fn a_rejected_link_does_not_leave_the_loading_row_behind() {
+        let (ctx, _app_rx, _work_rx) = rig();
+        import_playlist(&ctx, "not a link", true, false);
+        assert_eq!(ctx.playlist_import.borrow().clone(), None);
+    }
+
+    /// The rows arriving is what removes the loading row: `queue_playlist_streams`
+    /// clears the marker as it queues them, so the row cannot outlive the wait.
+    #[test]
+    fn the_arriving_rows_clear_the_loading_row() {
+        let (ctx, _app_rx, _work_rx) = rig();
+        begin_playlist_import(&ctx, false);
+        assert!(ctx.playlist_import.borrow().is_some());
+
+        let item = crate::shared::ytdlp::YtDlpItem {
+            id: "abcdefghijk".to_owned(),
+            filename: "A track".to_owned(),
+            kind: crate::shared::ytdlp::YtDlpHost::Youtube,
+            title: Some("A track".to_owned()),
+            duration: None,
+            channel: None,
+        };
+        super::queue_playlist_streams(&ctx, vec![item], true, false);
+
+        assert_eq!(
+            ctx.playlist_import.borrow().clone(),
+            None,
+            "the loading row goes as its rows land"
+        );
+    }
+
+    /// A valid link actually asks for the listing it will paint the row for.
+    #[test]
+    fn a_valid_link_queues_the_listing_request() {
+        let (ctx, _app_rx, work_rx) = rig();
+        import_playlist(&ctx, PLAYLIST, true, false);
+
+        let requests: Vec<WorkRequest> = work_rx.try_iter().collect();
+        assert_eq!(requests.len(), 1, "one listing request");
+        assert!(
+            matches!(
+                &requests[0],
+                WorkRequest::YtDlpResolvePlaylist {
+                    action: crate::shared::events::PlaylistAction::QueueStreams {
+                        audio: true,
+                        autoplay: false,
+                    },
+                    ..
+                }
+            ),
+            "the listing carries the popup's queue action"
+        );
+    }
 }

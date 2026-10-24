@@ -55,7 +55,28 @@ impl QueuePane {
         let jellyfin = crate::core::mpv::session_playlist_shown(ctx);
         let playlist: std::cell::Ref<'_, Vec<crate::core::mpv::MpvPlaylistEntry>> =
             if jellyfin { ctx.mpv.playlist.borrow() } else { ctx.video_playlist.borrow() };
-        self.video_items_len = playlist.len();
+        // 2026-10-24: a pasted playlist import into the Video list paints one
+        // extra line below the last entry (`Loading playlist…`) until its rows
+        // land. The first frame of the import scrolls it into view, because
+        // the import switched the user here to watch it.
+        let import_loading = ctx.playlist_import.borrow().is_some_and(|import| import.video);
+        if import_loading {
+            if !self.video_import_loading_shown {
+                self.video_import_loading_shown = true;
+                let viewport = area.height as usize;
+                let max_offset = (playlist.len() + 1).saturating_sub(viewport);
+                *self.video_state.offset_mut() = max_offset;
+            }
+            self.schedule_spinner_tick(ctx);
+        } else {
+            self.video_import_loading_shown = false;
+            // Nothing in the Video list spins once the import's line is gone
+            // (the audio list's Duration spinners are not drawn in this mode),
+            // so the shared redraw tick stops here instead of repainting at
+            // the spinner rate forever.
+            self.cancel_spinner_tick(ctx);
+        }
+        self.video_items_len = playlist.len() + usize::from(import_loading);
         // The playlist can change under the marks (session switches,
         // removals elsewhere); drop any mark that no longer has a row.
         self.video_marked.clamp(playlist.len());
@@ -94,6 +115,10 @@ impl QueuePane {
         }
 
         if playlist.is_empty() {
+            if import_loading {
+                self.render_video_import_loading_row(frame, ctx, 0);
+                return Ok(());
+            }
             let style = ctx.config.as_list_text_style().add_modifier(Modifier::DIM);
             frame.render_widget(
                 ratatui::widgets::Paragraph::new("No video playing").style(style),
@@ -167,6 +192,10 @@ impl QueuePane {
             });
         StatefulWidget::render(list, area, frame.buffer_mut(), &mut self.video_state);
 
+        if import_loading {
+            self.render_video_import_loading_row(frame, ctx, playlist.len());
+        }
+
         if let Some(scrollbar) = ctx.config.as_styled_scrollbar()
             && self.areas[Areas::Scrollbar].width > 0
         {
@@ -185,6 +214,42 @@ impl QueuePane {
             );
         }
         Ok(())
+    }
+
+    /// The Video list's `Loading playlist…` line (2026-10-24), painted at
+    /// `index` — one past the last entry for an append — and clipped away when
+    /// the viewport does not reach it. A painting only, like the audio list's
+    /// (see `render_import_loading_row`): the entry list itself is untouched.
+    fn render_video_import_loading_row(
+        &self,
+        frame: &mut ratatui::Frame,
+        ctx: &Ctx,
+        index: usize,
+    ) {
+        let area = self.areas[Areas::Table];
+        let row = index.saturating_sub(self.video_state.offset());
+        if row >= area.height as usize {
+            return;
+        }
+        let line = ratatui::text::Line::from(vec![
+            ratatui::text::Span::styled(
+                format!("{} ", super::render::spinner_frame()),
+                ratatui::style::Style::default(),
+            ),
+            ratatui::text::Span::styled(
+                "Loading playlist…",
+                ctx.config.as_list_text_style(),
+            ),
+        ]);
+        frame.render_widget(
+            line,
+            ratatui::prelude::Rect {
+                x: area.x,
+                y: area.y.saturating_add(row as u16),
+                width: area.width,
+                height: 1,
+            },
+        );
     }
 
     /// Play the selected row of the Video list: the WHOLE list is handed to

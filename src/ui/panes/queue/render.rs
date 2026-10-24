@@ -116,7 +116,8 @@ impl QueuePane {
 
     /// Round 95: arm (and re-arm) the redraw tick that animates the
     /// Duration column's spinner, the same way the Jellyfin indicator does.
-    fn schedule_spinner_tick(&mut self, ctx: &Ctx) {
+    /// The Video list's import loading row uses the same tick (2026-10-24).
+    pub(super) fn schedule_spinner_tick(&mut self, ctx: &Ctx) {
         let id = self.loading_tick.unwrap_or_else(|| {
             let id = crate::shared::id::new();
             self.loading_tick = Some(id);
@@ -132,8 +133,9 @@ impl QueuePane {
         );
     }
 
-    /// Round 95: stop the tick once no row is parsing any more.
-    fn cancel_spinner_tick(&mut self, ctx: &Ctx) {
+    /// Round 95: stop the tick once no row is parsing any more (and once the
+    /// Video list's import loading row is gone, 2026-10-24).
+    pub(super) fn cancel_spinner_tick(&mut self, ctx: &Ctx) {
         if let Some(id) = self.loading_tick.take() {
             ctx.scheduler.cancel(id);
         }
@@ -171,10 +173,23 @@ impl QueuePane {
             }
             b
         };
+        // 2026-10-24: a pasted playlist import paints one extra line below the
+        // last row (`Loading playlist…`) until its rows land, so the scrollable
+        // length grows by that line and the first frame of the import scrolls
+        // it into view — the user just switched here to watch the import.
+        let import_loading = ctx.playlist_import.borrow().is_some_and(|import| !import.video);
+        if import_loading && !self.import_loading_shown {
+            self.import_loading_shown = true;
+            let viewport = self.areas[Areas::Table].height as usize;
+            let max_offset = (self.queue.len() + 1).saturating_sub(viewport);
+            self.queue.state.set_offset(max_offset);
+        } else if !import_loading {
+            self.import_loading_shown = false;
+        }
         self.queue
             .state
             .set_content_and_viewport_len(
-                self.queue.len(),
+                self.queue.len() + usize::from(import_loading),
                 self.areas[Areas::Table].height as usize,
             );
         let hover_idx = crate::ui::panes::hovered_item(
@@ -208,7 +223,8 @@ impl QueuePane {
         // is armed while any stream resolve is in flight and dropped as soon
         // as none is. Round 107: the play-marker column's spinner uses the
         // same tick, so a pending entry resolve arms it too.
-        let spinning_any = !ctx.pending_yt_links.borrow().is_empty()
+        let spinning_any = import_loading
+            || !ctx.pending_yt_links.borrow().is_empty()
             || !ctx.pending_stream_resolve.borrow().is_empty();
         if spinning_any {
             self.schedule_spinner_tick(ctx);
@@ -334,6 +350,9 @@ impl QueuePane {
                 &mut self.queue.state,
             );
         let _ = std::mem::replace(self.queue.marked_mut(), marked);
+        if import_loading {
+            self.render_import_loading_row(frame, ctx);
+        }
         let selected_id = self.queue.selected().map(|s| s.id);
         // Round 111: the render pass is the one place every selection route
         // funnels through, so the selection-time metadata warm is driven from
@@ -375,6 +394,34 @@ impl QueuePane {
                 );
         }
         Ok(())
+    }
+
+    /// The pasted-playlist import's loading row: a spinner and
+    /// `Loading playlist…`, painted one line below the last queue row — where
+    /// an `Add to queue` import appends its rows — and gone the moment they
+    /// land (2026-10-24).
+    ///
+    /// A **painting, never a queue entry**: there is nothing to select, play,
+    /// delete, mark or persist here. A synthetic entry in the list would have
+    /// to be guarded at every action, and a real one in MPD's queue would be
+    /// filtered out of this pane (so the user could never remove it) while MPD
+    /// would eventually try to play it.
+    pub(super) fn render_import_loading_row(&self, frame: &mut Frame, ctx: &Ctx) {
+        let area = self.areas[Areas::Table];
+        let row = self.queue.len().saturating_sub(self.queue.state.offset());
+        if row >= area.height as usize {
+            // The list is scrolled away from its end: the line is out of
+            // view with it (it becomes visible as soon as the end is).
+            return;
+        }
+        let line = Line::from(vec![
+            Span::styled(format!("{} ", spinner_frame()), Style::default()),
+            Span::styled("Loading playlist…", ctx.config.as_list_text_style()),
+        ]);
+        frame.render_widget(
+            line,
+            Rect { x: area.x, y: area.y.saturating_add(row as u16), width: area.width, height: 1 },
+        );
     }
 
     pub(super) fn calculate_areas(&mut self, area: Rect, ctx: &Ctx) -> Result<()> {
@@ -1006,5 +1053,158 @@ mod stream_column_tests {
             symbols.ellipsis
         );
         assert!(long.starts_with(text.trim_end_matches(&symbols.ellipsis)), "it is a prefix: {text:?}");
+    }
+}
+
+/// 2026-10-24: the pasted-playlist import's `Loading playlist…` row.
+///
+/// A 1000+ track playlist takes seconds to list (`yt-dlp --flat-playlist`),
+/// and the import used to show nothing at all until its rows appeared. The
+/// paste flow now switches to the queue and this list paints the loading row,
+/// which must sit exactly one line below the last row (where an `Add to queue`
+/// import appends) and vanish the moment the rows land.
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod playlist_import_render_tests {
+    use ratatui::backend::TestBackend;
+    use ratatui::layout::Rect;
+
+    use super::{Areas, QueuePane, SPINNER_FRAMES};
+    use crate::ctx::{Ctx, PlaylistImport, QueueTabMode};
+    use crate::mpd::commands::Song;
+    use crate::tests::fixtures::ctx as fixture_ctx;
+
+    fn ctx_with_rows(n: usize) -> (Ctx, crossbeam::channel::Receiver<crate::shared::events::AppEvent>)
+    {
+        let app = crossbeam::channel::unbounded();
+        let app_rx = app.1.clone();
+        let mut ctx = fixture_ctx(
+            (app.0, app.1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+        );
+        ctx.queue = (0..n)
+            .map(|i| Song {
+                id: i as u32 + 1,
+                file: format!("/music/track{i}.flac"),
+                ..Default::default()
+            })
+            .collect();
+        (ctx, app_rx)
+    }
+
+    fn audio_pane(ctx: &Ctx) -> QueuePane {
+        ctx.queue_tab.set(QueueTabMode::Audio);
+        let mut pane = QueuePane::new(ctx);
+        pane.queue.items = QueuePane::local_queue_for_test(ctx);
+        pane.queue.state.set_content_len(Some(pane.queue.items.len()));
+        pane
+    }
+
+    fn draw(pane: &mut QueuePane, ctx: &Ctx) -> Rect {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| pane.render(frame, Rect::new(0, 0, 80, 24), ctx).unwrap())
+            .unwrap();
+        pane.areas[Areas::Table]
+    }
+
+    fn text_at(pane: &mut QueuePane, ctx: &Ctx, table: Rect, row: u16) -> String {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| pane.render(frame, Rect::new(0, 0, 80, 24), ctx).unwrap())
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        (table.x..table.x + table.width)
+            .map(|x| buf[(x, table.y + row)].symbol().to_owned())
+            .collect::<String>()
+            .trim_end()
+            .to_owned()
+    }
+
+    /// The row is drawn immediately below the queue's last row, with a spinner
+    /// frame in front of the label.
+    #[test]
+    fn the_import_paints_a_loading_row_after_the_last_entry() {
+        let (ctx, _rx) = ctx_with_rows(3);
+        ctx.playlist_import.replace(Some(PlaylistImport { video: false }));
+        let mut pane = audio_pane(&ctx);
+        let table = draw(&mut pane, &ctx);
+
+        let drawn = text_at(&mut pane, &ctx, table, 3);
+        assert!(
+            drawn.contains("Loading playlist…"),
+            "the loading row follows the last queue row, got {drawn:?}"
+        );
+        let spinner = drawn.chars().next().expect("a spinner frame leads the line");
+        assert!(
+            SPINNER_FRAMES.contains(&spinner.to_string().as_str()),
+            "the row starts with a queue spinner frame, got {spinner:?}"
+        );
+    }
+
+    /// Nothing is painted when no import is in flight — the line is a painting,
+    /// not a permanent row.
+    #[test]
+    fn no_import_paints_no_line() {
+        let (ctx, _rx) = ctx_with_rows(3);
+        let mut pane = audio_pane(&ctx);
+        let table = draw(&mut pane, &ctx);
+        assert_eq!(text_at(&mut pane, &ctx, table, 3), "");
+    }
+
+    /// An empty queue paints it on the first line, so the import is visible
+    /// even when there is nothing to append to yet.
+    #[test]
+    fn an_empty_queue_shows_the_loading_row_at_the_top() {
+        let (ctx, _rx) = ctx_with_rows(0);
+        ctx.playlist_import.replace(Some(PlaylistImport { video: false }));
+        let mut pane = audio_pane(&ctx);
+        let table = draw(&mut pane, &ctx);
+        assert!(
+            text_at(&mut pane, &ctx, table, 0).contains("Loading playlist…"),
+            "an empty queue's loading row is the first line"
+        );
+    }
+
+    /// Finishing the import (its rows landed, or it failed) removes the line.
+    #[test]
+    fn finishing_the_import_removes_the_line() {
+        let (ctx, _rx) = ctx_with_rows(2);
+        ctx.playlist_import.replace(Some(PlaylistImport { video: false }));
+        let mut pane = audio_pane(&ctx);
+        let table = draw(&mut pane, &ctx);
+        assert!(text_at(&mut pane, &ctx, table, 2).contains("Loading playlist…"));
+
+        crate::ui::modals::paste::finish_playlist_import(&ctx);
+        assert_eq!(ctx.playlist_import.borrow().clone(), None);
+        assert_eq!(text_at(&mut pane, &ctx, table, 2), "", "the line is gone");
+    }
+
+    /// A video import paints the line in the Video list, after its entries.
+    #[test]
+    fn a_video_import_paints_the_line_in_the_video_list() {
+        let (ctx, _rx) = ctx_with_rows(0);
+        ctx.video_playlist.borrow_mut().push(crate::core::mpv::MpvPlaylistEntry::new(
+            "one".to_owned(),
+            "https://example.invalid/one".to_owned(),
+            None,
+        ));
+        ctx.playlist_import.replace(Some(PlaylistImport { video: true }));
+        ctx.queue_tab.set(QueueTabMode::Video);
+        let mut pane = QueuePane::new(&ctx);
+        pane.video_items_len = ctx.video_playlist.borrow().len() + 1;
+        let table = draw(&mut pane, &ctx);
+
+        assert!(
+            text_at(&mut pane, &ctx, table, 1).contains("Loading playlist…"),
+            "the video list's loading row follows its last entry"
+        );
+
+        // And an audio import must not paint in the video list.
+        ctx.playlist_import.replace(Some(PlaylistImport { video: false }));
+        assert_eq!(text_at(&mut pane, &ctx, table, 1), "");
     }
 }

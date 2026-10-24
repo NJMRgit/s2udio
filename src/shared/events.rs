@@ -349,6 +349,15 @@ pub(crate) enum WorkDone {
         /// What the request asked to do with the resolved items.
         action: PlaylistAction,
     },
+    /// Listing a playlist failed (2026-10-24). Carried as a result rather than
+    /// returned as an `error` — the round-96 pattern — so the failure clears
+    /// the import's `Loading playlist…` row and says what happened, instead of
+    /// leaving a stuck row behind for a generic status message.
+    YtDlpPlaylistFailed {
+        /// What the request asked to do; the same request's action.
+        action: PlaylistAction,
+        error: String,
+    },
     YtDlpDownloaded {
         id: DownloadId,
         result: Result<YtDlpDownloadResult, YtDlpDownloadError>,

@@ -113,6 +113,7 @@ pub fn ctx(
         pending_stream_resolve: RefCell::new(HashSet::new()),
         chapters: RefCell::new(HashMap::new()),
         queue_tab: Cell::new(QueueTabMode::Audio),
+        playlist_import: RefCell::new(None),
         video_playlist: RefCell::new(Vec::new()),
         queue_table_width: Cell::new(None),
         mpv_custom_subtitle_lang: std::cell::RefCell::new(None),

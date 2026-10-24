@@ -22,6 +22,19 @@ use crate::{
     },
     ui::{StatusMessage, input::InputManager},
 };
+/// A pasted playlist import whose items are still being listed.
+///
+/// Held in [`Ctx::playlist_import`] for the duration of the `yt-dlp
+/// --flat-playlist` call the import starts with. The Queue pane paints a
+/// loading row while it is set; the paste flow switches the TUI to the queue
+/// it is adding to. A second import replaces the first (last one wins).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PlaylistImport {
+    /// The list the rows will land in: the Queue tab's Video list, else its
+    /// audio queue.
+    pub(crate) video: bool,
+}
+
 /// The sub-page shown in the Queue tab's body: the MPD queue (Audio),
 /// the mpv video playlist (Video), the current track's chapters, or the
 /// radio browser (Round 62 Q2 — Radio left the Libraries group and lives
@@ -263,6 +276,14 @@ pub struct Ctx {
     /// playback, and is saved to `<cache_dir>/video-playlist.json` so it
     /// survives restarts too.
     pub(crate) video_playlist: RefCell<Vec<crate::core::mpv::MpvPlaylistEntry>>,
+    /// The pasted-playlist import in flight, if any (2026-10-24): listing a
+    /// 1000+ track playlist takes seconds in `yt-dlp --flat-playlist`, and
+    /// nothing else would tell the user the import is running. The Queue list
+    /// paints a `Loading playlist…` row with a spinner where the rows will
+    /// land, and the paste flow switches the TUI to that queue. Cleared by
+    /// the listing's result (rows land, or the import fails), so the row
+    /// cannot outlive it.
+    pub(crate) playlist_import: RefCell<Option<PlaylistImport>>,
     /// Width of the queue table area (set by the QueuePane's layout pass),
     /// so the QueueHeaderPane's chapters header (Chapter | Time | Duration)
     /// renders into the same width and its labels sit exactly above the
@@ -634,6 +655,7 @@ impl Ctx {
             pending_stream_resolve: RefCell::new(HashSet::new()),
             chapters: RefCell::new(HashMap::new()),
             queue_tab: Cell::new(QueueTabMode::Audio),
+            playlist_import: RefCell::new(None),
             video_playlist: RefCell::new(Vec::new()),
             queue_table_width: Cell::new(None),
             mpv_custom_subtitle_lang: std::cell::RefCell::new(None),

@@ -748,7 +748,18 @@ fn handle_work_request(
             // action decides: the popup's queue rows enqueue stream entries
             // without downloading anything, the rest hand the item list to
             // the UI.
-            let urls = ytdlp.resolve_playlist_urls(&playlist)?;
+            let urls = match ytdlp.resolve_playlist_urls(&playlist) {
+                Ok(urls) => urls,
+                // 2026-10-24: the failure is the request's *result*, not a
+                // work error: the import's loading row has to come down and
+                // the message has to say the playlist could not be read.
+                Err(err) => {
+                    return Ok(WorkDone::YtDlpPlaylistFailed {
+                        action,
+                        error: err.to_string(),
+                    });
+                }
+            };
             // Round 95: the listing carries every item's title, channel and
             // duration, so the queue rows no longer wait for a per-item
             // resolve - `QueueStreams` hands the listed items to the UI,

@@ -82,6 +82,7 @@ use playlist::{
     import_playlist, is_playlist_link, paste_add_to_playlist, paste_audio_uris,
     paste_create_playlist, paste_video_uris, pick_playlist_items,
 };
+pub(crate) use playlist::finish_playlist_import;
 use queue_stream::{
     enqueue_items, enqueue_stream_links, mpd_addable_path, play_item, play_video_now, queue_videos,
     video_playlist_uris,

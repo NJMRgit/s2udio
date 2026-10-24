@@ -199,11 +199,25 @@ pub(super) fn handle_work_done(
                 // and duration (audio: the MPD queue, video:
                 // the persistent video playlist).
                 PlaylistAction::QueueStreams { audio, autoplay } => {
+                    // The wait is over: `queue_playlist_streams` clears
+                    // the import's loading row as it adds the rows
+                    // (2026-10-24).
                     crate::ui::modals::paste::queue_playlist_streams(
                         ctx, urls, audio, autoplay,
                     );
                 }
             }
+            *render_wanted = true;
+        }
+        WorkDone::YtDlpPlaylistFailed { action, error } => {
+            // The listing failed, so nothing will land: take the import's
+            // loading row down and say why (2026-10-24). Without this the
+            // Queue list would spin forever and only a generic work error
+            // would have been logged.
+            crate::ui::modals::paste::finish_playlist_import(ctx);
+            log::warn!(action:? = action, error = error.as_str(); "Could not list the playlist");
+            status_error!("Could not load the playlist: {error}");
+            *render_wanted = true;
         }
         WorkDone::YtDlpDownloaded { id, result, spec } => {
             match ctx.ytdlp_manager.resolve_download(id, result) {
