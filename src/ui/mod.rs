@@ -2163,6 +2163,44 @@ pub(crate) fn draw_back_button(
     area
 }
 
+/// The `⌂ Home` button on the library tree page (which sits under the Home
+/// page instead of beside it). Sits to the left of `↰ Back` when that button
+/// is visible (`right_limit` = its x), or at the row's end otherwise.
+pub(crate) fn draw_home_button(
+    frame: &mut Frame,
+    row: Rect,
+    visible: bool,
+    right_limit: Option<u16>,
+    ctx: &Ctx,
+) -> Rect {
+    const LABEL: &str = "⌂ Home";
+    if !visible || row.width < 12 {
+        return Rect::default();
+    }
+    let label_w = unicode_width::UnicodeWidthStr::width(LABEL) as u16;
+    let right = right_limit
+        .map(|limit| limit.saturating_sub(1))
+        .unwrap_or(row.right().saturating_sub(1));
+    let x = right.saturating_sub(label_w);
+    if x <= row.x + 1 {
+        return Rect::default();
+    }
+    let area = Rect {
+        x,
+        y: row.y,
+        width: label_w + 1,
+        height: 1,
+    };
+    let base = ctx.config.as_list_name_style();
+    let style = if ctx.mouse_pos().is_some_and(|p| area.contains(p)) {
+        crate::config::hover_style(base)
+    } else {
+        base
+    };
+    frame.render_widget(ratatui::widgets::Paragraph::new(LABEL).style(style), area);
+    area
+}
+
 /// The Item Box header (round 60 A2/A7): inside the pane's own region
 /// box, the first row carries the section title (one-character margin),
 /// the second row is a full-width separator that connects to the box's

@@ -154,6 +154,14 @@ pub(crate) enum WorkRequest {
 
     /// Fetch the Jellyfin library tree (views of the server).
     FetchJellyfinViews,
+    /// The Home page's three shelves (Continue Watching / Next Up /
+    /// Recently Added) in one work-thread round trip.
+    FetchJellyfinHome,
+    /// An item's ancestor chain (library → series → season), so a search
+    /// jump can open the library tree on the item.
+    FetchJellyfinAncestors {
+        item_id: String,
+    },
     /// Children of a Jellyfin folder/view (non-music views).
     FetchJellyfinFolder {
         parent_id: String,
@@ -185,6 +193,16 @@ pub(crate) enum WorkRequest {
     FetchJellyfinImage {
         item_id: String,
         fallback_item_id: Option<String>,
+    },
+    /// One typed image of an item for the Home poster wall, tagged so the
+    /// pane can key it by carousel slot kind (the same item can be shown as
+    /// a 16:9 preview and as a poster). `image_type` is tried first, then
+    /// the item's `Primary`, then `fallback_item_id`'s `Primary`.
+    FetchJellyfinImageTagged {
+        tag: String,
+        item_id: String,
+        fallback_item_id: Option<String>,
+        image_type: crate::jellyfin::JfImageType,
     },
     /// The primary image of the video currently playing in mpv, shown as
     /// the album art while the video plays.

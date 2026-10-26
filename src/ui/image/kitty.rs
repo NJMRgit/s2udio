@@ -1,6 +1,6 @@
 use std::{io::Write, time::Instant};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use base64::Engine;
 use crossterm::{
     execute,
@@ -360,6 +360,143 @@ pub struct AnimationData {
     img_width: u32,
     img_height: u32,
     aligned_area: Rect,
+}
+
+/// One Home-carousel tile: an image encoded to fill exactly a `cols` x
+/// `rows` cell rectangle (cover-cropped, so every card in a row has the same
+/// shape), ready to be transferred under its own kitty image id.
+///
+/// The wall draws one of these per visible card, each with a distinct id;
+/// the placeholder grid colours the cells with that id, which is how kitty
+/// tells the images apart (the existing single-image poster path uses id 1).
+#[derive(Debug, Clone)]
+pub struct WallTile {
+    pub id: u32,
+    content: String,
+    compressed: bool,
+    pub cols: u16,
+    pub rows: u16,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Encode `bytes` to exactly fill a `cols`x`rows` cell area, cropping the
+/// source to the area's pixel aspect (a "cover" fit: posters stay posters,
+/// thumbnails stay 16:9, and the carousel stays a clean grid).
+pub fn create_wall_tile(
+    bytes: &[u8],
+    cols: u16,
+    rows: u16,
+    id: u32,
+) -> Result<WallTile> {
+    let image = image::load_from_memory(bytes).context("Unable to decode image")?;
+    let (src_w, src_h) = (image.width(), image.height());
+    if src_w == 0 || src_h == 0 || cols == 0 || rows == 0 {
+        anyhow::bail!("invalid wall tile geometry");
+    }
+    // Terminal cell size in pixels; a missing window size falls back to a
+    // typical 8x16 cell so the tile is still encoded at a sane resolution.
+    let (cell_w, cell_h) = crossterm::terminal::window_size()
+        .map(|ws| {
+            if ws.columns == 0 || ws.rows == 0 {
+                (8.0, 16.0)
+            } else {
+                (
+                    ws.width as f64 / ws.columns as f64,
+                    ws.height as f64 / ws.rows as f64,
+                )
+            }
+        })
+        .unwrap_or((8.0, 16.0));
+    let target_w = ((f64::from(cols) * cell_w).round() as u32).clamp(16, 640);
+    let target_h = ((f64::from(rows) * cell_h).round() as u32).clamp(16, 960);
+    // Center crop to the target aspect, then resize to the exact pixel
+    // rectangle (no letterboxing, no stretching).
+    let target_aspect = f64::from(target_w) / f64::from(target_h);
+    let src_aspect = f64::from(src_w) / f64::from(src_h);
+    let (crop_w, crop_h) = if src_aspect > target_aspect {
+        (((f64::from(src_h) * target_aspect).round() as u32).max(1), src_h)
+    } else {
+        (src_w, ((f64::from(src_w) / target_aspect).round() as u32).max(1))
+    };
+    let crop_x = (src_w.saturating_sub(crop_w)) / 2;
+    let crop_y = (src_h.saturating_sub(crop_h)) / 2;
+    let cropped = image.crop_imm(crop_x, crop_y, crop_w, crop_h);
+    let resized = cropped.resize_exact(
+        target_w,
+        target_h,
+        image::imageops::FilterType::Triangle,
+    );
+    let rgba = resized.to_rgba8();
+    let payload = encode_image_payload(rgba.as_raw());
+    Ok(WallTile {
+        id,
+        content: payload.content,
+        compressed: payload.compressed,
+        cols,
+        rows,
+        width: target_w,
+        height: target_h,
+    })
+}
+
+/// Transmit a wall tile under its image id and paint its placeholder grid
+/// into `area` (cells must be exactly `tile.cols` x `tile.rows`). A retransfer
+/// of an existing id requires that id to be deleted first, which
+/// [`delete_wall_tile`] does.
+pub fn display_wall_tile(
+    w: &mut impl Write,
+    tile: &WallTile,
+    area: Rect,
+    bg_color: Option<crossterm::style::Color>,
+) -> Result<()> {
+    let compression = if tile.compressed { ",o=z" } else { "" };
+    let mut iter = tile.content.chars().peekable();
+    let first: String = iter.by_ref().take(4096).collect();
+    // `m` says whether another chunk follows; a small payload must NOT claim
+    // one (the terminal would wait for it forever).
+    let first_more = i32::from(iter.peek().is_some());
+    tmux_write!(
+        w,
+        "\x1b_Ga=T,U=1,i={id},q=2,c={cols},r={rows},f=32{compression},s={width},v={height},m={first_more};{first}\x1b\\",
+        id = tile.id,
+        cols = tile.cols,
+        rows = tile.rows,
+        width = tile.width,
+        height = tile.height,
+    )?;
+    while iter.peek().is_some() {
+        let chunk: String = iter.by_ref().take(4096).collect();
+        let more = i32::from(iter.peek().is_some());
+        tmux_write!(w, "\x1b_Gi={id},m={more};{chunk}\x1b\\", id = tile.id)?;
+    }
+    // The placeholder cells: every cell names its image id in the
+    // foreground colour and its (row, column) through combining diacritics.
+    let colors = Colors { background: bg_color, foreground: None };
+    let mut buf = Vec::with_capacity(usize::from(area.width) * usize::from(area.height) * 8);
+    execute!(buf, crossterm::cursor::SavePosition, SetColors(colors))?;
+    write!(buf, "\x1b[38;5;{}m", tile.id)?;
+    for y in 0..area.height {
+        csi_move!(buf, area.left(), area.top() + y)?;
+        for x in 0..area.width {
+            write!(
+                buf,
+                "{DELIM}{row}{col}",
+                row = GRID[y as usize],
+                col = GRID[x as usize]
+            )?;
+        }
+    }
+    execute!(buf, crossterm::style::ResetColor, crossterm::cursor::RestorePosition)?;
+    w.write_all(&buf)?;
+    w.flush()?;
+    Ok(())
+}
+
+/// Free one wall image (its data and all its placements).
+pub fn delete_wall_tile(w: &mut impl Write, id: u32) -> Result<()> {
+    tmux_write!(w, "\x1b_Ga=d,d=I,i={id},q=2\x1b\\", id = id)?;
+    Ok(())
 }
 
 const DELIM: &str = "\u{10EEEE}";

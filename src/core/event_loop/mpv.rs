@@ -24,10 +24,23 @@ pub(super) struct MpvState {
     session_since: Option<Instant>,
     /// Whether `POST /Sessions/Playing` was already sent for the Jellyfin
     /// item playing now: the server needs a session start to record the
-    /// playback, and it is sent once per session from the first progress
-    /// tick (a session this instance reattached to already has one from the
+    /// playback, and it is sent once per item from the first progress tick
+    /// (a session this instance reattached to already has one from the
     /// launcher/tracker).
     start_reported: bool,
+    /// The Jellyfin item the poll is reporting against. A playlist advance
+    /// (or a switch to another video) changes it, and the item left behind
+    /// is finalized at the last position seen for it — otherwise a season
+    /// played through mpv only ever reported the last episode, and a
+    /// finished one was never marked watched.
+    jellyfin_item: Option<String>,
+    /// `PlaySessionId` of the playback of `jellyfin_item` (one per item, so
+    /// the server can tell one playback from the next).
+    play_session_id: String,
+    /// The last position/duration read for `jellyfin_item` while it played:
+    /// the final position to report when the item ends.
+    item_last_pos: f64,
+    item_duration: f64,
 }
 
 impl MpvState {
@@ -40,6 +53,10 @@ impl MpvState {
             stale_ticks: 0,
             session_since: None,
             start_reported: false,
+            jellyfin_item: None,
+            play_session_id: String::new(),
+            item_last_pos: 0.0,
+            item_duration: 0.0,
         }
     }
 }
@@ -186,6 +203,13 @@ pub(super) fn session_started(ctx: &mut Ctx, ui: &mut Ui, state: &mut MpvState, 
     *ctx.mpv.resume_fetch_item.borrow_mut() = None;
     *ctx.mpv.pending_loadfile.borrow_mut() = None;
     state.stale_ticks = 0;
+    // A new mpv session is a new Jellyfin playback: the per-item
+    // bookkeeping starts clean (the previous session's item was finalized
+    // by `session_ended`).
+    state.jellyfin_item = None;
+    state.play_session_id = crate::jellyfin::new_play_session_id();
+    state.item_last_pos = 0.0;
+    state.item_duration = 0.0;
     // This is a fresh session: its Jellyfin session start has not been
     // reported yet.
     state.start_reported = false;
@@ -248,23 +272,72 @@ pub(super) fn session_started(ctx: &mut Ctx, ui: &mut Ui, state: &mut MpvState, 
     // video through its own MPRIS player.
 }
 
+/// Run one Jellyfin playback report on a throwaway thread (the event loop is
+/// never allowed to block on HTTP). A failure is logged, not shown: a
+/// server hiccup must not interrupt playback.
+fn spawn_jellyfin_report(
+    ctx: &Ctx,
+    report: impl FnOnce(&crate::jellyfin::Jellyfin) -> anyhow::Result<()> + Send + 'static,
+) {
+    let config_file = ctx.config.jellyfin.config_file.clone();
+    std::thread::spawn(move || {
+        let sidecar = crate::config::jellyfin::jellyfin_sidecar_path();
+        if let Some(jf) = crate::jellyfin::Jellyfin::load(&config_file, Some(&sidecar))
+            && let Err(err) = report(&jf)
+        {
+            log::debug!(error:? = err; "Jellyfin playback report failed");
+        }
+    });
+}
+
+/// Finalize one Jellyfin item's playback: report the stop at the last known
+/// position (never below the server's resume threshold, which would wipe
+/// the saved position instead of saving it).
+fn report_jellyfin_stop(
+    ctx: &Ctx,
+    item_id: &str,
+    position: f64,
+    duration: f64,
+    play_session_id: &str,
+) {
+    if !crate::jellyfin::reportable_position(position, duration) {
+        log::debug!(
+            item_id:? = item_id, position = position, duration = duration;
+            "Not reporting a Jellyfin stop below the resume threshold"
+        );
+        return;
+    }
+    let item_id = item_id.to_owned();
+    let play_session_id = play_session_id.to_owned();
+    spawn_jellyfin_report(ctx, move |jf| {
+        jf.report_playing_stopped(&item_id, position, &play_session_id)
+    });
+}
+
 pub(super) fn session_ended(ctx: &mut Ctx, ui: &mut Ui, state: &mut MpvState) {
     // Clear the flag the MPD-start pause guard checks (the
     // launcher thread clears it for its own session, but a
     // reattached one has no launcher thread — without this a
     // dead session kept flagging "mpv running" forever).
     crate::core::mpv::MPV_RUNNING.store(false, std::sync::atomic::Ordering::Relaxed);
-    // Save the final position for resume (background thread).
+    // Save the final position for resume (background thread). The position
+    // is the last one the poll saw for this item — `ctx.mpv.position` is a
+    // fresh 0 on a session that never got past its start, and a 0-tick stop
+    // would wipe the resume position the server had.
     if let Some(item_id) = ctx.mpv.item_id.clone() {
-        let config_file = ctx.config.jellyfin.config_file.clone();
-        let position = ctx.mpv.position;
-        std::thread::spawn(move || {
-            let sidecar = crate::config::jellyfin::jellyfin_sidecar_path();
-            if let Some(jf) = crate::jellyfin::Jellyfin::load(&config_file, Some(&sidecar)) {
-                let _ = jf.report_playing_stopped(&item_id, position);
-            }
-        });
+        let position = state.item_last_pos.max(ctx.mpv.position).max(0.0);
+        report_jellyfin_stop(
+            ctx,
+            &item_id,
+            position,
+            ctx.mpv.duration.max(state.item_duration),
+            &state.play_session_id,
+        );
     }
+    state.jellyfin_item = None;
+    state.start_reported = false;
+    state.item_last_pos = 0.0;
+    state.item_duration = 0.0;
     // Remember the final position locally for every video (Jellyfin keeps
     // its own server-side copy; this covers local files, torrents and
     // resolved links, and is the fallback for a Jellyfin item the server
@@ -483,6 +556,38 @@ pub(super) fn poll(ctx: &mut Ctx, ui: &mut Ui, state: &mut MpvState) -> PollResu
             }
         }
     }
+    // Jellyfin bookkeeping: when the item the poll reports against changes
+    // (mpv advanced to the next episode, or the user switched to another
+    // video), finalize the item that just ended at the last position seen
+    // for it. Every episode of a season then gets its own stop report, and
+    // a completed one is marked watched even if the 10 s progress tick never
+    // happened to land near its end.
+    //
+    // This runs AFTER the advance block above on purpose: there
+    // `ctx.mpv.item_id` already names the new entry while `item_last_pos`
+    // still holds the position the previous item reached, which is exactly
+    // the position its stop report needs.
+    let current_jellyfin_item = ctx.mpv.item_id.clone();
+    if state.jellyfin_item != current_jellyfin_item {
+        if let Some(previous) = state.jellyfin_item.clone() {
+            report_jellyfin_stop(
+                ctx,
+                &previous,
+                state.item_last_pos,
+                state.item_duration,
+                &state.play_session_id,
+            );
+            // Another item is another playback: its session start has not
+            // been reported yet.
+            state.start_reported = false;
+        }
+        // None → Some is the first poll of a session (or a reattach): the
+        // launcher/tracker already decided `start_reported` for it.
+        state.play_session_id = crate::jellyfin::new_play_session_id();
+        state.jellyfin_item = current_jellyfin_item;
+    }
+    state.item_last_pos = position;
+    state.item_duration = duration;
     // Apply an armed resume seek now that the socket is reachable; the
     // helper retries until mpv has finished opening the entry (a seek sent
     // while it is still loading is dropped).
@@ -574,33 +679,31 @@ pub(super) fn poll(ctx: &mut Ctx, ui: &mut Ui, state: &mut MpvState) -> PollResu
         state.last_report = Instant::now();
         state.last_paused = ctx.mpv.paused;
         if let Some(item_id) = ctx.mpv.item_id.clone() {
+            let session = state.play_session_id.clone();
             // The server needs a session start before progress makes sense
             // (it creates the session and records the playback); sent once
-            // per session.
+            // per item.
             if !state.start_reported {
                 state.start_reported = true;
-                let start_item = item_id.clone();
                 let position = ctx.mpv.position;
-                let config_file = ctx.config.jellyfin.config_file.clone();
-                std::thread::spawn(move || {
-                    let sidecar = crate::config::jellyfin::jellyfin_sidecar_path();
-                    if let Some(jf) = crate::jellyfin::Jellyfin::load(
-                        &config_file,
-                        Some(&sidecar),
-                    ) {
-                        let _ = jf.report_playing_start(&start_item, position);
-                    }
+                let start_item = item_id.clone();
+                let start_session = session.clone();
+                spawn_jellyfin_report(ctx, move |jf| {
+                    jf.report_playing_start(&start_item, position, &start_session)
                 });
             }
+            // A report below the server's resume threshold is stored as
+            // position 0 — it would ERASE the saved resume position, so an
+            // early tick reports nothing at all.
             let position = ctx.mpv.position;
-            let paused = ctx.mpv.paused;
-            let config_file = ctx.config.jellyfin.config_file.clone();
-            std::thread::spawn(move || {
-                let sidecar = crate::config::jellyfin::jellyfin_sidecar_path();
-                if let Some(jf) = crate::jellyfin::Jellyfin::load(&config_file, Some(&sidecar)) {
-                    let _ = jf.report_playing_progress(&item_id, position, paused);
-                }
-            });
+            let duration = ctx.mpv.duration;
+            if crate::jellyfin::reportable_position(position, duration) {
+                let paused = ctx.mpv.paused;
+                let session = state.play_session_id.clone();
+                spawn_jellyfin_report(ctx, move |jf| {
+                    jf.report_playing_progress(&item_id, position, paused, &session)
+                });
+            }
         }
         // Remember the position of every video (Jellyfin included: the
         // local store is the fallback for an item the server has none for,

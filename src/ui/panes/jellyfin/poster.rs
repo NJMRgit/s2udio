@@ -6,12 +6,18 @@ impl JellyfinPane {
     /// season/folder containers) is shelf-worthy; the shelf replaces both
     /// the old full-box art (`image_only`) and the 40%-column split.
     pub(super) fn poster_relevant(&self) -> bool {
+        // Home has no info box and no poster shelf: its cards draw a wall of
+        // images instead.
+        if self.mode == JellyfinTabMode::Home {
+            return false;
+        }
         self.selected_item()
             .is_some_and(|i| i.kind_matches_poster())
-            || self
-                .selected
-                .as_ref()
-                .is_some_and(|k| k.item().kind_matches_poster())
+            || (self.mode == JellyfinTabMode::Libraries
+                && self
+                    .selected
+                    .as_ref()
+                    .is_some_and(|k| k.item().kind_matches_poster()))
     }
     /// Fetch the primary image of the item selected in the right pane (or of
     /// the opened node when nothing is selected) and display it in the info
@@ -20,7 +26,11 @@ impl JellyfinPane {
         let target = self
             .selected_item()
             .filter(|item| item.is_playable() || item.is_container())
-            .or_else(|| self.selected.as_ref().map(|k| k.item().clone()));
+            .or_else(|| {
+                (self.mode == JellyfinTabMode::Libraries).then(|| {
+                    self.selected.as_ref().map(|k| k.item().clone())
+                }).flatten()
+            });
         let Some(target) = target else {
             if self.poster.item_id.is_some() {
                 self.poster.clear(ctx);
@@ -51,6 +61,14 @@ impl JellyfinPane {
     /// the overlay's placeholder cells.
     pub(crate) fn flush_pending_poster(&mut self, ctx: &Ctx) {
         self.poster.flush_pending(ctx);
+        // The Home carousel's images are terminal-side overlays as well: they
+        // are placed after the frame's buffer flush so the flush cannot
+        // overwrite their placeholder cells.
+        if self.mode == JellyfinTabMode::Home
+            && let Err(err) = self.wall.flush(&self.home_images, ctx)
+        {
+            log::debug!(error:? = err; "Failed to draw the Home carousel images");
+        }
     }
 
     /// A full terminal clear deleted every kitty overlay (the cava-row
@@ -60,10 +78,12 @@ impl JellyfinPane {
     /// it (identical recovery to the tab re-entry path).
     pub(crate) fn redraw_poster_after_clear(&mut self, ctx: &Ctx) {
         self.poster.redraw_next_render(ctx);
+        self.wall.redraw_next_flush();
     }
     /// Hide the poster overlay (window resizing / transient state).
     pub(crate) fn hide_pending_poster(&mut self, ctx: &Ctx) {
         self.poster.hide(ctx);
+        self.wall.hide(ctx);
     }
 }
 

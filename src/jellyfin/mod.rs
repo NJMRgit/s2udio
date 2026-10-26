@@ -96,6 +96,21 @@ pub struct JfItem {
     pub child_count: Option<i32>,
     /// Whether this view is a music library (`CollectionType == "music"`).
     pub is_music_view: bool,
+    /// The item's parent (the folder/series/season it sits in), from
+    /// `ParentId`. The search jump uses it to place an item in the tree.
+    #[serde(default)]
+    pub parent_id: Option<String>,
+    /// `UserData.Played`: the server has this item marked watched.
+    #[serde(default)]
+    pub played: bool,
+    /// `UserData.PlayedPercentage` (0–100) as the server reports it.
+    #[serde(default)]
+    pub played_percentage: Option<f64>,
+    /// `UserData.PlaybackPositionTicks` in seconds: where playback stopped
+    /// last time. This is Jellyfin's own resume position — the value the
+    /// web UI's Continue Watching list is built from.
+    #[serde(default)]
+    pub playback_position_secs: f64,
 }
 impl JfItem {
     pub fn is_container(&self) -> bool {
@@ -119,6 +134,39 @@ impl JfItem {
     pub fn kind_matches_poster(&self) -> bool {
         self.is_playable() || self.is_container()
     }
+    /// The season number of a season item (Jellyfin reports a `Season`'s
+    /// number as `IndexNumber`, not `ParentIndexNumber`), or of an
+    /// episode's parent season.
+    pub fn season_index(&self) -> Option<i32> {
+        if self.kind == "Season" {
+            self.index_number.or(self.season_number)
+        } else {
+            self.season_number
+        }
+    }
+    /// `S03E03` for an episode whose numbers are known.
+    pub fn episode_code(&self) -> Option<String> {
+        let season = self.season_number?;
+        let episode = self.index_number?;
+        Some(format!("S{season:02}E{episode:02}"))
+    }
+    /// How much of the item has been watched (0.0–1.0), from the server's
+    /// `PlayedPercentage` or the saved position over the runtime.
+    pub fn progress_fraction(&self) -> Option<f64> {
+        if let Some(pct) = self.played_percentage {
+            return Some((pct / 100.0).clamp(0.0, 1.0));
+        }
+        let runtime = self.runtime_secs.filter(|secs| *secs > 0)?;
+        if self.playback_position_secs <= 0.0 {
+            return None;
+        }
+        Some((self.playback_position_secs / runtime as f64).clamp(0.0, 1.0))
+    }
+    /// The resume position in whole seconds, when the server has one.
+    pub fn resume_secs(&self) -> Option<u64> {
+        let secs = self.playback_position_secs;
+        (secs >= 1.0).then(|| secs as u64)
+    }
 }
 /// Any result routed from the work thread back to the Jellyfin pane.
 #[derive(Debug)]
@@ -136,6 +184,14 @@ pub enum JellyfinResult {
     Image { item_id: String, bytes: Vec<u8> },
     /// Item metadata + primary image, for the MPRIS bridge.
     Mpris { item: JfItem, image: Vec<u8> },
+    /// One Home-wall image, tagged with the carousel slot it belongs to.
+    TaggedImage { tag: String, bytes: Vec<u8> },
+    /// The Home page's three shelves (Continue Watching, Next Up, Recently
+    /// Added), fetched as one work-thread round trip.
+    Home(Box<JfHome>),
+    /// The ancestor chain of an item (library → series → season → …), used
+    /// to open the library tree on a search result.
+    Ancestors { item_id: String, items: Vec<JfItem> },
     /// Chapter markers of an item.
     Chapters { item_id: String, chapters: Vec<crate::shared::chapters::Chapter> },
     /// The whole season's episodes as a playlist (built when an episode
@@ -153,6 +209,48 @@ pub struct SeasonEntry {
     pub title: String,
     pub url: String,
     pub duration: Option<f64>,
+}
+/// The Home page's three shelves, in the order the page paints them.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct JfHome {
+    /// `Users/{uid}/Items/Resume` filtered to video: started, not finished.
+    pub continue_watching: Vec<JfItem>,
+    /// `Shows/NextUp`: the next unwatched episode of every started series.
+    pub next_up: Vec<JfItem>,
+    /// `Users/{uid}/Items/Latest`: the newest items added to the libraries.
+    pub recently_added: Vec<JfItem>,
+}
+impl JfHome {
+    pub fn is_empty(&self) -> bool {
+        self.continue_watching.is_empty()
+            && self.next_up.is_empty()
+            && self.recently_added.is_empty()
+    }
+}
+/// How many rows each Home shelf asks the server for.
+const HOME_SHELF_LIMIT: u32 = 12;
+/// Which Jellyfin image an item is asked for (the Home carousel shows wide
+/// episode previews for Continue Watching and posters everywhere else).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+pub enum JfImageType {
+    /// The item's own artwork: poster for movies/series/seasons, a still for
+    /// episodes when the server has one.
+    #[default]
+    Primary,
+    /// A 16:9 still (episode screenshots; the server also exposes them for
+    /// movies when present).
+    Thumb,
+    /// A 16:9 backdrop image (movies and series).
+    Backdrop,
+}
+impl JfImageType {
+    fn api_name(self) -> &'static str {
+        match self {
+            Self::Primary => "Primary",
+            Self::Thumb => "Thumb",
+            Self::Backdrop => "Backdrop",
+        }
+    }
 }
 impl Jellyfin {
     /// Load the server credentials: the Settings-panel sidecar
@@ -374,6 +472,98 @@ impl Jellyfin {
                 .collect(),
         )
     }
+    /// The Home page's three shelves in one work-thread round trip (three
+    /// GETs: Continue Watching, Next Up, Recently Added). Each shelf is
+    /// independent: one failing endpoint leaves that shelf empty instead of
+    /// blanking the whole page.
+    pub fn home(&self) -> Result<JfHome> {
+        let mut home = JfHome::default();
+        let mut first_error: Option<anyhow::Error> = None;
+        let mut try_shelf = |result: Result<Vec<JfItem>>| match result {
+            Ok(items) => items,
+            Err(err) => {
+                if first_error.is_none() {
+                    first_error = Some(err);
+                }
+                Vec::new()
+            }
+        };
+        home.continue_watching = try_shelf(self.resume_items());
+        home.next_up = try_shelf(self.next_up());
+        home.recently_added = try_shelf(self.recently_added());
+        // A page with nothing at all is a failure worth reporting (the
+        // pane then shows the notice row); a partially filled page is not.
+        if home.is_empty() {
+            if let Some(err) = first_error {
+                return Err(err);
+            }
+        }
+        Ok(home)
+    }
+    /// Continue Watching: the items the user started and has not finished
+    /// (Jellyfin's own resume list, newest first). Video only — the tab's
+    /// Home page is a video page like the web UI's.
+    pub fn resume_items(&self) -> Result<Vec<JfItem>> {
+        let path = format!(
+            "/Users/{}/Items/Resume?MediaTypes=Video&Limit={HOME_SHELF_LIMIT}\
+             &Fields=Overview,MediaSources&ImageTypeLimit=1",
+            self.user_id
+        );
+        self.list_items(&path)
+    }
+    /// Next Up: the next unwatched episode of every series the user has
+    /// started (Jellyfin's `Shows/NextUp`).
+    pub fn next_up(&self) -> Result<Vec<JfItem>> {
+        let path = format!(
+            "/Shows/NextUp?UserId={}&Limit={HOME_SHELF_LIMIT}\
+             &Fields=Overview,MediaSources&ImageTypeLimit=1",
+            self.user_id
+        );
+        self.list_items(&path)
+    }
+    /// Recently Added: the newest items added to the libraries. The
+    /// endpoint answers a bare JSON array (not an `Items` object).
+    pub fn recently_added(&self) -> Result<Vec<JfItem>> {
+        let path = format!(
+            "/Users/{}/Items/Latest?Limit={HOME_SHELF_LIMIT}\
+             &Fields=Overview,MediaSources&ImageTypeLimit=1",
+            self.user_id
+        );
+        let data = self.get(&path)?;
+        Ok(list_from_value(&data))
+    }
+    /// A tagged Home-wall image (see `FetchJellyfinImageTagged`): the tag
+    /// echoes back with the bytes so the pane can match a slot.
+    pub fn tagged_image(
+        &self,
+        item_id: &str,
+        fallback_item_id: Option<&str>,
+        image_type: JfImageType,
+        max_width: u32,
+    ) -> Result<Vec<u8>> {
+        let mut attempts: Vec<(&str, JfImageType)> =
+            vec![(item_id, image_type), (item_id, JfImageType::Primary)];
+        if let Some(fallback) = fallback_item_id {
+            attempts.push((fallback, JfImageType::Primary));
+        }
+        let mut last_err = None;
+        for (target, kind) in attempts {
+            match self.fetch_image_of(target, kind, max_width) {
+                Ok(bytes) => return Ok(bytes),
+                Err(err) => last_err = Some(err),
+            }
+        }
+        Err(last_err.unwrap_or_else(|| anyhow::anyhow!("no image for {item_id}")))
+    }
+    /// The ancestor chain of an item, nearest folder first
+    /// (`Items/{id}/Ancestors`): for an episode that is
+    /// `[Season, Series, Library]`, for a movie `[Library]`.
+    pub fn ancestors(&self, item_id: &str) -> Result<Vec<JfItem>> {
+        let data = self.get(
+            &format!("/Items/{item_id}/Ancestors?UserId={}", self.user_id),
+        )?;
+        Ok(list_from_value(&data))
+    }
     /// The stream URL MPD plays for an audio item. `static=true` serves the
     /// original file (no transcoding).
     pub fn stream_url(&self, item_id: &str) -> String {
@@ -447,17 +637,37 @@ impl Jellyfin {
         Ok(chapters)
     }
     /// The saved resume position of an item in seconds (0 when new).
+    ///
+    /// Jellyfin has no `UserItems/{id}/UserData` route (that request 404s) —
+    /// the position lives in the item DTO's `UserData`, which
+    /// `Users/{uid}/Items/{id}` returns by default (`DtoOptions` enables
+    /// user data). Reading it from the item keeps one request.
     pub fn resume_position_secs(&self, item_id: &str) -> Result<f64> {
-        let data = self.get(&format!("/UserItems/{item_id}/UserData"))?;
+        let data = self.get(&format!("/Users/{}/Items/{item_id}", self.user_id))?;
         Ok(
-            data.get("PlaybackPositionTicks").and_then(|v| v.as_i64()).unwrap_or(0)
-                as f64 / 10_000_000.0,
+            data.get("UserData")
+                .and_then(|ud| ud.get("PlaybackPositionTicks"))
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(0)
+                as f64
+                / 10_000_000.0,
         )
     }
     /// The primary image (poster / episode preview) of an item, downscaled.
     pub fn fetch_image(&self, item_id: &str, max_width: u32) -> Result<Vec<u8>> {
+        self.fetch_image_of(item_id, JfImageType::Primary, max_width)
+    }
+    /// One specific image type of an item (`Primary`, `Thumb`, `Backdrop`),
+    /// downscaled to `max_width` pixels.
+    pub fn fetch_image_of(
+        &self,
+        item_id: &str,
+        image_type: JfImageType,
+        max_width: u32,
+    ) -> Result<Vec<u8>> {
+        let kind = image_type.api_name();
         let url = format!(
-            "{}/Items/{item_id}/Images/Primary?maxWidth={max_width}", self.base
+            "{}/Items/{item_id}/Images/{kind}?maxWidth={max_width}", self.base
         );
         let response = Self::agent()
             .get(&url)
@@ -476,61 +686,71 @@ impl Jellyfin {
     }
     /// Report playback progress to the server (creates/updates the active
     /// session visible in the web UI and saves the resume position).
+    ///
+    /// The body carries the full identifying set a real client sends
+    /// (`MediaSourceId` + `PlaySessionId`), so the server can attribute the
+    /// update to one playback of one version — an `ItemId` alone relied on
+    /// the server's fallback and lost the report when a session was
+    /// re-created.
     pub fn report_playing_progress(
         &self,
         item_id: &str,
         position_secs: f64,
         paused: bool,
+        play_session_id: &str,
     ) -> Result<()> {
-        let url = format!("{}/Sessions/Playing/Progress", self.base);
-        let body = serde_json::json!(
-            { "ItemId" : item_id, "PositionTicks" : (position_secs * 10_000_000.0) as
-            i64, "IsPaused" : paused, "PlayMethod" : "DirectPlay", }
-        );
-        Self::agent()
-            .post(&url)
-            .set(
-                "Authorization",
-                &media_browser_auth(DEVICE_NAME, DEVICE_ID, Some(&self.token)),
-            )
-            // legacy header for servers that predate the standard one
-            .set("X-Emby-Token", &self.token)
-            .send_json(body)
-            .context("Cannot report playback progress")?;
-        Ok(())
+        self.post_playback_report(
+            "/Sessions/Playing/Progress",
+            playback_progress_body(item_id, position_secs, paused, play_session_id),
+        )
+        .context("Cannot report playback progress")
     }
     /// Report the start of playback (creates the session the progress and
     /// stop reports belong to; without it the server has no playback
     /// session and stores no resume position).
-    pub fn report_playing_start(&self, item_id: &str, position_secs: f64) -> Result<()> {
-        let url = format!("{}/Sessions/Playing", self.base);
-        let body = serde_json::json!(
-            { "ItemId" : item_id, "PositionTicks" : (position_secs * 10_000_000.0) as
-            i64, "PlayMethod" : "DirectPlay", }
-        );
-        Self::agent()
-            .post(&url)
-            .set(
-                "Authorization",
-                &media_browser_auth(DEVICE_NAME, DEVICE_ID, Some(&self.token)),
-            )
-            // legacy header for servers that predate the standard one
-            .set("X-Emby-Token", &self.token)
-            .send_json(body)
-            .context("Cannot report playback start")?;
-        Ok(())
+    pub fn report_playing_start(
+        &self,
+        item_id: &str,
+        position_secs: f64,
+        play_session_id: &str,
+    ) -> Result<()> {
+        self.post_playback_report(
+            "/Sessions/Playing",
+            playback_progress_body(item_id, position_secs, false, play_session_id),
+        )
+        .context("Cannot report playback start")
     }
-    /// Report the end of playback (saves the final position for resume).
+    /// Report the end of playback (saves the final position for resume, and
+    /// marks the item watched once the server sees it was near the end).
+    ///
+    /// A caller that knows nothing better than position 0 must not call
+    /// this: a 0-tick stop is below `MinResumePct`, so the server stores 0
+    /// and **wipes** the resume position the progress reports had saved.
+    /// `position_secs <= 0.0` is therefore dropped here as a no-op.
     pub fn report_playing_stopped(
         &self,
         item_id: &str,
         position_secs: f64,
+        play_session_id: &str,
     ) -> Result<()> {
-        let url = format!("{}/Sessions/Playing/Stopped", self.base);
-        let body = serde_json::json!(
-            { "ItemId" : item_id, "PositionTicks" : (position_secs * 10_000_000.0) as
-            i64, "IsPaused" : false, "PlayMethod" : "DirectPlay", }
-        );
+        if position_secs <= 0.0 {
+            log::debug!(
+                item_id:? = item_id; "Skipping a 0-position Jellyfin stop report (it would wipe the saved resume position)"
+            );
+            return Ok(());
+        }
+        self.post_playback_report(
+            "/Sessions/Playing/Stopped",
+            playback_stop_body(item_id, position_secs, play_session_id),
+        )
+        .context("Cannot report playback stop")
+    }
+    fn post_playback_report(
+        &self,
+        path: &str,
+        body: serde_json::Value,
+    ) -> Result<()> {
+        let url = format!("{}{path}", self.base);
         Self::agent()
             .post(&url)
             .set(
@@ -540,9 +760,82 @@ impl Jellyfin {
             // legacy header for servers that predate the standard one
             .set("X-Emby-Token", &self.token)
             .send_json(body)
-            .context("Cannot report playback stop")?;
+            .with_context(|| format!("Cannot POST {url}"))?;
         Ok(())
     }
+}
+
+/// A stable-per-playback session id for the Jellyfin playback reports.
+///
+/// `PlaySessionId` identifies one playback of one item to the server;
+/// process id + a counter is unique per session without pulling in a uuid
+/// dependency, and it is deliberately not persisted (a restart is a new
+/// playback).
+pub fn new_play_session_id() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(1);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    format!("s2u-{}-{seq}", std::process::id())
+}
+
+/// Whether a playback position is worth reporting to Jellyfin at all.
+///
+/// The server's `UpdatePlayState` treats a report below `MinResumePct`
+/// (5 %, the default) as position 0 **and saves it**, which erases the
+/// resume position the item already had. A client that reports every 10 s
+/// from the very start therefore wipes the position it is supposed to
+/// track. Only report once playback is meaningfully in (or has reached the
+/// end): the end-of-item case always reports so a finished episode is
+/// marked watched.
+pub fn reportable_position(position_secs: f64, duration_secs: f64) -> bool {
+    if position_secs <= 0.0 {
+        return false;
+    }
+    let near_end = duration_secs > 0.0 && position_secs >= duration_secs - 15.0;
+    near_end
+        || position_secs >= 60.0
+        || (duration_secs > 0.0 && position_secs / duration_secs >= 0.05)
+}
+
+/// Ticks (Jellyfin's 10 ms unit) for a position in seconds, never negative.
+fn position_ticks(position_secs: f64) -> i64 {
+    (position_secs.max(0.0) * 10_000_000.0) as i64
+}
+
+/// The shared start/progress report body. Only fields the server's
+/// `PlaybackProgressInfo` model actually has are sent (unknown members
+/// would be rejected by a strict binder).
+fn playback_progress_body(
+    item_id: &str,
+    position_secs: f64,
+    paused: bool,
+    play_session_id: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "ItemId": item_id,
+        "MediaSourceId": item_id,
+        "PlaySessionId": play_session_id,
+        "PositionTicks": position_ticks(position_secs),
+        "CanSeek": true,
+        "IsPaused": paused,
+        "IsMuted": false,
+        "PlayMethod": "DirectPlay",
+    })
+}
+
+/// The stop report body (`PlaybackStopInfo`).
+fn playback_stop_body(
+    item_id: &str,
+    position_secs: f64,
+    play_session_id: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "ItemId": item_id,
+        "MediaSourceId": item_id,
+        "PlaySessionId": play_session_id,
+        "PositionTicks": position_ticks(position_secs),
+        "Failed": false,
+    })
 }
 /// Tolerant extraction of a Jellyfin item. Unknown fields are ignored.
 /// Extract the unique track languages of one stream type (Audio/Subtitle)
@@ -668,6 +961,7 @@ fn item_from_value(value: &serde_json::Value, is_music_view: bool) -> Option<JfI
         value.get(key).and_then(|v| v.as_str()).map(str::to_owned)
     };
     let runtime_ticks = value.get("RunTimeTicks").and_then(|v| v.as_i64());
+    let user_data = value.get("UserData");
     let mut director = None;
     let mut writer = None;
     let mut starring = Vec::new();
@@ -723,7 +1017,34 @@ fn item_from_value(value: &serde_json::Value, is_music_view: bool) -> Option<JfI
         runtime_secs: runtime_ticks.map(|t| (t / 10_000_000) as u64),
         child_count: value.get("ChildCount").and_then(|v| v.as_i64()).map(|c| c as i32),
         is_music_view,
+        parent_id: str_field("ParentId"),
+        played: user_data
+            .and_then(|ud| ud.get("Played"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        played_percentage: user_data
+            .and_then(|ud| ud.get("PlayedPercentage"))
+            .and_then(serde_json::Value::as_f64),
+        playback_position_secs: user_data
+            .and_then(|ud| ud.get("PlaybackPositionTicks"))
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(0) as f64
+            / 10_000_000.0,
     })
+}
+
+/// Normalize the two list shapes the Jellyfin API answers with: the
+/// `{ "Items": [...] }` envelope most endpoints use, and the bare array
+/// `Items/Latest` (and `Ancestors`) return.
+fn list_from_value(value: &serde_json::Value) -> Vec<JfItem> {
+    let items = match value {
+        serde_json::Value::Array(items) => items.as_slice(),
+        other => other
+            .get("Items")
+            .and_then(serde_json::Value::as_array)
+            .map_or(&[][..], Vec::as_slice),
+    };
+    items.iter().filter_map(|v| item_from_value(v, false)).collect()
 }
 /// Round 92: on-disk cache of the server's top-level library views
 /// (`<cache_dir>/jellyfin-views.json`).
@@ -908,6 +1229,143 @@ mod tests {
         items.sort_by_key(|i| i.index_number.unwrap_or(i32::MAX));
         let names: Vec<&str> = items.iter().map(|i| i.name.as_str()).collect();
         assert_eq!(names, vec!["One", "Two", "Ten"]);
+    }
+
+    #[test]
+    fn parses_user_data_from_the_item_dto() {
+        // The resume position and watched flag live in the item's
+        // `UserData` (there is no `UserItems/{id}/UserData` route).
+        let v = json!({
+            "Id": "ep-1",
+            "Name": "Chapter One",
+            "Type": "Episode",
+            "ParentId": "season-1",
+            "RunTimeTicks": 1_350_000_000_i64,
+            "UserData": {
+                "Played": true,
+                "PlayedPercentage": 42.5,
+                "PlaybackPositionTicks": 573_750_000_i64,
+                "PlayCount": 2,
+            },
+        });
+        let item = item_from_value(&v, false).unwrap();
+        assert!(item.played);
+        assert_eq!(item.played_percentage, Some(42.5));
+        assert!((item.playback_position_secs - 57.375).abs() < f64::EPSILON);
+        assert_eq!(item.parent_id.as_deref(), Some("season-1"));
+        assert_eq!(item.resume_secs(), Some(57));
+        assert!(item.progress_fraction().is_some());
+    }
+
+    #[test]
+    fn missing_user_data_reads_as_new() {
+        let v = json!({ "Id": "e", "Name": "N", "Type": "Episode" });
+        let item = item_from_value(&v, false).unwrap();
+        assert!(!item.played);
+        assert_eq!(item.played_percentage, None);
+        assert_eq!(item.playback_position_secs, 0.0);
+        assert_eq!(item.resume_secs(), None);
+        assert_eq!(item.progress_fraction(), None);
+    }
+
+    #[test]
+    fn both_list_shapes_parse() {
+        // Most endpoints answer `{ "Items": [...] }`; `Items/Latest` and
+        // `Items/{id}/Ancestors` answer a bare array (measured against the
+        // live server).
+        let envelope = json!({ "Items": [
+            { "Id": "a", "Name": "A", "Type": "Movie" },
+            { "Id": "b", "Name": "B", "Type": "Episode" },
+        ] });
+        let bare = json!([
+            { "Id": "c", "Name": "C", "Type": "Season" },
+        ]);
+        assert_eq!(
+            list_from_value(&envelope).iter().map(|i| i.id.as_str()).collect::<Vec<_>>(),
+            ["a", "b"]
+        );
+        assert_eq!(
+            list_from_value(&bare).iter().map(|i| i.id.as_str()).collect::<Vec<_>>(),
+            ["c"]
+        );
+        assert!(list_from_value(&json!({})).is_empty());
+    }
+
+    #[test]
+    fn a_season_takes_its_number_from_the_index() {
+        // Jellyfin reports a Season's number as `IndexNumber` (the
+        // `ParentIndexNumber` is the series' root), while an episode's
+        // season number is `ParentIndexNumber`.
+        let season = item_from_value(
+            &json!({ "Id": "s2", "Name": "Season 2", "Type": "Season",
+                     "IndexNumber": 2 }),
+            false,
+        )
+        .unwrap();
+        assert_eq!(season.season_index(), Some(2));
+        let episode = item_from_value(
+            &json!({ "Id": "e3", "Name": "Three", "Type": "Episode",
+                     "IndexNumber": 3, "ParentIndexNumber": 2 }),
+            false,
+        )
+        .unwrap();
+        assert_eq!(episode.season_index(), Some(2));
+        assert_eq!(episode.episode_code().as_deref(), Some("S02E03"));
+    }
+
+    #[test]
+    fn positions_below_the_resume_threshold_are_not_reported() {
+        // A report below MinResumePct is stored as 0 and WIPES the saved
+        // resume position, so early ticks must stay silent.
+        assert!(!reportable_position(0.0, 1200.0));
+        assert!(!reportable_position(5.0, 1200.0));
+        assert!(!reportable_position(30.0, 1200.0), "2.5% of a 20 min episode");
+        assert!(reportable_position(90.0, 1200.0), "7.5% is past the threshold");
+        assert!(reportable_position(60.0, 3600.0), "one minute floor");
+        // A short clip that reached its end still reports.
+        assert!(reportable_position(28.0, 30.0));
+        // Below 60 s with an unknown duration: nothing to report.
+        assert!(!reportable_position(30.0, 0.0));
+    }
+
+    #[test]
+    fn playback_report_bodies_carry_the_full_client_identity() {
+        let body = playback_progress_body("abc", 12.5, true, "sess-1");
+        assert_eq!(body["ItemId"], json!("abc"));
+        assert_eq!(body["MediaSourceId"], json!("abc"));
+        assert_eq!(body["PlaySessionId"], json!("sess-1"));
+        assert_eq!(body["PositionTicks"], json!(125_000_000_i64));
+        assert_eq!(body["IsPaused"], json!(true));
+        assert_eq!(body["PlayMethod"], json!("DirectPlay"));
+        assert_eq!(body["CanSeek"], json!(true));
+
+        let stop = playback_stop_body("abc", 99.0, "sess-2");
+        assert_eq!(stop["Failed"], json!(false));
+        assert_eq!(stop["PositionTicks"], json!(990_000_000_i64));
+        assert_eq!(stop["PlaySessionId"], json!("sess-2"));
+        // A negative position (a seek report gone wrong) clamps to 0
+        // instead of sending a tick count the server rejects.
+        assert_eq!(position_ticks(-3.0), 0);
+    }
+
+    #[test]
+    fn play_session_ids_are_unique_per_playback() {
+        let a = new_play_session_id();
+        let b = new_play_session_id();
+        assert_ne!(a, b);
+        assert!(a.starts_with("s2u-"), "{a}");
+    }
+
+    #[test]
+    fn a_zero_position_stop_does_not_reach_the_server() {
+        // The early return must happen before any HTTP: no server is
+        // reachable here and the call still succeeds.
+        let jf = Jellyfin {
+            base: "http://127.0.0.1:1".to_owned(),
+            token: "tok".to_owned(),
+            user_id: "u".to_owned(),
+        };
+        assert!(jf.report_playing_stopped("abc", 0.0, "sess").is_ok());
     }
 
     #[test]

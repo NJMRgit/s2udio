@@ -116,7 +116,15 @@ impl JellyfinPane {
     fn is_tracked_fetch(id: &str) -> bool {
         matches!(
             id,
-            JF_VIEWS | JF_FOLDER | JF_ARTISTS | JF_ALBUMS | JF_SONGS | JF_SEARCH
+            JF_VIEWS
+                | JF_HOME
+                | JF_WALL_IMAGE
+                | JF_ANCESTORS
+                | JF_FOLDER
+                | JF_ARTISTS
+                | JF_ALBUMS
+                | JF_SONGS
+                | JF_SEARCH
         )
     }
     /// Arm (and re-arm) the single redraw tick that animates the indicator.
@@ -205,8 +213,47 @@ impl JellyfinPane {
                         if id == JF_SEARCH {
                             self.search_pending = false;
                         }
+                        // A failed fetch on the way to a search/Home jump
+                        // must drop the jump: the tree cache it is waiting
+                        // for will never arrive.
+                        if self.jump.is_some()
+                            && matches!(
+                                id,
+                                JF_ANCESTORS | JF_FOLDER | JF_ARTISTS | JF_ALBUMS
+                                    | JF_SONGS
+                            )
+                        {
+                            self.jump = None;
+                        }
                         self.error = Some(err.clone());
                         status_warn!("Jellyfin: {err}");
+                        ctx.render()?;
+                    }
+                    (crate::jellyfin::JellyfinResult::Home(home), JF_HOME) => {
+                        self.home = *home;
+                        self.error = None;
+                        self.rebuild_home_sections();
+                        ctx.render()?;
+                    }
+                    (
+                        crate::jellyfin::JellyfinResult::TaggedImage { tag, bytes },
+                        JF_WALL_IMAGE,
+                    ) => {
+                        self.home_image_requests.remove(&tag);
+                        if bytes.is_empty() {
+                            // The server has no image for this item: do not
+                            // re-request it every frame.
+                            self.home_image_failed.insert(tag);
+                        } else {
+                            self.home_images.insert(tag, std::sync::Arc::new(bytes));
+                        }
+                        ctx.render()?;
+                    }
+                    (
+                        crate::jellyfin::JellyfinResult::Ancestors { item_id, items },
+                        JF_ANCESTORS,
+                    ) => {
+                        self.on_jump_ancestors(&item_id, items, ctx)?;
                         ctx.render()?;
                     }
                     (crate::jellyfin::JellyfinResult::SearchHints { items }, JF_SEARCH) => {
@@ -262,6 +309,7 @@ impl JellyfinPane {
                         self.populate_items();
                         self.sync_tree_to_items_cursor();
                         self.sync_poster(ctx);
+                        self.advance_jump(ctx)?;
                         ctx.render()?;
                     }
                     (
@@ -273,6 +321,7 @@ impl JellyfinPane {
                         self.populate_items();
                         self.sync_tree_to_items_cursor();
                         self.sync_poster(ctx);
+                        self.advance_jump(ctx)?;
                         ctx.render()?;
                     }
                     (
@@ -284,6 +333,7 @@ impl JellyfinPane {
                         self.populate_items();
                         self.sync_tree_to_items_cursor();
                         self.sync_poster(ctx);
+                        self.advance_jump(ctx)?;
                         ctx.render()?;
                     }
                     (
@@ -294,6 +344,7 @@ impl JellyfinPane {
                         self.populate_items();
                         self.sync_tree_to_items_cursor();
                         self.sync_poster(ctx);
+                        self.advance_jump(ctx)?;
                         ctx.render()?;
                     }
                     _ => {}

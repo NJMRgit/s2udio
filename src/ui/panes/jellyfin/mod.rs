@@ -33,6 +33,8 @@ use crate::{
 
 /// Result ids of the work-thread Jellyfin fetches.
 pub const JF_VIEWS: &str = "jellyfin_views";
+pub const JF_HOME: &str = "jellyfin_home";
+pub const JF_ANCESTORS: &str = "jellyfin_ancestors";
 pub const JF_FOLDER: &str = "jellyfin_folder";
 pub const JF_ARTISTS: &str = "jellyfin_artists";
 pub const JF_ALBUMS: &str = "jellyfin_albums";
@@ -40,6 +42,8 @@ pub const JF_SONGS: &str = "jellyfin_songs";
 pub const JF_ITEM: &str = "jellyfin_item";
 pub const JF_RESUME: &str = "jellyfin_resume";
 pub const JF_IMAGE: &str = "jellyfin_image";
+/// Home-carousel image bytes (tagged; one per visible card).
+pub const JF_WALL_IMAGE: &str = "jellyfin_wall_image";
 /// Item metadata + image for the MPRIS bridge (played stream title/art).
 pub const JF_MPRIS: &str = "jellyfin_mpris";
 pub const JF_CHAPTERS: &str = "jellyfin_chapters";
@@ -76,13 +80,34 @@ const POSTER_SHELF_H: u16 = 18;
 /// image's own aspect at the fixed height.
 const POSTER_SHELF_W: u16 = 26;
 const POSTER_SHELF_RIGHT_MARGIN: u16 = 6;
-/// The tab's mode (round 60 B2): the library browser, or server-side
-/// search across every library. Startup default: Libraries; the search
-/// state lives for the session.
+/// The tab's mode: the Home shelves (Continue Watching / Next Up /
+/// Recently Added), the library browser, or server-side search across
+/// every library. Startup default: Home, mirroring the Jellyfin web UI;
+/// the browser, search and home state all live for the session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum JellyfinTabMode {
+    Home,
     Libraries,
     Search,
+}
+impl JellyfinTabMode {
+    /// The next mode in the toggle row's order (Home ↔ Search), for
+    /// `Shift+Tab`. The library tree is a sub-page of Home, not a mode of its
+    /// own, so it is not in the cycle.
+    fn next(self) -> Self {
+        match self {
+            Self::Home | Self::Libraries => Self::Search,
+            Self::Search => Self::Home,
+        }
+    }
+    /// The toggle row's segments are `Home` and `Search`; the tree page
+    /// counts as Home (it sits under it).
+    fn from_index(idx: usize) -> Self {
+        match idx {
+            0 => Self::Home,
+            _ => Self::Search,
+        }
+    }
 }
 /// A node of the left tree. The tree mirrors the server: views (libraries),
 /// artists and albums of music libraries, plain folders elsewhere.
@@ -222,12 +247,51 @@ pub struct JellyfinPane {
     /// Drag state of the items-list scrollbar (Round 48: press-and-hold on
     /// the thumb/track, then the thumb follows the pointer anywhere).
     item_scrollbar_drag: crate::shared::mouse_event::ScrollbarDrag,
-    /// Round 60 (B2): the active mode (Libraries browser or Search).
+    /// Round 60 (B2): the active mode (Home, Libraries browser or Search).
     mode: JellyfinTabMode,
-    /// Click areas of the toggle row's two labels (Libraries, Search).
+    /// The mode Esc in the search page returns to (the page the search was
+    /// entered from): Home, or the library tree page.
+    search_return: JellyfinTabMode,
+    /// Click areas of the toggle row's two labels (Home, Search).
     toggle_areas: [Rect; 2],
     /// Click area of the `↰ Back` button (round 60 B3).
     back_area: Rect,
+    /// Click area of the `⌂ Home` button on the library tree page (which now
+    /// sits under Home instead of beside it).
+    home_button_area: Rect,
+    /// The Home page's three shelves.
+    home: crate::jellyfin::JfHome,
+    /// The Home carousels (one per non-empty shelf) with their cursors.
+    home_sections: Vec<home::HomeSection>,
+    /// Whether the Libraries carousel has been revealed (Up from the first
+    /// shelf); it is a hint line until then.
+    home_libraries_revealed: bool,
+    /// Cursor/scroll of the Libraries carousel.
+    home_libraries_cursor: usize,
+    home_libraries_scroll: u16,
+    /// Which row has the focus (up/down moves it).
+    home_focus: home::HomeFocus,
+    /// First row shown when they do not all fit vertically.
+    home_section_scroll: usize,
+    /// The cards painted by the last Home render (mouse hit-testing).
+    home_layout: home::HomeLayout,
+    /// Home image bytes keyed by `{kind}:{item id}`.
+    home_images: home::HomeImageCache,
+    /// Home image fetches in flight.
+    home_image_requests: home::HomeImageRequests,
+    /// Home images the server has no image for (never re-requested until a
+    /// refresh).
+    home_image_failed: HashSet<String>,
+    /// Test override for the terminal cell aspect used to size cards.
+    home_cell_ratio: Option<f64>,
+    /// The terminal-side wall of carousel images (kitty only).
+    wall: crate::ui::image::wall::PosterWall,
+    /// When the Home shelves were last fetched (drives the refresh on tab
+    /// show; a stale page reflects playback that happened elsewhere).
+    home_fetched_at: Option<std::time::Instant>,
+    /// A search/Home jump that is opening the library tree on an item:
+    /// the target, its ancestors once fetched, and what is left to load.
+    jump: Option<nav::JfJump>,
     /// Buffer id of the search query input (session-lived).
     search_buffer: crate::ui::input::BufferId,
     /// Keyboard phase of the search mode: true = the input row is focused,
@@ -291,9 +355,26 @@ impl JellyfinPane {
             info_scrollbar_area: Rect::default(),
             info_scrollbar_drag: crate::shared::mouse_event::ScrollbarDrag::default(),
             item_scrollbar_drag: crate::shared::mouse_event::ScrollbarDrag::default(),
-            mode: JellyfinTabMode::Libraries,
+            mode: JellyfinTabMode::Home,
+            search_return: JellyfinTabMode::Home,
             toggle_areas: [Rect::default(); 2],
             back_area: Rect::default(),
+            home_button_area: Rect::default(),
+            home: crate::jellyfin::JfHome::default(),
+            home_sections: Vec::new(),
+            home_libraries_revealed: false,
+            home_libraries_cursor: 0,
+            home_libraries_scroll: 0,
+            home_focus: home::HomeFocus::Section(0),
+            home_section_scroll: 0,
+            home_layout: home::HomeLayout::default(),
+            home_images: home::HomeImageCache::new(),
+            home_image_requests: home::HomeImageRequests::new(),
+            home_image_failed: HashSet::new(),
+            home_cell_ratio: None,
+            wall: crate::ui::image::wall::PosterWall::new(ctx),
+            home_fetched_at: None,
+            jump: None,
             search_buffer: crate::ui::input::BufferId::new(),
             // Round 73.2: the search page opens unfocused (Shift+Tab no
             // longer grabs the input; `S` does).
@@ -314,12 +395,34 @@ mod info;
 mod loading;
 mod play;
 mod poster;
+mod home;
+mod nav;
 mod render;
 mod search;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests;
+
+impl JellyfinPane {
+    /// Leave the library tree page for the Home carousels (the `⌂ Home`
+    /// button).
+    fn go_home(&mut self, ctx: &Ctx) -> Result<()> {
+        if self.mode == JellyfinTabMode::Home {
+            return Ok(());
+        }
+        self.release_search_input(ctx);
+        self.mode = JellyfinTabMode::Home;
+        // The tree is a sub-page of Home: coming back to the carousels folds
+        // it back to its root, so the next visit starts from the library
+        // tiles instead of a deep expansion left behind.
+        self.collapse_tree(ctx)?;
+        self.poster.hide(ctx);
+        self.wall.redraw_next_flush();
+        ctx.render()?;
+        Ok(())
+    }
+}
 
 impl Pane for JellyfinPane {
     fn render(
@@ -330,7 +433,8 @@ impl Pane for JellyfinPane {
     ) -> Result<()> {
         JellyfinPane::render(self, frame, area, ctx)
     }
-    /// The mode toggle row (`⭘ Libraries ● Search`) + the `↰ Back` button.
+    /// The mode toggle row (`● Home ⭘ Libraries ⭘ Search`) + the `↰ Back`
+    /// button.
     fn before_show(&mut self, ctx: &Ctx) -> Result<()> {
         // Round 92: `first_show` = the tab has never been opened (or the
         // server was dropped after a config change). The cached views are
@@ -344,6 +448,11 @@ impl Pane for JellyfinPane {
         if first_show || self.error.is_some() {
             self.fetch_views(ctx);
         }
+        // The Home shelves (Continue Watching / Next Up / Recently Added)
+        // are fetched on the first show and re-fetched when the page is
+        // stale, so a video watched in the meantime leaves Continue
+        // Watching without a restart.
+        self.refresh_home_if_stale(ctx);
         self.initialized = true;
         self.poster.redraw_next_render(ctx);
         // Round 60b (D4): returning to a tab left in search mode with the
@@ -365,6 +474,7 @@ impl Pane for JellyfinPane {
     }
     fn on_hide(&mut self, ctx: &Ctx) -> Result<()> {
         self.poster.hide(ctx);
+        self.wall.hide(ctx);
         // Round 60b (D4): leaving the tab must drop the search input's
         // insert mode — the input manager is global and an unattended
         // insert buffer would swallow keys meant for the other tab.
@@ -386,18 +496,24 @@ impl Pane for JellyfinPane {
             UiEvent::ModalOpened => {
                 self.is_modal_open = true;
                 self.poster.hide(ctx);
+                // The carousel's images are terminal-side too: a modal drawn
+                // over them would sit under the artwork.
+                self.wall.hide(ctx);
             }
             UiEvent::ModalClosed => {
                 self.is_modal_open = false;
                 self.poster.drawn_area = None;
+                self.wall.redraw_next_flush();
                 ctx.render()?;
             }
             UiEvent::Displayed => {
                 self.poster.drawn_area = None;
+                self.wall.redraw_next_flush();
                 ctx.render()?;
             }
             UiEvent::Hidden if !is_visible => {
                 self.poster.hide(ctx);
+                self.wall.hide(ctx);
             }
             // Round 51: a Settings sign-in may have written the jellyfin
             // sidecar while the app runs (and the notice may be stale) —
@@ -422,17 +538,28 @@ impl Pane for JellyfinPane {
         if matches!(
             event.kind, MouseEventKind::LeftClick | MouseEventKind::DoubleClick
         ) {
-            // The mode toggle row (Libraries | Search).
+            // The mode toggle row (Home | Libraries | Search).
             for (idx, area) in self.toggle_areas.iter().enumerate() {
                 if area.contains(position) {
-                    let mode = if idx == 0 {
-                        JellyfinTabMode::Libraries
-                    } else {
-                        JellyfinTabMode::Search
-                    };
+                    let mode = JellyfinTabMode::from_index(idx);
                     if self.mode != mode {
+                        if mode == JellyfinTabMode::Search {
+                            self.search_return = self.mode;
+                        }
+                        let left_home = self.mode == JellyfinTabMode::Home;
                         self.mode = mode;
+                        if left_home {
+                            // The carousel's terminal-side images belong to
+                            // the Home page only.
+                            self.wall.hide(ctx);
+                        } else if mode == JellyfinTabMode::Home {
+                            // Coming back from the tree page: re-paint the
+                            // carousel images (their grids were hidden).
+                            self.wall.redraw_next_flush();
+                        }
                         self.poster.hide(ctx);
+                        // The poster follows the new page's selection.
+                        self.sync_poster(ctx);
                         ctx.render()?;
                     }
                     return Ok(());
@@ -442,9 +569,17 @@ impl Pane for JellyfinPane {
             if self.back_area.width > 0 && self.back_area.contains(position) {
                 return self.select_parent(ctx);
             }
+            // The library tree sits under Home now, so it carries a Home
+            // button back to the carousels.
+            if self.home_button_area.width > 0 && self.home_button_area.contains(position) {
+                return self.go_home(ctx);
+            }
         }
         if self.mode == JellyfinTabMode::Search {
             return self.handle_search_mouse(event, ctx);
+        }
+        if self.mode == JellyfinTabMode::Home && self.handle_home_mouse(event, ctx)? {
+            return Ok(());
         }
         if self.tree_area.contains(event.into()) {
             return self.handle_tree_mouse(event, ctx);
@@ -521,6 +656,9 @@ impl Pane for JellyfinPane {
         }
         if self.mode == JellyfinTabMode::Search {
             return self.handle_search_action(event, ctx);
+        }
+        if self.mode == JellyfinTabMode::Home {
+            return self.handle_home_action(event, ctx);
         }
         self.handle_tree_action(event, ctx)?;
         Ok(())

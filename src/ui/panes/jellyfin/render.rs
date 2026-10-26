@@ -13,6 +13,7 @@ impl JellyfinPane {
             .areas(area);
         self.render_toggle(frame, toggle_area, ctx);
         match self.mode {
+            JellyfinTabMode::Home => self.render_home(frame, content, ctx),
             JellyfinTabMode::Libraries => {
                 self.render_tree_browser(frame, content, ctx)
             }
@@ -75,6 +76,20 @@ impl JellyfinPane {
                 }
             }
         }
+        // Where the server says playback stopped: the same percentage and
+        // "x left" the web UI's cards show, so a partially watched item
+        // reads as such here.
+        if let Some(watched) = item.progress_fraction() {
+            parts.push(format!("{}%", (watched * 100.0).round() as u32));
+        }
+        if let Some(resume) = item.resume_secs() {
+            let left = item
+                .runtime_secs
+                .map_or(0, |runtime| runtime.saturating_sub(resume));
+            if left > 0 {
+                parts.push(format!("{} left", super::home::clock(left)));
+            }
+        }
         parts.join(" · ")
     }
 pub(super) fn render_toggle(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) {
@@ -83,10 +98,12 @@ pub(super) fn render_toggle(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx)
         if area.height == 0 {
             return;
         }
+        // The library tree is a sub-page of Home, so only two segments are
+        // left; the tree page shows Home as active.
         let segments = [
             crate::ui::widgets::sub_tab_bar::Segment {
-                label: "Libraries",
-                active: self.mode == JellyfinTabMode::Libraries,
+                label: "Home",
+                active: self.mode != JellyfinTabMode::Search,
             },
             crate::ui::widgets::sub_tab_bar::Segment {
                 label: "Search",
@@ -109,6 +126,15 @@ pub(super) fn render_toggle(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx)
         // and in search mode).
         let visible = self.mode == JellyfinTabMode::Libraries && self.selected.is_some();
         self.back_area = crate::ui::draw_back_button(frame, area, visible, ctx);
+        // The tree page sits under Home now: a `⌂ Home` button returns to the
+        // carousels (to the left of Back, or at the row's end without it).
+        self.home_button_area = crate::ui::draw_home_button(
+            frame,
+            area,
+            self.mode == JellyfinTabMode::Libraries,
+            (self.back_area.width > 0).then_some(self.back_area.x),
+            ctx,
+        );
         self.draw_loading(frame, area, ctx);
     }
     /// Round 92: the animated loading indicator, right-aligned on the
@@ -142,15 +168,19 @@ pub(super) fn render_toggle(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx)
         let spinner = LOADING_FRAMES[frame_idx];
         // The mode labels own the left end of the row; the indicator never
         // reaches into them.
-        let labels_end = self.toggle_areas[0]
-            .right()
-            .max(self.toggle_areas[1].right())
+        let labels_end = self.toggle_areas
+            .iter()
+            .map(|area| area.right())
+            .max()
+            .unwrap_or(area.x)
             .max(area.x);
-        let right = if self.back_area.width > 0 {
-            self.back_area.x.saturating_sub(1)
-        } else {
-            area.right().saturating_sub(1)
-        };
+        // The indicator ends left of whichever page button is on the row.
+        let right = [self.back_area, self.home_button_area]
+            .iter()
+            .filter(|rect| rect.width > 0)
+            .map(|rect| rect.x.saturating_sub(1))
+            .min()
+            .unwrap_or(area.right().saturating_sub(1));
         let style = ctx.config.as_list_text_style();
         let full = format!("{spinner} {LOADING_LABEL}");
         let full_w =
@@ -309,8 +339,10 @@ impl JellyfinPane {
         };
         let item = &self.items[idx];
         let is_playing = playing_id.as_deref() == Some(item.id.as_str());
-        let prefix = if item.is_playable() {
-            if is_playing { "▶ " } else { "  " }
+        let prefix = if is_playing {
+            "▶ "
+        } else if item.played {
+            "✓ "
         } else if item.is_container() {
             "▸ "
         } else {

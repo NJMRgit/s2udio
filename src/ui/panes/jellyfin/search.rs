@@ -46,6 +46,92 @@ pub(super) fn search_result_rows(items: &[JfItem]) -> Vec<ListItem<'static>> {
         .collect()
 }
 
+/// A season/episode hint parsed out of the search query: `S02`, `S02E03`,
+/// `season 2` or `2x03`. It is applied when the jump reaches a series or
+/// season result, so "Show season 2" opens on season 2 instead of on the
+/// show's first season.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(super) struct JfSearchHint {
+    pub(super) season: Option<i32>,
+    pub(super) episode: Option<i32>,
+}
+
+/// Split a search query into the free text sent to `SearchHints` and the
+/// season/episode hint. `("overgeared S01E03")` → `("overgeared", S01E03)`.
+/// A query that is nothing but a hint keeps its full text for the server
+/// (there is still something to search for), only losing the hint token.
+pub(super) fn split_query_hint(query: &str) -> (String, JfSearchHint) {
+    let mut hint = JfSearchHint::default();
+    let mut text: Vec<&str> = Vec::new();
+    let tokens: Vec<&str> = query.split_whitespace().collect();
+    let mut idx = 0;
+    while idx < tokens.len() {
+        let raw = tokens[idx];
+        let token = raw.trim_matches(|c: char| !c.is_ascii_alphanumeric());
+        if hint.season.is_none() {
+            if let Some((season, episode)) = parse_season_episode_token(token) {
+                hint.season = Some(season);
+                hint.episode = episode;
+                idx += 1;
+                continue;
+            }
+            if token.eq_ignore_ascii_case("season")
+                && let Some(next) = tokens.get(idx + 1)
+            {
+                let next = next.trim_matches(|c: char| !c.is_ascii_alphanumeric());
+                if let Ok(season) = next.parse::<i32>() {
+                    hint.season = Some(season);
+                    idx += 2;
+                    continue;
+                }
+            }
+            let lower = token.to_ascii_lowercase();
+            if let Some(rest) = lower.strip_prefix("season")
+                && !rest.is_empty()
+                && rest.chars().all(|c| c.is_ascii_digit())
+                && let Ok(season) = rest.parse::<i32>()
+            {
+                hint.season = Some(season);
+                idx += 1;
+                continue;
+            }
+        }
+        text.push(raw);
+        idx += 1;
+    }
+    let text = text.join(" ");
+    let text = if text.trim().is_empty() {
+        query.trim().to_owned()
+    } else {
+        text
+    };
+    (text, hint)
+}
+
+/// `S03E07` / `s3` / `3x07` (case-insensitive) → (season, episode).
+fn parse_season_episode_token(token: &str) -> Option<(i32, Option<i32>)> {
+    let lower = token.to_ascii_lowercase();
+    let all_digits = |value: &str| !value.is_empty() && value.chars().all(|c| c.is_ascii_digit());
+    if let Some(rest) = lower.strip_prefix('s')
+        && rest.chars().next().is_some_and(|c| c.is_ascii_digit())
+    {
+        if let Some((season, episode)) = rest.split_once('e') {
+            if all_digits(season) && all_digits(episode) {
+                return Some((season.parse().ok()?, Some(episode.parse().ok()?)));
+            }
+        } else if all_digits(rest) {
+            return Some((rest.parse().ok()?, None));
+        }
+    }
+    if let Some((season, episode)) = lower.split_once('x')
+        && all_digits(season)
+        && all_digits(episode)
+    {
+        return Some((season.parse().ok()?, Some(episode.parse().ok()?)));
+    }
+    None
+}
+
 impl JellyfinPane {
     /// The selected search result, if any.
     pub(super) fn search_selected(&self) -> Option<&JfItem> {
@@ -54,8 +140,8 @@ impl JellyfinPane {
             .and_then(|idx| self.search_results.get(idx))
     }
 
-    /// Flip Libraries <-> Search (Shift+Tab / toggle click). The search
-    /// state stays for the session.
+    /// Cycle Home → Libraries → Search (Shift+Tab / toggle click). The
+    /// search state stays for the session.
     ///
     /// Round 73.2: the flip no longer focuses the query input (the `S` key
     /// does that) — it always RELEASES it instead. Releasing is required,
@@ -64,11 +150,18 @@ impl JellyfinPane {
     /// NOT focused), so a flip that left the flag true without insert mode
     /// would freeze the results list.
     pub(super) fn toggle_mode(&mut self, ctx: &mut Ctx) -> Result<()> {
-        self.mode = match self.mode {
-            JellyfinTabMode::Libraries => JellyfinTabMode::Search,
-            JellyfinTabMode::Search => JellyfinTabMode::Libraries,
-        };
+        let next = self.mode.next();
+        // Entering the search page from Home/Libraries remembers the page
+        // Esc returns to.
+        if next == JellyfinTabMode::Search && self.mode != JellyfinTabMode::Search {
+            self.search_return = self.mode;
+        }
+        if self.mode == JellyfinTabMode::Home && next != JellyfinTabMode::Home {
+            self.wall.hide(ctx);
+        }
+        self.mode = next;
         self.release_search_input(ctx);
+        self.sync_poster(ctx);
         ctx.render()?;
         Ok(())
     }
@@ -78,6 +171,12 @@ impl JellyfinPane {
     /// nothing is cleared, so the session query and its results are still
     /// there when the page returns.
     pub(super) fn jump_to_search(&mut self, ctx: &mut Ctx) -> Result<()> {
+        if self.mode != JellyfinTabMode::Search {
+            self.search_return = self.mode;
+        }
+        if self.mode == JellyfinTabMode::Home {
+            self.wall.hide(ctx);
+        }
         self.mode = JellyfinTabMode::Search;
         self.focus_search_input(ctx);
         ctx.render()?;
@@ -87,11 +186,12 @@ impl JellyfinPane {
     /// Jellyfin browser — clears the query + results and returns to
     /// keyboard navigation.
     pub(super) fn exit_search(&mut self, ctx: &mut Ctx) -> Result<()> {
-        self.mode = JellyfinTabMode::Libraries;
+        self.mode = self.search_return;
         self.release_search_input(ctx);
         self.search_results_state.select(None);
         self.search_results.clear();
         ctx.input.clear_buffer(self.search_buffer);
+        self.sync_poster(ctx);
         ctx.render()?;
         Ok(())
     }
@@ -118,8 +218,8 @@ impl JellyfinPane {
     /// Fire a server-side search for the current query (deduped; an empty
     /// query clears the results). Results arrive as `JF_SEARCH`.
     pub(super) fn run_search(&mut self, ctx: &Ctx) {
-        let query = ctx.input.value(self.search_buffer).trim().to_owned();
-        if query.is_empty() {
+        let raw = ctx.input.value(self.search_buffer).trim().to_owned();
+        if raw.is_empty() {
             self.search_results.clear();
             self.search_results_state = ListState::default();
             let _ = ctx.render();
@@ -131,46 +231,43 @@ impl JellyfinPane {
         if self.load_server(ctx).is_none() {
             return;
         }
+        // The season/episode hint is ours, not the server's: "overgeared
+        // S01E03" searches "overgeared" and the hint opens the episode.
+        let (query, _) = split_query_hint(&raw);
         self.search_pending = true;
-        self.last_sent_query = query.clone();
+        self.last_sent_query = raw;
         self.request_fetch(ctx, WorkRequest::FetchJellyfinSearch { query });
     }
 
-    /// `d`/`→`/double-click on a result: play it with the existing
-    /// Jellyfin behavior (audio via MPD temp stream, video via mpv).
-    fn search_activate(&mut self, ctx: &Ctx) -> Result<()> {
+    /// Enter/`d`/`→`/double-click on a result: **go to the item in the
+    /// library tree**. A movie or a specific episode starts playing once
+    /// the tree is on it; a series or a season only opens (the cursor lands
+    /// inside it, on the hinted season/episode when the query named one).
+    /// Songs keep the immediate MPD temp-stream play.
+    pub(super) fn search_activate(&mut self, ctx: &Ctx) -> Result<()> {
         let Some(item) = self.search_selected().cloned() else { return Ok(()) };
-        if !item.is_playable() {
-            // Containers just select (their subtree is browsable in
-            // Libraries mode); nothing to play.
-            return Ok(());
+        let (_, hint) = split_query_hint(&ctx.input.value(self.search_buffer));
+        match item.kind.as_str() {
+            "Audio" => {
+                let Some(server) = self.load_server(ctx) else { return Ok(()) };
+                let url = server.stream_url(&item.id);
+                self.play_temp_url(
+                    ctx,
+                    JF_PLAY,
+                    PaneType::Jellyfin {
+                        tree: TreeBrowserArgs::default(),
+                    },
+                    item.name.clone(),
+                    url,
+                );
+                status_info!("Playing {}", item.name);
+                Ok(())
+            }
+            "Movie" | "Episode" | "Video" => {
+                self.start_jump(item, true, hint.season, hint.episode, ctx)
+            }
+            _ => self.start_jump(item, false, hint.season, hint.episode, ctx),
         }
-        let Some(server) = self.load_server(ctx) else {
-            return Ok(());
-        };
-        if item.is_audio() {
-            let url = server.stream_url(&item.id);
-            self.play_temp_url(
-                ctx,
-                JF_PLAY,
-                PaneType::Jellyfin {
-                    tree: TreeBrowserArgs::default(),
-                },
-                item.name.clone(),
-                url,
-            );
-            status_info!("Playing {}", item.name);
-        } else {
-            let url = server.video_stream_url(&item.id);
-            Self::play_video(
-                ctx,
-                url,
-                item.name.clone(),
-                item.id.clone(),
-                item.season_id.clone(),
-            )?;
-        }
-        Ok(())
     }
 
     /// Search-mode keys (parity with the MPD/playlists search): `d`/`→`
@@ -232,7 +329,10 @@ impl JellyfinPane {
                     return Ok(());
                 }
                 CommonAction::Confirm => {
-                    return self.search_context_menu(ctx);
+                    // Enter is "go to it": the tree opens on the result
+                    // (and a movie/episode plays there). The item menu stays
+                    // on the context-menu key / right-click.
+                    return self.search_activate(ctx);
                 }
                 CommonAction::ContextMenu => {
                     return self.search_context_menu(ctx);

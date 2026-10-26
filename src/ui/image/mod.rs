@@ -23,6 +23,7 @@ pub mod iterm2;
 pub mod kitty;
 pub mod sixel;
 pub mod ueberzug;
+pub mod wall;
 
 #[allow(unused)]
 pub trait Backend {

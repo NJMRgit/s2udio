@@ -2,7 +2,7 @@ use super::*;
 
 impl JellyfinPane {
     /// Lazy-load the children of a node kind.
-    fn ensure_loaded(&mut self, kind: &JfNodeKind, ctx: &Ctx) {
+    pub(super) fn ensure_loaded(&mut self, kind: &JfNodeKind, ctx: &Ctx) {
         if self.load_server(ctx).is_none() {
             return;
         }
@@ -49,7 +49,7 @@ impl JellyfinPane {
         }
     }
     /// Children of a node from whatever is loaded (None = still loading).
-    fn children_of(&self, kind: &JfNodeKind) -> Option<Vec<JfItem>> {
+    pub(super) fn children_of(&self, kind: &JfNodeKind) -> Option<Vec<JfItem>> {
         match kind {
             JfNodeKind::View(item) if item.is_music_view => {
                 self.artists.get(&item.id).cloned()
@@ -384,10 +384,40 @@ impl JellyfinPane {
         self.set_expanded(&kind, true, ctx)?;
         self.select_node(&kind, ctx)
     }
+
+    /// Collapse the library tree back to its root (every node folded, no
+    /// selection). Leaving the tree page for Home does this: the tree is a
+    /// sub-page of Home, so it must not keep a deep expansion behind the
+    /// carousels.
+    pub(super) fn collapse_tree(&mut self, ctx: &Ctx) -> Result<()> {
+        if self.expanded.is_empty() && self.selected.is_none() {
+            return Ok(());
+        }
+        self.expanded.clear();
+        self.selected = None;
+        self.rebuild_tree();
+        self.populate_items();
+        self.sync_poster(ctx);
+        ctx.render()?;
+        Ok(())
+    }
 }
 
 impl TreeBrowserCore for JellyfinPane {
     type Item = JfItem;
+    /// The item the info box, the poster and the item menu follow: the
+    /// Home cursor on the home page, the highlighted result on the search
+    /// page, the items cursor in the browser.
+    fn selected_item(&self) -> Option<JfItem> {
+        match self.mode {
+            JellyfinTabMode::Home => self.home_selected_item(),
+            JellyfinTabMode::Search => self.search_selected().cloned(),
+            JellyfinTabMode::Libraries => self
+                .item_list
+                .selected()
+                .and_then(|idx| self.items.get(idx).cloned()),
+        }
+    }
     fn tree_rows(&self) -> Vec<TreeRowView> {
         self.tree
             .iter()
@@ -468,6 +498,12 @@ impl TreeBrowserCore for JellyfinPane {
         let prev_id = current.id().to_owned();
         let prev_key = current.key();
         self.expanded.remove(&prev_key);
+        // A library view *is* the tree's root: Left there leaves the page for
+        // the Home carousels (the `⌂ Home` button's twin), which collapses
+        // the tree on the way out.
+        if matches!(current, JfNodeKind::View(_)) {
+            return self.go_home(ctx);
+        }
         match self.parent_of(&current) {
             Some(parent) => {
                 self.selected = Some(parent.clone());

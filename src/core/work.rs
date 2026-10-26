@@ -380,6 +380,34 @@ fn handle_work_request(
                 }
             }
         }
+        WorkRequest::FetchJellyfinHome => {
+            let data = jellyfin_handle(
+                    jellyfin_config_file,
+                    |jf| jf.home().map(|home| JellyfinResult::Home(Box::new(home))),
+                )
+                .unwrap_or_else(|err| JellyfinResult::Error(err.to_string()));
+            Ok(WorkDone::JellyfinFetched {
+                id: crate::ui::panes::jellyfin::JF_HOME,
+                data,
+            })
+        }
+        WorkRequest::FetchJellyfinAncestors { item_id } => {
+            let data = jellyfin_handle(
+                    jellyfin_config_file,
+                    |jf| {
+                        jf.ancestors(&item_id)
+                            .map(|items| JellyfinResult::Ancestors {
+                                item_id,
+                                items,
+                            })
+                    },
+                )
+                .unwrap_or_else(|err| JellyfinResult::Error(err.to_string()));
+            Ok(WorkDone::JellyfinFetched {
+                id: crate::ui::panes::jellyfin::JF_ANCESTORS,
+                data,
+            })
+        }
         WorkRequest::FetchJellyfinViews => {
             let data = jellyfin_handle(
                     jellyfin_config_file,
@@ -652,6 +680,44 @@ fn handle_work_request(
                 .unwrap_or_else(|err| JellyfinResult::Error(err.to_string()));
             Ok(WorkDone::JellyfinFetched {
                 id: crate::ui::panes::jellyfin::JF_IMAGE,
+                data,
+            })
+        }
+        WorkRequest::FetchJellyfinImageTagged {
+            tag,
+            item_id,
+            fallback_item_id,
+            image_type,
+        } => {
+            let data = jellyfin_handle(
+                    jellyfin_config_file,
+                    |jf| {
+                        // Try the row's preferred shape, then the item's
+                        // own poster/still, then the fallback item (the
+                        // series behind a season, the series behind an
+                        // episode).
+                        let result_tag = tag.clone();
+                        jf.tagged_image(
+                            &item_id,
+                            fallback_item_id.as_deref(),
+                            image_type,
+                            600,
+                        )
+                        .map(|bytes| JellyfinResult::TaggedImage {
+                            tag: result_tag,
+                            bytes,
+                        })
+                    },
+                )
+                .unwrap_or_else(|err| {
+                    log::debug!(error:? = err; "Home carousel image fetch failed");
+                    JellyfinResult::TaggedImage {
+                        tag,
+                        bytes: Vec::new(),
+                    }
+                });
+            Ok(WorkDone::JellyfinFetched {
+                id: crate::ui::panes::jellyfin::JF_WALL_IMAGE,
                 data,
             })
         }
