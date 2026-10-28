@@ -279,6 +279,10 @@ pub struct JellyfinPane {
     /// Whether the Libraries carousel has been revealed (Up from the first
     /// shelf); it is a hint line until then.
     home_libraries_revealed: bool,
+    /// Whether the last Home render had room to paint the Libraries
+    /// carousel at the cards' preferred size (a tall page shows the row
+    /// without waiting for Up). Recomputed by every Home render.
+    home_libraries_fits: bool,
     /// Cursor/scroll of the Libraries carousel.
     home_libraries_cursor: usize,
     home_libraries_scroll: u16,
@@ -377,6 +381,7 @@ impl JellyfinPane {
             home: crate::jellyfin::JfHome::default(),
             home_sections: Vec::new(),
             home_libraries_revealed: false,
+            home_libraries_fits: false,
             home_libraries_cursor: 0,
             home_libraries_scroll: 0,
             home_focus: home::HomeFocus::Section(0),

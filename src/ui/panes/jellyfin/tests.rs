@@ -5,19 +5,34 @@
         shared::events::WorkRequest,
     };
 
-    fn render_text(pane: &mut JellyfinPane, ctx: &crate::ctx::Ctx) -> String {
-        let backend = ratatui::backend::TestBackend::new(100, 40);
+    /// Render the pane at `width`x`height` and return the text grid.
+    fn render_text_at(
+        pane: &mut JellyfinPane,
+        ctx: &crate::ctx::Ctx,
+        width: u16,
+        height: u16,
+    ) -> String {
+        let backend = ratatui::backend::TestBackend::new(width, height);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
         terminal
             .draw(|frame| {
-                pane.render(frame, ratatui::prelude::Rect::new(0, 0, 100, 40), ctx).unwrap()
+                pane.render(frame, ratatui::prelude::Rect::new(0, 0, width, height), ctx)
+                    .unwrap()
             })
             .unwrap();
         let buf = terminal.backend().buffer();
-        (0..40u16)
-            .map(|y| (0..100).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>())
+        (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    fn render_text(pane: &mut JellyfinPane, ctx: &crate::ctx::Ctx) -> String {
+        render_text_at(pane, ctx, 100, 40)
     }
 
     /// The tree-browser args drive the shared split: `tree_min_width: 60`
@@ -522,6 +537,14 @@
             continue_watching: vec![resume, resume2],
             next_up: vec![next],
             recently_added: vec![latest, recent_episode],
+            library_latest: Vec::new(),
+        }
+    }
+
+    fn library_strip(name: &str, ids: &[&str]) -> crate::jellyfin::JfLibraryLatest {
+        crate::jellyfin::JfLibraryLatest {
+            library: jf_item(&format!("lib-{name}"), name, "CollectionFolder"),
+            items: ids.iter().map(|id| jf_item(id, id, "Movie")).collect(),
         }
     }
 
@@ -627,11 +650,30 @@
         let tiny = home::card_metrics(home::HomeShelf::NextUp, 12, tiny_img_h, 2.25);
         assert!(tiny.img_w >= 2);
         assert!(tiny.visible >= 1);
-        // The image height is capped, so a very tall terminal does not blow
-        // one card up over the whole page.
+        // The image height stops at its preferred maximum, so a very tall
+        // terminal does not blow one card up over the whole page: extra rows
+        // scroll, and the Libraries row only stays on the page when the
+        // whole page fits.
         let (img_h, section_h) = home::section_geometry(100, 3);
-        assert_eq!(img_h, 18);
-        assert_eq!(section_h, 24);
+        assert_eq!(img_h, home::MAX_IMAGE_H);
+        assert_eq!(section_h, home::MAX_IMAGE_H + 6);
+        let full = 4 * (home::MAX_IMAGE_H + 6);
+        assert!(
+            !home::libraries_row_fits(full - 1, 3, 3),
+            "one row short: the hint stands in for the Libraries row"
+        );
+        assert!(
+            home::libraries_row_fits(full, 3, 3),
+            "four rows fit at the preferred card size"
+        );
+        assert!(
+            !home::libraries_row_fits(full, 0, 3),
+            "no shelves, nothing to reveal above"
+        );
+        assert!(
+            !home::libraries_row_fits(100, 3, 12),
+            "more rows than fit hide the carousel behind Up"
+        );
     }
 
     /// The page paints the three section headers and the card labels, and
@@ -695,6 +737,7 @@
             continue_watching: Vec::new(),
             next_up: Vec::new(),
             recently_added: vec![jf_item("series1", "Lanterns", "Series")],
+            library_latest: Vec::new(),
         };
         pane.rebuild_home_sections();
         pane.home_activate(&ctx).unwrap();
@@ -1358,6 +1401,7 @@
             // fit and the five Continue Watching cards overflow.
             next_up: vec![jf_item("n1", "Next One", "Episode")],
             recently_added: vec![jf_item("r1", "Recent One", "Series")],
+            library_latest: Vec::new(),
         };
         pane.rebuild_home_sections();
         let text = render_text(&mut pane, &ctx);
@@ -1565,6 +1609,255 @@
                 .iter()
                 .any(|card| card.row == home::HomeRowId::Libraries),
             "no library cards after collapsing"
+        );
+    }
+
+    /// A taller TUI must not inflate the posters: the cards stop at a
+    /// comfortable image height and the spare rows go to the Libraries
+    /// carousel (2026-10-28, two user screenshots of the same page at
+    /// different terminal heights).
+    #[test]
+    fn a_tall_page_reveals_the_libraries_row_instead_of_growing_the_posters() {
+        let (mut pane, ctx) = home_rig();
+        pane.views = vec![
+            jf_item("lib1", "Anime", "CollectionFolder"),
+            jf_item("lib2", "Movies", "CollectionFolder"),
+        ];
+        pane.home = shelf_home();
+        pane.rebuild_home_sections();
+
+        // 40 rows: too short for a fourth row, so the dim hint stands in.
+        let short = render_text_at(&mut pane, &ctx, 100, 40);
+        assert!(short.contains("↑ Libraries"), "the hint is the short page's row: {short}");
+        assert!(
+            !pane
+                .home_layout
+                .cards
+                .iter()
+                .any(|card| card.row == home::HomeRowId::Libraries),
+            "no library cards on a short page"
+        );
+
+        // 100 rows: the Libraries row takes the spare height instead of the
+        // cards growing to fill it.
+        let tall = render_text_at(&mut pane, &ctx, 100, 100);
+        assert!(!tall.contains("↑ Libraries"), "the row replaces its hint: {tall}");
+        assert_eq!(
+            pane.home_layout.sections.len(),
+            4,
+            "Libraries + three shelves are on the page"
+        );
+        assert!(
+            pane.home_layout
+                .cards
+                .iter()
+                .any(|card| card.row == home::HomeRowId::Libraries),
+            "the library cards are painted"
+        );
+        let tall_h = pane
+            .home_layout
+            .cards
+            .iter()
+            .find(|card| card.row == home::HomeRowId::Section(0))
+            .expect("a Continue Watching card")
+            .image
+            .height;
+        assert_eq!(
+            tall_h,
+            home::MAX_IMAGE_H,
+            "the posters stay at their preferred size"
+        );
+
+        // More rows still do not grow the posters.
+        let _ = render_text_at(&mut pane, &ctx, 100, 140);
+        let taller_h = pane
+            .home_layout
+            .cards
+            .iter()
+            .find(|card| card.row == home::HomeRowId::Section(0))
+            .expect("a Continue Watching card")
+            .image
+            .height;
+        assert_eq!(taller_h, tall_h, "extra height does not inflate the cards");
+
+        // Shrinking the terminal gives the row back to its hint.
+        let short_again = render_text_at(&mut pane, &ctx, 100, 40);
+        assert!(short_again.contains("↑ Libraries"), "the hint is back: {short_again}");
+        assert!(
+            !pane
+                .home_layout
+                .cards
+                .iter()
+                .any(|card| card.row == home::HomeRowId::Libraries),
+            "the library cards are gone again"
+        );
+    }
+
+    /// When the page is tall enough to paint the Libraries carousel, Up
+    /// steps onto it: the row is already shown, so there is no hidden row
+    /// to reveal.
+    #[test]
+    fn up_reaches_the_libraries_row_when_the_page_shows_it() {
+        let (mut pane, mut ctx) = home_rig();
+        pane.views = vec![jf_item("lib1", "Anime", "CollectionFolder")];
+        pane.home = shelf_home();
+        pane.rebuild_home_sections();
+        let _ = render_text_at(&mut pane, &ctx, 100, 100);
+        assert_eq!(pane.home_focus, home::HomeFocus::Section(0));
+
+        let mut event = crate::shared::keys::ActionEvent::from(std::sync::Arc::new(vec![
+            crate::shared::keys::Actions::Directories(
+                crate::config::keys::DirectoriesActions::FolderUp,
+            ),
+        ]));
+        pane.handle_home_action(&mut event, &mut ctx).unwrap();
+        assert_eq!(pane.home_focus, home::HomeFocus::Libraries);
+        assert_eq!(
+            pane.home_selected_item().map(|i| i.id),
+            Some("lib1".to_owned())
+        );
+        assert!(
+            !pane.home_libraries_revealed,
+            "the row was never hidden, so Up does not reveal it"
+        );
+    }
+
+    /// Every library with recent items gets its own row after the
+    /// server-wide Recently Added shelf; an empty library gets none. When
+    /// the whole page still fits, the Libraries row stays visible (a small
+    /// server needs no Up hint).
+    #[test]
+    fn each_library_gets_its_own_recently_added_row() {
+        let (mut pane, mut ctx) = home_rig();
+        pane.views = vec![
+            jf_item("lib1", "Anime", "CollectionFolder"),
+            jf_item("lib2", "Movies", "CollectionFolder"),
+            jf_item("lib3", "Documentaries", "CollectionFolder"),
+        ];
+        pane.home = shelf_home();
+        pane.home.library_latest = vec![
+            library_strip("Anime", &["a1", "a2", "a3"]),
+            library_strip("Movies", &["m1", "m2"]),
+            library_strip("Documentaries", &[]),
+        ];
+        pane.rebuild_home_sections();
+        let rows: Vec<(&str, bool)> = pane
+            .home_sections
+            .iter()
+            .map(|section| (section.title.as_str(), section.library_strip))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("Continue Watching", false),
+                ("Next Up", false),
+                ("Recently Added", false),
+                ("Recently Added in Anime", true),
+                ("Recently Added in Movies", true),
+            ],
+            "the empty library contributes no row"
+        );
+
+        let text = render_text_at(&mut pane, &ctx, 100, 120);
+        assert!(pane.home_libraries_fits, "the whole page fits at this size");
+        assert!(!text.contains("↑ Libraries"), "the Libraries row is on the page");
+        assert!(text.contains("Recently Added in Anime"), "{text}");
+        assert!(text.contains("Recently Added in Movies"), "{text}");
+        assert!(!text.contains("Recently Added in Documentaries"), "{text}");
+        let anime_cards: Vec<&home::HomeCard> = pane
+            .home_layout
+            .cards
+            .iter()
+            .filter(|card| card.row == home::HomeRowId::Section(3))
+            .collect();
+        assert!(!anime_cards.is_empty(), "the Anime strip painted its cards");
+        assert!(
+            anime_cards
+                .iter()
+                .all(|card| card.image.height == home::MAX_IMAGE_H),
+            "library strips share the poster size"
+        );
+
+        // Down from the server-wide Recently Added row enters the first
+        // library strip.
+        for _ in 0..3 {
+            let mut event = crate::shared::keys::ActionEvent::from(std::sync::Arc::new(vec![
+                crate::shared::keys::Actions::Directories(
+                    crate::config::keys::DirectoriesActions::FolderDown,
+                ),
+            ]));
+            pane.handle_home_action(&mut event, &mut ctx).unwrap();
+        }
+        assert_eq!(pane.home_focus, home::HomeFocus::Section(3));
+        assert_eq!(
+            pane.home_selected_item().map(|i| i.id),
+            Some("a1".to_owned())
+        );
+    }
+
+    /// More library rows than fit: the page scrolls at the preferred poster
+    /// size instead of shrinking every card, and the Libraries row goes
+    /// back to its Up hint.
+    #[test]
+    fn many_library_rows_scroll_and_hide_the_libraries_row() {
+        let (mut pane, mut ctx) = home_rig();
+        pane.views = (0..8)
+            .map(|i| {
+                jf_item(
+                    &format!("lib{i}"),
+                    &format!("Library {i}"),
+                    "CollectionFolder",
+                )
+            })
+            .collect();
+        pane.home = shelf_home();
+        pane.home.library_latest = (0..8)
+            .map(|i| library_strip(&format!("Library {i}"), &["latest"]))
+            .collect();
+        pane.rebuild_home_sections();
+        assert_eq!(pane.home_sections.len(), 11);
+
+        let text = render_text_at(&mut pane, &ctx, 100, 100);
+        assert!(!pane.home_libraries_fits, "eleven rows do not fit the page");
+        assert!(text.contains("↑ Libraries"), "the carousel is the hint again: {text}");
+        assert!(
+            pane.home_layout
+                .cards
+                .iter()
+                .all(|card| card.image.height == home::MAX_IMAGE_H),
+            "extra rows do not shrink the cards"
+        );
+        assert_eq!(
+            pane.home_layout.sections.len(),
+            6,
+            "only the rows that fit are painted"
+        );
+        assert!(text.contains("Continue Watching"), "{text}");
+        assert!(
+            text.contains("Recently Added in Library 2"),
+            "the first library rows are visible: {text}"
+        );
+        assert!(
+            !text.contains("Recently Added in Library 7"),
+            "the last rows need scrolling: {text}"
+        );
+
+        // Down to the last row scrolls it into view.
+        for _ in 0..10 {
+            let mut event = crate::shared::keys::ActionEvent::from(std::sync::Arc::new(vec![
+                crate::shared::keys::Actions::Directories(
+                    crate::config::keys::DirectoriesActions::FolderDown,
+                ),
+            ]));
+            pane.handle_home_action(&mut event, &mut ctx).unwrap();
+        }
+        assert_eq!(pane.home_focus, home::HomeFocus::Section(10));
+        let text = render_text_at(&mut pane, &ctx, 100, 100);
+        assert!(pane.home_section_scroll > 0, "the page scrolled");
+        assert!(text.contains("Recently Added in Library 7"), "{text}");
+        assert!(
+            !text.contains("Continue Watching"),
+            "the first row scrolled away: {text}"
         );
     }
 

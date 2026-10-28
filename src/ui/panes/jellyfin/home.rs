@@ -14,6 +14,13 @@ const CARD_CHROME_ROWS: u16 = 6;
 /// The narrowest a poster card may get before the terminal is considered too
 /// narrow for images (the card then still shows its labels).
 const MIN_IMAGE_W: u16 = 3;
+/// The preferred tallest image of a Home card. A taller page does not grow
+/// the posters: the spare rows go to the Libraries carousel (when all the
+/// rows fit at this height) and then stay blank. 10 rows is what the three
+/// carousels get on a normal-height terminal, so the cards keep the size
+/// users already know when the terminal grows (2026-10-28: the posters used
+/// to scale with the page until far too large).
+pub(super) const MAX_IMAGE_H: u16 = 10;
 /// A poster is ~2:3, a Jellyfin episode/backdrop preview ~16:9.
 const POSTER_ASPECT: f64 = 2.0 / 3.0;
 const PREVIEW_ASPECT: f64 = 16.0 / 9.0;
@@ -95,6 +102,14 @@ impl HomeShelf {
 #[derive(Debug, Clone)]
 pub(super) struct HomeSection {
     pub(super) shelf: HomeShelf,
+    /// The row's header text: the shelf title, or `Recently Added in …` for
+    /// one library's strip.
+    pub(super) title: String,
+    /// One library's own Recently Added strip rather than one of the three
+    /// server shelves. Per-library strips are extra rows: the card size is
+    /// derived from the base shelves, so they scroll instead of shrinking
+    /// every poster.
+    pub(super) library_strip: bool,
     pub(super) items: Vec<JfItem>,
     pub(super) cursor: usize,
     /// Index of the first card shown (the row scrolls horizontally).
@@ -107,6 +122,16 @@ impl HomeSection {
     fn selected(&self) -> Option<&JfItem> {
         self.items.get(self.cursor())
     }
+}
+
+/// The cursor a rebuilt row inherits from the previous sections, keyed by
+/// its title (every Home row has a unique one), clamped to the new length.
+fn restored_cursor(previous: &[(String, usize)], title: &str, len: usize) -> usize {
+    previous
+        .iter()
+        .find(|(t, _)| t == title)
+        .map_or(0, |(_, cursor)| *cursor)
+        .min(len.saturating_sub(1))
 }
 
 /// Card geometry for one section at the current terminal size.
@@ -149,7 +174,7 @@ pub(super) struct HomeCard {
 #[derive(Debug, Clone)]
 struct HomeRowView {
     shelf: HomeShelf,
-    title: &'static str,
+    title: String,
     items: Vec<JfItem>,
     cursor: usize,
     scroll: u16,
@@ -278,14 +303,35 @@ pub(super) fn row_geometry(
 }
 
 /// The vertical split of the Home page: the image height every section
-/// shares, the per-section slot height (header + card + gap), and how many
-/// sections fit at once. When the sections do not all fit, the caller
-/// scrolls them vertically.
+/// shares, and the per-section slot height (header + card + gap). The image
+/// height stops at [`MAX_IMAGE_H`], so a tall page uses its spare rows for
+/// another carousel instead of inflating the posters. When the sections do
+/// not all fit, the caller scrolls them vertically.
 pub(super) fn section_geometry(area_height: u16, sections: usize) -> (u16, u16) {
     let sections = sections.max(1) as u16;
     let slot_h = (area_height / sections).max(8);
-    let img_h = slot_h.saturating_sub(CARD_CHROME_ROWS).clamp(2, 18);
+    let img_h = slot_h.saturating_sub(CARD_CHROME_ROWS).clamp(2, MAX_IMAGE_H);
     (img_h, img_h + CARD_CHROME_ROWS)
+}
+
+/// Whether the Libraries row can stay on the page **without scrolling or
+/// shrinking the cards**: every row (the base shelves, one strip per
+/// library, and the Libraries carousel itself) must fit at the preferred
+/// image height. With more rows the carousel goes back to being the
+/// `↑ Libraries` hint, revealed with Up; a small server whose whole page
+/// fits keeps it visible.
+pub(super) fn libraries_row_fits(
+    area_height: u16,
+    base_shelves: usize,
+    total_rows: usize,
+) -> bool {
+    if base_shelves == 0 || total_rows == 0 {
+        return false;
+    }
+    let (img_h, section_h) = section_geometry(area_height, base_shelves);
+    img_h >= MAX_IMAGE_H
+        && (total_rows + 1).saturating_mul(usize::from(section_h))
+            <= usize::from(area_height)
 }
 
 /// The terminal's cell height/width ratio, for sizing poster cards so their
@@ -322,13 +368,15 @@ impl JellyfinPane {
             self.fetch_home(ctx);
         }
     }
-    /// Rebuild the sections from the fetched shelves, keeping each shelf's
-    /// cursor when it still exists.
+    /// Rebuild the sections from the fetched shelves, keeping each row's
+    /// cursor when it still exists. The three server shelves come first,
+    /// then one "Recently Added in <library>" strip per library with recent
+    /// items.
     pub(super) fn rebuild_home_sections(&mut self) {
-        let previous: Vec<(HomeShelf, usize)> = self
+        let previous: Vec<(String, usize)> = self
             .home_sections
             .iter()
-            .map(|section| (section.shelf, section.cursor()))
+            .map(|section| (section.title.clone(), section.cursor()))
             .collect();
         let shelves: [(HomeShelf, &Vec<JfItem>); 3] = [
             (HomeShelf::ContinueWatching, &self.home.continue_watching),
@@ -340,14 +388,29 @@ impl JellyfinPane {
             if items.is_empty() {
                 continue;
             }
-            let cursor = previous
-                .iter()
-                .find(|(s, _)| *s == shelf)
-                .map_or(0, |(_, cursor)| *cursor);
+            let title = shelf.title().to_owned();
             sections.push(HomeSection {
                 shelf,
+                cursor: restored_cursor(&previous, &title, items.len()),
+                title,
+                library_strip: false,
                 items: items.clone(),
-                cursor: cursor.min(items.len() - 1),
+                scroll: 0,
+            });
+        }
+        for latest in &self.home.library_latest {
+            if latest.items.is_empty() {
+                continue;
+            }
+            let title = format!("Recently Added in {}", latest.library.name);
+            sections.push(HomeSection {
+                // A library strip is the same kind of row as the server's
+                // Recently Added shelf: 2:3 posters of the newest items.
+                shelf: HomeShelf::RecentlyAdded,
+                cursor: restored_cursor(&previous, &title, latest.items.len()),
+                title,
+                library_strip: true,
+                items: latest.items.clone(),
                 scroll: 0,
             });
         }
@@ -359,6 +422,7 @@ impl JellyfinPane {
         }
         if self.views.is_empty() {
             self.home_libraries_revealed = false;
+            self.home_libraries_fits = false;
         }
         self.home_libraries_cursor = self
             .home_libraries_cursor
@@ -367,11 +431,21 @@ impl JellyfinPane {
         // memory so retried items are fetched again.
         self.home_image_failed.clear();
     }
-    /// Whether the Libraries carousel is part of the page right now: only
-    /// once the user pressed Up from the first shelf (it is otherwise just a
-    /// hint line).
+    /// How many rows belong to the three server shelves (not one library's
+    /// strip). The card size and the Libraries-row fit are derived from
+    /// these: extra per-library rows scroll instead of shrinking the cards.
+    fn home_base_shelf_count(&self) -> usize {
+        self.home_sections
+            .iter()
+            .filter(|section| !section.library_strip)
+            .count()
+    }
+    /// Whether the Libraries carousel is part of the page right now: once
+    /// the user pressed Up from the first shelf, or already when the page is
+    /// tall enough to paint it at the cards' preferred size (it is otherwise
+    /// just a hint line).
     fn libraries_row_shown(&self) -> bool {
-        self.home_libraries_revealed
+        (self.home_libraries_revealed || self.home_libraries_fits)
             && !self.views.is_empty()
             && !self.home_sections.is_empty()
     }
@@ -444,7 +518,7 @@ impl JellyfinPane {
                 }
                 Some(HomeRowView {
                     shelf: HomeShelf::Libraries,
-                    title: HomeShelf::Libraries.title(),
+                    title: HomeShelf::Libraries.title().to_owned(),
                     items: self.views.clone(),
                     cursor: self
                         .home_libraries_cursor
@@ -455,7 +529,7 @@ impl JellyfinPane {
             HomeRowId::Section(idx) => self.home_sections.get(idx).map(|section| {
                 HomeRowView {
                     shelf: section.shelf,
-                    title: section.shelf.title(),
+                    title: section.title.clone(),
                     items: section.items.clone(),
                     cursor: section.cursor(),
                     scroll: section.scroll,
@@ -895,9 +969,21 @@ impl JellyfinPane {
         let cell_ratio = self.home_cell_ratio.unwrap_or_else(detect_cell_ratio);
         let base = ctx.config.as_list_text_style();
         let dim = base.add_modifier(Modifier::DIM);
+        // The card size comes from the base shelves (Continue Watching, Next
+        // Up, Recently Added), not from the per-library strips: more rows
+        // scroll instead of shrinking every poster. The Libraries row stays
+        // on the page only when every row still fits at that preferred size
+        // (a small server); with more rows it is the `↑ Libraries` hint
+        // again, so the visible page is all content. The fit is measured on
+        // the full content area because a fitting row needs no hint line
+        // (and the hint would be dropped anyway).
+        let base_shelves = self.home_base_shelf_count();
+        self.home_libraries_fits = !self.views.is_empty()
+            && libraries_row_fits(area.height, base_shelves, self.home_sections.len());
         let rows = self.home_row_ids();
         let mut usable = area;
-        // The Libraries row is hidden until Up: a one-line hint says so.
+        // The Libraries row is hidden on a short page until Up: a one-line
+        // hint says so.
         if !self.libraries_row_shown() && !self.views.is_empty() && area.height > 2 {
             frame.render_widget(
                 Paragraph::new(Line::from(Span::styled(
@@ -912,7 +998,7 @@ impl JellyfinPane {
                 ..area
             };
         }
-        let (img_h, section_h) = section_geometry(usable.height, rows.len());
+        let (img_h, section_h) = section_geometry(usable.height, base_shelves);
         let visible_rows = (usable.height / section_h).max(1) as usize;
         let focused_row = self.home_focus_row().min(rows.len().saturating_sub(1));
         let section_scroll = visible_offset(

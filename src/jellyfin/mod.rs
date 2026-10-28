@@ -210,7 +210,16 @@ pub struct SeasonEntry {
     pub url: String,
     pub duration: Option<f64>,
 }
-/// The Home page's three shelves, in the order the page paints them.
+/// One library's "Recently Added" strip: the Home page's per-library rows
+/// (`Users/{uid}/Items/Latest?ParentId=…`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct JfLibraryLatest {
+    /// The library view the strip belongs to (its name titles the row).
+    pub library: JfItem,
+    /// That library's newest items, newest first.
+    pub items: Vec<JfItem>,
+}
+/// The Home page's shelves, in the order the page paints them.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct JfHome {
     /// `Users/{uid}/Items/Resume` filtered to video: started, not finished.
@@ -219,16 +228,30 @@ pub struct JfHome {
     pub next_up: Vec<JfItem>,
     /// `Users/{uid}/Items/Latest`: the newest items added to the libraries.
     pub recently_added: Vec<JfItem>,
+    /// One strip per library with recent additions (titled "Recently Added
+    /// in <library>"), after the server-wide `recently_added` shelf.
+    pub library_latest: Vec<JfLibraryLatest>,
 }
 impl JfHome {
     pub fn is_empty(&self) -> bool {
         self.continue_watching.is_empty()
             && self.next_up.is_empty()
             && self.recently_added.is_empty()
+            && self.library_latest.is_empty()
     }
 }
 /// How many rows each Home shelf asks the server for.
 const HOME_SHELF_LIMIT: u32 = 12;
+
+/// The `Items/Latest` request path, optionally scoped to one library (the
+/// per-library Home strips). The endpoint answers a bare JSON array.
+fn latest_media_path(user_id: &str, parent_id: Option<&str>) -> String {
+    let parent = parent_id.map_or_else(String::new, |id| format!("&ParentId={id}"));
+    format!(
+        "/Users/{user_id}/Items/Latest?Limit={HOME_SHELF_LIMIT}{parent}\
+         &Fields=Overview,MediaSources&ImageTypeLimit=1"
+    )
+}
 /// Which Jellyfin image an item is asked for (the Home carousel shows wide
 /// episode previews for Continue Watching and posters everywhere else).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
@@ -491,6 +514,16 @@ impl Jellyfin {
         home.continue_watching = try_shelf(self.resume_items());
         home.next_up = try_shelf(self.next_up());
         home.recently_added = try_shelf(self.recently_added());
+        // A "Recently Added in <library>" strip per library, after the
+        // server-wide shelf. The views call is one more GET; a failing
+        // library strip is skipped instead of blanking the page.
+        let views = try_shelf(self.views());
+        for view in views {
+            let items = try_shelf(self.library_latest(&view.id));
+            if !items.is_empty() {
+                home.library_latest.push(JfLibraryLatest { library: view, items });
+            }
+        }
         // A page with nothing at all is a failure worth reporting (the
         // pane then shows the notice row); a partially filled page is not.
         if home.is_empty() {
@@ -524,12 +557,14 @@ impl Jellyfin {
     /// Recently Added: the newest items added to the libraries. The
     /// endpoint answers a bare JSON array (not an `Items` object).
     pub fn recently_added(&self) -> Result<Vec<JfItem>> {
-        let path = format!(
-            "/Users/{}/Items/Latest?Limit={HOME_SHELF_LIMIT}\
-             &Fields=Overview,MediaSources&ImageTypeLimit=1",
-            self.user_id
-        );
-        let data = self.get(&path)?;
+        self.latest_media(None)
+    }
+    /// Recently Added in one library (the Home page's per-library strip).
+    pub fn library_latest(&self, library_id: &str) -> Result<Vec<JfItem>> {
+        self.latest_media(Some(library_id))
+    }
+    fn latest_media(&self, parent_id: Option<&str>) -> Result<Vec<JfItem>> {
+        let data = self.get(&latest_media_path(&self.user_id, parent_id))?;
         Ok(list_from_value(&data))
     }
     /// A tagged Home-wall image (see `FetchJellyfinImageTagged`): the tag
@@ -1346,6 +1381,16 @@ mod tests {
         // A negative position (a seek report gone wrong) clamps to 0
         // instead of sending a tick count the server rejects.
         assert_eq!(position_ticks(-3.0), 0);
+    }
+
+    #[test]
+    fn latest_media_scopes_to_the_library() {
+        let all = latest_media_path("u", None);
+        assert!(all.starts_with("/Users/u/Items/Latest?Limit=12"), "{all}");
+        assert!(!all.contains("ParentId"), "the server-wide shelf is unscoped: {all}");
+        let anime = latest_media_path("u", Some("lib1"));
+        assert!(anime.contains("ParentId=lib1"), "a strip is scoped to its library: {anime}");
+        assert!(anime.contains("Fields=Overview,MediaSources"), "{anime}");
     }
 
     #[test]
