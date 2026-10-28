@@ -61,50 +61,18 @@ impl JellyfinPane {
         }
     }
     /// Rebuild the visible tree from the loaded data + expansion state.
+    ///
+    /// With a `tree_scope` the tree starts at that node instead of at every
+    /// library: the entry context is the only root, and the libraries the
+    /// user did not come from have no rows at all.
     pub(super) fn rebuild_tree(&mut self) {
         let prev_key = self.selected.as_ref().map(JfNodeKind::key);
         let mut tree: Vec<JfNode> = Vec::new();
-        for view in &self.views {
-            let view_kind = JfNodeKind::View(view.clone());
-            let expanded = self.expanded.contains(&view_kind.key());
-            tree.push(JfNode {
-                kind: view_kind.clone(),
-                depth: 0,
-                expandable: true,
-                expanded,
-            });
-            if !expanded {
-                continue;
-            }
-            if view.is_music_view {
-                for artist in self.artists.get(&view.id).cloned().unwrap_or_default() {
-                    let artist_kind = JfNodeKind::Artist(artist.clone());
-                    let artist_expanded = self.expanded.contains(&artist_kind.key());
-                    tree.push(JfNode {
-                        kind: artist_kind.clone(),
-                        depth: 1,
-                        expandable: true,
-                        expanded: artist_expanded,
-                    });
-                    if artist_expanded {
-                        for album in self
-                            .albums
-                            .get(&artist.id)
-                            .cloned()
-                            .unwrap_or_default()
-                        {
-                            tree.push(JfNode {
-                                kind: JfNodeKind::Album(album),
-                                depth: 2,
-                                expandable: false,
-                                expanded: false,
-                            });
-                        }
-                    }
-                }
-            } else {
-                for folder in self.folders.get(&view.id).cloned().unwrap_or_default() {
-                    self.push_folder_rows(&mut tree, folder, 1);
+        match self.tree_scope.clone() {
+            Some(root) => self.push_node_rows(&mut tree, root, 0),
+            None => {
+                for view in &self.views {
+                    self.push_node_rows(&mut tree, JfNodeKind::View(view.clone()), 0);
                 }
             }
         }
@@ -116,6 +84,67 @@ impl JellyfinPane {
             }
         }
         self.tree_list.select(if self.tree.is_empty() { None } else { Some(0) });
+    }
+    /// The rows of one node: the node itself, then — when it is expanded —
+    /// its children (folders recurse through `push_folder_rows`).
+    fn push_node_rows(&self, tree: &mut Vec<JfNode>, kind: JfNodeKind, depth: u8) {
+        match kind.clone() {
+            JfNodeKind::Album(album) => tree.push(JfNode {
+                kind: JfNodeKind::Album(album),
+                depth,
+                expandable: false,
+                expanded: false,
+            }),
+            JfNodeKind::Artist(artist) => {
+                let artist_kind = JfNodeKind::Artist(artist.clone());
+                let expanded = self.expanded.contains(&artist_kind.key());
+                tree.push(JfNode {
+                    kind: artist_kind,
+                    depth,
+                    expandable: true,
+                    expanded,
+                });
+                if !expanded {
+                    return;
+                }
+                for album in self.albums.get(&artist.id).cloned().unwrap_or_default() {
+                    tree.push(JfNode {
+                        kind: JfNodeKind::Album(album),
+                        depth: depth.saturating_add(1),
+                        expandable: false,
+                        expanded: false,
+                    });
+                }
+            }
+            JfNodeKind::View(view) => {
+                let view_kind = JfNodeKind::View(view.clone());
+                let expanded = self.expanded.contains(&view_kind.key());
+                tree.push(JfNode {
+                    kind: view_kind,
+                    depth,
+                    expandable: true,
+                    expanded,
+                });
+                if !expanded {
+                    return;
+                }
+                let child_depth = depth.saturating_add(1);
+                if view.is_music_view {
+                    for artist in self.artists.get(&view.id).cloned().unwrap_or_default() {
+                        self.push_node_rows(
+                            tree,
+                            JfNodeKind::Artist(artist),
+                            child_depth,
+                        );
+                    }
+                } else {
+                    for folder in self.folders.get(&view.id).cloned().unwrap_or_default() {
+                        self.push_folder_rows(tree, folder, child_depth);
+                    }
+                }
+            }
+            JfNodeKind::Folder(folder) => self.push_folder_rows(tree, folder, depth),
+        }
     }
     fn push_folder_rows(&self, tree: &mut Vec<JfNode>, folder: JfItem, depth: u8) {
         if !folder.is_container() {
@@ -390,11 +419,12 @@ impl JellyfinPane {
     /// sub-page of Home, so it must not keep a deep expansion behind the
     /// carousels.
     pub(super) fn collapse_tree(&mut self, ctx: &Ctx) -> Result<()> {
-        if self.expanded.is_empty() && self.selected.is_none() {
+        if self.expanded.is_empty() && self.selected.is_none() && self.tree_scope.is_none() {
             return Ok(());
         }
         self.expanded.clear();
         self.selected = None;
+        self.tree_scope = None;
         self.rebuild_tree();
         self.populate_items();
         self.sync_poster(ctx);
@@ -498,6 +528,15 @@ impl TreeBrowserCore for JellyfinPane {
         let prev_id = current.id().to_owned();
         let prev_key = current.key();
         self.expanded.remove(&prev_key);
+        // Backing out of a filtered tree's root would select a node the tree
+        // does not contain: the filter widens to the parent instead, so `a`/
+        // Left always means "one level up" (a library root still leaves for
+        // Home below).
+        if self.tree_scope.as_ref().is_some_and(|root| root.key() == prev_key)
+            && let Some(parent) = self.parent_of(&current)
+        {
+            self.tree_scope = Some(parent);
+        }
         // A library view *is* the tree's root: Left there leaves the page for
         // the Home carousels (the `⌂ Home` button's twin), which collapses
         // the tree on the way out.

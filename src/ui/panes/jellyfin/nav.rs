@@ -200,6 +200,12 @@ impl JellyfinPane {
             self.expanded.insert(self.node_kind_for(ancestor).key());
         }
         self.expanded.insert(selected_kind.key());
+        // The page is scoped to what the user came from instead of showing
+        // every library: a library entry shows that library path only, an
+        // entry inside a show shows that show (its seasons).
+        let scope = self.jump_scope(&chain, &jump.target);
+        self.expanded.insert(scope.key());
+        self.tree_scope = Some(scope);
         self.selected = Some(selected_kind.clone());
         self.ensure_loaded(&selected_kind, ctx);
         self.rebuild_tree();
@@ -260,6 +266,24 @@ impl JellyfinPane {
             })
         } else {
             find(&|item: &JfItem| item.id == jump.target.id)
+        }
+    }
+    /// The tree scope a jump enters with: the show whose seasons the user
+    /// came to see when the target (or an ancestor) is a series, otherwise the
+    /// library the item lives in.
+    pub(super) fn jump_scope(&self, chain: &[JfItem], target: &JfItem) -> JfNodeKind {
+        let show = chain
+            .iter()
+            .chain(std::iter::once(target))
+            .find(|item| item.kind == "Series");
+        if let Some(show) = show {
+            return self.node_kind_for(show);
+        }
+        match chain.first() {
+            Some(view) if matches!(view.kind.as_str(), "CollectionFolder" | "UserView") => {
+                self.node_kind_for(view)
+            }
+            _ => self.node_kind_for(target),
         }
     }
     /// The item as the tree will hold it: a View that the server's `views`

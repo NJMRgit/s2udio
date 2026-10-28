@@ -342,6 +342,24 @@
     }
 
     /// A pane wired to a fake server + the default test context.
+    /// The frame at a terminal width where the library tree is drawn (the
+    /// tree pane hides below ~120 columns, so the 100-col `render_text`
+    /// never shows it).
+    fn render_text_wide(pane: &mut JellyfinPane, ctx: &crate::ctx::Ctx) -> String {
+        let backend = ratatui::backend::TestBackend::new(200, 40);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                pane.render(frame, ratatui::prelude::Rect::new(0, 0, 200, 40), ctx).unwrap()
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        (0..40u16)
+            .map(|y| (0..200).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     fn pane_with_server() -> (JellyfinPane, crate::ctx::Ctx, crossbeam::channel::Receiver<WorkRequest>) {
         let (app_tx, _app_rx) = crossbeam::channel::unbounded();
         let (work_tx, work_rx) = crossbeam::channel::unbounded();
@@ -899,6 +917,180 @@
         let season_row = pane.tree.iter().position(|n| n.kind.id() == "season1").unwrap();
         assert_eq!(pane.tree_list.selected(), Some(season_row),
                    "the tree highlight follows the items cursor");
+    }
+
+    /// The tree page is scoped to what the user came from: an episode entry
+    /// shows the show's seasons, not the whole server tree.
+    #[test]
+    fn an_episode_jump_scopes_the_tree_to_its_show() {
+        let (mut pane, ctx, _work_rx) = pane_with_server();
+        let lib = jf_item("lib", "TV", "CollectionFolder");
+        let other = jf_item("lib2", "Movies", "CollectionFolder");
+        pane.views = vec![lib.clone(), other];
+        // The other library has loaded items: they must not get tree rows.
+        pane.folders.insert("lib2".to_owned(), vec![jf_item("movie", "A Movie", "Movie")]);
+        let series = jf_item("series", "Futurama", "Series");
+        let season = jf_item("s1", "Season 1", "Season");
+        let ep = jf_item("e1", "Space Pilot 3000", "Episode");
+        pane.start_jump(ep.clone(), false, None, None, &ctx).unwrap();
+        feed(&mut pane, &ctx, JF_ANCESTORS, JellyfinResult::Ancestors {
+            item_id: "e1".to_owned(),
+            items: vec![season.clone(), series.clone(), lib],
+        });
+        feed(&mut pane, &ctx, JF_FOLDER, JellyfinResult::Children {
+            parent_id: "lib".to_owned(),
+            items: vec![series.clone()],
+        });
+        feed(&mut pane, &ctx, JF_FOLDER, JellyfinResult::Children {
+            parent_id: "series".to_owned(),
+            items: vec![season.clone()],
+        });
+        feed(&mut pane, &ctx, JF_FOLDER, JellyfinResult::Children {
+            parent_id: "s1".to_owned(),
+            items: vec![ep],
+        });
+
+        assert_eq!(
+            pane.tree_scope.as_ref().map(JfNodeKind::key).as_deref(),
+            Some("folder:series"),
+            "the entry context is the show"
+        );
+        assert_eq!(
+            pane.tree.first().map(|node| (node.kind.key(), node.depth)),
+            Some(("folder:series".to_owned(), 0)),
+            "the show is the tree's root row: {:?}",
+            pane.tree
+        );
+        assert!(
+            !pane.tree.iter().any(|node| matches!(node.kind.id(), "lib" | "lib2")),
+            "no library rows in a show-scoped tree: {:?}",
+            pane.tree
+        );
+        assert!(
+            !pane.tree.iter().any(|node| node.kind.id() == "movie"),
+            "another library's items are hidden too"
+        );
+        let season_row = pane
+            .tree
+            .iter()
+            .position(|node| node.kind.id() == "s1")
+            .expect("the show's seasons are listed");
+        assert_eq!(pane.tree[season_row].depth, 1);
+
+        // And the frame shows the show + its seasons, never the libraries.
+        let text = render_text_wide(&mut pane, &ctx);
+        assert!(text.contains("Futurama"), "the show is rendered:\n{text}");
+        assert!(text.contains("Season 1"), "its seasons are rendered:\n{text}");
+        assert!(!text.contains("Movies"), "other libraries are gone:\n{text}");
+    }
+
+    /// Selecting a library scopes the tree to that library, expanded: the
+    /// other libraries and their items have no rows.
+    #[test]
+    fn a_library_jump_scopes_the_tree_to_that_library() {
+        let (mut pane, ctx, _work_rx) = pane_with_server();
+        let lib = jf_item("lib", "TV", "CollectionFolder");
+        let other = jf_item("lib2", "Movies", "CollectionFolder");
+        pane.views = vec![lib.clone(), other];
+        let series = jf_item("series", "Futurama", "Series");
+        pane.folders.insert("lib".to_owned(), vec![series.clone()]);
+        pane.folders.insert("lib2".to_owned(), vec![jf_item("movie", "A Movie", "Movie")]);
+
+        pane.start_jump(lib.clone(), false, None, None, &ctx).unwrap();
+        // The library's own ancestors are just Jellyfin's UserRootFolder,
+        // which the tree does not show.
+        feed(&mut pane, &ctx, JF_ANCESTORS, JellyfinResult::Ancestors {
+            item_id: "lib".to_owned(),
+            items: vec![jf_item("root", "Media Folders", "UserRootFolder")],
+        });
+
+        assert_eq!(
+            pane.tree_scope.as_ref().map(JfNodeKind::key).as_deref(),
+            Some("view:lib")
+        );
+        assert_eq!(pane.tree.first().map(|node| node.kind.id()), Some("lib"));
+        assert!(
+            pane.tree.iter().any(|node| node.kind.id() == "series"),
+            "the library is expanded with its items: {:?}",
+            pane.tree
+        );
+        assert!(
+            !pane.tree.iter().any(|node| matches!(node.kind.id(), "lib2" | "movie")),
+            "the other library and its items are hidden: {:?}",
+            pane.tree
+        );
+    }
+
+    /// Backing out of a scoped root widens the filter one level instead of
+    /// selecting a node the tree does not contain.
+    #[test]
+    fn backing_out_of_the_scoped_root_widens_the_scope() {
+        let (mut pane, ctx, _work_rx) = pane_with_server();
+        let lib = jf_item("lib", "TV", "CollectionFolder");
+        pane.views = vec![lib.clone()];
+        let series = jf_item("series", "Futurama", "Series");
+        let season = jf_item("s1", "Season 1", "Season");
+        let ep = jf_item("e1", "Space Pilot 3000", "Episode");
+        pane.start_jump(ep, false, None, None, &ctx).unwrap();
+        feed(&mut pane, &ctx, JF_ANCESTORS, JellyfinResult::Ancestors {
+            item_id: "e1".to_owned(),
+            items: vec![season.clone(), series.clone(), lib.clone()],
+        });
+        feed(&mut pane, &ctx, JF_FOLDER, JellyfinResult::Children {
+            parent_id: "lib".to_owned(),
+            items: vec![series.clone()],
+        });
+        feed(&mut pane, &ctx, JF_FOLDER, JellyfinResult::Children {
+            parent_id: "series".to_owned(),
+            items: vec![season],
+        });
+        feed(&mut pane, &ctx, JF_FOLDER, JellyfinResult::Children {
+            parent_id: "s1".to_owned(),
+            items: vec![jf_item("e1", "Space Pilot 3000", "Episode")],
+        });
+        assert_eq!(pane.tree_scope.as_ref().map(JfNodeKind::key).as_deref(),
+                   Some("folder:series"));
+
+        // s1 -> series -> (out of the scope) library.
+        pane.select_parent(&ctx).unwrap();
+        assert_eq!(pane.selected.as_ref().map(JfNodeKind::id), Some("series"));
+        assert_eq!(
+            pane.tree_scope.as_ref().map(JfNodeKind::key).as_deref(),
+            Some("folder:series"),
+            "still inside the show"
+        );
+        pane.select_parent(&ctx).unwrap();
+        assert_eq!(pane.selected.as_ref().map(JfNodeKind::id), Some("lib"));
+        assert_eq!(
+            pane.tree_scope.as_ref().map(JfNodeKind::key).as_deref(),
+            Some("view:lib"),
+            "the filter widened to the library"
+        );
+        assert_eq!(pane.tree.first().map(|node| node.kind.id()), Some("lib"));
+    }
+
+    /// Leaving the page for Home drops the filter: the next visit starts
+    /// from the full tree again.
+    #[test]
+    fn returning_home_drops_the_tree_scope() {
+        let (mut pane, ctx, _work_rx) = pane_with_server();
+        let lib = jf_item("lib", "TV", "CollectionFolder");
+        let other = jf_item("lib2", "Movies", "CollectionFolder");
+        pane.views = vec![lib.clone(), other];
+        pane.start_jump(lib, false, None, None, &ctx).unwrap();
+        feed(&mut pane, &ctx, JF_ANCESTORS, JellyfinResult::Ancestors {
+            item_id: "lib".to_owned(),
+            items: vec![],
+        });
+        assert!(pane.tree_scope.is_some());
+        pane.collapse_tree(&ctx).unwrap();
+        assert!(pane.tree_scope.is_none());
+        assert_eq!(
+            pane.tree.iter().filter(|node| node.depth == 0).count(),
+            2,
+            "the full tree is back: {:?}",
+            pane.tree
+        );
     }
 
     /// A series result opens on the season the query named (`S02`), with

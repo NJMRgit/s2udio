@@ -190,6 +190,19 @@ pub struct JellyfinPane {
     selected: Option<JfNodeKind>,
     /// Expanded node keys.
     expanded: HashSet<String>,
+    /// The tree's entry context (Settings-style filter): the node the page was
+    /// opened on, when the user got here by activating a library or an item
+    /// rather than by pressing the Libraries segment. `None` = the full tree
+    /// of every library (the pre-scope behaviour).
+    ///
+    /// - a library entry scopes the tree to that library, expanded, with the
+    ///   other libraries and their items hidden;
+    /// - an episode/series/season entry scopes it to that show's seasons.
+    ///
+    /// Set by `finish_jump` (every Home-card / search-result crossing goes
+    /// through it), widened one level when `a`/Left leaves the root, and
+    /// cleared when the page returns Home.
+    tree_scope: Option<JfNodeKind>,
     /// Config-missing / fetch error notice.
     error: Option<String>,
     /// The pane the user last navigated in; Enter acts on that pane.
@@ -332,6 +345,7 @@ impl JellyfinPane {
             item_list: ListState::default(),
             selected: None,
             expanded: HashSet::new(),
+            tree_scope: None,
             error: None,
             focus: PaneFocus::Tree,
             temp_play_id: None,
@@ -523,6 +537,9 @@ impl Pane for JellyfinPane {
             UiEvent::ConfigChanged => {
                 self.server = None;
                 self.error = None;
+                // The views are about to be re-fetched: a scope points into
+                // the old server's tree.
+                self.tree_scope = None;
                 if is_visible {
                     self.fetch_views(ctx);
                 } else {
