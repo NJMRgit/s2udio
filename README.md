@@ -12,7 +12,7 @@ A heavily modified fork of [rmpc](https://github.com/mierak/rmpc) v0.11.0
 
 a fully featured media center TUI built on rmpc that adds support for video via mpv and a bunch of other goodies!
 
-AI assisted with open weights models and open source software
+AI assisted with open weight models and open source software
 
 ## Added Features:
 - synchronized lyrics + fetch
