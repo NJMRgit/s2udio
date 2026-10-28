@@ -1700,7 +1700,11 @@ impl Ui {
     /// Display any overlay queued by the last frame (the Jellyfin tab's
     /// poster). Called after the buffer flush so the flush cannot overwrite
     /// the overlay's terminal-side placeholder cells.
-    pub fn flush_pending_overlays(&mut self, ctx: &Ctx) -> Result<()> {
+    pub fn flush_pending_overlays(
+        &mut self,
+        frame: &ratatui::buffer::Buffer,
+        ctx: &Ctx,
+    ) -> Result<()> {
         let Some(tab) = self.tabs.get_mut(&ctx.active_tab) else {
             return Ok(());
         };
@@ -1713,7 +1717,7 @@ impl Ui {
         };
         let mut pane = self.panes.get_mut(&pane.pane, ctx)?;
         if let Panes::Jellyfin(jellyfin) = &mut pane {
-            jellyfin.flush_pending_poster(ctx);
+            jellyfin.flush_pending_poster(frame, ctx);
         }
         Ok(())
     }

@@ -825,7 +825,7 @@ fn main_task<B: Backend + std::io::Write>(
             if let Err(err) = ui.flush_album_art(completed_frame.buffer, &ctx) {
                 log::error!(error:? = err; "Failed to flush album art");
             }
-            if let Err(err) = ui.flush_pending_overlays(&ctx) {
+            if let Err(err) = ui.flush_pending_overlays(completed_frame.buffer, &ctx) {
                 log::error!(error:? = err; "Failed to flush pending overlays");
             }
             // Round 73.1: the frame, its clear and its images are on the wire

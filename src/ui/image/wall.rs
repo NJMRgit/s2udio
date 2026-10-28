@@ -13,7 +13,7 @@
 use std::{collections::HashMap, io::Write, sync::Arc};
 
 use anyhow::Result;
-use ratatui::{layout::Rect, prelude::IntoCrossterm};
+use ratatui::{buffer::Buffer, layout::Rect, prelude::IntoCrossterm};
 
 use super::kitty::{self, WallTile};
 use crate::{config::album_art::ImageMethod, ctx::Ctx, shared::terminal::TERMINAL};
@@ -46,6 +46,12 @@ struct Slot {
     dirty: bool,
     /// An encode that failed for this tag/area: do not retry every frame.
     failed: bool,
+    /// The area this tile occupied before it moved. Its placeholder cells stay
+    /// in the terminal after the image is freed, so the flush repaints that
+    /// rectangle from the frame instead of leaving the cells blank (they may
+    /// hold the new layout's text: the rows move when a card's geometry
+    /// changes).
+    stale_area: Option<Rect>,
 }
 
 #[derive(Debug)]
@@ -96,6 +102,9 @@ impl PosterWall {
                     slot.encoded = None;
                     slot.failed = false;
                     slot.tag = placement.tag.clone();
+                    if slot.area != placement.area && slot.placed {
+                        slot.stale_area = Some(slot.area);
+                    }
                     slot.area = placement.area;
                     slot.image_id = image_id;
                     slot.dirty = true;
@@ -109,6 +118,7 @@ impl PosterWall {
                         placed: false,
                         dirty: true,
                         failed: false,
+                        stale_area: None,
                     });
                 }
             }
@@ -118,13 +128,37 @@ impl PosterWall {
     /// Draw every slot that needs it. Encodes on the calling (UI) thread,
     /// like the single-poster overlay does; only slots whose item or area
     /// changed are encoded, so scrolling re-encodes just the arriving cards.
-    pub(crate) fn flush(&mut self, bytes: &HashMap<String, Arc<Vec<u8>>>, ctx: &Ctx) -> Result<()> {
+    ///
+    /// `frame` is the buffer the caller just flushed. Cells this overlay
+    /// uncovered or freed are repainted from it: the diff that put the frame
+    /// on the glass will not write them again, so blanking them (the old
+    /// `clear_area`) left a hole in whatever the new layout drew there. A card
+    /// row's geometry changes when the Libraries carousel is revealed or
+    /// hidden (fewer/more cards per row, taller cards), which moves every
+    /// card below it - exactly the case where the retired grid sat on top of
+    /// the new layout's label rows.
+    pub(crate) fn flush(
+        &mut self,
+        frame: Option<&Buffer>,
+        bytes: &HashMap<String, Arc<Vec<u8>>>,
+        ctx: &Ctx,
+    ) -> Result<()> {
         if !self.enabled {
             return Ok(());
         }
         let writer = TERMINAL.writer();
         let mut guard = writer.lock();
-        let w = guard.by_ref();
+        self.flush_to(guard.by_ref(), frame, bytes, ctx)
+    }
+    /// [`Self::flush`] against a caller-supplied writer (tests replay the
+    /// escape stream instead of drawing on the terminal).
+    fn flush_to(
+        &mut self,
+        w: &mut impl Write,
+        frame: Option<&Buffer>,
+        bytes: &HashMap<String, Arc<Vec<u8>>>,
+        ctx: &Ctx,
+    ) -> Result<()> {
         let bg = ctx.config.theme.background_color.map(|c| c.into_crossterm());
         // Retire slots the new layout no longer uses.
         let in_layout: Vec<usize> = self
@@ -140,7 +174,21 @@ impl PosterWall {
                 && slot.placed
             {
                 let _ = kitty::delete_wall_tile(w, slot.image_id);
-                let _ = super::clear_area(w, bg, slot.area);
+                restore(w, frame, slot.area, bg)?;
+            }
+        }
+        // Repaint every rectangle a tile is leaving BEFORE any new grid is
+        // written. A placeholder cell that is overwritten breaks its kitty
+        // placement, so a repaint that ran after another slot's grid was
+        // painted would cut that poster in half (the image is drawn only over
+        // the cells whose placeholder survived).
+        for placement in &self.placements {
+            let idx = usize::from(placement.slot);
+            let Some(slot) = self.slots.get_mut(idx).and_then(Option::as_mut) else {
+                continue;
+            };
+            if let Some(stale) = slot.stale_area.take() {
+                restore(w, frame, stale, bg)?;
             }
         }
         if self.redraw_all {
@@ -157,10 +205,11 @@ impl PosterWall {
             let Some(slot) = self.slots.get_mut(idx).and_then(Option::as_mut) else {
                 continue;
             };
-            if slot.failed || (!slot.dirty && slot.placed) {
+            if !slot.dirty && slot.placed {
                 continue;
             }
-            if slot.encoded.is_none()
+            if !slot.failed
+                && slot.encoded.is_none()
                 && let Some(data) = bytes.get(&placement.tag)
             {
                 match kitty::create_wall_tile(
@@ -176,11 +225,21 @@ impl PosterWall {
                             "Could not encode a Home carousel image"
                         );
                         slot.failed = true;
-                        continue;
                     }
                 }
             }
             let Some(tile) = slot.encoded.as_ref() else {
+                // Nothing to draw for this card: the server has no artwork
+                // for it (the pane remembers that, and the card is drawn with
+                // its name instead), or the encode failed. Drop the grid this
+                // slot still shows, or the *previous* card's poster stays on
+                // the new card: the Libraries row scrolls one card at a time,
+                // so an id's old grid sits exactly on the incoming card.
+                if slot.placed {
+                    let _ = kitty::delete_wall_tile(w, slot.image_id);
+                    restore(w, frame, slot.area, bg)?;
+                    slot.placed = false;
+                }
                 continue;
             };
             // Re-transmitting an id requires the old image to be freed first
@@ -232,11 +291,29 @@ impl PosterWall {
     }
 }
 
+/// Put `area` back on the glass after an image left it.
+///
+/// With the flushed frame at hand the cells are repainted from their real
+/// content; without one (a hide, driven by an event rather than a frame) the
+/// area is blanked, which is what the next full page render expects.
+fn restore(
+    w: &mut impl Write,
+    frame: Option<&Buffer>,
+    area: Rect,
+    bg: Option<crossterm::style::Color>,
+) -> Result<()> {
+    match frame {
+        Some(buffer) => super::paint_area(w, buffer, area),
+        None => super::clear_area(w, bg, area),
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use crate::config::album_art::ImageMethod;
+    use ratatui::style::Style;
 
     fn test_ctx() -> Ctx {
         crate::tests::fixtures::ctx(
@@ -340,6 +417,194 @@ mod tests {
         }]);
         assert_eq!(wall.placements.len(), 1, "only one card is on screen now");
         assert_eq!(wall.placements[0].slot, 1);
+    }
+
+    /// A tile that leaves the page must put the frame's text back, not blank
+    /// its cells: the diff that painted the current frame has already run, so
+    /// anything this flush erases stays erased until an unrelated repaint.
+    /// The reported case: Up (Libraries carousel appears: fewer, wider cards
+    /// per row) then Down again - the retired grids of the 4-row layout land
+    /// on the bottom row's label lines, which went blank.
+    #[test]
+    fn a_retired_tile_repaints_the_frames_text_instead_of_blanking_it() {
+        let ctx = ctx_with_method(ImageMethod::Kitty);
+        let mut wall = PosterWall::new(&ctx);
+        let mut bytes: HashMap<String, Arc<Vec<u8>>> = HashMap::new();
+        bytes.insert("tag".to_owned(), Arc::new(png_bytes(64, 96)));
+
+        // Frame 1: a card image sits where the labels are about to move to.
+        let area = Rect::new(2, 1, 16, 4);
+        wall.set_layout(vec![WallPlacement {
+            slot: 0,
+            tag: "tag".to_owned(),
+            area,
+        }]);
+        let mut first = Vec::new();
+        wall.flush_to(&mut first, None, &bytes, &ctx).expect("first flush");
+        assert!(wall.slots[0].as_ref().is_some_and(|slot| slot.placed));
+
+        // Frame 2: the card is gone (a shorter layout) and the label line
+        // occupies the cells the image used to cover.
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 40, 8));
+        buffer.set_string(2, 1, "Season 29", Style::default());
+        buffer.set_string(2, 2, "South America", Style::default());
+        wall.set_layout(Vec::new());
+        let mut out = Vec::new();
+        wall.flush_to(&mut out, Some(&buffer), &bytes, &ctx).expect("retire flush");
+
+        let text = String::from_utf8_lossy(&out);
+        assert!(
+            text.contains("Season 29"),
+            "the retired grid must repaint the label line: {text:?}"
+        );
+        assert!(
+            text.contains("South America"),
+            "and its subline: {text:?}"
+        );
+        assert!(wall.slots[0].is_none(), "the slot is retired");
+    }
+
+    /// The same hole appears when a tile *moves* (the rows shift when the card
+    /// geometry changes): its old placeholder grid stays in the terminal, so
+    /// the flush has to repaint that rectangle too.
+    #[test]
+    fn a_moved_tile_repaints_its_old_area() {
+        let ctx = ctx_with_method(ImageMethod::Kitty);
+        let mut wall = PosterWall::new(&ctx);
+        let mut bytes: HashMap<String, Arc<Vec<u8>>> = HashMap::new();
+        bytes.insert("tag".to_owned(), Arc::new(png_bytes(64, 96)));
+        let first_area = Rect::new(2, 1, 16, 4);
+        wall.set_layout(vec![WallPlacement {
+            slot: 0,
+            tag: "tag".to_owned(),
+            area: first_area,
+        }]);
+        let mut first = Vec::new();
+        wall.flush_to(&mut first, None, &bytes, &ctx).expect("first flush");
+
+        let moved = Rect::new(2, 5, 16, 4);
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 40, 12));
+        buffer.set_string(2, 1, "Recently Added", Style::default());
+        wall.set_layout(vec![WallPlacement {
+            slot: 0,
+            tag: "tag".to_owned(),
+            area: moved,
+        }]);
+        let mut out = Vec::new();
+        wall.flush_to(&mut out, Some(&buffer), &bytes, &ctx).expect("move flush");
+
+        let text = String::from_utf8_lossy(&out);
+        assert!(
+            text.contains("Recently Added"),
+            "the old grid's cells are repainted from the frame: {text:?}"
+        );
+        assert!(
+            text.contains("c=16,r=4"),
+            "and the new grid is still placed: {text:?}"
+        );
+    }
+
+    /// A repaint must never land on a grid that was painted moments earlier:
+    /// kitty drops the placement for cells whose placeholder is overwritten,
+    /// so the poster is drawn only over the surviving cells - the half-drawn
+    /// cards the first version of this fix produced. Every repaint therefore
+    /// happens before the first new grid.
+    #[test]
+    fn repaints_run_before_any_new_grid_is_painted() {
+        let ctx = ctx_with_method(ImageMethod::Kitty);
+        let mut wall = PosterWall::new(&ctx);
+        let mut bytes: HashMap<String, Arc<Vec<u8>>> = HashMap::new();
+        bytes.insert("a".to_owned(), Arc::new(png_bytes(64, 96)));
+        bytes.insert("b".to_owned(), Arc::new(png_bytes(64, 96)));
+        // Frame 1: both cards sit on the upper rows.
+        wall.set_layout(vec![
+            WallPlacement { slot: 0, tag: "a".to_owned(), area: Rect::new(2, 1, 16, 4) },
+            WallPlacement { slot: 1, tag: "b".to_owned(), area: Rect::new(20, 1, 16, 4) },
+        ]);
+        let mut first = Vec::new();
+        wall.flush_to(&mut first, None, &bytes, &ctx).expect("first flush");
+
+        // Frame 2: both tiles move down; the frame drew a label in each old
+        // rectangle.
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 40, 12));
+        buffer.set_string(2, 2, "Recently Added", Style::default());
+        buffer.set_string(20, 2, "Overgeared", Style::default());
+        wall.set_layout(vec![
+            WallPlacement { slot: 0, tag: "a".to_owned(), area: Rect::new(2, 6, 16, 4) },
+            WallPlacement { slot: 1, tag: "b".to_owned(), area: Rect::new(20, 6, 16, 4) },
+        ]);
+        let mut out = Vec::new();
+        wall.flush_to(&mut out, Some(&buffer), &bytes, &ctx).expect("move flush");
+
+        let text = String::from_utf8_lossy(&out);
+        let grid_at = text
+            .find("a=T,U=1")
+            .unwrap_or_else(|| panic!("no grid was painted: {text:?}"));
+        for label in ["Recently Added", "Overgeared"] {
+            let at = text
+                .find(label)
+                .unwrap_or_else(|| panic!("{label} was not repainted: {text:?}"));
+            assert!(
+                at < grid_at,
+                "the repaint of {label} ran after a grid write: {text:?}"
+            );
+        }
+        assert!(
+            text.matches("a=T,U=1").count() >= 2,
+            "both moved tiles are re-painted: {text:?}"
+        );
+    }
+
+    /// A card whose item has no artwork must not keep the poster of the card
+    /// that occupied the slot before it. The Libraries row scrolls one card
+    /// at a time, so the previous item's grid sits exactly on the incoming
+    /// card - reported as "a library without a cover shows another library's
+    /// cover".
+    #[test]
+    fn a_card_without_artwork_drops_the_previous_poster() {
+        let ctx = ctx_with_method(ImageMethod::Kitty);
+        let mut wall = PosterWall::new(&ctx);
+        let mut bytes: HashMap<String, Arc<Vec<u8>>> = HashMap::new();
+        bytes.insert("with-art".to_owned(), Arc::new(png_bytes(64, 96)));
+        let area = Rect::new(2, 1, 16, 4);
+        wall.set_layout(vec![WallPlacement {
+            slot: 0,
+            tag: "with-art".to_owned(),
+            area,
+        }]);
+        let mut first = Vec::new();
+        wall.flush_to(&mut first, None, &bytes, &ctx).expect("first flush");
+        assert!(wall.slots[0].as_ref().is_some_and(|slot| slot.placed));
+
+        // The row scrolls: the slot now shows an item without artwork (its
+        // tag never enters the byte cache).
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 40, 8));
+        buffer.set_string(2, 2, "Live Action (Adult)", Style::default());
+        wall.set_layout(vec![WallPlacement {
+            slot: 0,
+            tag: "no-art".to_owned(),
+            area,
+        }]);
+        let mut out = Vec::new();
+        wall.flush_to(&mut out, Some(&buffer), &bytes, &ctx).expect("art-less flush");
+
+        let text = String::from_utf8_lossy(&out);
+        assert!(
+            text.contains("a=d,d=I,i=2"),
+            "the old poster is freed: {text:?}"
+        );
+        assert!(
+            text.contains("Live Action (Adu"),
+            "and the cell is repainted from the frame: {text:?}"
+        );
+        assert!(
+            !text.contains("a=T,U=1"),
+            "nothing new is transferred for a card without artwork: {text:?}"
+        );
+        assert!(
+            !wall.slots[0].as_ref().is_some_and(|slot| slot.placed),
+            "the slot is no longer holding an image"
+        );
     }
 
     fn png_bytes(width: u32, height: u32) -> Vec<u8> {

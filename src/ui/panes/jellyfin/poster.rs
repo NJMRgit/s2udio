@@ -59,13 +59,18 @@ impl JellyfinPane {
     /// Display the poster queued by the last render. Called by the event
     /// loop after the frame's buffer flush, so the flush cannot overwrite
     /// the overlay's placeholder cells.
-    pub(crate) fn flush_pending_poster(&mut self, ctx: &Ctx) {
+    pub(crate) fn flush_pending_poster(
+        &mut self,
+        frame: &ratatui::buffer::Buffer,
+        ctx: &Ctx,
+    ) {
         self.poster.flush_pending(ctx);
         // The Home carousel's images are terminal-side overlays as well: they
         // are placed after the frame's buffer flush so the flush cannot
-        // overwrite their placeholder cells.
+        // overwrite their placeholder cells. The frame goes along so the cells
+        // a retiring grid uncovers are repainted instead of blanked.
         if self.mode == JellyfinTabMode::Home
-            && let Err(err) = self.wall.flush(&self.home_images, ctx)
+            && let Err(err) = self.wall.flush(Some(frame), &self.home_images, ctx)
         {
             log::debug!(error:? = err; "Failed to draw the Home carousel images");
         }
