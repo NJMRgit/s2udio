@@ -96,6 +96,11 @@ pub(crate) struct Session {
     pub(crate) kitty_listen_on: Option<String>,
     /// `$KITTY_WINDOW_ID`.
     pub(crate) kitty_window_id: Option<String>,
+    /// The kitty holding this TUI is a *panel* (`kitty +kitten panel`), which is
+    /// how the quick access terminal is built. Its OS window is a layer-shell
+    /// surface: no window manager can raise it, and while it is hidden its
+    /// surface is unmapped, so only kitty's remote control can show it again.
+    pub(crate) kitty_panel: bool,
     /// `$WEZTERM_PANE`.
     pub(crate) wezterm_pane: Option<String>,
     /// KDE/Plasma session.
@@ -123,6 +128,12 @@ impl Session {
         let terminal_class = terminal_pid
             .and_then(|pid| std::fs::read_to_string(format!("/proc/{pid}/comm")).ok())
             .map_or_else(|| class_from_term(ENV.var("TERM").ok().as_deref()), |comm| class_for(&comm));
+        let kitty_panel = ENV
+            .var("KITTY_PID")
+            .ok()
+            .and_then(|pid| pid.parse::<u32>().ok())
+            .and_then(|pid| std::fs::read(format!("/proc/{pid}/cmdline")).ok())
+            .is_some_and(|cmdline| is_kitty_panel_cmdline(&cmdline));
 
         Self {
             terminal_pid,
@@ -130,6 +141,7 @@ impl Session {
             tmux_pane: non_empty(ENV.var("TMUX_PANE").ok()),
             kitty_listen_on: non_empty(ENV.var("KITTY_LISTEN_ON").ok()),
             kitty_window_id: non_empty(ENV.var("KITTY_WINDOW_ID").ok()),
+            kitty_panel,
             wezterm_pane: non_empty(ENV.var("WEZTERM_PANE").ok()),
             kde: desktop.contains("kde")
                 || desktop.contains("plasma")
@@ -213,15 +225,42 @@ pub(crate) fn run() -> Result<&'static str> {
         return Ok("tmux");
     }
 
+    // Nothing came forward: say why, in terms the user can act on.
+    Err(anyhow!(failure_message(&session, &failures)))
+}
+
+/// The message the user gets when no backend raised anything.
+///
+/// A kitty panel (the quick access terminal) is a layer shell surface no window
+/// manager can raise, and while it is hidden kitty unmaps it — with the panel's
+/// remote control off every backend is guaranteed to fail, so that case reports
+/// the one thing the user can change instead of the list of lost attempts.
+fn failure_message(session: &Session, failures: &[String]) -> String {
+    if session.kitty_panel && session.kitty_listen_on.is_none() {
+        log::warn!(
+            terminal_pid:? = session.terminal_pid;
+            "s2udio runs in a kitty panel whose remote control is off"
+        );
+        return QAT_REMOTE_CONTROL_HINT.to_owned();
+    }
     if failures.is_empty() {
-        bail!(
+        return format!(
             "no raise backend applies to this session (terminal pid {:?}, class {:?})",
-            session.terminal_pid,
-            session.terminal_class
+            session.terminal_pid, session.terminal_class
         );
     }
-    Err(anyhow!("all raise backends failed: {}", failures.join("; ")))
+    format!("all raise backends failed: {}", failures.join("; "))
 }
+
+/// What a raise can do about a quick access terminal whose kitty has remote
+/// control switched off. `kitten quick-access-terminal` has no `--listen-on` of
+/// its own (kitty 0.49), but it hands `kitty_override` values to the panel's
+/// kitty instance, which is where both options belong. The actionable part is
+/// front-loaded: the TUI shows this in a single status line.
+const QAT_REMOTE_CONTROL_HINT: &str =
+    "this quick access terminal needs kitty remote control to be raised: add \
+`kitty_override allow_remote_control=socket-only` and `kitty_override \
+listen_on=unix:@s2udio-qat` to quick-access-terminal.conf, then restart it";
 
 fn attempt(backend: Backend, session: &Session) -> Result<()> {
     match backend {
@@ -253,27 +292,59 @@ fn tmux_focus(pane: &str) -> Result<()> {
     if selected { Ok(()) } else { bail!("tmux did not select {pane}") }
 }
 
+/// kitty: show the OS window, then focus this TUI's window inside it.
+///
+/// `focus-window` alone only moves kitty's *internal* focus. The quick access
+/// terminal is a panel (`kitty +kitten panel --toggle-visibility`), a layer
+/// shell surface the window manager cannot raise, and while it is hidden kitty
+/// unmaps its surface — so focusing the window inside it is invisible. Only
+/// kitty itself can map it again (`resize-os-window --action=show`); that call
+/// is a no-op for an already visible window, so every kitty raise issues it.
 fn kitty_focus(session: &Session) -> Result<()> {
     let listen_on = session.kitty_listen_on.as_deref().context("kitty remote control is off")?;
     let window_id = session.kitty_window_id.as_deref().context("no kitty window id")?;
     let kitty = which::which("kitty").context("kitty is not on PATH")?;
-    let output = run_with_timeout(
-        &kitty,
-        &[
-            "@".to_owned(),
-            "--to".to_owned(),
-            listen_on.to_owned(),
-            "focus-window".to_owned(),
-            "--match".to_owned(),
-            format!("window_id:{window_id}"),
-        ],
-        COMMAND_TIMEOUT,
-    )?;
-    if output.status.success() {
+    let show = run_with_timeout(&kitty, &kitty_show_args(listen_on, window_id), COMMAND_TIMEOUT)?;
+    if !show.status.success() {
+        bail!("kitty resize-os-window --action=show exited {}", show.status);
+    }
+    let focus = run_with_timeout(&kitty, &kitty_focus_args(listen_on, window_id), COMMAND_TIMEOUT)?;
+    if focus.status.success() {
         Ok(())
     } else {
-        bail!("kitty focus-window exited {}", output.status)
+        bail!("kitty focus-window exited {}", focus.status)
     }
+}
+
+/// kitty selectors use its search syntax, where a window is matched by `id:`;
+/// `window_id:` is not a location kitty knows and is rejected outright.
+fn kitty_window_match(window_id: &str) -> String {
+    format!("id:{window_id}")
+}
+
+/// `kitty @ --to <socket> resize-os-window --match id:<id> --action=show`
+fn kitty_show_args(listen_on: &str, window_id: &str) -> Vec<String> {
+    vec![
+        "@".to_owned(),
+        "--to".to_owned(),
+        listen_on.to_owned(),
+        "resize-os-window".to_owned(),
+        "--match".to_owned(),
+        kitty_window_match(window_id),
+        "--action=show".to_owned(),
+    ]
+}
+
+/// `kitty @ --to <socket> focus-window --match id:<id>`
+fn kitty_focus_args(listen_on: &str, window_id: &str) -> Vec<String> {
+    vec![
+        "@".to_owned(),
+        "--to".to_owned(),
+        listen_on.to_owned(),
+        "focus-window".to_owned(),
+        "--match".to_owned(),
+        kitty_window_match(window_id),
+    ]
 }
 
 fn wezterm_focus(session: &Session) -> Result<()> {
@@ -601,6 +672,21 @@ fn parse_ppid(stat: &str) -> Option<u32> {
     fields.next()?.parse().ok()
 }
 
+/// Whether `/proc/<pid>/cmdline` describes a kitty *panel* — the process behind
+/// the quick access terminal is `kitty +kitten panel --toggle-visibility …`,
+/// which is what `kitten quick-access-terminal` execs. A plain kitty window is
+/// just `kitty`, so the pair is what tells the two apart.
+fn is_kitty_panel_cmdline(cmdline: &[u8]) -> bool {
+    let args: Vec<&[u8]> =
+        cmdline.split(|byte| *byte == 0).filter(|arg| !arg.is_empty()).collect();
+    args.windows(2).any(|pair| {
+        let launcher = pair[0].ends_with(b"kitten") || pair[0].ends_with(b"kitty");
+        let kitten =
+            pair[1] == b"panel".as_slice() || pair[1] == b"quick-access-terminal".as_slice();
+        launcher && kitten
+    })
+}
+
 /// WM class for a terminal process name.
 fn class_for(comm: &str) -> String {
     let comm = comm.trim();
@@ -638,6 +724,7 @@ mod tests {
             tmux_pane: Some("%1".to_owned()),
             kitty_listen_on: Some("unix:/tmp/kitty.sock".to_owned()),
             kitty_window_id: Some("7".to_owned()),
+            kitty_panel: false,
             wezterm_pane: Some("3".to_owned()),
             kde: true,
             hyprland: true,
@@ -687,6 +774,77 @@ mod tests {
         assert!(script.contains("workspace.activeWindow = best;"), "{script}");
         assert!(script.contains("best.minimized = false;"), "{script}");
         assert!(script.contains("if (w.normalWindow === false)"), "{script}");
+    }
+
+    #[test]
+    fn a_kitty_raise_shows_the_os_window_before_focusing_it() {
+        let show = kitty_show_args("unix:@qat", "7");
+        assert_eq!(
+            show,
+            vec![
+                "@",
+                "--to",
+                "unix:@qat",
+                "resize-os-window",
+                "--match",
+                "id:7",
+                "--action=show",
+            ]
+        );
+        let focus = kitty_focus_args("unix:@qat", "7");
+        assert_eq!(focus, vec!["@", "--to", "unix:@qat", "focus-window", "--match", "id:7"]);
+        // The window selector is kitty's search syntax: `window_id:` is not a
+        // location kitty knows, and it made every kitty raise fail.
+        for args in [&show, &focus] {
+            let matched = &args[args.iter().position(|arg| arg == "--match").unwrap() + 1];
+            assert_eq!(matched, "id:7");
+            assert!(!matched.starts_with("window_id:"), "{matched}");
+        }
+    }
+
+    #[test]
+    fn a_kitty_panel_is_recognised_from_the_kitty_process_cmdline() {
+        // What the quick access terminal execs: kitty +kitten panel …
+        let panel = b"/usr/bin/kitty\0+kitten\0panel\0--toggle-visibility\0--single-instance\0";
+        assert!(is_kitty_panel_cmdline(panel));
+        // A plain kitty window is just the binary and its options.
+        let window = b"/usr/bin/kitty\0--class\0foo\0";
+        assert!(!is_kitty_panel_cmdline(window));
+        // The launcher form, before it execs the panel.
+        let launcher = b"/usr/bin/kitten\0quick-access-terminal\0";
+        assert!(is_kitty_panel_cmdline(launcher));
+        assert!(!is_kitty_panel_cmdline(b""));
+        // "panel" as an option value must not make a plain kitty a panel.
+        assert!(!is_kitty_panel_cmdline(b"/usr/bin/kitty\0--session\0panel\0"));
+    }
+
+    #[test]
+    fn a_panel_without_remote_control_reports_the_fix() {
+        // The quick access terminal: a kitty panel whose remote control is off.
+        let panel = Session {
+            terminal_pid: Some(4242),
+            terminal_class: "kitty".to_owned(),
+            kitty_window_id: Some("1".to_owned()),
+            kitty_panel: true,
+            kde: true,
+            ..Session::default()
+        };
+        let message = failure_message(&panel, &["kwin: no window".to_owned()]);
+        assert!(message.contains("allow_remote_control=socket-only"), "{message}");
+        assert!(message.contains("listen_on=unix:@s2udio-qat"), "{message}");
+        assert!(message.contains("quick-access-terminal.conf"), "{message}");
+
+        // The same panel with remote control on: no hint, the ordinary error.
+        let with_socket = Session {
+            kitty_listen_on: Some("unix:@qat".to_owned()),
+            ..panel.clone()
+        };
+        let message = failure_message(&with_socket, &["kitty: refused".to_owned()]);
+        assert_eq!(message, "all raise backends failed: kitty: refused");
+
+        // A plain kitty window keeps the old message.
+        let message = failure_message(&Session::default(), &[]);
+        assert!(message.starts_with("no raise backend applies"), "{message}");
     }
 
     #[test]
