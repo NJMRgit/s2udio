@@ -18,10 +18,12 @@ use ratatui::{buffer::Buffer, layout::Rect, prelude::IntoCrossterm};
 use super::kitty::{self, WallTile};
 use crate::{config::album_art::ImageMethod, ctx::Ctx, shared::terminal::TERMINAL};
 
-/// Upper bound on simultaneously displayed carousel images (also the highest
-/// kitty image id the wall uses, which must stay below the 256-color range
-/// the placeholder fg encoding relies on).
-pub(crate) const MAX_SLOTS: usize = 32;
+/// Upper bound on simultaneously displayed carousel images. The wall uses
+/// `slot + 2` as the kitty image id, and the placeholder cells encode that id
+/// through the 256-color range (`38;5;<id>`), so 253 slots is the protocol
+/// limit. 32 was too small once the Home page grew several rows: a 5-row page
+/// with 7-8 cards per row still misses the last row's posters (2026-10-28).
+pub(crate) const MAX_SLOTS: usize = 250;
 
 /// One visible card's image slot, as computed by the Home renderer.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -614,6 +616,43 @@ mod tests {
             .write_to(&mut bytes, image::ImageFormat::Png)
             .expect("encode a test png");
         bytes.into_inner()
+    }
+
+    /// A multi-row Home page has more visible cards than the old 32 slots, so
+    /// the last row lost its later posters. Every card of a 40-card page must
+    /// get its own slot/id in one flush.
+    #[test]
+    fn a_multi_row_page_gets_a_slot_for_every_visible_card() {
+        let ctx = ctx_with_method(ImageMethod::Kitty);
+        let mut wall = PosterWall::new(&ctx);
+        let mut bytes: HashMap<String, Arc<Vec<u8>>> = HashMap::new();
+        bytes.insert("poster".to_owned(), Arc::new(png_bytes(32, 48)));
+        let placements: Vec<WallPlacement> = (0..40u16)
+            .map(|slot| WallPlacement {
+                slot,
+                tag: "poster".to_owned(),
+                area: Rect::new((slot % 8) * 18, (slot / 8) * 12, 16, 10),
+            })
+            .collect();
+        wall.set_layout(placements);
+        let mut out = Vec::new();
+        wall.flush_to(&mut out, None, &bytes, &ctx).expect("flush");
+        let text = String::from_utf8_lossy(&out);
+        // Slot 39 is image id 41 (the wall's ids start at 2).
+        assert!(
+            wall.slots[39].as_ref().is_some_and(|slot| slot.placed),
+            "the 40th visible card holds its poster"
+        );
+        assert!(
+            text.contains("a=T,U=1,i=41"),
+            "the last card is transferred under its own id: {}",
+            &text[..text.len().min(300)]
+        );
+        assert!(
+            text.contains("38;5;41"),
+            "and its placeholder cells name that id: {}",
+            &text[..text.len().min(300)]
+        );
     }
 
     /// A tile is encoded to exactly the requested cell grid, under its own
