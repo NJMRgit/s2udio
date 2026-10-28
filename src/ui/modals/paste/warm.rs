@@ -541,10 +541,20 @@ pub fn ensure_mpris_metadata(ctx: &Ctx) {
         crate::core::work::set_expected_mpris_art(None);
         return;
     };
-    if let Some(yt) = ctx.yt_info.borrow().get(&song.file) {
+    // Round 118: the tag- and buffer-aware lookup. `ctx.yt_info` is keyed by
+    // the resolved URL, the canonical link *and* the buffer's player URL, but
+    // a queue row can still carry the tagged link (`#s2u-audio`) while the
+    // status handler runs against a queue the `ReplaceAndPlay` has not
+    // refreshed yet, and a restored buffered row's player URL is only
+    // resolvable through the stream-buffer manifest. The raw
+    // `get(&song.file)` missed both, so no art request was sent at all —
+    // and the branch below then deleted the previous stream's art.
+    if let Some(yt) = super::resolve::song_stream_info(ctx, &song.file) {
         let title = yt.title.clone();
         let channel = yt.channel.clone();
-        let thumb = yt.thumbnail.clone();
+        // An empty thumbnail is no art: treating it as one would key the
+        // expected source to "" and leave the previous image in place.
+        let thumb = yt.thumbnail.clone().filter(|thumb| !thumb.is_empty());
         crate::core::work::set_expected_mpris_art(thumb.clone());
         ctx.command(move |client| {
             if !title.is_empty() {
@@ -568,6 +578,11 @@ pub fn ensure_mpris_metadata(ctx: &Ctx) {
                     crop_letterbox: ctx.config.album_art.crop_letterbox,
                 })
                 .map_err(|err| log::error!(error:? = err; "Failed to request MPRIS art"));
+        } else {
+            // The stream has no thumbnail: drop the previous stream's image
+            // instead of leaving it advertised for this track's whole
+            // duration.
+            let _ = std::fs::remove_file(mpris_art_path(ctx.config.cache_dir.as_deref()));
         }
         return;
     }
@@ -761,6 +776,44 @@ mod warm_next_tests {
                         && matches!(action, YtAction::ReplaceInPlace(found) if found == 2)
             )),
             "the original link is re-resolved in place"
+        );
+    }
+
+    /// A **restored buffered row** — a previous run's `/s2u/audio/<key>` URL
+    /// whose key the stream-buffer manifest no longer holds — used to be
+    /// "not warmable": the look ahead could not name the link, left the row
+    /// alone, and MPD then 404'd on it ("a stream the app did not start") and
+    /// stopped. The resolve cache is keyed by that same buffered URL
+    /// (round 107), so the row can be re-resolved in place ahead of playback.
+    #[test]
+    fn a_restored_buffered_next_row_is_warmed_from_the_resolve_cache() {
+        const LINK: &str = "https://www.youtube.com/watch?v=xzNjLuoe-nw";
+        const BUFFERED: &str = "http://127.0.0.1:40393/s2u/audio/17fe2899f41933ca";
+        let rig = rig(
+            vec![resolved(1, "https://rr1.example/vb"), row(2, BUFFERED)],
+            1,
+        );
+        rig.ctx.yt_info.borrow_mut().insert(
+            BUFFERED.to_owned(),
+            YtStreamInfo {
+                url: "https://rr1.example/vb".to_owned(),
+                original_url: LINK.to_owned(),
+                title: "8 Graves - Burning Alive (lyrics)".to_owned(),
+                ..Default::default()
+            },
+        );
+
+        warm_next_queue_link(&rig.ctx);
+
+        assert!(rig.ctx.warmed_row(2), "the restored row is remembered as warmed");
+        assert!(
+            rig.work_rx.try_iter().any(|request| matches!(
+                request,
+                WorkRequest::ResolveYtStreams { urls, action, .. }
+                    if urls == vec![LINK.to_owned()]
+                        && matches!(action, YtAction::ReplaceInPlace(found) if found == 2)
+            )),
+            "the restored buffered row is re-resolved in place from its link"
         );
     }
 
@@ -1064,5 +1117,119 @@ mod warm_next_tests {
         warm_next_queue_link(&rig.ctx);
         assert!(rig.ctx.warmed_ahead_ids.borrow().is_empty());
         assert_eq!(requests(&rig.work_rx), 0);
+    }
+}
+
+/// 2026-10-28: web-stream MPRIS art. The request must actually be sent for a
+/// row whose `file` is not yet the key the resolve is stored under, and a
+/// stream without a thumbnail must not keep the previous track's image.
+#[cfg(test)]
+mod mpris_metadata_tests {
+    use super::*;
+    use crate::mpd::commands::{Song, State};
+    use crate::shared::events::WorkRequest;
+    use crate::shared::ytdlp::YtStreamInfo;
+
+    static RIG_SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+    struct Rig {
+        ctx: Ctx,
+        work_rx: crossbeam::channel::Receiver<WorkRequest>,
+    }
+
+    fn rig(queue: Vec<Song>, current_id: u32) -> Rig {
+        let app = crossbeam::channel::unbounded();
+        let work = crossbeam::channel::unbounded();
+        let client = crossbeam::channel::unbounded();
+        let work_rx = work.1.clone();
+        // Keep every receiver alive: the code under test sends on all three.
+        Box::leak(Box::new(app.1.clone()));
+        Box::leak(Box::new(client.1.clone()));
+        let mut ctx = crate::tests::fixtures::ctx(
+            (app.0, app.1),
+            (work.0, work.1.clone()),
+            (client.0, client.1.clone()),
+        );
+        // A per-rig cache dir: these tests create and delete `mpris-art`, and
+        // the shared fixture dir would let a parallel test remove the file
+        // another one is asserting on.
+        let mut config = (*ctx.config).clone();
+        config.cache_dir = Some(std::env::temp_dir().join(format!(
+            "s2udio-test-mpris-art-{}-{}",
+            std::process::id(),
+            RIG_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        )));
+        ctx.config = std::sync::Arc::new(config);
+        ctx.queue = queue;
+        ctx.status.state = State::Play;
+        ctx.status.songid = Some(current_id);
+        Rig { ctx, work_rx }
+    }
+
+    fn row(id: u32, file: &str) -> Song {
+        Song { id, file: file.to_owned(), ..Default::default() }
+    }
+
+    fn requested_art(rig: &Rig) -> Option<String> {
+        rig.work_rx.try_iter().find_map(|request| match request {
+            WorkRequest::SaveMprisArt { url, .. } => Some(url),
+            _ => None,
+        })
+    }
+
+    const LINK: &str = "https://www.youtube.com/watch?v=xzNjLuoe-nw";
+    const THUMB: &str = "https://i.ytimg.com/vi_webp/xzNjLuoe-nw/maxresdefault.webp";
+
+    fn stream_info(thumbnail: Option<&str>) -> YtStreamInfo {
+        YtStreamInfo {
+            url: "https://rr1---sn.example/videoplayback".to_owned(),
+            original_url: LINK.to_owned(),
+            title: "8 Graves - Burning Alive (lyrics)".to_owned(),
+            channel: Some("MrSuicideSheep".to_owned()),
+            thumbnail: thumbnail.map(str::to_owned),
+            duration: Some(203.0),
+            ..Default::default()
+        }
+    }
+
+    /// The status handler runs against the queue the `ReplaceAndPlay` has not
+    /// refreshed yet, so the row still carries the tagged link. The resolve is
+    /// keyed by the canonical link; the raw map lookup missed it and no art
+    /// request was ever sent for the track (`ensure_mpris_metadata` even took
+    /// the "no stream art" branch and deleted the previous art).
+    #[test]
+    fn a_row_still_carrying_its_tagged_link_still_gets_its_art() {
+        let tagged = format!("{LINK}#s2u-audio");
+        let rig = rig(vec![row(7, &tagged)], 7);
+        rig.ctx.yt_info.borrow_mut().insert(LINK.to_owned(), stream_info(Some(THUMB)));
+
+        ensure_mpris_metadata(&rig.ctx);
+
+        assert_eq!(
+            requested_art(&rig).as_deref(),
+            Some(THUMB),
+            "the tagged row's resolve is found through its canonical link"
+        );
+    }
+
+    /// A stream whose resolve carries no thumbnail: the previous track's image
+    /// must not stay in the media controls for this one's whole duration.
+    #[test]
+    fn a_stream_without_a_thumbnail_drops_the_previous_art() {
+        let rig = rig(vec![row(7, "https://rr1---sn.example/videoplayback")], 7);
+        let art = mpris_art_path(rig.ctx.config.cache_dir.as_deref());
+        if let Some(parent) = art.parent() {
+            std::fs::create_dir_all(parent).expect("test cache dir");
+        }
+        std::fs::write(&art, b"previous-stream").expect("previous art on disk");
+        rig.ctx.yt_info.borrow_mut().insert(
+            "https://rr1---sn.example/videoplayback".to_owned(),
+            stream_info(None),
+        );
+
+        ensure_mpris_metadata(&rig.ctx);
+
+        assert!(!art.exists(), "the previous stream's image must be removed");
+        assert_eq!(requested_art(&rig), None, "there is no thumbnail to fetch");
     }
 }

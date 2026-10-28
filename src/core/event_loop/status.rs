@@ -977,6 +977,7 @@ mod mpd_error_plan_tests {
         ctx::Ctx,
         mpd::commands::{Song, State},
         shared::events::{ClientRequest, WorkRequest},
+        shared::ytdlp::YtStreamInfo,
         ui::modals::paste::YtAction,
     };
 
@@ -1104,6 +1105,54 @@ mod mpd_error_plan_tests {
             .count();
         assert_eq!(commands, 1, "the hidden station row is dropped exactly once");
         assert_eq!(ctx.temp_play_id.get(), None, "the temp entry is no longer tracked");
+    }
+
+    /// **The restored-buffer dead end (live, 2026-10-28).** MPD auto-advanced
+    /// to a buffered row written by a *previous* run (`/s2u/audio/<key>`); the
+    /// fresh proxy has no upstream registration for it and the stream-buffer
+    /// manifest no longer lists the key, so `expired_stream_original_url` could
+    /// not name the original link. The row fell through to "a stream the app
+    /// did not start": nothing re-resolved it, playback stayed stopped, and the
+    /// media controls kept the previous track's title and art. The resolve
+    /// cache is keyed by that same buffered URL (round 107) and still knows the
+    /// canonical link.
+    #[test]
+    fn a_restored_buffered_row_is_recovered_through_the_resolve_cache() {
+        const KEY: &str = "17fe2899f41933ca";
+        const LINK: &str = "https://www.youtube.com/watch?v=xzNjLuoe-nw";
+        let url = format!("http://127.0.0.1:40393/s2u/audio/{KEY}");
+        let (ctx, _client_rx, work_rx) = rig(vec![(660, &url)], Some(660), State::Stop);
+        ctx.yt_info.borrow_mut().insert(
+            url.clone(),
+            YtStreamInfo {
+                url: "https://rr1---sn.example/videoplayback".to_owned(),
+                original_url: LINK.to_owned(),
+                title: "8 Graves - Burning Alive (lyrics)".to_owned(),
+                ..Default::default()
+            },
+        );
+        let err = format!("Failed to decode \"{url}\"; got HTTP status 404");
+
+        assert_eq!(
+            plan_mpd_error(&ctx, &err),
+            MpdErrorPlan::Recover { uri: url.clone(), song_id: 660 },
+            "a restored buffered row is resolvable through the resolve cache"
+        );
+
+        let mut state = StatusState::new();
+        handle_mpd_error(&ctx, &mut state, &err);
+        let resolved_from_link = work_rx.try_iter().any(|request| match request {
+            WorkRequest::ResolveYtStreams { urls, action, .. } => {
+                urls.len() == 1
+                    && urls[0] == LINK
+                    && matches!(action, YtAction::ReplaceAndPlay(660))
+            }
+            _ => false,
+        });
+        assert!(
+            resolved_from_link,
+            "the row is re-resolved from its canonical link and played"
+        );
     }
 
     /// A tagged row's failure still queues its resolve and spends the budget —

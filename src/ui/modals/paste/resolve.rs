@@ -278,11 +278,20 @@ pub fn expired_stream_original_url(ctx: &Ctx, url: &str) -> Option<String> {
         if !crate::core::stream_cache::needs_upstream_refresh(url) {
             return None;
         }
+        let usable = |original: &String| !original.is_empty() && original != url;
+        // The stream-buffer manifest is the primary key → link map, but it is
+        // LRU-bounded: a row restored from an old queue can outlive its entry
+        // (live 2026-10-28 — MPD auto-advanced to such a row, got a 404 and
+        // stopped; nothing could name the link to re-resolve, so playback
+        // stayed stopped and the media controls kept the previous track's art).
+        // The resolve cache is keyed by the same buffered URL (round 107) and
+        // still knows the canonical link, so it is the fallback.
         return crate::core::stream_cache::original_link_for_url(
             ctx.config.cache_dir.as_deref(),
             url,
         )
-        .filter(|original| !original.is_empty() && original != url);
+        .filter(usable)
+        .or_else(|| stream_info_for(ctx, url).map(|info| info.original_url).filter(usable));
     }
     if !crate::ui::panes::queue::resolved_stream_expired(url) {
         return None;
