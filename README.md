@@ -137,6 +137,47 @@ uses `systemctl --user`, which only exists on systemd targets. Verify with
 ## Settings & Config
 Configuration is stored at ~/.config/s2udio and separate from rmpc
 
+## Raising the player (kitty quick-access terminal)
+
+Clicking the cover in a desktop media widget (Plasma's PlasMusic toolbar, and
+anything else that speaks MPRIS) — or running `s2udio remote raise` — asks the
+running TUI to come to the front. s2udio tries the ways that exist in turn
+(tmux, kitty, KWin, Hyprland, Sway, X11, wezterm), so a normal kitty window on
+KDE needs no setup at all.
+
+One case does need a one-time setup: s2udio running **inside kitty's
+quick-access terminal** (`kitten quick-access-terminal`, the quake-style
+drop-down panel). That panel is a Wayland layer-shell surface — no window
+manager can raise it, and while it is hidden kitty unmaps it outright, so only
+kitty itself can bring it back, over its remote-control channel (off by default,
+because allowing it lets programs in that terminal drive kitty).
+
+Turn it on for the quick-access terminal only, in its own config
+(`~/.config/kitty/quick-access-terminal.conf`):
+
+```conf
+kitty_override allow_remote_control=socket-only
+kitty_override listen_on=unix:@s2udio-qat
+```
+
+Then restart the quick-access terminal once — the panel reads these at startup,
+and your existing shortcut command is unchanged. Use `socket-only`, not `yes`:
+it is all the raise needs, and it keeps remote control off the terminal's tty,
+so programs running inside the panel (an SSH session, say) still cannot drive
+kitty. The panel exports the address it actually bound as `KITTY_LISTEN_ON` to
+the programs it runs, so there is no address to put anywhere else.
+
+Verify it:
+
+```sh
+s2udio remote raise          # prints {"backend":"kitty"} on success
+```
+
+With the panel hidden, the raise maps it again with s2udio focused; with the
+panel already up, the raise leaves it up (it never toggles the panel away).
+Without the setup the raise reports that the quick-access terminal needs kitty
+remote control, and names the two options above.
+
 ## rqbit — torrent web UI & commands
 
 Torrent streaming runs through **rqbit** (`./setup.sh --with-rqbit`
