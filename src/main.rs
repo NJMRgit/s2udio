@@ -440,13 +440,32 @@ fn run_tui(args: &mut Args) -> Result<()> {
         config.cache_dir.as_deref(),
         config.ui.mpdris2_notifications,
     );
-    let blur_mode_active = crate::core::blur::read_schedule_mode().is_some();
+    // Auto theming (Settings -> Appearance, "auto theme"): the panel's
+    // choice persists in state.ron and overrides the config file.
+    if let Some(source) = state.auto_theme_source.as_deref()
+        && let Some(source) = crate::config::auto_theme::AutoThemeSource::parse(source)
+    {
+        config.auto_theme.source = source;
+    }
+    // Resolve the accent once, before the first frame, so a running desktop
+    // source never flashes the theme file's static accent. This is the only
+    // resolve on the main thread (bounded by the portal timeout); the
+    // watcher does the rest on its own thread.
+    let startup_accent = crate::core::accent::resolve(&config.auto_theme);
+    let accent_active = startup_accent.is_some();
     if let Some(appearance) = state.appearance.clone() {
         crate::ui::modals::settings::apply_persisted_appearance(
             &mut config,
             &appearance,
-            blur_mode_active,
+            accent_active,
         );
+    }
+    // The theme as configured (before the accent): what the watcher restores
+    // when the accent source goes away.
+    let accent_baseline = config.theme.clone();
+    if let Some(accent) = startup_accent {
+        config.theme.text_color = Some(accent.color);
+        crate::config::derive_theme_accents(&mut config.theme);
     }
     config.validate()?;
     if let Some(lyrics_dir) = &config.lyrics_dir {
@@ -480,6 +499,12 @@ fn run_tui(args: &mut Args) -> Result<()> {
             Scheduler::new((event_tx.clone(), client_tx.clone())),
         )
         .context("Failed to create app context")?;
+    // Hand the startup resolve to the watcher so its first tick is a no-op
+    // (and so the settings panel already knows the desktop owns the accent).
+    // The baseline only exists while an accent is applied: it is what a
+    // settings save persists for the accent-managed targets and what the
+    // watcher restores when the accent goes away.
+    ctx.accent.seed(startup_accent, startup_accent.map(|_| accent_baseline));
     core::client::init(
         client_rx.clone(),
         event_tx.clone(),

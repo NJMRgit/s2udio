@@ -260,6 +260,21 @@ impl SettingsModal {
                 _ => (Vec::new(), Vec::new(), Vec::new(), None),
             },
             ContentRow::Appearance(_) => (Vec::new(), Vec::new(), Vec::new(), None),
+            ContentRow::AutoTheme => {
+                let current = self.auto_theme_pending;
+                let options: Vec<(&str, bool)> =
+                    crate::config::auto_theme::AutoThemeSource::ALL
+                        .iter()
+                        .map(|source| (source.as_str(), *source == current))
+                        .collect();
+                // The label names the source currently winning the resolve,
+                // so "why is my accent this color" is answerable at a glance.
+                let label = match ctx.accent.applied() {
+                    Some(accent) => format!(" auto theme ({})", accent.source.as_str()),
+                    None => " auto theme (desktop accent)".to_owned(),
+                };
+                Self::option_row(&label, style, dim, &options)
+            }
             ContentRow::Mpd(m) => match m {
                 MpdRow::LibraryPath => {
                     let path = if self.library_path.is_empty() {
@@ -737,7 +752,8 @@ impl SettingsModal {
             ContentRow::Advanced(AdvancedRow::DiagnosticsHeader) => {
                 Line::from(vec![Span::styled(" diagnostics", dim)])
             }
-            ContentRow::General(_)
+            ContentRow::AutoTheme
+            | ContentRow::General(_)
             | ContentRow::Mpd(_)
             | ContentRow::Mpv(_)
             | ContentRow::Jellyfin(_)
@@ -808,6 +824,7 @@ impl SettingsModal {
             row,
             ContentRow::KeyItem(_)
                 | ContentRow::Appearance(_)
+                | ContentRow::AutoTheme
                 | ContentRow::General(_)
                 | ContentRow::Mpd(_)
                 | ContentRow::Mpv(_)

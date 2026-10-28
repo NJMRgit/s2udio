@@ -1403,7 +1403,26 @@ impl Ui {
                     ctx.config.cache_dir.as_deref(),
                     staged.ui.mpdris2_notifications,
                 );
-                state.appearance = Some(modals::settings::persisted_appearance(&config));
+                // Auto theming (Settings -> Appearance, "auto theme"): applied
+                // to the live config and persisted to state.ron. Nothing is
+                // resolved here; the watcher's next tick picks the new source
+                // up (a source switch re-applies, `off` restores the theme).
+                // Turning it off counts as inactive for the appearance save
+                // below, so the real configured colors persist rather than
+                // the transient accent.
+                config.auto_theme.source = staged.auto_theme;
+                state.auto_theme_source = Some(staged.auto_theme.as_str().to_owned());
+                // While an accent owns the UI colors, the configured colors
+                // live in the pre-accent baseline (the live theme carries the
+                // transient accent, and the watcher clears it on its next
+                // tick when the source is `off`).
+                let accent_baseline = ctx.accent.baseline();
+                state.appearance = Some(modals::settings::persisted_appearance(
+                    &config,
+                    accent_baseline.as_ref(),
+                    &staged.appearance,
+                ));
+                let _ = ctx.app_event_sender.send(crate::AppEvent::AccentCheck);
                 // rqbit SOCKS5 proxy (Settings -> torrent): applied to the
                 // engine config (the next engine spawn routes through it)
                 // and persisted to state.ron.
@@ -1453,6 +1472,7 @@ impl Ui {
                 staged.cava.apply_to(&mut config.cava);
 
                 // Staged appearance colors.
+                let mut appearance_edits = Vec::new();
                 for (target, staged_color) in
                     modals::settings::AppearanceTarget::all().iter().zip(staged.appearance)
                 {
@@ -1462,16 +1482,32 @@ impl Ui {
                         modals::settings::StagedColor::Set(color) => Some(color),
                     };
                     modals::settings::set_appearance_color(&mut config.theme, *target, color);
+                    appearance_edits.push((*target, color));
                 }
 
                 // A "UI colors" edit drives the dependent accents (borders,
                 // selection, cava bars, seekbar, controls) the same way the
-                // blur watcher derives them from text_color.
-                if !matches!(
+                // auto-theme watcher derives them from text_color.
+                let ui_edited = !matches!(
                     staged.appearance[modals::settings::AppearanceTarget::Ui as usize],
                     modals::settings::StagedColor::Unchanged
-                ) {
+                );
+                if ui_edited {
                     crate::config::derive_theme_accents(&mut config.theme);
+                }
+
+                // While an accent is applied the baseline is the configured
+                // theme; it has to pick up these edits too, or turning the
+                // accent off would restore the colors from before the edit.
+                if !appearance_edits.is_empty() {
+                    ctx.accent.patch_baseline(|theme| {
+                        for (target, color) in &appearance_edits {
+                            modals::settings::set_appearance_color(theme, *target, *color);
+                        }
+                        if ui_edited {
+                            crate::config::derive_theme_accents(theme);
+                        }
+                    });
                 }
 
                 ctx.config = std::sync::Arc::new(config);

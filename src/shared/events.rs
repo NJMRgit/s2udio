@@ -562,9 +562,13 @@ pub(crate) enum AppEvent {
     },
     WorkDone(Result<WorkDone>),
     UiEvent(UiAppEvent),
-    /// Fired every second by the blur-schedule watcher; applies the active
-    /// mode's colors when the schedule changed.
-    BlurCheck,
+    /// Fired every second by the accent watcher; starts a background resolve
+    /// of the configured accent source (STTM blur mode, matugen or Plasma).
+    AccentCheck,
+    /// A resolve finished (on its own thread: the KDE source reads D-Bus, so
+    /// it must never run on the event loop). `None` = no source has an
+    /// accent, which makes the watcher restore the configured theme.
+    AccentResolved(Option<crate::config::auto_theme::AppliedAccent>),
     Reconnected,
     LostConnection,
     TmuxHook {

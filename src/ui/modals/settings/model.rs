@@ -264,6 +264,9 @@ pub(crate) struct StagedSettings {
     pub ui: UiSettings,
     pub cava: CavaOverridesFile,
     pub appearance: [StagedColor; 7],
+    /// The auto-theme source chosen in the settings panel; applied to the
+    /// live config + persisted to state.ron on Save.
+    pub auto_theme: crate::config::auto_theme::AutoThemeSource,
     pub remaps: Vec<PendingRemap>,
     /// Video playback mode chosen in the settings panel; applied + persisted
     /// to state.ron on Save.
@@ -295,6 +298,9 @@ pub(super) enum ContentRow {
     KeyHeader(remap_keys::Section),
     KeyItem(remap_keys::RemapRow),
     Appearance(AppearanceTarget),
+    /// The auto-theme source row (Settings -> Appearance, "auto theme"):
+    /// off / auto / sttm / matugen / kde.
+    AutoTheme,
     Mpd(MpdRow),
     Mpv(MpvRow),
     Jellyfin(JellyfinRow),

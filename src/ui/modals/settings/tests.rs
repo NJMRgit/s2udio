@@ -4,7 +4,7 @@ mod nav_tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     use super::super::{
-        appearance::{persisted_appearance_with, set_appearance_color},
+        appearance::{StagedColor, persisted_appearance, set_appearance_color},
         cava::pipewire_sources,
         model::{ContentRow, GeneralRow, SettingsFocus},
         SettingsModal,
@@ -593,7 +593,11 @@ mod nav_tests {
             super::super::appearance::AppearanceTarget::Background,
             Some(ratatui::style::Color::Rgb(0xaa, 0xbb, 0xcc)),
         );
-        let values = persisted_appearance_with(&config, false);
+        let values = persisted_appearance(
+            &config,
+            None,
+            &[StagedColor::Unchanged; 7],
+        );
         assert_eq!(
             values[super::super::appearance::AppearanceTarget::Text as usize].as_deref(),
             Some("#ffb454")
@@ -624,21 +628,21 @@ mod nav_tests {
             Some(ratatui::style::Color::Rgb(0xaa, 0xbb, 0xcc))
         );
 
-        // With a blur mode scheduled, the blur-managed targets (UI colors /
-        // borders / focus border / selection) are left to the watcher so a
-        // stale persisted color doesn't flash at launch; the content text
-        // color and background still restore.
+        // With an auto-theme accent active, the accent-managed targets (UI
+        // colors / borders / focus border / selection) are left to the
+        // watcher so a stale persisted color doesn't flash at launch; the
+        // content text color and background still restore.
         let default_text = crate::config::Config::default().theme.text_color;
         let mut blur = crate::config::Config::default();
         super::super::appearance::apply_persisted_appearance(&mut blur, &values, true);
         assert_eq!(
             blur.theme.text_color, default_text,
-            "UI colors left to the blur watcher, not the persisted value"
+            "UI colors left to the auto-theme watcher, not the persisted value"
         );
         assert_eq!(
             blur.theme.list_text_color,
             Some(ratatui::style::Color::Rgb(0xff, 0xb4, 0x54)),
-            "content text color is not blur-managed and restores"
+            "content text color is not accent-managed and restores"
         );
         assert_eq!(blur.theme.background_color, Some(ratatui::style::Color::Rgb(0xaa, 0xbb, 0xcc)));
     }
@@ -806,5 +810,267 @@ mod advanced_tests {
             "the live config is untouched until Save"
         );
         assert!(modal.has_changes(), "a staged toggle counts as a change");
+    }
+}
+
+/// Auto theming (Settings -> Appearance, "auto theme"): the row that picks
+/// the accent source at runtime (off / auto / sttm / matugen / kde).
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod auto_theme_tests {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    use ratatui::style::Style;
+
+    use super::super::{
+        SettingsModal,
+        model::{Click, ContentRow},
+    };
+    use crate::{
+        config::auto_theme::{AccentSource, AppliedAccent, AutoThemeSource},
+        ctx::Ctx,
+        ui::modals::Modal,
+    };
+
+    /// The row's rendered text (spans concatenated).
+    fn row_text(modal: &mut SettingsModal, ctx: &Ctx) -> String {
+        let mut targets = Vec::new();
+        let line = modal.render_row(
+            &ContentRow::AutoTheme,
+            true,
+            false,
+            ctx,
+            Style::default(),
+            Style::default(),
+            Style::default(),
+            0,
+            0,
+            80,
+            &mut targets,
+        );
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            targets.iter().any(|(_, click)| *click == Click::Toggle),
+            "the whole row is clickable: {targets:?}"
+        );
+        text
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn fixture() -> (SettingsModal, Ctx) {
+        let ctx = crate::tests::fixtures::ctx(
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+        );
+        let modal = SettingsModal::new(&ctx);
+        (modal, ctx)
+    }
+
+    /// Open the general section and walk down to the auto-theme row (the last
+    /// row of the appearance section).
+    fn select_auto_theme_row(modal: &mut SettingsModal, ctx: &mut Ctx) {
+        modal.handle_raw_key(key(KeyCode::Char('d')), ctx).unwrap();
+        while !matches!(modal.rows[modal.selected], ContentRow::AutoTheme) {
+            modal.handle_raw_key(key(KeyCode::Down), ctx).unwrap();
+        }
+    }
+
+    #[test]
+    fn the_appearance_section_lists_the_auto_theme_row() {
+        let (modal, _ctx) = fixture();
+        assert!(
+            matches!(modal.rows.last(), Some(ContentRow::AutoTheme)),
+            "the auto-theme row closes the appearance section"
+        );
+        // It sits below the color rows, not among them.
+        let auto = modal
+            .rows
+            .iter()
+            .position(|row| matches!(row, ContentRow::AutoTheme))
+            .expect("the row exists");
+        let last_color = modal
+            .rows
+            .iter()
+            .rposition(|row| matches!(row, ContentRow::Appearance(_)))
+            .expect("appearance colors exist");
+        assert!(auto > last_color);
+    }
+
+    #[test]
+    fn the_row_starts_on_the_configured_source() {
+        let (modal, ctx) = fixture();
+        assert_eq!(modal.auto_theme_pending, ctx.config.auto_theme.source);
+        assert_eq!(
+            ctx.config.auto_theme.source,
+            AutoThemeSource::Auto,
+            "auto is the default so existing blur setups keep working"
+        );
+    }
+
+    #[test]
+    fn cycling_stages_without_touching_the_live_config() {
+        let (mut modal, mut ctx) = fixture();
+        let before = ctx.config.auto_theme.source;
+        select_auto_theme_row(&mut modal, &mut ctx);
+
+        // Enter cycles forward: auto -> sttm.
+        modal.handle_raw_key(key(KeyCode::Enter), &mut ctx).unwrap();
+        assert_eq!(modal.auto_theme_pending, AutoThemeSource::Sttm);
+        assert_eq!(
+            ctx.config.auto_theme.source, before,
+            "the live config is untouched until Save"
+        );
+        assert!(modal.has_changes(), "a staged source counts as a change");
+
+        // Right (in the content pane) activates the row too, like Enter.
+        modal.handle_raw_key(key(KeyCode::Right), &mut ctx).unwrap();
+        assert_eq!(modal.auto_theme_pending, AutoThemeSource::Matugen);
+        // Stepping backwards is the cycle helper the row uses (Left leaves
+        // the content pane, exactly like the other option rows).
+        modal.step_auto_theme(&mut ctx, -1).unwrap();
+        assert_eq!(modal.auto_theme_pending, AutoThemeSource::Sttm);
+    }
+
+    #[test]
+    fn the_cycle_wraps_at_both_ends() {
+        let (mut modal, mut ctx) = fixture();
+        select_auto_theme_row(&mut modal, &mut ctx);
+        // Walk all the way round: five sources, so five steps return home.
+        let start = modal.auto_theme_pending;
+        for _ in 0..AutoThemeSource::ALL.len() {
+            modal.step_auto_theme(&mut ctx, 1).unwrap();
+        }
+        assert_eq!(modal.auto_theme_pending, start);
+        // Backwards from off lands on kde.
+        modal.auto_theme_pending = AutoThemeSource::Off;
+        modal.step_auto_theme(&mut ctx, -1).unwrap();
+        assert_eq!(modal.auto_theme_pending, AutoThemeSource::Kde);
+    }
+
+    #[test]
+    fn discarding_drops_the_staged_source() {
+        let (mut modal, mut ctx) = fixture();
+        select_auto_theme_row(&mut modal, &mut ctx);
+        modal.handle_raw_key(key(KeyCode::Enter), &mut ctx).unwrap();
+        assert!(modal.has_changes());
+        // A fresh panel (the discard path) stages the configured value again.
+        let fresh = SettingsModal::new(&ctx);
+        assert_eq!(fresh.auto_theme_pending, ctx.config.auto_theme.source);
+        assert!(!fresh.has_changes());
+    }
+
+    #[test]
+    fn the_row_renders_every_source() {
+        let (mut modal, ctx) = fixture();
+        let text = row_text(&mut modal, &ctx);
+        assert!(text.contains("auto theme"), "label: {text}");
+        for source in AutoThemeSource::ALL {
+            assert!(
+                text.contains(source.as_str()),
+                "the '{}' option is offered: {text}",
+                source.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn the_label_names_the_source_that_is_winning() {
+        let (mut modal, mut ctx) = fixture();
+        let text = row_text(&mut modal, &ctx);
+        assert!(text.contains("auto theme (desktop accent)"));
+        // Once a source has supplied the accent, the row says which one.
+        ctx.accent.seed(
+            Some(AppliedAccent {
+                source: AccentSource::Matugen,
+                color: ratatui::style::Color::Rgb(1, 2, 3),
+            }),
+            None,
+        );
+        assert!(row_text(&mut modal, &ctx).contains("auto theme (matugen)"));
+    }
+
+    #[test]
+    fn the_source_persists_through_state_ron() {
+        let mut state = crate::config::state::AppStateFile::default();
+        state.auto_theme_source = Some(AutoThemeSource::Kde.as_str().to_owned());
+        let content =
+            ron::ser::to_string_pretty(&state, ron::ser::PrettyConfig::default()).unwrap();
+        let back: crate::config::state::AppStateFile = ron::de::from_str(&content).unwrap();
+        assert_eq!(
+            back.auto_theme_source
+                .as_deref()
+                .and_then(AutoThemeSource::parse),
+            Some(AutoThemeSource::Kde)
+        );
+        // A legacy state file without the field leaves the config default.
+        let legacy: crate::config::state::AppStateFile = ron::de::from_str("()").unwrap();
+        assert_eq!(legacy.auto_theme_source, None);
+    }
+}
+
+/// Auto theming and the appearance colors: a settings save must persist the
+/// *configured* colors, never the transient accent the watcher applied.
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod appearance_baseline_tests {
+    use ratatui::style::Color;
+
+    use super::super::appearance::{
+        AppearanceTarget, StagedColor, persisted_appearance, set_appearance_color,
+    };
+
+    /// No appearance row was edited in this save.
+    fn untouched() -> [StagedColor; 7] {
+        [StagedColor::Unchanged; 7]
+    }
+
+    /// The user staged a new UI-colors value.
+    fn staged_ui(color: Color) -> [StagedColor; 7] {
+        let mut staged = untouched();
+        staged[AppearanceTarget::Ui as usize] = StagedColor::Set(color);
+        staged
+    }
+
+    /// A config whose configured UI accent is `configured`, plus the baseline
+    /// snapshot the watcher keeps, plus the live theme after an accent was
+    /// applied on top of it.
+    fn accent_applied(configured: Color, accent: Color) -> (crate::config::Config, crate::config::theme::UiConfig) {
+        let mut config = crate::config::Config::default();
+        set_appearance_color(&mut config.theme, AppearanceTarget::Ui, Some(configured));
+        crate::config::derive_theme_accents(&mut config.theme);
+        let baseline = config.theme.clone();
+        config.theme.text_color = Some(accent);
+        crate::config::derive_theme_accents(&mut config.theme);
+        (config, baseline)
+    }
+
+    #[test]
+    fn a_save_during_an_active_accent_keeps_the_configured_ui_accent() {
+        let configured = Color::Rgb(0x11, 0x22, 0x33);
+        let (config, baseline) = accent_applied(configured, Color::Rgb(0xff, 0x00, 0x00));
+        let values = persisted_appearance(&config, Some(&baseline), &untouched());
+        assert_eq!(
+            values[AppearanceTarget::Ui as usize].as_deref(),
+            Some("#112233"),
+            "the configured accent persists, not the transient one"
+        );
+        // Without the baseline (no accent active) the live value is used.
+        let values = persisted_appearance(&config, None, &untouched());
+        assert_eq!(values[AppearanceTarget::Ui as usize].as_deref(), Some("#ff0000"));
+    }
+
+    #[test]
+    fn an_explicit_ui_colors_edit_wins_over_the_baseline() {
+        let configured = Color::Rgb(0x11, 0x22, 0x33);
+        let (mut config, baseline) = accent_applied(configured, Color::Rgb(0xff, 0x00, 0x00));
+        let edited = Color::Rgb(0xaa, 0x00, 0x00);
+        // The save handler applies staged colors to the live theme first.
+        set_appearance_color(&mut config.theme, AppearanceTarget::Ui, Some(edited));
+        let values = persisted_appearance(&config, Some(&baseline), &staged_ui(edited));
+        assert_eq!(values[AppearanceTarget::Ui as usize].as_deref(), Some("#aa0000"));
     }
 }

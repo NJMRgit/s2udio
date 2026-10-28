@@ -227,6 +227,11 @@ pub struct Ctx {
         (Sender<AppEvent>, Sender<ClientRequest>),
         DefaultTimeProvider,
     >,
+    /// The accent color currently applied by the auto-theme watcher (and
+    /// the theme to restore when it goes away). Shared with the resolve
+    /// worker thread and the settings panel, which must not re-read D-Bus on
+    /// the event-loop thread to answer "is auto theming active?".
+    pub(crate) accent: crate::core::accent::AccentState,
     pub(crate) messages: RingVec<10, StatusMessage>,
     pub(crate) last_status_update: Instant,
     pub(crate) song_played: Option<Duration>,
@@ -657,6 +662,7 @@ impl Ctx {
             app_event_sender,
             work_sender,
             scheduler,
+            accent: crate::core::accent::AccentState::default(),
             client_request_sender,
             needs_render: Cell::new(false),
             resizing: Cell::new(false),

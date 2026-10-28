@@ -64,6 +64,54 @@
     video: (
         playback: ask,
     ),
+    // Auto theming: follow the desktop's accent color instead of the theme
+    // file's static accent. The accent drives `text_color`, and its derived
+    // accents (borders, focused borders, selection, marked/hover rows, cava
+    // bars, seekbar, active tab, transport controls) follow automatically.
+    //
+    // Sources, in `auto` priority order:
+    //   1. sttm    — the blur-mode scheduler (`~/.blur-schedule` + blsw).
+    //                Kept first so an existing blur-mode setup keeps the
+    //                exact accent it had before auto theming existed.
+    //   2. matugen — a matugen palette JSON, e.g.
+    //                `matugen image "$wall" --json hex > ~/.cache/matugen/colors.json`
+    //                in the wallpaper hook. Reads matugen 4.x (mode-nested)
+    //                and pre-4.0 (flat) dumps.
+    //   3. kde     — the Plasma accent from the XDG settings portal
+    //                (`org.freedesktop.appearance` `accent-color`), falling
+    //                back to `[General] AccentColor` in `kdeglobals`.
+    auto_theme: (
+        // off | auto | sttm | matugen | kde. Settings -> Appearance has an
+        // "auto theme" row for the same choice; its value persists in
+        // state.ron and overrides this one.
+        source: Auto,
+        // How much to mute the accent toward grey: 0.0 = the source's raw
+        // color, 1.0 = luminance grey. 0.4 is the blur watcher's
+        // historical muting.
+        desaturate: 0.4,
+        sttm_schedule: "~/.blur-schedule",
+        // Read, never executed: s2udio must not trigger blsw's KWin effects.
+        sttm_script: "~/.local/bin/blsw",
+        // Where the palette comes from. `None` (default) discovers one with
+        // no setup, in this order:
+        //   ~/.cache/matugen/colors.json      (`--json hex` redirect)
+        //   ~/.config/matugen/colors.json
+        //   ~/.cache/matugen/images/*.json    (matugen `caching = true`)
+        //   ~/.cache/dms/dms-colors.json      (DankMaterialShell / Dux)
+        //   ~/.local/state/caelestia/scheme.json (Caelestia shell)
+        //   JSON `output_path`s from ~/.config/matugen/config.toml
+        // A path here pins it to that one file instead. Only a setup that
+        // renders matugen colors to non-JSON formats and enables neither
+        // caching nor a shell needs this line in the hook that runs matugen:
+        //   matugen image "$wall" --json hex > ~/.cache/matugen/colors.json
+        matugen_json: None,
+        // Which palette color supplies the accent (`colors.<key>`).
+        matugen_color: "primary",
+        // default | dark | light — `default` is the variant matugen itself
+        // rendered (what the rest of the desktop was just themed with).
+        matugen_mode: Default,
+        kdeglobals: "~/.config/kdeglobals",
+    ),
     torrent: (
         enabled: true,
         port: 3030,

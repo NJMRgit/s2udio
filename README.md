@@ -50,8 +50,12 @@ AI assisted with open weight models and open source software
 - wl-clipboard (Ctrl+V / middle-click clipboard reads; bracketed paste and
   drag & drop work without it)
 - kitty* (not a hard requirement, but development and testing is focused on kitty)
-- [STTM](https://github.com/NJMRgit/STTM) - TUI supports auto theming if using my KDE theme tool.
-    * planned support for following KDE accent color
+- Auto theming follows the desktop accent, in this priority order:
+  [STTM](https://github.com/NJMRgit/STTM) blur modes (my KDE theme tool),
+  [matugen](https://github.com/InioX/matugen) (any WM/shell), or the KDE
+  Plasma accent — read from the XDG settings portal, with `kdeglobals` as
+  the fallback. See the `auto_theme` section in `assets/example_config.ron`,
+  or switch sources at runtime in Settings → Appearance → *auto theme*.
 
 ## Install
 

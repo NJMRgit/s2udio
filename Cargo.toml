@@ -65,6 +65,10 @@ parking_lot = { version = "0.12.5", features = [] }
 unicode-segmentation = "1.12.0"
 winnow = "^0.7.14"
 ksni = { version = "0.3", features = ["blocking"] }
+# The accent watcher reads the desktop accent color from the XDG settings
+# portal. zbus is already in the tree (ksni pulls it for MPRIS); the
+# blocking API adds no new crates.
+zbus = { version = "5.19", default-features = false, features = ["blocking-api", "tokio"] }
 
 [build-dependencies]
 clap = { workspace = true }

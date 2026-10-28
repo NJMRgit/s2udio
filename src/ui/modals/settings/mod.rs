@@ -131,6 +131,10 @@ pub struct SettingsModal {
     /// Staged appearance changes, applied only when the panel is closed with
     /// Save (indexed by AppearanceTarget).
     appearance_pending: [StagedColor; 7],
+    /// The auto-theme source when the panel opened (staging baseline).
+    auto_theme_initial: crate::config::auto_theme::AutoThemeSource,
+    /// Staged auto-theme source (the live config is untouched until Save).
+    auto_theme_pending: crate::config::auto_theme::AutoThemeSource,
     /// The appearance row currently being typed into.
     editing_color: Option<AppearanceTarget>,
     /// Hex digits typed so far (no '#').
@@ -244,6 +248,8 @@ impl SettingsModal {
             pending_remaps: Vec::new(),
             capturing: false,
             appearance_pending: [StagedColor::Unchanged; 7],
+            auto_theme_initial: ctx.config.auto_theme.source,
+            auto_theme_pending: ctx.config.auto_theme.source,
             editing_color: None,
             edit_buffer: String::new(),
             scroll: 0,
@@ -302,6 +308,7 @@ impl SettingsModal {
                         .into_iter()
                         .map(ContentRow::Appearance),
                 );
+                rows.push(ContentRow::AutoTheme);
                 rows
             }
             Section::Keybinds => {
@@ -400,6 +407,7 @@ impl SettingsModal {
             || self.mpv_svp_pending != self.mpv_svp_initial
             || self.replay_gain_pending != self.replay_gain_initial
             || self.cava_pending != self.cava_initial
+            || self.auto_theme_pending != self.auto_theme_initial
             || self
                 .appearance_pending
                 .iter()
@@ -415,6 +423,7 @@ impl SettingsModal {
             ui: self.ui_pending,
             cava: self.cava_pending.to_overrides(),
             appearance: self.appearance_pending,
+            auto_theme: self.auto_theme_pending,
             remaps: self.pending_remaps.clone(),
             video_playback: self.video_pending,
             mpv_audio_lang: self.mpv_audio_pending.clone(),

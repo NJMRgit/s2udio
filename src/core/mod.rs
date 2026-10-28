@@ -1,4 +1,4 @@
-pub mod blur;
+pub mod accent;
 pub mod client;
 pub mod command;
 pub mod config_watcher;

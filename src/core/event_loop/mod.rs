@@ -176,14 +176,16 @@ fn main_task<B: Backend + std::io::Write>(
     // playback progress back to Jellyfin (throttled).
     mpv::init(&mut ctx, &mut ui, &mut mpv_state);
 
-    // Watch ~/.blur-schedule once a second; when it changes, the active
-    // mode's colors (read from ~/.local/bin/blsw) are applied to the theme.
-    let mut last_blur_mode: Option<String> = None;
-    let _blur_guard = ctx.scheduler.repeated(Duration::from_secs(1), move |(tx, _)| {
-        let _ = tx.send(AppEvent::BlurCheck);
+    // Watch the auto-theme sources once a second. The resolve runs on its own
+    // thread (the KDE source speaks D-Bus); the event loop only applies the
+    // result, so a slow portal can never stall the UI.
+    let _accent_guard = ctx.scheduler.repeated(Duration::from_secs(1), move |(tx, _)| {
+        let _ = tx.send(AppEvent::AccentCheck);
         Ok(())
     });
-    let _ = ctx.app_event_sender.send(AppEvent::BlurCheck); // apply the current mode at startup
+    // The startup resolve already ran in main (so the first frame never
+    // flashes a stale accent); this tick picks up anything that changed since.
+    let _ = ctx.app_event_sender.send(AppEvent::AccentCheck);
 
     // Tmux hooks have to be initialized after ui, because ueberzugpp replaces all
     // hooks on its init instead of simply appending and might break rmpc's hooks
@@ -682,36 +684,44 @@ fn main_task<B: Backend + std::io::Write>(
                         }
                     }
                 }
-                AppEvent::BlurCheck => {
-                    // Apply the active blur mode's colors only when the
-                    // schedule changed since the last check.
-                    let mode = crate::core::blur::read_schedule_mode();
-                    if mode != last_blur_mode {
-                        if let Some(mode) = &mode {
+                AppEvent::AccentCheck => {
+                    // Start one background resolve at a time; the worker
+                    // reports back with AccentResolved.
+                    if ctx.accent.try_begin_resolve() {
+                        let auto_theme = ctx.config.auto_theme.clone();
+                        let sender = ctx.app_event_sender.clone();
+                        std::thread::spawn(move || {
+                            let resolved = crate::core::accent::resolve(&auto_theme);
+                            let _ = sender.send(AppEvent::AccentResolved(resolved));
+                        });
+                    }
+                }
+                AppEvent::AccentResolved(resolved) => {
+                    ctx.accent.finish_resolve();
+                    let accent = ctx.accent.record(resolved, &ctx.config.theme);
+                    match accent {
+                        crate::core::accent::AccentChange::Unchanged => {}
+                        crate::core::accent::AccentChange::Applied(accent) => {
+                            log::info!(source:% = accent.source.as_str(), color:? = accent.color;
+                                "Applying the auto-theme accent");
                             let mut config = ctx.config.as_ref().clone();
-                            match crate::core::blur::apply_mode_color(&mut config, mode) {
-                                Ok(true) => {
-                                    log::info!(mode:?; "Applying blur mode colors");
-                                    ctx.config = std::sync::Arc::new(config);
-                                    last_blur_mode = Some(mode.clone());
-                                    if let Err(err) = ui.on_event(UiEvent::ConfigChanged, &mut ctx) {
-                                        log::error!(
-                                            error:? = err; "UI failed to handle blur theme change"
-                                        );
-                                    }
-                                    render_wanted = true;
-                                }
-                                Ok(false) => {
-                                    // Mode has no readable colors (yet); retry
-                                    // on the next tick.
-                                    log::debug!(mode:?; "No blur colors found, retrying");
-                                }
-                                Err(err) => {
-                                    log::error!(error:? = err, mode:?; "Blur color apply failed");
-                                }
+                            config.theme.text_color = Some(accent.color);
+                            crate::config::derive_theme_accents(&mut config.theme);
+                            ctx.config = std::sync::Arc::new(config);
+                            if let Err(err) = ui.on_event(UiEvent::ConfigChanged, &mut ctx) {
+                                log::error!(error:? = err; "UI failed to apply the accent change");
                             }
-                        } else {
-                            last_blur_mode = None;
+                            render_wanted = true;
+                        }
+                        crate::core::accent::AccentChange::Cleared(theme) => {
+                            log::info!("Auto-theme accent cleared; restoring the theme");
+                            let mut config = ctx.config.as_ref().clone();
+                            config.theme = theme;
+                            ctx.config = std::sync::Arc::new(config);
+                            if let Err(err) = ui.on_event(UiEvent::ConfigChanged, &mut ctx) {
+                                log::error!(error:? = err; "UI failed to restore the theme");
+                            }
+                            render_wanted = true;
                         }
                     }
                 }

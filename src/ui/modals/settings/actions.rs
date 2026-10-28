@@ -118,6 +118,22 @@ impl SettingsModal {
         Ok(())
     }
 
+    /// Cycle the staged auto-theme source by `delta` (off -> auto -> sttm ->
+    /// matugen -> kde -> off). Staged like every other row: the watcher is
+    /// restarted with the new source when the panel is saved.
+    pub(super) fn step_auto_theme(&mut self, ctx: &mut Ctx, delta: i64) -> Result<()> {
+        use crate::config::auto_theme::AutoThemeSource;
+        let all = AutoThemeSource::ALL;
+        let current = all
+            .iter()
+            .position(|source| *source == self.auto_theme_pending)
+            .unwrap_or(0) as i64;
+        let next = all[(current + delta).rem_euclid(all.len() as i64) as usize];
+        self.auto_theme_pending = next;
+        ctx.render()?;
+        Ok(())
+    }
+
     /// Step the selected row by `delta` (-1 or +1, scaled per row).
     pub(super) fn adjust(&mut self, ctx: &mut Ctx, delta: i64) -> Result<()> {
         match &self.rows[self.selected] {
@@ -224,6 +240,7 @@ impl SettingsModal {
                 MpvRow::Header => Ok(()),
             },
             ContentRow::Appearance(_) => Ok(()),
+            ContentRow::AutoTheme => self.step_auto_theme(ctx, delta),
             ContentRow::Jellyfin(_) => Ok(()),
             ContentRow::Torrent(_) => Ok(()),
             ContentRow::Mpd(m) => match m {
@@ -430,6 +447,7 @@ impl SettingsModal {
                 self.start_edit_color(*target, ctx);
                 Ok(())
             }
+            ContentRow::AutoTheme => self.step_auto_theme(ctx, 1),
             ContentRow::KeyItem(_) => {
                 self.capturing = true;
                 ctx.render()?;

@@ -4,6 +4,7 @@ use address::MpdPassword;
 use album_art::{AlbumArtConfig, AlbumArtConfigFile, ImageMethodFile};
 use anyhow::Result;
 use artists::{Artists, ArtistsFile};
+use auto_theme::AutoThemeConfig;
 use cava::{Cava, CavaFile};
 use clap::Parser;
 use cli::{Args, OnOff, OnOffOneshot};
@@ -22,6 +23,7 @@ use utils::tilde_expand;
 use video::{Video, VideoFile};
 pub mod address;
 pub mod album_art;
+pub mod auto_theme;
 pub mod artists;
 pub mod cava;
 pub mod cli;
@@ -164,6 +166,9 @@ pub struct Config {
     pub mpd_idle_read_timeout_ms: Option<Duration>,
     pub theme: UiConfig,
     pub theme_name: Option<String>,
+    /// Auto theming: where the accent color comes from (blur modes,
+    /// matugen, or the Plasma accent). See `config::auto_theme`.
+    pub auto_theme: AutoThemeConfig,
     pub album_art: AlbumArtConfig,
     pub on_song_change: Option<Arc<Vec<String>>>,
     pub exec_on_song_change_at_start: bool,
@@ -255,6 +260,7 @@ pub struct ConfigFile {
     enable_lyrics_hot_reload: bool,
     pub lyrics_source: LyricsSource,
     pub theme: Option<String>,
+    auto_theme: AutoThemeConfig,
     volume_step: u8,
     pub max_fps: u32,
     scrolloff: usize,
@@ -318,6 +324,7 @@ impl ConfigFile {
     fn stock_default() -> Self {
         Self {
             address: String::from("127.0.0.1:6600"),
+            auto_theme: AutoThemeConfig::default(),
             keybinds: KeyConfigFile::default(),
             normal_timeout_ms: 1000,
             insert_timeout_ms: 1000,
@@ -648,6 +655,7 @@ impl ConfigFile {
                 },
             ),
             theme,
+            auto_theme: self.auto_theme,
             rewind_to_start_sec: self.rewind_to_start_sec,
             keep_state_on_song_change: self.keep_state_on_song_change,
             reflect_changes_to_playlist: self.reflect_changes_to_playlist,

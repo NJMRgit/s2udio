@@ -21,7 +21,7 @@ pub(crate) enum StagedColor {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AppearanceTarget {
     /// Content text color (the queue / tab-list text). Never touched by the
-    /// blur watcher.
+    /// auto-theme watcher.
     Text,
     Borders,
     FocusBorder,
@@ -29,8 +29,8 @@ pub(crate) enum AppearanceTarget {
     Accent,
     Background,
     /// The UI chrome accent: `text_color`, which the accent derivation
-    /// (borders, cava bars, selection, seekbar, controls) follows. The blur
-    /// watcher owns it while a mode is active.
+    /// (borders, cava bars, selection, seekbar, controls) follows. The
+    /// auto-theme watcher owns it while an accent source is active.
     Ui,
 }
 
@@ -100,81 +100,85 @@ pub(super) fn color_hex(color: &Color) -> String {
     }
 }
 
-/// The current theme color of an appearance target. `blur_active` tells
-/// whether the blur watcher currently owns `text_color`: while a mode is
-/// active the persisted value must be the *configured* color, never the
-/// transient mode accent (a save while a mode runs would otherwise freeze a
-/// stale mode color into state.ron).
-fn theme_color(theme: &UiConfig, target: AppearanceTarget, blur_active: bool) -> Option<Color> {
-    match target {
-        AppearanceTarget::Text => theme.list_text_color.or(theme.text_color),
-        AppearanceTarget::Ui => {
-            if blur_active {
-                theme.list_text_color.or(theme.text_color)
-            } else {
-                theme.text_color
-            }
-        }
-        AppearanceTarget::Borders => theme.borders_style.fg,
-        AppearanceTarget::FocusBorder => theme.highlight_border_style.fg,
-        AppearanceTarget::Selection => theme.current_item_style.bg,
-        AppearanceTarget::Accent => theme.highlighted_item_style.fg,
-        AppearanceTarget::Background => theme.background_color,
-    }
+/// Whether the auto-theme watcher owns a target's live color.
+pub(crate) fn is_accent_managed(target: AppearanceTarget) -> bool {
+    matches!(
+        target,
+        AppearanceTarget::Ui
+            | AppearanceTarget::Borders
+            | AppearanceTarget::FocusBorder
+            | AppearanceTarget::Selection
+    )
 }
 
 /// The appearance values to persist to state.ron after a settings save:
 /// each target's resolved color as a hex string, "" for transparent, and
 /// `None` when the theme's value is not an RGB color (left to the theme on
-/// restore). While a blur mode is scheduled the UI-accent target persists
-/// the configured color (see `theme_color`).
-pub(crate) fn persisted_appearance(config: &Config) -> Vec<Option<String>> {
-    let blur_active = crate::core::blur::read_schedule_mode().is_some();
-    persisted_appearance_with(config, blur_active)
-}
-
-/// The persisted values with an explicit blur-mode signal (deterministic in
-/// tests).
-pub(super) fn persisted_appearance_with(
+/// restore).
+///
+/// `baseline` is the theme as it was before an active accent was applied
+/// (`ctx.accent.baseline()`): for the accent-managed targets it — not the
+/// live theme, whose UI colors are the transient accent — carries the
+/// configured color. A target the user edited in this save
+/// (`staged[i] != Unchanged`) always takes the live value, because that edit
+/// is the newly configured color.
+pub(crate) fn persisted_appearance(
     config: &Config,
-    blur_active: bool,
+    baseline: Option<&UiConfig>,
+    staged: &[StagedColor; 7],
 ) -> Vec<Option<String>> {
     AppearanceTarget::all()
         .iter()
-        .map(|target| match theme_color(&config.theme, *target, blur_active) {
-            Some(Color::Rgb(r, g, b)) => Some(format!("#{r:02x}{g:02x}{b:02x}")),
-            Some(_) => None,
-            None => Some(String::new()),
+        .enumerate()
+        .map(|(i, target)| {
+            let color = if matches!(staged[i], StagedColor::Unchanged) {
+                theme_color(&config.theme, baseline, *target)
+            } else {
+                appearance_color(&config.theme, *target)
+            };
+            match color {
+                Some(Color::Rgb(r, g, b)) => Some(format!("#{r:02x}{g:02x}{b:02x}")),
+                Some(_) => None,
+                None => Some(String::new()),
+            }
         })
         .collect()
+}
+
+/// The color a target should be persisted as: the configured value from the
+/// pre-accent baseline while the watcher owns an accent-managed target,
+/// otherwise the live theme's value.
+fn theme_color(
+    theme: &UiConfig,
+    baseline: Option<&UiConfig>,
+    target: AppearanceTarget,
+) -> Option<Color> {
+    if is_accent_managed(target)
+        && let Some(baseline) = baseline
+    {
+        return appearance_color(baseline, target);
+    }
+    appearance_color(theme, target)
 }
 
 /// Apply persisted appearance values to a config's theme: a hex string sets
 /// the color, "" makes it transparent, `None` leaves the theme default.
 ///
-/// When a blur mode is scheduled (`blur_mode_active`), the targets the blur
-/// watcher derives from the mode's color (the UI accent / Borders /
-/// FocusBorder / Selection) are skipped: the persisted values only reflect
-/// the theme at the time of the last settings save and would otherwise
-/// flash stale colors (e.g. a previous mode's accent) until the watcher
-/// re-derives them on its first tick. The content text color (Text) and the
-/// highlighted-item / background colors are not blur-managed and always
+/// When an auto-theme accent is active (`accent_active`), the targets the
+/// watcher derives from the accent (the UI accent / Borders / FocusBorder /
+/// Selection) are skipped: the persisted values only reflect the theme at
+/// the time of the last settings save and would otherwise flash stale
+/// colors (e.g. a previous source's accent) until the watcher re-derives
+/// them on its first tick. The content text color (Text) and the
+/// highlighted-item / background colors are not accent-managed and always
 /// restore.
 pub(crate) fn apply_persisted_appearance(
     config: &mut Config,
     values: &[Option<String>],
-    blur_mode_active: bool,
+    accent_active: bool,
 ) {
     for (target, value) in AppearanceTarget::all().iter().zip(values) {
-        if blur_mode_active
-            && matches!(
-                target,
-                AppearanceTarget::Ui
-                    | AppearanceTarget::Borders
-                    | AppearanceTarget::FocusBorder
-                    | AppearanceTarget::Selection
-            )
-        {
+        if accent_active && is_accent_managed(*target) {
             continue;
         }
         match value.as_deref() {

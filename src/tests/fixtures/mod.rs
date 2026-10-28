@@ -97,6 +97,7 @@ pub fn ctx(
         app_event_sender: app_event_channel.0.clone(),
         work_sender: work_request_channel.0.clone(),
         scheduler: scheduler,
+        accent: crate::core::accent::AccentState::default(),
         client_request_sender: client_request_channel.0.clone(),
         needs_render: Cell::new(false),
         resizing: Cell::new(false),
