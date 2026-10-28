@@ -10,24 +10,40 @@ use crate::{
     config::album_art::ImageMethod, ctx::Ctx,
     shared::{events::WorkRequest, macros::status_error, terminal::TERMINAL},
 };
+/// One encoded album-art frame plus the pane rect and encode epoch it was
+/// made for. The epoch lets the facade drop a result that finished after the
+/// pane moved (a resize while the encode was in flight): drawing it would
+/// place the old-size image over the freshly resized UI.
+#[derive(Debug, Default, Clone)]
+pub struct EncodedImage {
+    pub data: EncodeData,
+    pub size: Rect,
+    pub generation: u64,
+}
+
 #[derive(Debug)]
 pub struct AlbumArtFacade {
     image_backend: ImageBackend,
     current_album_art: Option<Arc<Vec<u8>>>,
     last_size: Rect,
-    /// The pane size the currently-queued encode was made for (a flush at a
-    /// different size is stale).
-    last_show_size: Rect,
     work_tx: Sender<WorkRequest>,
     is_showing: bool,
     request_queue: Vec<Arc<Vec<u8>>>,
+    /// Bumped whenever the pane geometry changes or the overlay is hidden.
+    /// An encode sent before the bump belongs to the old geometry and must
+    /// not be drawn, even if it finishes after the new frame is on screen.
+    encode_generation: u64,
     /// Encoded image waiting to be drawn after the current frame's buffer
-    /// flush (see [`Self::flush_display`]).
+    /// flush (see [`Self::flush_display`]), with the size it was encoded for.
     pending_display: Option<EncodeData>,
+    pending_size: Option<Rect>,
     /// The last successfully drawn encode: re-placed when a frame's diff
     /// rewrote its (transient) placeholder cells so the wipe heals within
     /// one frame (see [`Self::frame_rendered`]).
     last_drawn: Option<EncodeData>,
+    /// The pane size [`Self::last_drawn`] was encoded for. A re-place at a
+    /// different size would paint the old image over the new layout.
+    last_drawn_size: Rect,
     /// Snapshot of the album-art pane area cells of the previous frame. A
     /// frame whose buffer differs here rewrote those cells, which deletes a
     /// transient kitty placement sitting on them.
@@ -60,6 +76,15 @@ pub enum EncodeData {
     #[default]
     Empty,
 }
+/// What [`AlbumArtFacade::flush_display`] should do with the current state.
+#[derive(Debug)]
+enum FlushAction {
+    Nothing,
+    /// The data matches the current pane geometry: draw it.
+    Draw(EncodeData),
+    /// A pending encode was made for an older geometry.
+    Reencode,
+}
 impl AlbumArtFacade {
     pub fn new(ctx: &Ctx) -> Self {
         let config = ctx.config.as_ref();
@@ -78,12 +103,14 @@ impl AlbumArtFacade {
             image_backend,
             current_album_art: None,
             last_size: Rect::default(),
-            last_show_size: Rect::default(),
             work_tx: ctx.work_sender.clone(),
             is_showing: false,
             request_queue: Vec::new(),
+            encode_generation: 0,
             pending_display: None,
+            pending_size: None,
             last_drawn: None,
+            last_drawn_size: Rect::default(),
             prev_art_region: Vec::new(),
             prev_art_region_area: Rect::default(),
             region_dirty: false,
@@ -139,7 +166,7 @@ impl AlbumArtFacade {
         let halign = ctx.config.album_art.horizontal_align;
         let valign = ctx.config.album_art.vertical_align;
         let size = self.last_size;
-        self.last_show_size = size;
+        let generation = self.encode_generation;
         let data = data.into();
         self.current_album_art = Some(Arc::clone(&data));
         self.request_queue.push(Arc::clone(&data));
@@ -153,11 +180,13 @@ impl AlbumArtFacade {
                     .send(
                         WorkRequest::ResizeImage(
                             Box::new(move || {
-                                Ok(
-                                    EncodeData::Kitty(
+                                Ok(EncodedImage {
+                                    data: EncodeData::Kitty(
                                         Kitty::create_data(&data, size, max_size, halign, valign)?,
                                     ),
-                                )
+                                    size,
+                                    generation,
+                                })
                             }),
                         ),
                     )?;
@@ -167,11 +196,13 @@ impl AlbumArtFacade {
                     .send(
                         WorkRequest::ResizeImage(
                             Box::new(move || {
-                                Ok(
-                                    EncodeData::Iterm2(
+                                Ok(EncodedImage {
+                                    data: EncodeData::Iterm2(
                                         Iterm2::create_data(&data, size, max_size, halign, valign)?,
                                     ),
-                                )
+                                    size,
+                                    generation,
+                                })
                             }),
                         ),
                     )?;
@@ -182,11 +213,13 @@ impl AlbumArtFacade {
                     .send(
                         WorkRequest::ResizeImage(
                             Box::new(move || {
-                                Ok(
-                                    EncodeData::Sixel(
+                                Ok(EncodedImage {
+                                    data: EncodeData::Sixel(
                                         Sixel::create_data(&data, size, max_size, halign, valign)?,
                                     ),
-                                )
+                                    size,
+                                    generation,
+                                })
                             }),
                         ),
                     )?;
@@ -196,11 +229,13 @@ impl AlbumArtFacade {
                     .send(
                         WorkRequest::ResizeImage(
                             Box::new(move || {
-                                Ok(
-                                    EncodeData::Block(
+                                Ok(EncodedImage {
+                                    data: EncodeData::Block(
                                         Block::create_data(&data, size, max_size, halign, valign)?,
                                     ),
-                                )
+                                    size,
+                                    generation,
+                                })
                             }),
                         ),
                     )?;
@@ -210,8 +245,8 @@ impl AlbumArtFacade {
                     .send(
                         WorkRequest::ResizeImage(
                             Box::new(move || {
-                                Ok(
-                                    EncodeData::Ueberzug(
+                                Ok(EncodedImage {
+                                    data: EncodeData::Ueberzug(
                                         Ueberzug::create_data(
                                             &data,
                                             size,
@@ -220,7 +255,9 @@ impl AlbumArtFacade {
                                             valign,
                                         )?,
                                     ),
-                                )
+                                    size,
+                                    generation,
+                                })
                             }),
                         ),
                     )?;
@@ -244,12 +281,34 @@ impl AlbumArtFacade {
         }
         Ok(())
     }
-    pub fn display(&mut self, data: EncodeData, ctx: &Ctx) -> Result<()> {
+    /// Accept an encoded frame. A frame from an older generation (the pane
+    /// moved while it was being encoded) or made for a different rect is
+    /// dropped, never drawn: on a resize the old-size image must not land on
+    /// the new UI. The encode coalescing queue then asks for the current
+    /// geometry if nothing is in flight for it.
+    pub fn display(&mut self, image: EncodedImage, ctx: &Ctx) -> Result<()> {
         if !self.is_showing {
             log::trace!(
                 "Not showing image because its not supposed to be displayed anymore"
             );
             self.request_queue.clear();
+            return Ok(());
+        }
+        if image.generation != self.encode_generation {
+            log::debug!(
+                encoded_for:? = image.size,
+                current:? = self.last_size,
+                encoded_generation = image.generation,
+                current_generation = self.encode_generation;
+                "Dropping album-art encode from before a resize/hide"
+            );
+            // The stale request occupied the work thread, so a newer request
+            // may never have been sent. Send one for the current geometry.
+            if self.request_queue.is_empty()
+                && let Some(art) = self.current_album_art.clone()
+            {
+                self.show(art, ctx)?;
+            }
             return Ok(());
         }
         if let Some(req_data) = self.request_queue.pop()
@@ -260,8 +319,19 @@ impl AlbumArtFacade {
             self.show(req_data, ctx)?;
             return Ok(());
         }
-        log::debug!(data:?, area:? = self.last_size; "Received encoded data",);
-        self.pending_display = Some(data);
+        if image.size != self.last_size {
+            log::debug!(
+                encoded_for:? = image.size, current:? = self.last_size;
+                "Dropping stale album-art encode, re-encoding at the current size"
+            );
+            if let Some(art) = self.current_album_art.clone() {
+                self.show(art, ctx)?;
+            }
+            return Ok(());
+        }
+        log::debug!(data:? = image.data, area:? = image.size; "Received encoded data",);
+        self.pending_display = Some(image.data);
+        self.pending_size = Some(image.size);
         Ok(())
     }
     /// Record the frame that was just flushed so the next
@@ -297,41 +367,47 @@ impl AlbumArtFacade {
         }
         self.prev_art_region = region;
     }
+    /// What a display flush should do with the current state.
+    fn flush_action(&mut self) -> FlushAction {
+        if let Some(data) = self.pending_display.take() {
+            let size = self.pending_size.take();
+            if !self.is_showing {
+                return FlushAction::Nothing;
+            }
+            if size != Some(self.last_size) {
+                log::debug!(
+                    encoded_for:? = size, current:? = self.last_size;
+                    "Dropping stale album-art encode, re-encoding at the current size"
+                );
+                return FlushAction::Reencode;
+            }
+            return FlushAction::Draw(data);
+        }
+        match &self.last_drawn {
+            Some(data) if self.is_showing && self.region_dirty
+                && self.last_drawn_size == self.last_size => FlushAction::Draw(data.clone()),
+            _ => FlushAction::Nothing,
+        }
+    }
     /// Draw the encoded image queued by [`Self::display`], or re-place the
     /// last drawn one. Called by the event loop after every frame's buffer
-    /// flush. A stale encode (the pane changed size since it was queued) is
-    /// re-encoded at the current size instead of drawn, so the image can
-    /// never cover the UI. The last drawn image is re-placed only when
+    /// flush. A pending encode made for another pane size is dropped and
+    /// re-encoded at the current size, and a drawn image is only re-placed
+    /// when it was drawn at the current size, so a resize can never put the
+    /// old image over the new UI. The last drawn image is re-placed only when
     /// [`Self::frame_rendered`] saw the frame rewrite the art pane area
     /// (re-placing after *every* frame would strobe the art while playing,
     /// since status updates / mpv polls render many frames a second).
     pub fn flush_display(&mut self, ctx: &Ctx) -> Result<()> {
-        let data = match self.pending_display.take() {
-            Some(data) => {
-                if !self.is_showing {
-                    return Ok(());
+        let data = match self.flush_action() {
+            FlushAction::Nothing => return Ok(()),
+            FlushAction::Reencode => {
+                if let Some(art) = self.current_album_art.clone() {
+                    self.show(art, ctx)?;
                 }
-                if self.last_show_size != self.last_size {
-                    log::debug!(
-                        last_show:? = self.last_show_size, current:? = self.last_size;
-                        "Dropping stale album-art encode, re-encoding at the current size"
-                    );
-                    if let Some(art) = self.current_album_art.clone() {
-                        self.show(art, ctx)?;
-                    }
-                    return Ok(());
-                }
-                data
+                return Ok(());
             }
-            None => {
-                match &self.last_drawn {
-                    Some(
-                        data,
-                    ) if self.is_showing && self.region_dirty
-                        && self.last_show_size == self.last_size => data.clone(),
-                    _ => return Ok(()),
-                }
-            }
+            FlushAction::Draw(data) => data,
         };
         let w = TERMINAL.writer();
         let mut w = w.lock();
@@ -379,6 +455,7 @@ impl AlbumArtFacade {
             status_error!("Failed to display image {err:#}");
         } else {
             self.last_drawn = Some(drawn);
+            self.last_drawn_size = self.last_size;
             self.region_dirty = false;
         }
         Ok(())
@@ -389,10 +466,18 @@ impl AlbumArtFacade {
     pub fn forget(&mut self) {
         self.current_album_art = None;
         self.request_queue.clear();
+        self.encode_generation = self.encode_generation.wrapping_add(1);
+        self.pending_display = None;
+        self.pending_size = None;
         self.last_drawn = None;
         self.region_dirty = false;
     }
     pub fn hide(&mut self, ctx: &Ctx) -> Result<()> {
+        // An encode that is still in flight was made for a geometry that is
+        // no longer on screen: its result must not be drawn when it lands.
+        self.encode_generation = self.encode_generation.wrapping_add(1);
+        self.pending_display = None;
+        self.pending_size = None;
         self.last_drawn = None;
         self.region_dirty = false;
         self.request_queue.clear();
@@ -434,6 +519,23 @@ impl AlbumArtFacade {
         }
     }
     pub fn set_size(&mut self, area: Rect) {
+        if self.last_size != area {
+            // The pane geometry changed (resize / layout change). Anything
+            // encoded for the old rect is now stale: never re-place it at
+            // the new one. A fresh encode at the new size is the only image
+            // that may be drawn (2026-10-28 resize regression).
+            self.encode_generation = self.encode_generation.wrapping_add(1);
+            self.pending_display = None;
+            self.pending_size = None;
+            self.last_drawn = None;
+            self.last_drawn_size = Rect::default();
+            self.request_queue.clear();
+            // The frame at the new rect must heal after the old placement
+            // was deleted, so force the next snapshot to be dirty.
+            self.region_dirty = true;
+            self.prev_art_region_area = Rect::default();
+            self.prev_art_region.clear();
+        }
         self.last_size = area;
     }
 }
@@ -444,7 +546,7 @@ mod tests {
     use crossbeam::channel::{Receiver, Sender};
     use rstest::rstest;
 
-    use super::AlbumArtFacade;
+    use super::{AlbumArtFacade, EncodeData, EncodedImage, FlushAction};
     use crate::{
         shared::events::{AppEvent, ClientRequest, WorkRequest},
         tests::fixtures::{app_event_channel, client_request_channel, ctx, work_request_channel},
@@ -534,5 +636,84 @@ mod tests {
         buffer.get_mut(9, 9).set_symbol("x");
         facade.frame_rendered(&buffer);
         assert!(!facade.region_dirty);
+    }
+
+    /// A resize must never replay an image encoded for the old rect. The
+    /// pending/drawn image is dropped when the pane area changes, and a late
+    /// result from the pre-resize generation is refused even if it carries
+    /// the new size (2026-10-28: the old-size image was drawn after the new
+    /// frame, over the resized UI).
+    #[rstest]
+    fn a_resize_drops_images_encoded_for_the_old_rect(
+        app_event_channel: (Sender<AppEvent>, Receiver<AppEvent>),
+        work_request_channel: (Sender<WorkRequest>, Receiver<WorkRequest>),
+        client_request_channel: (Sender<ClientRequest>, Receiver<ClientRequest>),
+    ) {
+        // Keep a receiver alive: `show` sends an encode request, and the
+        // fixture's ctx only keeps the sender.
+        let _work_rx = work_request_channel.1.clone();
+        let ctx = ctx(app_event_channel, work_request_channel, client_request_channel);
+        let mut facade = AlbumArtFacade::new(&ctx);
+        let old = ratatui::layout::Rect::new(0, 0, 10, 5);
+        let new = ratatui::layout::Rect::new(0, 0, 20, 6);
+
+        facade.set_size(old);
+        facade.show(vec![1, 2, 3], &ctx).unwrap();
+        let old_generation = facade.encode_generation;
+        facade
+            .display(
+                EncodedImage { data: EncodeData::Empty, size: old, generation: old_generation },
+                &ctx,
+            )
+            .unwrap();
+        assert!(facade.pending_display.is_some(), "the old encode is pending");
+
+        // The pane resizes before the next flush.
+        facade.set_size(new);
+        assert!(facade.pending_display.is_none(), "the old pending image is dropped");
+        assert!(facade.pending_size.is_none());
+        assert!(facade.last_drawn.is_none());
+        assert!(facade.encode_generation > old_generation);
+        assert!(matches!(facade.flush_action(), FlushAction::Nothing));
+
+        // A result for the old generation arriving after the resize is
+        // refused even though it names the new rect.
+        facade.show(vec![4, 5, 6], &ctx).unwrap();
+        facade
+            .display(
+                EncodedImage { data: EncodeData::Empty, size: new, generation: old_generation },
+                &ctx,
+            )
+            .unwrap();
+        assert!(facade.pending_display.is_none(), "a pre-resize encode is refused");
+    }
+
+    /// A result for the current geometry is still accepted and drawn.
+    #[rstest]
+    fn a_current_encode_is_drawn(
+        app_event_channel: (Sender<AppEvent>, Receiver<AppEvent>),
+        work_request_channel: (Sender<WorkRequest>, Receiver<WorkRequest>),
+        client_request_channel: (Sender<ClientRequest>, Receiver<ClientRequest>),
+    ) {
+        // Keep a receiver alive: `show` sends an encode request, and the
+        // fixture's ctx only keeps the sender.
+        let _work_rx = work_request_channel.1.clone();
+        let ctx = ctx(app_event_channel, work_request_channel, client_request_channel);
+        let mut facade = AlbumArtFacade::new(&ctx);
+        let area = ratatui::layout::Rect::new(0, 0, 10, 5);
+        facade.set_size(area);
+        facade.show(vec![1, 2, 3], &ctx).unwrap();
+        facade
+            .display(
+                EncodedImage {
+                    data: EncodeData::Empty,
+                    size: area,
+                    generation: facade.encode_generation,
+                },
+                &ctx,
+            )
+            .unwrap();
+        assert!(facade.pending_display.is_some());
+        assert!(matches!(facade.flush_action(), FlushAction::Draw(_)));
     }
 }

@@ -456,6 +456,10 @@ impl Pane for AlbumArtPane {
         if self.is_modal_open || ctx.album_art_collapsed.get() {
             return Ok(());
         }
+        // The image on screen belongs to the pre-resize rect: erase it
+        // before the resized UI is drawn (a late encode is tracked by the
+        // facade and can never be placed at the old geometry).
+        self.album_art.hide(ctx)?;
         self.album_art.set_size(area);
         self.album_art.show_current(ctx)
     }
@@ -648,8 +652,8 @@ impl Pane for AlbumArtPane {
             UiEvent::Exit => {
                 self.album_art.cleanup()?;
             }
-            UiEvent::ImageEncoded { data } => {
-                self.album_art.display(std::mem::take(data), ctx)?;
+            UiEvent::ImageEncoded { image } => {
+                self.album_art.display(std::mem::take(image), ctx)?;
             }
             UiEvent::ImageEncodeFailed { err } => {
                 self.album_art.image_processing_failed(err, ctx)?;

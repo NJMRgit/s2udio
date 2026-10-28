@@ -48,7 +48,7 @@ use crate::{
         ytdlp::YtDlpHost,
     },
     ui::{
-        image::facade::EncodeData,
+        image::facade::EncodedImage,
         input::{InputEvent, InputResultEvent},
         modals::{downloads::DownloadsModal, menu::create_rating_modal},
     },
@@ -91,6 +91,11 @@ pub struct Ui {
     resizing: bool,
     overlays_hidden: bool,
     cava_hidden: bool,
+    /// The frame being drawn is transient (resizing or too small). Set by
+    /// `render`, read by the overlay flushes that run after the frame's
+    /// buffer flush: no terminal-side image may be (re)placed on top of a
+    /// clear/too-small frame (a resize regression, 2026-10-28).
+    suppress_overlays: bool,
     /// Set when the cava row was removed (hidden): the event loop clears
     /// the terminal and repaints fully, so the visualizer's terminal-side
     /// bars can never leave stale cells behind.
@@ -134,6 +139,7 @@ impl Ui {
             resizing: false,
             overlays_hidden: false,
             cava_hidden: false,
+            suppress_overlays: false,
             cava_refresh_pending: false,
             album_art_refresh_pending: false,
             album_art_was_visible: false,
@@ -303,6 +309,7 @@ impl Ui {
         let too_small =
             frame.area().height < MIN_CONTENT_HEIGHT || (size_px.0 > 0 && size_px.0 < MIN_WIDTH_PX);
         let degraded = self.resizing || too_small;
+        self.suppress_overlays = degraded;
         if degraded {
             if !self.overlays_hidden {
                 // Terminal-side overlays (kitty/iTerm/sixel album art and the
@@ -1702,6 +1709,15 @@ impl Ui {
             self.tabs.get(&ctx.active_tab).is_some_and(|tab| {
                 tab.panes.panes_iter().any(|pane| pane.pane == PaneType::AlbumArt)
             }) || self.layout.panes_iter().any(|pane| pane.pane == PaneType::AlbumArt);
+        if self.suppress_overlays {
+            // The frame is a resize clear or the too-small notice. Hiding
+            // here keeps a late encode from landing on it. Keep the visible
+            // latch so the first normal frame does not request the art a
+            // second time: the settled `resize` already asked for it.
+            self.panes.album_art.on_hide(ctx)?;
+            self.album_art_was_visible = visible;
+            return Ok(());
+        }
         if visible && !ctx.is_pane_hidden(&PaneType::AlbumArt) {
             // Round 63.1b (host fix): a hidden→visible transition (the
             // Radio-page mode flip hides the queue body, then re-shows it)
@@ -1741,6 +1757,12 @@ impl Ui {
         frame: &ratatui::buffer::Buffer,
         ctx: &Ctx,
     ) -> Result<()> {
+        if self.suppress_overlays {
+            // The Jellyfin poster/wall were hidden by the transient frame;
+            // drawing them now would put a stale-size image over the clear
+            // or too-small notice.
+            return Ok(());
+        }
         let Some(tab) = self.tabs.get_mut(&ctx.active_tab) else {
             return Ok(());
         };
@@ -2109,7 +2131,7 @@ pub enum UiEvent {
     Hidden,
     ConfigChanged,
     PlaybackStateChanged,
-    ImageEncoded { data: EncodeData },
+    ImageEncoded { image: EncodedImage },
     ImageEncodeFailed { err: anyhow::Error },
     DownloadsUpdated,
     /// Round 96: the Queue tab's YouTube search finished. Broadcast like

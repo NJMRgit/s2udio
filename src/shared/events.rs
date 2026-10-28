@@ -27,7 +27,7 @@ use crate::{
             YtDlpItem, YtDlpPlaylist, YtDlpSearchItem,
         },
     },
-    ui::{UiAppEvent, image::facade::EncodeData},
+    ui::{UiAppEvent, image::facade::EncodedImage},
 };
 
 #[derive(Debug)]
@@ -275,7 +275,7 @@ pub(crate) enum WorkRequest {
         state: String,
     },
     Command(Command),
-    ResizeImage(Box<dyn FnOnce() -> Result<EncodeData> + Send + Sync>),
+    ResizeImage(Box<dyn FnOnce() -> Result<EncodedImage> + Send + Sync>),
     /// Prepare a torrent stream (M2): start the rqbit engine, add the
     /// torrent, pick the largest playable file and build the mpv stream
     /// URL. Runs on the work thread; the engine is moved back to the UI
@@ -340,7 +340,7 @@ pub(crate) enum WorkDone {
         data: MpdQueryResult,
     },
     ImageResized {
-        data: Result<EncodeData>,
+        data: Result<EncodedImage>,
     },
     /// The resolved direct stream info (URL, title, thumbnail,
     /// description) for a pasted YouTube-style link.

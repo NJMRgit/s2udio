@@ -390,7 +390,7 @@ pub(super) fn handle_work_done(
         }
         WorkDone::ImageResized { data } => {
             let event = match data {
-                Ok(data) => UiEvent::ImageEncoded { data },
+                Ok(image) => UiEvent::ImageEncoded { image },
                 Err(err) => UiEvent::ImageEncodeFailed { err },
             };
 
