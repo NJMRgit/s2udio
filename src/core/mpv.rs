@@ -55,6 +55,20 @@ impl MpvPlaylistEntry {
         self.original_url.as_deref().filter(|u| !u.is_empty()).unwrap_or(&self.url)
     }
 }
+/// The answer to a resume prompt that was asked **before** mpv started.
+///
+/// The prompt is shown by the play path, not by the session-start handler, so
+/// a slow answer cannot leave mpv owning the window: mpv is spawned only once
+/// the user has chosen. The answer rides this value into the session start,
+/// which arms the seek and keeps the post-start fetch from asking again.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PendingResume {
+    /// "Continue": seek here once the entry is open.
+    Continue(f64),
+    /// "Start over": play from the beginning, no seek.
+    StartOver,
+}
+
 /// The playing state of an mpv video launched from s2udio. Updated by the
 /// event loop from mpv's IPC socket; read by the controls/seekbar/info.
 #[derive(Debug, Clone, Default)]
@@ -91,6 +105,12 @@ pub struct MpvSession {
     /// A `RefCell` (not a `Cell`: `String` is not `Copy`, and `MpvSession`
     /// derives `Clone`).
     pub resume_prompted_for: std::cell::RefCell<Option<String>>,
+    /// The answer to a pre-launch resume prompt (see [`PendingResume`]),
+    /// together with the Jellyfin item it was asked about: the play path can
+    /// take several steps before mpv is spawned, and a video started some
+    /// other way in between must not inherit the position. Taken at session
+    /// start; cleared when a session ends.
+    pub pending_resume: std::cell::RefCell<Option<(String, PendingResume)>>,
     /// The Jellyfin item whose saved resume position is being fetched. The
     /// `JF_RESUME` handler only acts on a response while the item playing
     /// now is still the one it was asked for, so a request that lost a race
@@ -241,6 +261,7 @@ fn detect_mpv_session_at(ctx: &mut Ctx, socket: std::path::PathBuf) -> bool {
     ctx.mpv.resume_seek.set(None);
     *ctx.mpv.resume_prompted_for.borrow_mut() = None;
     *ctx.mpv.resume_fetch_item.borrow_mut() = None;
+    *ctx.mpv.pending_resume.borrow_mut() = None;
     log::info!(
         title:? = ctx.mpv.title, item_id:? = ctx.mpv.item_id, position:? = ctx.mpv
         .position, duration:? = ctx.mpv.duration; "Reattached to a running mpv session"

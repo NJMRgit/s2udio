@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 use crossbeam::channel::Sender;
 
 use crate::{
+    core::mpv::PendingResume,
     ctx::Ctx,
     jellyfin::JellyfinResult,
     mpd::{
@@ -202,6 +203,9 @@ pub(super) fn session_started(ctx: &mut Ctx, ui: &mut Ui, state: &mut MpvState, 
     *ctx.mpv.resume_prompted_for.borrow_mut() = None;
     *ctx.mpv.resume_fetch_item.borrow_mut() = None;
     *ctx.mpv.pending_loadfile.borrow_mut() = None;
+    // The resume question was asked *before* mpv started (so a slow answer
+    // cannot leave mpv owning the window): apply the answer to this session.
+    apply_pending_resume(ctx, &url);
     state.stale_ticks = 0;
     // A new mpv session is a new Jellyfin playback: the per-item
     // bookkeeping starts clean (the previous session's item was finalized
@@ -338,6 +342,9 @@ pub(super) fn session_ended(ctx: &mut Ctx, ui: &mut Ui, state: &mut MpvState) {
     state.start_reported = false;
     state.item_last_pos = 0.0;
     state.item_duration = 0.0;
+    // A pre-launch answer that never reached a session start (its launch
+    // failed, or mpv died on the way up) must not seek the next video.
+    *ctx.mpv.pending_resume.borrow_mut() = None;
     // Remember the final position locally for every video (Jellyfin keeps
     // its own server-side copy; this covers local files, torrents and
     // resolved links, and is the fallback for a Jellyfin item the server
@@ -505,6 +512,7 @@ pub(super) fn poll(ctx: &mut Ctx, ui: &mut Ui, state: &mut MpvState) -> PollResu
             ctx.mpv.resume_seek.set(None);
             *ctx.mpv.resume_prompted_for.borrow_mut() = None;
             *ctx.mpv.resume_fetch_item.borrow_mut() = None;
+            *ctx.mpv.pending_resume.borrow_mut() = None;
             // Another playlist entry is another Jellyfin playback: its
             // session start has not been reported yet either.
             state.start_reported = false;
@@ -995,8 +1003,42 @@ pub(super) fn handle_jellyfin_fetched(
 /// Whether a saved position is far enough into a video to be worth offering.
 /// A Continue / Start over prompt for the first few seconds would be noise
 /// (and Jellyfin's own threshold is the same 10 s).
-fn should_prompt_resume(seconds: f64) -> bool {
+pub(crate) fn should_prompt_resume(seconds: f64) -> bool {
     seconds > 10.0
+}
+
+/// Apply a Continue / Start over answer that was collected **before** mpv
+/// was spawned (see [`crate::core::mpv::PendingResume`]).
+///
+/// `Continue` arms the resume seek the poll applies once the entry is open;
+/// `Start over` leaves the seek unset. Either way the entry counts as
+/// answered, so the server-position fetch that runs for every Jellyfin item
+/// does not ask the same question again behind the now-visible video.
+pub(crate) fn apply_pending_resume(ctx: &Ctx, url: &str) {
+    let Some((item_id, choice)) = ctx.mpv.pending_resume.borrow_mut().take() else {
+        return;
+    };
+    // The answer belongs to the item it was asked about: a session that
+    // starts in between must not inherit the position.
+    if ctx.mpv.item_id.as_deref() != Some(item_id.as_str()) {
+        log::debug!(
+            answered_for:? = item_id.as_str(), playing:? = ctx.mpv.item_id.as_deref();
+            "Dropped a resume answer asked for another item"
+        );
+        return;
+    }
+    if let PendingResume::Continue(seconds) = choice {
+        ctx.mpv.resume_seek.set(Some((seconds, 0, None)));
+    }
+    let key = ctx
+        .mpv
+        .item_id
+        .as_ref()
+        .map(|id| format!("jf:{id}"))
+        .or_else(|| entry_key_for_url(ctx, url));
+    if key.is_some() {
+        *ctx.mpv.resume_prompted_for.borrow_mut() = key;
+    }
 }
 
 /// The resume-store key of the playlist entry that was started at `url`
@@ -1094,7 +1136,82 @@ fn prompt_video_resume(ctx: &mut Ctx, title: &str, seconds: f64, key: String) {
 
 #[cfg(test)]
 mod tests {
-    use super::should_prompt_resume;
+    use super::{apply_pending_resume, should_prompt_resume};
+    use crate::core::mpv::PendingResume;
+
+    fn rig() -> crate::ctx::Ctx {
+        let (app_tx, app_rx) = crossbeam::channel::unbounded();
+        let (work_tx, work_rx) = crossbeam::channel::unbounded();
+        let (client_tx, client_rx) = crossbeam::channel::unbounded();
+        crate::tests::fixtures::ctx((app_tx, app_rx), (work_tx, work_rx), (client_tx, client_rx))
+    }
+
+    /// The answer collected before the launch rides into the session start:
+    /// "Continue" arms the seek and marks the entry answered, "Start over"
+    /// leaves the seek alone but still counts as answered (so the server
+    /// fetch does not ask again), and the answer is consumed once.
+    #[test]
+    fn a_pre_launch_answer_arms_the_seek_once() {
+        let mut ctx = rig();
+        ctx.mpv.item_id = Some("ep1".to_owned());
+        *ctx.mpv.pending_resume.borrow_mut() =
+            Some(("ep1".to_owned(), PendingResume::Continue(1200.0)));
+        apply_pending_resume(&ctx, "http://jf:8096/Videos/ep1/stream");
+        assert_eq!(
+            ctx.mpv.resume_seek.get().map(|(secs, _, _)| secs),
+            Some(1200.0),
+            "Continue arms the resume seek"
+        );
+        assert_eq!(
+            ctx.mpv.resume_prompted_for.borrow().as_deref(),
+            Some("jf:ep1"),
+            "the entry counts as answered"
+        );
+        assert!(ctx.mpv.pending_resume.borrow().is_none(), "the answer is consumed");
+
+        *ctx.mpv.pending_resume.borrow_mut() =
+            Some(("ep1".to_owned(), PendingResume::StartOver));
+        ctx.mpv.resume_seek.set(None);
+        *ctx.mpv.resume_prompted_for.borrow_mut() = None;
+        apply_pending_resume(&ctx, "http://jf:8096/Videos/ep1/stream");
+        assert!(ctx.mpv.resume_seek.get().is_none(), "Start over seeks nothing");
+        assert_eq!(
+            ctx.mpv.resume_prompted_for.borrow().as_deref(),
+            Some("jf:ep1"),
+            "and is not asked again behind the video"
+        );
+    }
+
+    /// An answer asked about one item must never seek another: a session can
+    /// begin between the question and the launch it belongs to.
+    #[test]
+    fn an_answer_for_another_item_is_dropped() {
+        let mut ctx = rig();
+        ctx.mpv.item_id = Some("ep2".to_owned());
+        *ctx.mpv.pending_resume.borrow_mut() =
+            Some(("ep1".to_owned(), PendingResume::Continue(1200.0)));
+        apply_pending_resume(&ctx, "http://jf:8096/Videos/ep2/stream");
+        assert!(
+            ctx.mpv.resume_seek.get().is_none(),
+            "another item's position is not applied"
+        );
+        assert!(
+            ctx.mpv.resume_prompted_for.borrow().is_none(),
+            "and it does not count as answered for this one"
+        );
+        assert!(ctx.mpv.pending_resume.borrow().is_none(), "the stale answer is consumed");
+    }
+
+    /// Nothing was asked (a fresh item, or a session started by something
+    /// other than the play path): the session start must not invent a seek.
+    #[test]
+    fn no_answer_leaves_the_session_alone() {
+        let mut ctx = rig();
+        ctx.mpv.item_id = Some("ep2".to_owned());
+        apply_pending_resume(&ctx, "http://jf:8096/Videos/ep2/stream");
+        assert!(ctx.mpv.resume_seek.get().is_none());
+        assert!(ctx.mpv.resume_prompted_for.borrow().is_none());
+    }
 
     /// At/around the threshold: only a position past 10 s is worth a prompt
     /// (the boundary belongs to "start from the beginning").

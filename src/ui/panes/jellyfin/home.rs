@@ -765,6 +765,7 @@ impl JellyfinPane {
                             item.name.clone(),
                             item.id.clone(),
                             item.season_id.clone(),
+                            item.resume_secs(),
                         )
                     }
                     _ => self.start_jump(item, false, None, None, ctx),

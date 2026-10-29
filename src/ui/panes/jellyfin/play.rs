@@ -25,6 +25,7 @@ impl JellyfinPane {
         name: String,
         item_id: String,
         season_id: Option<String>,
+        resume_secs: Option<u64>,
     ) -> Result<()> {
         use crate::ui::modals::confirm_modal::{Action, ConfirmModal};
         if ctx.mpv.active {
@@ -62,30 +63,14 @@ impl JellyfinPane {
             }
             return Ok(());
         }
-        let start_episode = {
-            let season_id = season_id.clone();
-            let item_id = item_id.clone();
-            let url = url.clone();
-            // Round 64: pass the content name to mpv (the window title
-            // previously showed the raw stream URL).
-            let name = name.clone();
-            move |ctx: &Ctx| {
-                if let Some(season_id) = season_id.clone() {
-                    let _ = ctx
-                        .work_sender
-                        .send(crate::shared::events::WorkRequest::FetchJellyfinSeason {
-                            season_id,
-                            episode_id: item_id.clone(),
-                        });
-                } else {
-                    crate::core::mpv::run_mpv_titled(ctx, &url, &name);
-                }
-            }
-        };
         match ctx.config.video.playback {
-            crate::config::video::VideoPlaybackMode::Mpv => start_episode(ctx),
+            crate::config::video::VideoPlaybackMode::Mpv => {
+                Self::start_video(ctx, url, name, item_id, season_id, resume_secs)?;
+            }
             crate::config::video::VideoPlaybackMode::Mpd => jellyfin_play_temp(ctx, url, name),
             crate::config::video::VideoPlaybackMode::Ask => {
+                let (mpv_url, mpv_name) = (url.clone(), name.clone());
+                let (mpv_item, mpv_season) = (item_id.clone(), season_id.clone());
                 let menu = MenuModal::new(ctx)
                     .width(60)
                     .title(format!(" {name} "))
@@ -97,8 +82,14 @@ impl JellyfinPane {
                                 .item(
                                     "Play with MPV (video)",
                                     move |ctx| {
-                                        start_episode(ctx);
-                                        Ok(())
+                                        Self::start_video(
+                                            ctx,
+                                            mpv_url.clone(),
+                                            mpv_name.clone(),
+                                            mpv_item.clone(),
+                                            mpv_season.clone(),
+                                            resume_secs,
+                                        )
                                     },
                                 );
                             let mpd_url = url.clone();
@@ -120,6 +111,117 @@ impl JellyfinPane {
             }
         }
         Ok(())
+    }
+    /// Ask about a saved position **before** mpv is spawned, then start.
+    ///
+    /// The question used to be asked after the session started, on the
+    /// position the app fetches from the server: mpv opened first, took the
+    /// keyboard focus, and a user who was slow to answer (or never saw the
+    /// prompt) ended up with the video playing behind the ask. Asking here
+    /// means mpv only exists once the answer does; the choice rides
+    /// `ctx.mpv.pending_resume` into the session start, which arms the seek.
+    fn start_video(
+        ctx: &Ctx,
+        url: String,
+        name: String,
+        item_id: String,
+        season_id: Option<String>,
+        resume_secs: Option<u64>,
+    ) -> Result<()> {
+        use crate::ui::modals::confirm_modal::{Action, ConfirmModal};
+        // An answer asked for this item already exists (the Home page asks
+        // before it leaves for the tree): launch instead of asking twice.
+        let answered = ctx
+            .mpv
+            .pending_resume
+            .borrow()
+            .as_ref()
+            .is_some_and(|(id, _)| id == &item_id);
+        let offered = if answered {
+            None
+        } else {
+            resume_secs
+                .filter(|secs| crate::core::event_loop::should_prompt_resume(*secs as f64))
+        };
+        let Some(seconds) = offered else {
+            Self::launch_video(ctx, &url, &name, &item_id, season_id.as_deref());
+            return Ok(());
+        };
+        let formatted = ctx.config.duration_format.format(seconds);
+        let (c_url, c_name, c_item, c_season) =
+            (url.clone(), name.clone(), item_id.clone(), season_id.clone());
+        let (o_url, o_name, o_item, o_season) = (url, name, item_id, season_id);
+        crate::shared::macros::modal!(
+            ctx,
+            ConfirmModal::builder()
+                .ctx(ctx)
+                .message(vec![
+                    format!("Resume {c_name}?"),
+                    format!("Continue from {formatted}."),
+                ])
+                .action(Action::CustomButtons {
+                    buttons: vec![
+                        (
+                            "Continue",
+                            Box::new(move |ctx| {
+                                *ctx.mpv.pending_resume.borrow_mut() = Some((
+                                    c_item.clone(),
+                                    crate::core::mpv::PendingResume::Continue(seconds as f64),
+                                ));
+                                Self::launch_video(
+                                    ctx,
+                                    &c_url,
+                                    &c_name,
+                                    &c_item,
+                                    c_season.as_deref(),
+                                );
+                                Ok(())
+                            }),
+                        ),
+                        (
+                            "Start over",
+                            Box::new(move |ctx| {
+                                *ctx.mpv.pending_resume.borrow_mut() = Some((
+                                    o_item.clone(),
+                                    crate::core::mpv::PendingResume::StartOver,
+                                ));
+                                Self::launch_video(
+                                    ctx,
+                                    &o_url,
+                                    &o_name,
+                                    &o_item,
+                                    o_season.as_deref(),
+                                );
+                                Ok(())
+                            }),
+                        ),
+                    ],
+                })
+                .size((56, 7))
+                .build()
+        );
+        Ok(())
+    }
+    /// Start the mpv session (or its season playlist) with no further
+    /// questions. Round 64: the content name goes to mpv as the window
+    /// title (it previously showed the raw stream URL).
+    fn launch_video(
+        ctx: &Ctx,
+        url: &str,
+        name: &str,
+        item_id: &str,
+        season_id: Option<&str>,
+    ) {
+        if let Some(season_id) = season_id {
+            let _ = ctx.work_sender.send(
+                crate::shared::events::WorkRequest::FetchJellyfinSeason {
+                    season_id: season_id.to_owned(),
+                    episode_id: item_id.to_owned(),
+                },
+            );
+        } else {
+            crate::core::mpv::run_mpv_titled(ctx, url, name);
+        }
     }
     /// Play the highlighted item. Audio plays through MPD (temporary entry,
     /// like radio stations); video launches per the configured playback mode
@@ -148,6 +250,7 @@ impl JellyfinPane {
                     item.name.clone(),
                     item.id.clone(),
                     item.season_id.clone(),
+                    item.resume_secs(),
                 )?;
             }
         }

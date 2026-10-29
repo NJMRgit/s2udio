@@ -47,6 +47,7 @@ impl JellyfinPane {
                         let season_id = item.season_id.clone();
                         let mpv_name = item_name.clone();
                         let mpd_name = item_name.clone();
+                        let resume_secs = item.resume_secs();
                         section = section
                             .item(
                                 "Play with MPV (video)",
@@ -57,6 +58,7 @@ impl JellyfinPane {
                                         mpv_name.clone(),
                                         item_id.clone(),
                                         season_id.clone(),
+                                        resume_secs,
                                     )
                                 },
                             );
@@ -129,6 +131,7 @@ impl JellyfinPane {
                     let mpv_url = play_url.clone();
                     let season_id = item.season_id.clone();
                     let play_item_name = item_name.clone();
+                    let resume_secs = item.resume_secs();
                     section = section
                         .item(
                             "Play with MPV (video)",
@@ -139,6 +142,7 @@ impl JellyfinPane {
                                     play_item_name.clone(),
                                     item_id.clone(),
                                     season_id.clone(),
+                                    resume_secs,
                                 )
                             },
                         );

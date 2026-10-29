@@ -1085,6 +1085,126 @@
         assert!(opened_modals(&app_rx).is_empty(), "a fresh item asks nothing");
     }
 
+    /// A partly watched video asks Continue / Start over **before** mpv is
+    /// spawned: a slow answer used to leave mpv owning the window (it had
+    /// already launched behind the prompt). Nothing starts until the answer.
+    #[test]
+    fn a_partly_watched_video_asks_before_starting() {
+        let (_pane, ctx, work_rx, app_rx) = play_rig();
+        JellyfinPane::play_video(
+            &ctx,
+            "http://jf:8096/Videos/ep1/stream?static=true".to_owned(),
+            "Pilot".to_owned(),
+            "ep1".to_owned(),
+            Some("season1".to_owned()),
+            Some(1200),
+        )
+        .unwrap();
+        assert!(
+            work_rx.try_recv().is_err(),
+            "no season/mpv launch is requested before the answer"
+        );
+        assert!(
+            !opened_modals(&app_rx).is_empty(),
+            "the Continue / Start over modal asks the question"
+        );
+        assert!(
+            ctx.mpv.pending_resume.borrow().is_none(),
+            "no position is armed before the answer"
+        );
+    }
+
+    /// A video the server has no position for starts straight away — the
+    /// prompt must not become a gate on every play.
+    #[test]
+    fn a_fresh_video_starts_without_asking() {
+        let (_pane, ctx, work_rx, app_rx) = play_rig();
+        JellyfinPane::play_video(
+            &ctx,
+            "http://jf:8096/Videos/ep2/stream?static=true".to_owned(),
+            "Second".to_owned(),
+            "ep2".to_owned(),
+            Some("season1".to_owned()),
+            None,
+        )
+        .unwrap();
+        assert!(
+            matches!(
+                work_rx.try_recv(),
+                Ok(WorkRequest::FetchJellyfinSeason { .. })
+            ),
+            "without a saved position the video starts immediately"
+        );
+        assert!(opened_modals(&app_rx).is_empty(), "and no modal is opened");
+    }
+
+    /// A partly watched result picked in the search asks Continue / Start
+    /// over **before** the video starts: the jump plays the tree's own copy of
+    /// the item (it carries the `UserData` a search hint lacks), so the
+    /// question comes from the play path and neither mpv nor the season
+    /// playlist starts until the answer.
+    #[test]
+    fn a_partly_watched_search_result_asks_before_the_video_starts() {
+        let (mut pane, ctx, work_rx, app_rx) = play_rig();
+        pane.views = vec![jf_item("lib", "TV", "CollectionFolder")];
+        let series = jf_item("series", "Futurama", "Series");
+        let season = jf_item("season1", "Season 1", "Season");
+        let mut ep1 = jf_item("ep1", "Space Pilot 3000", "Episode");
+        ep1.season_id = Some("season1".to_owned());
+        let mut ep2 = jf_item("ep2", "The Series Has Landed", "Episode");
+        ep2.season_id = Some("season1".to_owned());
+        ep2.runtime_secs = Some(1421);
+        ep2.playback_position_secs = 600.0;
+        let library = pane.views[0].clone();
+
+        // The search hits are bare hints: no SeasonId, no UserData.
+        pane.mode = JellyfinTabMode::Search;
+        pane.search_results = vec![jf_item("ep2", "The Series Has Landed", "Episode")];
+        pane.search_results_state.select(Some(0));
+        pane.search_activate(&ctx).unwrap();
+        feed(&mut pane, &ctx, JF_ANCESTORS, JellyfinResult::Ancestors {
+            item_id: "ep2".to_owned(),
+            items: vec![season.clone(), series.clone(), library],
+        });
+        feed(&mut pane, &ctx, JF_FOLDER, JellyfinResult::Children {
+            parent_id: "lib".to_owned(),
+            items: vec![series],
+        });
+        feed(&mut pane, &ctx, JF_FOLDER, JellyfinResult::Children {
+            parent_id: "series".to_owned(),
+            items: vec![season],
+        });
+        feed(&mut pane, &ctx, JF_FOLDER, JellyfinResult::Children {
+            parent_id: "season1".to_owned(),
+            items: vec![ep1, ep2],
+        });
+
+        assert_eq!(pane.selected.as_ref().map(JfNodeKind::id), Some("season1"));
+        assert_eq!(pane.item_list.selected(), Some(1), "the clicked episode");
+        assert!(
+            pane.tree_list.selected().is_some(),
+            "the season row is selected in the tree"
+        );
+        assert!(
+            !opened_modals(&app_rx).is_empty(),
+            "the Continue / Start over modal is asked"
+        );
+        let mut requests = Vec::new();
+        while let Ok(request) = work_rx.try_recv() {
+            requests.push(request);
+        }
+        assert!(
+            !requests
+                .iter()
+                .any(|request| matches!(request, WorkRequest::FetchJellyfinSeason { .. })),
+            "the video waits for the answer instead of starting"
+        );
+        assert!(
+            ctx.mpv.pending_resume.borrow().is_none(),
+            "no position is armed before the question is answered"
+        );
+    }
+
     /// An episode jump expands library → series → season, shows the season's
     /// episodes and puts the selection on the clicked episode.
     #[test]

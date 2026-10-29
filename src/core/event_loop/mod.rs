@@ -4,6 +4,10 @@ mod queue_update;
 mod status;
 mod work_done;
 
+/// Whether a saved position is far enough into a video to be worth a
+/// Continue / Start over prompt (the play path asks before mpv starts).
+pub(crate) use mpv::should_prompt_resume;
+
 use std::{
     io::Write,
     ops::Sub,
