@@ -1,37 +1,18 @@
 use super::*;
 
 /// One search-result row: the item name (bold-ish white) with a dim
-/// sublabel of its type + artist/album/series, so the match kind is
-/// clear at a glance.
+/// sublabel of its type (+ the series for an episode), so the match kind is
+/// clear at a glance. Only movies, series and episodes are listed
+/// (`crate::jellyfin::is_search_kind`), so the type name is the label.
 pub(super) fn search_result_rows(items: &[JfItem]) -> Vec<ListItem<'static>> {
     items
         .iter()
         .map(|item| {
-            let mut parts: Vec<String> = Vec::new();
-            parts.push(match item.kind.as_str() {
-                "Audio" => "Song".to_owned(),
-                "MusicAlbum" => "Album".to_owned(),
-                "MusicArtist" => "Artist".to_owned(),
-                "Movie" => "Movie".to_owned(),
-                "Episode" => "Episode".to_owned(),
-                "Series" => "Series".to_owned(),
-                other => other.to_owned(),
-            });
-            match item.kind.as_str() {
-                "Audio" => {
-                    if let Some(artist) = &item.artist {
-                        parts.push(artist.clone());
-                    }
-                    if let Some(album) = &item.album {
-                        parts.push(album.clone());
-                    }
-                }
-                "Episode" => {
-                    if let Some(series) = &item.series_name {
-                        parts.push(series.clone());
-                    }
-                }
-                _ => {}
+            let mut parts: Vec<String> = vec![item.kind.clone()];
+            if item.kind == "Episode"
+                && let Some(series) = &item.series_name
+            {
+                parts.push(series.clone());
             }
             let mut line = Line::from(Span::styled(
                 item.name.clone(),
@@ -240,34 +221,18 @@ impl JellyfinPane {
     }
 
     /// Enter/`d`/`→`/double-click on a result: **go to the item in the
-    /// library tree**. A movie or a specific episode starts playing once
-    /// the tree is on it; a series or a season only opens (the cursor lands
-    /// inside it, on the hinted season/episode when the query named one).
-    /// Songs keep the immediate MPD temp-stream play.
+    /// library tree**. Every result leads to a selected item there — a movie
+    /// or a specific episode starts playing once the tree is on it, and a
+    /// partly watched one asks Continue / Start over **before** the video
+    /// starts (the jump plays the tree's copy of the item, so its saved
+    /// position is known up front; see [`JellyfinPane::start_jump`]). A series
+    /// only opens (the cursor lands inside it, on the hinted season/episode
+    /// when the query named one).
     pub(super) fn search_activate(&mut self, ctx: &Ctx) -> Result<()> {
         let Some(item) = self.search_selected().cloned() else { return Ok(()) };
         let (_, hint) = split_query_hint(&ctx.input.value(self.search_buffer));
-        match item.kind.as_str() {
-            "Audio" => {
-                let Some(server) = self.load_server(ctx) else { return Ok(()) };
-                let url = server.stream_url(&item.id);
-                self.play_temp_url(
-                    ctx,
-                    JF_PLAY,
-                    PaneType::Jellyfin {
-                        tree: TreeBrowserArgs::default(),
-                    },
-                    item.name.clone(),
-                    url,
-                );
-                status_info!("Playing {}", item.name);
-                Ok(())
-            }
-            "Movie" | "Episode" | "Video" => {
-                self.start_jump(item, true, hint.season, hint.episode, ctx)
-            }
-            _ => self.start_jump(item, false, hint.season, hint.episode, ctx),
-        }
+        let play = matches!(item.kind.as_str(), "Movie" | "Episode");
+        self.start_jump(item, play, hint.season, hint.episode, ctx)
     }
 
     /// Search-mode keys (parity with the MPD/playlists search): `d`/`→`

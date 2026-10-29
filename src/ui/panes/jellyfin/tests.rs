@@ -897,8 +897,56 @@
         assert_eq!(hint.season, None);
     }
 
+    /// A pane with a server plus both receivers, so a play path's work
+    /// requests and the modals it opens can both be inspected. The video
+    /// playback mode is `mpv`, so the only modal a play ever opens is a
+    /// question about the play itself.
+    fn play_rig() -> (
+        JellyfinPane,
+        crate::ctx::Ctx,
+        crossbeam::channel::Receiver<WorkRequest>,
+        crossbeam::channel::Receiver<crate::AppEvent>,
+    ) {
+        let (app_tx, app_rx) = crossbeam::channel::unbounded();
+        let (work_tx, work_rx) = crossbeam::channel::unbounded();
+        let mut ctx = crate::tests::fixtures::ctx(
+            (app_tx, app_rx.clone()),
+            (work_tx, work_rx.clone()),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+        );
+        {
+            let mut config = ctx.config.as_ref().clone();
+            config.video.playback = crate::config::video::VideoPlaybackMode::Mpv;
+            ctx.config = std::sync::Arc::new(config);
+        }
+        let mut pane = JellyfinPane::new(&ctx);
+        pane.server = Some(crate::jellyfin::Jellyfin {
+            base: "http://jf:8096".to_owned(),
+            token: "tok".to_owned(),
+            user_id: "u".to_owned(),
+        });
+        (pane, ctx, work_rx, app_rx)
+    }
+
+    /// Every modal the pane opened, drained from the app channel.
+    fn opened_modals(
+        app_rx: &crossbeam::channel::Receiver<crate::AppEvent>,
+    ) -> Vec<crate::AppEvent> {
+        let mut modals = Vec::new();
+        while let Ok(event) = app_rx.try_recv() {
+            if matches!(
+                event,
+                crate::AppEvent::UiEvent(crate::ui::UiAppEvent::Modal(_))
+            ) {
+                modals.push(event);
+            }
+        }
+        modals
+    }
+
     /// Picking a result on the search page leaves the page and asks for the
-    /// item's ancestors: the browser then walks the tree to it.
+    /// item's ancestors: the browser then walks the tree to it. An episode
+    /// (and a movie) result plays once the tree is on it.
     #[test]
     fn selecting_a_search_result_opens_the_library_page() {
         let (mut pane, ctx, work_rx) = pane_with_server();
@@ -907,10 +955,134 @@
         pane.search_results_state.select(Some(0));
         pane.search_activate(&ctx).unwrap();
         assert_eq!(pane.mode, JellyfinTabMode::Libraries);
+        assert!(
+            pane.jump.as_ref().is_some_and(|jump| jump.target.id == "ep2" && jump.play),
+            "an episode result plays once the tree is open"
+        );
         assert!(matches!(
             work_rx.try_recv(),
             Ok(WorkRequest::FetchJellyfinAncestors { ref item_id }) if item_id == "ep2"
         ));
+    }
+
+    /// A search result is a place in the library: activating **any** of them
+    /// leaves the tree with a selected item. A series only opens (its seasons
+    /// are the right pane); nothing plays.
+    #[test]
+    fn a_series_search_result_opens_into_the_series_and_selects_it() {
+        let (mut pane, ctx, work_rx) = pane_with_server();
+        pane.views = vec![jf_item("lib", "TV", "CollectionFolder")];
+        let series = jf_item("series", "Futurama", "Series");
+        let s1 = jf_item("s1", "Season 1", "Season");
+        let library = pane.views[0].clone();
+        pane.mode = JellyfinTabMode::Search;
+        pane.search_results = vec![series.clone()];
+        pane.search_results_state.select(Some(0));
+        pane.search_activate(&ctx).unwrap();
+        assert!(
+            pane.jump.as_ref().is_some_and(|jump| !jump.play),
+            "a series result only opens, it does not play"
+        );
+        feed(&mut pane, &ctx, JF_ANCESTORS, JellyfinResult::Ancestors {
+            item_id: "series".to_owned(),
+            items: vec![library],
+        });
+        feed(&mut pane, &ctx, JF_FOLDER, JellyfinResult::Children {
+            parent_id: "lib".to_owned(),
+            items: vec![series],
+        });
+        feed(&mut pane, &ctx, JF_FOLDER, JellyfinResult::Children {
+            parent_id: "series".to_owned(),
+            items: vec![s1],
+        });
+        assert_eq!(pane.selected.as_ref().map(JfNodeKind::id), Some("series"));
+        assert_eq!(pane.item_list.selected(), Some(0), "season 1 is selected");
+        assert!(
+            pane.tree_list.selected().is_some(),
+            "the series row is selected in the tree"
+        );
+        let mut requests = Vec::new();
+        while let Ok(request) = work_rx.try_recv() {
+            requests.push(request);
+        }
+        assert!(
+            !requests
+                .iter()
+                .any(|request| matches!(request, WorkRequest::FetchJellyfinSeason { .. })),
+            "nothing is played"
+        );
+    }
+
+    /// A series result has no play action, so the context-menu key opens
+    /// nothing for it — the search menu belongs to the playable video results
+    /// (movies/episodes).
+    #[test]
+    fn a_series_search_result_opens_no_context_menu() {
+        let (mut pane, ctx, _work_rx, app_rx) = play_rig();
+        pane.mode = JellyfinTabMode::Search;
+        pane.search_results = vec![jf_item("series", "Futurama", "Series")];
+        pane.search_results_state.select(Some(0));
+        pane.search_context_menu(&ctx).unwrap();
+        assert!(
+            opened_modals(&app_rx).is_empty(),
+            "no item menu is opened for a container"
+        );
+    }
+
+    /// A result with no saved position does not ask: the clicked episode
+    /// starts right away (with its season playlist), never the row the cursor
+    /// happened to sit on.
+    #[test]
+    fn a_fresh_search_result_starts_immediately() {
+        let (mut pane, ctx, work_rx, app_rx) = play_rig();
+        pane.views = vec![jf_item("lib", "TV", "CollectionFolder")];
+        let series = jf_item("series", "Futurama", "Series");
+        let season = jf_item("season1", "Season 1", "Season");
+        let mut ep1 = jf_item("ep1", "Space Pilot 3000", "Episode");
+        ep1.season_id = Some("season1".to_owned());
+        let mut ep2 = jf_item("ep2", "The Series Has Landed", "Episode");
+        ep2.season_id = Some("season1".to_owned());
+        let library = pane.views[0].clone();
+
+        pane.mode = JellyfinTabMode::Search;
+        pane.search_results = vec![jf_item("ep2", "The Series Has Landed", "Episode")];
+        pane.search_results_state.select(Some(0));
+        pane.search_activate(&ctx).unwrap();
+        feed(&mut pane, &ctx, JF_ANCESTORS, JellyfinResult::Ancestors {
+            item_id: "ep2".to_owned(),
+            items: vec![season.clone(), series.clone(), library],
+        });
+        feed(&mut pane, &ctx, JF_FOLDER, JellyfinResult::Children {
+            parent_id: "lib".to_owned(),
+            items: vec![series],
+        });
+        feed(&mut pane, &ctx, JF_FOLDER, JellyfinResult::Children {
+            parent_id: "series".to_owned(),
+            items: vec![season],
+        });
+        feed(&mut pane, &ctx, JF_FOLDER, JellyfinResult::Children {
+            parent_id: "season1".to_owned(),
+            items: vec![ep1, ep2],
+        });
+
+        assert_eq!(pane.selected.as_ref().map(JfNodeKind::id), Some("season1"));
+        assert_eq!(pane.item_list.selected(), Some(1), "the clicked episode");
+        assert!(pane.tree_list.selected().is_some());
+        let mut requests = Vec::new();
+        while let Ok(request) = work_rx.try_recv() {
+            requests.push(request);
+        }
+        assert!(
+            requests.iter().any(|request| {
+                matches!(
+                    request,
+                    WorkRequest::FetchJellyfinSeason { season_id, episode_id }
+                        if season_id == "season1" && episode_id == "ep2"
+                )
+            }),
+            "the clicked episode starts"
+        );
+        assert!(opened_modals(&app_rx).is_empty(), "a fresh item asks nothing");
     }
 
     /// An episode jump expands library → series → season, shows the season's

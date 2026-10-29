@@ -471,29 +471,24 @@ impl Jellyfin {
             .unwrap_or_default();
         Ok(items.iter().filter_map(|v| item_from_value(v, false)).collect())
     }
-    /// Server-side search across the user's libraries (round 60 B2): the
-    /// Jellyfin `SearchHints` endpoint returns matching items of every
-    /// kind (movies, episodes, music albums/artists/songs, folders…)
-    /// with the primary-image + overview fields the pane displays.
+    /// Server-side search across the user's libraries (round 60 B2), limited
+    /// to the kinds the search page can jump into (2026-10-29): **movies,
+    /// series and episodes**. A search result is a place in the library, not
+    /// a player entry — songs, albums and artists have no jump of their own,
+    /// so the server is asked for these three types and the answer is
+    /// filtered again here (a server that ignores `IncludeItemTypes` must not
+    /// leak them onto the page).
     pub fn search_hints(&self, query: &str) -> Result<Vec<JfItem>> {
-        let encoded: String =
-            url::form_urlencoded::byte_serialize(query.as_bytes()).collect();
-        let path = format!(
-            "/Search/Hints?SearchTerm={encoded}&UserId={}&Limit=60",
-            self.user_id
-        );
+        let path = search_hints_path(&self.user_id, query);
         let data = self.get(&path)?;
         let hints = data
             .get("SearchHints")
             .and_then(serde_json::Value::as_array)
             .cloned()
             .unwrap_or_default();
-        Ok(
-            hints
-                .iter()
-                .filter_map(search_hint_item)
-                .collect(),
-        )
+        let mut items: Vec<JfItem> = hints.iter().filter_map(search_hint_item).collect();
+        items.retain(|item| is_search_kind(&item.kind));
+        Ok(items)
     }
     /// The Home page's three shelves in one work-thread round trip (three
     /// GETs: Continue Watching, Next Up, Recently Added). Each shelf is
@@ -973,6 +968,26 @@ fn iso639_2_to_1(code: &str) -> Option<&'static str> {
         },
     )
 }
+/// The kinds the search page lists: the ones a result can be **jumped to**
+/// in the library tree (2026-10-29). Everything else the server may match
+/// (songs, albums, artists, seasons, folders, videos) has no search entry of
+/// its own — a song would just start playing without ever producing a tree
+/// selection.
+fn is_search_kind(kind: &str) -> bool {
+    matches!(kind, "Movie" | "Series" | "Episode")
+}
+
+/// The `/Search/Hints` path for `query`, restricted to [`is_search_kind`]
+/// types. Jellyfin takes `IncludeItemTypes` as a comma-separated list; the
+/// commas are percent-encoded so the request survives any transport.
+fn search_hints_path(user_id: &str, query: &str) -> String {
+    let encoded: String = url::form_urlencoded::byte_serialize(query.as_bytes()).collect();
+    format!(
+        "/Search/Hints?SearchTerm={encoded}&UserId={user_id}\
+         &IncludeItemTypes=Movie%2CSeries%2CEpisode&Limit=60"
+    )
+}
+
 /// Convert one `SearchHints` entry (JSON shape: `ItemId` instead of
 /// `Id`, plus `StartDate`, `PrimaryImageTag`, …) into a [`JfItem`] by
 /// normalizing its id, then reusing the shared item parser.
@@ -1421,5 +1436,36 @@ mod tests {
             user_id: "u".to_owned(),
         };
         assert_eq!(jf.stream_url("abc"), "http://x:8086/Audio/abc/stream?static=true&api_key=tok");
+    }
+
+    /// The search page lists only what it can jump to: movies, series and
+    /// episodes. Songs, albums, artists, seasons and folders are not search
+    /// results (2026-10-29 user request).
+    #[test]
+    fn only_movies_series_and_episodes_are_search_results() {
+        for kind in ["Movie", "Series", "Episode"] {
+            assert!(is_search_kind(kind), "{kind} is a search result");
+        }
+        for kind in ["Audio", "MusicAlbum", "MusicArtist", "Season", "Video", "Folder",
+                     "CollectionFolder", "Playlist", "Person"] {
+            assert!(!is_search_kind(kind), "{kind} is not a search result");
+        }
+    }
+
+    /// The request asks the server for exactly those three types (so 60 results
+    /// are 60 usable ones) and still keeps the page's limit.
+    #[test]
+    fn the_search_request_is_limited_to_the_jumpable_types() {
+        let path = search_hints_path("u", "overgeared S01E03");
+        assert!(
+            path.contains("IncludeItemTypes=Movie%2CSeries%2CEpisode"),
+            "the server filters by type: {path}"
+        );
+        assert!(path.contains("Limit=60"), "{path}");
+        assert!(path.contains("UserId=u"), "{path}");
+        assert!(
+            path.contains("SearchTerm=overgeared+S01E03"),
+            "the query is still encoded: {path}"
+        );
     }
 }
