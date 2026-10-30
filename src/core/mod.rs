@@ -2,6 +2,10 @@ pub mod accent;
 pub mod client;
 pub mod command;
 pub mod config_watcher;
+/// The always-on daemon: owns the stream buffer proxy and, while no TUI is
+/// attached, the queue's web-stream caretaker. See
+/// `docs/design/Backend/daemon.md`.
+pub mod daemon;
 pub mod event_loop;
 pub mod input;
 /// One running instance per user: the lock file that refuses a second TUI

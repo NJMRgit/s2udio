@@ -632,6 +632,15 @@ impl Ctx {
         // its on-disk index (and the key -> original-link map) is loaded, and
         // so a buffered row pointing at a previous run's proxy port can be
         // repaired below.
+        //
+        // The always-on daemon owns that proxy when it is running: the TUI
+        // only registers entries with it (a TUI-hosted proxy would die with
+        // the TUI, taking the playing stream and the daemon's caretaker
+        // registrations with it). Without a daemon this is the in-process
+        // proxy, exactly as before.
+        #[cfg(not(test))]
+        let _daemon_proxy = crate::core::stream_cache::init_client(config.cache_dir.as_deref());
+        #[cfg(test)]
         crate::core::stream_cache::init(config.cache_dir.as_deref());
         let mut queue = client.playlist_info()?.unwrap_or_default();
         // A buffered row whose URL points at another run's proxy port is dead

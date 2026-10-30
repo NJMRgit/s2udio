@@ -81,6 +81,15 @@ fn main() -> Result<()> {
         Some(Command::Dl { cmd }) => {
             crate::core::dlctl::run(cmd).map_err(anyhow::Error::msg)?;
         }
+        Some(Command::Daemon { cmd }) => {
+            crate::core::daemon::run(
+                cmd,
+                args.config.clone(),
+                args.address.clone(),
+                args.password.clone(),
+                args.partition.partition.clone(),
+            )?;
+        }
         Some(Command::Remote { command, pid }) => {
             handle_remote(command, pid);
         }
@@ -490,6 +499,17 @@ fn run_tui(args: &mut Args) -> Result<()> {
             .context("Failed to request lyrics indexing")?;
     }
     event_tx.send(AppEvent::RequestRender).context("Failed to render first frame")?;
+    // The always-on daemon owns the stream buffer proxy and, while this TUI is
+    // not attached, warms the queue's web-stream rows. Start it before the
+    // context resolves the queue, so a restored buffered row points at a proxy
+    // that survives this TUI. Without a daemon the context falls back to the
+    // in-process proxy.
+    crate::core::daemon::ensure_running(&crate::core::daemon::LaunchOptions {
+        config: args.config.clone(),
+        address: args.address.clone(),
+        password: args.password.clone(),
+        partition: args.partition.partition.clone(),
+    });
     let mut client = Client::init(
             config.address.clone(),
             config.password.clone(),

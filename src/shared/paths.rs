@@ -190,6 +190,30 @@ pub fn resolve_bin(name: &str) -> PathBuf {
     PathBuf::from(name)
 }
 
+/// One s2udio cache **file**, honoring an explicit cache dir and the legacy
+/// `~/.cache/rmpc` location when the new dir does not hold the file yet.
+///
+/// The paste pipeline had a private copy of this rule for `yt-info.json`;
+/// the daemon's caretaker must read and write the *same* file, so the rule
+/// lives here now. The legacy dir is a read-only fallback: a file missing
+/// from both resolves to the new dir, which every writer then creates.
+pub fn s2udio_cache_path(cache_dir: Option<&Path>, file: &str) -> PathBuf {
+    if let Some(dir) = cache_dir {
+        return dir.join(file);
+    }
+    let new = s2udio_cache_dir()
+        .unwrap_or_else(|| tilde_expand("~/.cache/s2udio").into_owned().into())
+        .join(file);
+    let legacy: PathBuf = tilde_expand("~/.cache/rmpc").into_owned().into();
+    if new.exists() {
+        new
+    } else if legacy.join(file).exists() {
+        legacy.join(file)
+    } else {
+        new
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

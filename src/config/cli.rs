@@ -297,6 +297,56 @@ pub enum Command {
     /// committed action) spawns the daemon; it exits when the last job is
     /// done; progress lives in `~/.cache/s2udio/downloads.json`.
     Dl { #[command(subcommand)] cmd: DlCmd },
+    /// Control the always-on s2udio daemon: the stream buffer proxy and the
+    /// detached queue caretaker (resolves the next web-stream rows even while
+    /// the TUI is closed). The TUI starts it on demand.
+    Daemon { #[command(subcommand)] cmd: DaemonCmd },
+}
+/// `s2udio daemon ...` (see `docs/design/Backend/daemon.md`).
+#[derive(Subcommand, Clone, Debug, PartialEq)]
+#[clap(rename_all = "lower")]
+pub enum DaemonCmd {
+    /// Start the daemon (idempotent) and print its state.
+    Start,
+    /// Print the daemon's state.
+    Status,
+    /// Stop the daemon (graceful request, then SIGTERM/SIGKILL).
+    Stop,
+    /// Launch the player's quick-access terminal, or toggle the running one
+    /// (the daemon's registered hotkey does the same thing).
+    Qat {
+        /// What to do; the QAT itself toggles, so show/hide are the same
+        /// action today.
+        #[arg(default_value = "toggle")]
+        action: QatAction,
+    },
+    /// Hidden daemon entry point for `daemon start` and the TUI's startup
+    /// ensure: owns the stream proxy and the caretaker until stopped (never
+    /// typed by users).
+    #[clap(hide = true)]
+    Serve {
+        /// Config file the daemon should read (the starter forwards it).
+        #[arg(short, long, value_hint = clap::ValueHint::AnyPath, value_name = "FILE")]
+        config: Option<std::path::PathBuf>,
+        /// MPD address override, as on the top-level CLI.
+        #[arg(short, long)]
+        address: Option<String>,
+        /// MPD password override, as on the top-level CLI.
+        #[arg(short, long)]
+        password: Option<String>,
+        /// MPD partition to watch, as on the top-level CLI.
+        #[arg(long)]
+        partition: Option<String>,
+    },
+}
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq)]
+#[clap(rename_all = "lower")]
+pub enum QatAction {
+    Toggle,
+    Show,
+    Hide,
+    /// Print the daemon's QAT state (attached TUI, registered hotkey).
+    Status,
 }
 #[derive(Subcommand, Clone, Debug, PartialEq)]
 #[clap(rename_all = "lower")]

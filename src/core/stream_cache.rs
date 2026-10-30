@@ -48,14 +48,14 @@ pub enum StreamClass {
 }
 
 impl StreamClass {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Audio => "audio",
             Self::Video => "video",
         }
     }
 
-    fn from_str(value: &str) -> Option<Self> {
+    pub(crate) fn from_str(value: &str) -> Option<Self> {
         match value {
             "audio" => Some(Self::Audio),
             "video" => Some(Self::Video),
@@ -192,12 +192,84 @@ pub struct StreamCache {
 
 static PROXY: OnceLock<Arc<StreamCache>> = OnceLock::new();
 
+/// Set when the TUI runs beside the s2udio daemon: the proxy lives in the
+/// daemon (it must outlive the TUI), so this process only sends registrations
+/// and lookups over the daemon socket. `port` is the daemon proxy's port.
+struct DaemonProxy {
+    port: Option<u16>,
+}
+
+static DAEMON_PROXY: OnceLock<DaemonProxy> = OnceLock::new();
+
+/// Whether this process is a client of the daemon's proxy.
+pub(crate) fn uses_daemon_proxy() -> bool {
+    DAEMON_PROXY.get().is_some()
+}
+
 /// Start the buffer (bind its loopback port and load the on-disk index).
 /// Called once at app startup so a queue restored from MPD still resolves
 /// its buffered URLs (their upstream URLs are gone; the original links and
 /// any completed cache files are not).
 pub fn init(cache_dir: Option<&Path>) {
     let _ = PROXY.get_or_init(|| StreamCache::start(cache_dir));
+}
+
+/// The TUI's startup path: use the daemon's proxy when one is running, and
+/// otherwise fall back to the in-process proxy (the pre-daemon behaviour —
+/// non-systemd installs, `S2U_DAEMON_SOCKET` unavailable, tests).
+///
+/// Returns whether the daemon is hosting the proxy. A daemon without a bound
+/// proxy is still adopted: playback falls back to the CDN URLs either way,
+/// and attaching keeps the daemon's caretaker in its proper state.
+#[cfg_attr(test, allow(dead_code))]
+pub(crate) fn init_client(cache_dir: Option<&Path>) -> bool {
+    match crate::core::daemon::ping() {
+        Ok(info) => {
+            if info.proxy_port.is_none() {
+                log::warn!("The s2udio daemon could not bind its stream proxy; streams use the CDN directly");
+            }
+            let _ = DAEMON_PROXY.set(DaemonProxy { port: info.proxy_port });
+            let _ = crate::core::daemon::attach_tui();
+            log::info!(proxy_port:? = info.proxy_port; "Using the s2udio daemon's stream proxy");
+            true
+        }
+        Err(err) => {
+            log::debug!(error:? = err; "No s2udio daemon; starting the in-process stream proxy");
+            init(cache_dir);
+            false
+        }
+    }
+}
+
+/// The daemon proxy port when this process is a daemon client.
+fn daemon_port() -> Option<u16> {
+    DAEMON_PROXY.get().and_then(|daemon| daemon.port)
+}
+
+/// Ask the daemon to register an entry (and optionally preload it). Returns
+/// the daemon's port when the reply carries one.
+fn daemon_register(class: StreamClass, original_url: &str, upstream_url: &str, preload: bool) -> Option<u16> {
+    let request = if preload {
+        crate::core::daemon::proto::Request::Preload {
+            class: class.as_str().to_owned(),
+            original: original_url.to_owned(),
+            upstream: upstream_url.to_owned(),
+        }
+    } else {
+        crate::core::daemon::proto::Request::Register {
+            class: class.as_str().to_owned(),
+            original: original_url.to_owned(),
+            upstream: upstream_url.to_owned(),
+        }
+    };
+    match crate::core::daemon::request(&request) {
+        Ok(crate::core::daemon::proto::Reply::Port { port }) => port.or(daemon_port()),
+        Ok(_) => daemon_port(),
+        Err(err) => {
+            log::warn!(error:? = err; "The s2udio daemon did not accept the stream registration");
+            None
+        }
+    }
 }
 
 /// Register the entry's current upstream URL and return the stable
@@ -209,6 +281,14 @@ pub fn proxy_url(
     original_url: &str,
     upstream_url: &str,
 ) -> String {
+    if uses_daemon_proxy() {
+        return match daemon_register(class, original_url, upstream_url, false) {
+            Some(port) => {
+                format!("http://127.0.0.1:{port}/s2u/{}/{}", class.as_str(), key_for(original_url))
+            }
+            None => upstream_url.to_owned(),
+        };
+    }
     let cache = PROXY.get_or_init(|| StreamCache::start(cache_dir));
     cache.register(class, original_url, upstream_url);
     match cache.port {
@@ -227,6 +307,10 @@ pub fn preload(
     original_url: &str,
     upstream_url: &str,
 ) {
+    if uses_daemon_proxy() {
+        let _ = daemon_register(class, original_url, upstream_url, true);
+        return;
+    }
     let cache = PROXY.get_or_init(|| StreamCache::start(cache_dir));
     cache.register(class, original_url, upstream_url);
     if cache.port.is_some() {
@@ -252,6 +336,19 @@ pub fn is_buffered_url(url: &str) -> bool {
 /// for a non-buffered URL or an unknown key.
 pub fn original_link_for_url(cache_dir: Option<&Path>, url: &str) -> Option<String> {
     let key = buffered_key(url)?;
+    if uses_daemon_proxy() {
+        // The daemon holds the live registry; the manifest below is its
+        // persisted fallback and is still consulted when the socket is gone.
+        match crate::core::daemon::request(&crate::core::daemon::proto::Request::OriginalLink {
+            key: key.to_owned(),
+        }) {
+            Ok(crate::core::daemon::proto::Reply::Link { link: Some(link) }) => return Some(link),
+            Ok(_) => {}
+            Err(err) => {
+                log::warn!(error:? = err; "The s2udio daemon did not answer the original-link lookup");
+            }
+        }
+    }
     if let Some(cache) = PROXY.get() {
         let inner = lock(&cache.inner);
         if let Some(original) = inner
@@ -307,6 +404,16 @@ pub fn forget_registration_for_test(url: &str) {
 /// MPD restart the playing track from the beginning on every upstream hiccup.
 pub fn needs_upstream_refresh(url: &str) -> bool {
     let Some(key) = buffered_key(url) else { return false };
+    if uses_daemon_proxy() {
+        return match crate::core::daemon::request(&crate::core::daemon::proto::Request::NeedsRefresh {
+            url: url.to_owned(),
+        }) {
+            Ok(crate::core::daemon::proto::Reply::Refresh { needed }) => needed,
+            // A daemon that cannot answer means this process cannot prove the
+            // row is servable; re-resolving is the safe answer.
+            _ => true,
+        };
+    }
     let Some(cache) = PROXY.get() else { return true };
     if let Some(port) = cache.port
         && url_port(url).is_some_and(|row_port| row_port != port)
@@ -323,7 +430,24 @@ pub fn needs_upstream_refresh(url: &str) -> bool {
 
 /// This run's proxy port, when the proxy is running.
 pub fn current_port() -> Option<u16> {
+    if uses_daemon_proxy() {
+        return daemon_port();
+    }
     PROXY.get().and_then(|cache| cache.port)
+}
+
+/// Daemon-side lookup for the IPC handler: the original link a buffer key
+/// was registered from. Deliberately does not consult the on-disk manifest —
+/// the daemon's live registry is authoritative there.
+pub(crate) fn original_link_for_key(key: &str) -> Option<String> {
+    let cache = PROXY.get()?;
+    let inner = lock(&cache.inner);
+    inner
+        .entries
+        .get(key)
+        .map(|entry| entry.original_url.clone())
+        .or_else(|| inner.registrations.get(key).map(|reg| reg.original_url.clone()))
+        .filter(|original| !original.is_empty())
 }
 
 /// The port a buffered URL points at.
@@ -845,21 +969,32 @@ fn handle_client(
     };
     let key = key.to_owned();
 
-    let known = {
+    let (known, content_type) = {
         let mut state = lock(inner);
+        let content_type = state
+            .entries
+            .get(&key)
+            .and_then(|entry| entry.content_type.clone());
         let known = state.registrations.contains_key(&key)
             || state.entries.get(&key).is_some_and(|entry| entry.complete);
         if known {
             *state.active.entry(key.clone()).or_insert(0) += 1;
         }
-        known
+        (known, content_type)
     };
     if !known {
         return write_head(&mut client, "404 Not Found", &[]);
     }
 
     let result = if cache.is_complete(&key) {
-        serve_from_disk(&mut client, root, class, &key, header_value(&head, "Range"))
+        serve_from_disk(
+            &mut client,
+            root,
+            class,
+            &key,
+            content_type.as_deref(),
+            header_value(&head, "Range"),
+        )
     } else {
         serve_via_fill(&mut client, inner, root, cache, class, &key, header_value(&head, "Range"))
     };
@@ -878,6 +1013,7 @@ fn serve_from_disk(
     root: &Path,
     class: StreamClass,
     key: &str,
+    content_type: Option<&str>,
     range_header: Option<&str>,
 ) -> io::Result<()> {
     let path = cache_path(root, class, key);
@@ -898,7 +1034,13 @@ fn serve_from_disk(
     let partial = wanted.is_some();
     let status = if partial { "206 Partial Content" } else { "200 OK" };
     let mut headers = vec![
-        ("Content-Type", "application/octet-stream".to_owned()),
+        // The stored type matters: MPD picks its decoder from the content
+        // type (a buffered row's URL has no extension), so a completed entry
+        // served as generic octet-stream fails to decode and MPD stops.
+        (
+            "Content-Type",
+            content_type.unwrap_or("application/octet-stream").to_owned(),
+        ),
         ("Accept-Ranges", "bytes".to_owned()),
         ("Content-Length", length.to_string()),
     ];
@@ -933,8 +1075,13 @@ fn serve_via_fill(
         return forward_range(client, &reg.upstream_url, range_header);
     }
     let Some(fill) = cache.ensure_fill(key) else {
-        // It completed between the lookup and here: serve it from disk.
-        return serve_from_disk(client, root, class, key, range_header);
+        // It completed between the lookup and here: serve it from disk, with
+        // the content type the completed entry recorded.
+        let content_type = lock(inner)
+            .entries
+            .get(key)
+            .and_then(|entry| entry.content_type.clone());
+        return serve_from_disk(client, root, class, key, content_type.as_deref(), range_header);
     };
     // Wait for the upstream response headers (or a failure).
     let (total, content_type, failed) = {
@@ -1564,8 +1711,15 @@ mod tests {
 
         // A replay range is served from the cache file, not the upstream.
         let (mut server, mut client) = connected_pair();
-        serve_from_disk(&mut server, &root, StreamClass::Audio, &key, Some("bytes=10-19"))
-            .expect("served from disk");
+        serve_from_disk(
+            &mut server,
+            &root,
+            StreamClass::Audio,
+            &key,
+            Some("audio/mpeg"),
+            Some("bytes=10-19"),
+        )
+        .expect("served from disk");
         // The client reads raw bytes, not HTTP framing: close the server side
         // so `read_to_end` sees EOF.
         let _ = server.shutdown(std::net::Shutdown::Both);
@@ -1573,6 +1727,10 @@ mod tests {
         client.read_to_end(&mut response).expect("read response");
         let text = String::from_utf8_lossy(&response);
         assert!(text.starts_with("HTTP/1.1 206 Partial Content"), "got: {text}");
+        assert!(
+            text.contains("Content-Type: audio/mpeg"),
+            "a completed entry is served with its stored content type: {text}"
+        );
         let marker: Vec<u8> = (10..=19u8).collect();
         assert!(
             response.windows(marker.len()).any(|window| window == marker.as_slice()),

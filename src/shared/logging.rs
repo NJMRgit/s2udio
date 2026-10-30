@@ -162,6 +162,31 @@ pub fn init_daemon() -> Result<LoggerHandle, FlexiLoggerError> {
         .start()
 }
 
+/// The always-on s2udio daemon's logger (`s2udio daemon serve`).
+///
+/// Same reasoning as [`init_daemon`]: the daemon is detached and has no
+/// terminal or status bar, so its caretaker decisions (which row it resolved,
+/// why it backed off, when a TUI attached) must land in their own appended
+/// file. Separate basename from the downloader daemon so the two logs never
+/// interleave.
+pub fn init_s2udio_daemon() -> Result<LoggerHandle, FlexiLoggerError> {
+    let uid = rustix::process::geteuid();
+    let spec = match crate::shared::paths::s2udio_state_dir() {
+        Some(dir) => FileSpec::default()
+            .directory(dir)
+            .basename(format!("s2udio_daemon_{}", uid.as_raw()))
+            .suppress_timestamp(),
+        None => FileSpec::default()
+            .directory(std::env::temp_dir())
+            .basename(format!("s2udio_daemon_{}", uid.as_raw()))
+            .suppress_timestamp(),
+    };
+    with_rotation(flexi_logger::Logger::try_with_env_or_str("debug")?.log_to_file(spec))
+        .format_for_files(structured_detailed_format)
+        .set_palette("1;3;15;4;13".to_string())
+        .start()
+}
+
 #[allow(dead_code)]
 fn init_release(tx: Sender<AppEvent>) -> Result<LoggerHandle, FlexiLoggerError> {
     with_rotation(flexi_logger::Logger::try_with_env_or_str("debug")?.log_to_file(log_file_spec()))
