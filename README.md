@@ -67,6 +67,9 @@ from official distro repositories or the AUR — no patched cava, no patched
 mpDris2, no yt-dlp-ejs. It is idempotent (safe to re-run) and never
 overwrites existing configs.
 
+Prefer to do it by hand, or on a distro the script does not cover? See
+[**manual-setup.md**](manual-setup.md) for the same steps as plain commands.
+
 ### Distro support matrix
 
 | Backend | Distros | Packages come from | Notes |

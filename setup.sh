@@ -224,6 +224,59 @@ seed_config_theme() {
 }
 
 # ---------------------------------------------------------------------------
+# Kitty quick-access terminal: s2udio can only raise the player out of a
+# hidden QAT through kitty's own remote control, so the two overrides belong
+# in the user's QAT config. Create the file when it is missing, append what is
+# missing when it exists, and never overwrite anything else.
+qat_conf_step() {
+    local conf_dir conf
+    if ! command -v kitty >/dev/null 2>&1; then
+        info "kitty quick access terminal: kitty not installed - skipping the QAT overrides"
+        return 0
+    fi
+    conf_dir="${KITTY_CONFIG_DIRECTORY:-${XDG_CONFIG_HOME:-$HOME/.config}/kitty}"
+    conf="$conf_dir/quick-access-terminal.conf"
+    local allow='kitty_override allow_remote_control=socket-only'
+    local listen='kitty_override listen_on=unix:@s2udio-qat'
+    if [[ -f "$conf" ]] \
+        && grep -qE '^[[:space:]]*kitty_override[[:space:]]+allow_remote_control=socket-only' "$conf" \
+        && grep -qE '^[[:space:]]*kitty_override[[:space:]]+listen_on=unix:@s2udio-qat' "$conf"; then
+        ok "QAT remote control already configured ($conf)"
+        return 0
+    fi
+    if [[ -f "$conf" ]]; then
+        info "kitty quick access terminal: remote-control overrides"
+        if confirm "Add the QAT remote-control overrides to $conf (needed to raise the player)?"; then
+            {
+                printf '\n# s2udio: let the player be raised from a hidden quick access terminal\n'
+                grep -qE '^[[:space:]]*kitty_override[[:space:]]+allow_remote_control=socket-only' "$conf" \
+                    || printf '%s\n' "$allow"
+                grep -qE '^[[:space:]]*kitty_override[[:space:]]+listen_on=unix:@s2udio-qat' "$conf" \
+                    || printf '%s\n' "$listen"
+            } >> "$conf"
+            ok "appended to $conf (restart the quick access terminal to apply)"
+        else
+            warn "skipped - without them s2udio cannot raise the hidden quick access terminal"
+        fi
+        return 0
+    fi
+    info "kitty quick access terminal: no $conf yet"
+    if confirm "Create $conf with the QAT remote-control overrides (raising the player needs them)?"; then
+        mkdir -p "$conf_dir"
+        {
+            printf '# Created by s2udio setup.sh: the quick access terminal needs kitty\n'
+            printf '# remote control so s2udio can raise the player when the panel is hidden.\n'
+            printf '%s\n%s\n' "$allow" "$listen"
+        } > "$conf"
+        ok "created $conf (restart kitty, then use the quick access terminal)"
+    else
+        warn "skipped - create $conf manually with:"
+        warn "  $allow"
+        warn "  $listen"
+    fi
+}
+
+# ---------------------------------------------------------------------------
 # Radio favourites migration: the favourites used to live as an MPD stored
 # playlist (<playlist>.m3u in MPD's playlist dir), which rmpc's playlist UI
 # showed as a playlist it doesn't understand. They now live in the s2udio
@@ -1063,6 +1116,7 @@ run_arch() {
 
     # ---------------------------------------------------------------------------
     seed_config_theme
+    qat_conf_step
 
     # ---------------------------------------------------------------------------
     cava_step "pacman -Q cava" "install it (sudo pacman -S cava)"
@@ -1212,6 +1266,7 @@ run_dnf5() {
     install_support_scripts
     install_s2u_svc
     seed_config_theme
+    qat_conf_step
     cava_step "" "install it (sudo dnf5 install cava)"
     ensure_mpd_conf
     services_step_systemd
@@ -1253,6 +1308,7 @@ run_apt() {
     install_support_scripts
     install_s2u_svc
     seed_config_theme
+    qat_conf_step
     cava_step "" "install it (sudo apt-get install cava)"
     ensure_mpd_conf
     services_step_systemd
@@ -1319,6 +1375,7 @@ run_apk() {
     install_support_scripts
     install_s2u_svc
     seed_config_theme
+    qat_conf_step
     cava_step "" "install it or rebuild from source (see step 1)"
     ensure_mpd_conf
     services_step_launcher
@@ -1371,6 +1428,7 @@ run_xbps() {
     install_support_scripts
     install_s2u_svc
     seed_config_theme
+    qat_conf_step
     cava_step "" "install it (sudo xbps-install -S cava)"
     ensure_mpd_conf
     services_step_runit
@@ -1425,6 +1483,7 @@ run_nix() {
     install_support_scripts
     install_s2u_svc
     seed_config_theme
+    qat_conf_step
     cava_step "" "install it (nix profile install nixpkgs#cava)"
     ensure_mpd_conf
 
