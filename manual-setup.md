@@ -5,14 +5,26 @@ install by hand, or whose distro is not covered by the script. It mirrors what
 the script does on Arch/CachyOS, Fedora, Debian/Ubuntu/Devuan, Alpine, Void
 and NixOS; commands are shown for those families where they differ.
 
+**Version note.** This guide describes the **current version**, s2udio
+**0.11.0 git `4b2a5ff`** (2026-10-30) **or later**, the first master with the
+**always-on daemon**. `s2udio version` prints the exact build
+(`s2udio 0.11.0 git <sha>`); the daemon is in every build from `4b2a5ff`
+onward. Installing an older, pre-daemon build? Follow the same sections except
+section 5 (the daemon does not exist there), skip the daemon-only checks in
+sections 11–12, and read
+[Old versions (without the daemon)](#old-versions-without-the-daemon) at the
+bottom for what differs — the last such master was **0.11.0 git `9e3b493`**
+(2026-10-29).
+
 Nothing here writes outside your home directory except the optional
 `/opt/s2udio` prefix for programs no package manager owns (Alpine/NixOS
 mpDris2, a cava built from source). Use `sudo` only where it is shown.
 
 If you only want the quick version: install the dependencies, `cargo build
 --release`, put `target/release/s2u` on your `PATH` as `s2udio`, copy
-`scripts/s2u-helper` next to it, seed the config, point MPD at your music and
-start the app.
+`scripts/s2u-helper` next to it, seed the config, point MPD at your music,
+start the app — and on the current version run `s2udio daemon autostart on`
+so the daemon owns the player across logins (section 5).
 
 ---
 
@@ -60,7 +72,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profil
 
 ```sh
 git clone https://github.com/NJMRgit/s2udio.git
-cd s2udio
+cd s2udio                     # current version: 4b2a5ff or later
 cargo build --release
 install -Dm755 target/release/s2u ~/.local/bin/s2udio
 ```
@@ -69,8 +81,12 @@ The Cargo artifact is named **`s2u`**; the installed name is **`s2udio`**.
 Make sure `~/.local/bin` is on your `PATH`.
 
 ```sh
-s2udio version
+s2udio version                # e.g. s2udio 0.11.0 git 4b2a5ff
 ```
+
+The daemon is present in every build from `4b2a5ff` (2026-10-30) onward. An
+older commit builds without it — see the old-version section before going
+further.
 
 ## 4. Support programs
 
@@ -98,7 +114,69 @@ Optional companion tools:
 - `s2u-mpdris/` — the standalone video MPRIS bridge; the `s2u-helper mpris`
   subcommand is the embedded equivalent and is enough.
 
-## 5. Configuration
+## 5. The always-on daemon (current version — start it now)
+
+The current version moves the stream buffer proxy, the web-stream caretaker
+and the QAT controller into a detached per-user daemon. The TUI starts it on
+demand, but starting it explicitly and enabling login autostart is what makes
+the current version behave as documented:
+
+```sh
+s2udio daemon start         # idempotent; the TUI also does this on demand
+s2udio daemon status        # pid, proxy port, MPD, attached TUI, hotkey
+s2udio daemon autostart on  # install + enable the systemd user unit
+```
+
+What the daemon gives you:
+
+- the stream buffer proxy survives the TUI and a destroyed QAT, so a web row
+  keeps playing and the queue's next web streams are resolved/preloaded while
+  no TUI is attached (the TUI's own look-ahead is authoritative while it is);
+- `s2udio remote raise`, a media widget's **Raise** (MPRIS), and
+  `s2udio daemon qat raise` relaunch the QAT with a fresh TUI when the
+  compositor destroyed it — no live TUI socket needed;
+- the QAT **Meta+T** hotkey is owned by the daemon (KWin script), with
+  `S2U_QAT_HOTKEY` overriding the chord. Remove an old
+  `net.local.kitten.desktop` shortcut on the same chord; two bindings fight.
+  See section 10 for the kitty side of the QAT.
+
+`daemon autostart on` writes and enables this systemd **user** unit (the
+daemon detaches, so the unit is a oneshot around the idempotent CLI):
+
+```ini
+# ~/.config/systemd/user/s2udio-daemon.service
+[Unit]
+Description=s2udio always-on daemon (stream proxy, web-stream caretaker, QAT)
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart="%h/.local/bin/s2udio" daemon start
+ExecStop="%h/.local/bin/s2udio" daemon stop
+
+[Install]
+WantedBy=graphical-session.target
+```
+
+```sh
+systemctl --user daemon-reload
+systemctl --user enable --now s2udio-daemon.service
+```
+
+The same switch from the TUI is **Settings > Advanced > startup > start daemon
+at login**. Turning it off removes the login start but deliberately leaves a
+running daemon alone (`s2udio daemon stop` stops it). The unit needs the
+graphical session environment (Wayland/D-Bus for the QAT and hotkey); Plasma
+imports it into the systemd user session. On a non-systemd session, run
+`s2udio daemon start` from your login autostart instead (the
+`daemon autostart` command itself needs systemd).
+
+If MPD is not configured yet, the daemon retries its connection; finish
+sections 6–7 and `s2udio daemon status` should show it connected.
+
+## 6. Configuration
 
 ```sh
 mkdir -p ~/.config/s2udio/themes
@@ -120,7 +198,7 @@ printf 'input-ipc-server=/tmp/mpvsocket\n' >> ~/.config/mpv/mpv.conf
 Smart playlists, key remaps, cava settings and Jellyfin credentials are
 sidecars in the same directory, all managed by the app.
 
-## 6. MPD
+## 7. MPD
 
 s2udio is an MPD client; MPD must be reachable (default `127.0.0.1:6600`).
 A small **user-level** MPD is the least surprising setup (it puts the server
@@ -151,9 +229,10 @@ sudo systemctl disable --now mpd
 
 Start MPD as your user (`mpd --no-daemon ~/.config/mpd/mpd.conf`, or a user
 service). Check it with `mpc status`; the app's `Settings > MPD` also has
-update/rescan actions.
+update/rescan actions. Once MPD is up, `s2udio daemon status` (section 5)
+should report it connected.
 
-## 7. Services and desktop integration
+## 8. Services and desktop integration
 
 The `s2u-helper svc` subcommand abstracts systemd-user, runit, s6, openrc and
 a plain-launcher backend:
@@ -191,7 +270,7 @@ The torrent engine's **S2RQ** entry (`s2udio rq start`) is written by the
 script only when rqbit is installed; copy its `Exec=` line from
 `setup.sh` if you want it.
 
-## 8. Optional features
+## 9. Optional features
 
 - **YouTube / SoundCloud / NicoVideo**: install `yt-dlp`; resolution is
   per-play. The `s2u-yt` wrapper adds PO tokens for YouTube when deployed.
@@ -206,11 +285,12 @@ script only when rqbit is installed; copy its `Exec=` line from
 - **SVP4**: enable `Settings > mpv > svp support`; the app then launches
   SVP4's bundled mpv.
 
-## 9. Kitty quick access terminal (raising)
+## 10. Kitty quick access terminal and raising
 
 If you run s2udio in kitty's **quick-access-terminal**, raising the player
 back into view uses kitty's own remote control. Add these two overrides to
-`~/.config/kitty/quick-access-terminal.conf` (create the file if needed):
+`~/.config/kitty/quick-access-terminal.conf` (create the file if needed;
+`setup.sh` offers to do this automatically):
 
 ```conf
 kitty_override allow_remote_control=socket-only
@@ -222,72 +302,33 @@ Notes:
 - The QAT is a layer-shell panel; while it is hidden its surface is unmapped,
   and no window manager can show it again. `s2udio` asks kitty to
   `resize-os-window --action=show` over the socket above.
-- Bind `kitten quick-access-terminal` to a shortcut (or run it from a
-  terminal). If a newer build's daemon owns the shortcut, do not also keep a
-  desktop-file shortcut on the same chord — see the next section.
+- On the current version the daemon owns the QAT toggle: it registers
+  **Meta+T** through KWin (section 5), so you do **not** need a desktop-file
+  shortcut for the panel. If you keep a custom shortcut bound to `kitten
+  quick-access-terminal`, give it a different chord — or remove it.
+- Raising works both ways: with a live TUI the TUI maps/focuses its own
+  panel; with no TUI (destroyed QAT, screen blank) the daemon launches a fresh
+  one (`s2udio remote raise` / MPRIS `Raise` / `s2udio daemon qat raise`).
 - The exact lines are what the app prints when raising fails with remote
   control disabled.
-
-## 10. The always-on daemon and its autostart (newer builds)
-
-Builds that contain the daemon (2026-10-30 and later) can keep the stream
-buffer proxy and the web-stream caretaker alive outside the TUI, and reopen
-the QAT after the compositor destroys it:
-
-```sh
-s2udio daemon start      # idempotent; the TUI also does this on demand
-s2udio daemon status
-s2udio daemon qat raise  # bring the player up (live TUI or launch the QAT)
-```
-
-The TUI's **Settings > Advanced > startup** has a *start daemon at login*
-toggle. The equivalent command is:
-
-```sh
-s2udio daemon autostart on     # off / status also work
-```
-
-It writes and enables this systemd **user** unit (the daemon itself detaches,
-so the unit is a oneshot around the idempotent CLI):
-
-```ini
-# ~/.config/systemd/user/s2udio-daemon.service
-[Unit]
-Description=s2udio always-on daemon (stream proxy, web-stream caretaker, QAT)
-PartOf=graphical-session.target
-After=graphical-session.target
-
-[Service]
-Type=oneshot
-RemainAfterExit=yes
-ExecStart="%h/.local/bin/s2udio" daemon start
-ExecStop="%h/.local/bin/s2udio" daemon stop
-
-[Install]
-WantedBy=graphical-session.target
-```
-
-```sh
-systemctl --user daemon-reload
-systemctl --user enable --now s2udio-daemon.service
-```
-
-Turning autostart off only removes the login start; it does not stop a
-running daemon (`s2udio daemon stop` does). The daemon's QAT hotkey is
-registered through a KWin script (default **Meta+T**, `S2U_QAT_HOTKEY`
-overrides); remove any old `net.local.kitten.desktop` shortcut that uses the
-same chord. Raising (`s2udio remote raise`, MPRIS `Raise`) works while the
-daemon runs, even with no TUI.
 
 ## 11. Verify
 
 ```sh
-s2udio version
-s2udio debug-info                 # resolves the optional dependencies
-mpc status                        # MPD is reachable
-s2udio                            # the TUI starts and connects
-qdbus6 org.mpris.MediaPlayer2.mpd # audio MPRIS (after mpDris2 starts)
-s2udio remote raise               # while the TUI is live
+s2udio version                     # 0.11.0 git 4b2a5ff (or later)
+s2udio debug-info                  # resolves the optional dependencies
+s2udio daemon status               # daemon up, proxy port, MPD, attached TUI
+s2udio daemon autostart status     # enabled/disabled + the unit path
+mpc status                         # MPD is reachable
+s2udio                             # the TUI starts and connects
+qdbus6 org.mpris.MediaPlayer2.mpd  # audio MPRIS (after mpDris2 starts)
+s2udio remote raise                # while the TUI is live
+```
+
+Then close the QAT (or let the screen blank) and run
+
+```sh
+s2udio remote raise                # the daemon relaunches the QAT + a fresh TUI
 ```
 
 Logs: `~/.local/state/s2udio/s2udio_<uid>.log` (app) and
@@ -302,6 +343,7 @@ git pull
 cargo build --release
 install -Dm755 target/release/s2u ~/.local/bin/s2udio
 install -Dm755 scripts/s2u-helper ~/.local/bin/s2u-helper
+s2udio daemon autostart status    # the unit's ExecStart points at the binary
 ```
 
 Uninstall: stop the app and the daemon, disable autostart
@@ -309,6 +351,43 @@ Uninstall: stop the app and the daemon, disable autostart
 `~/.local/bin/`, the `mpDris2` user unit, the S2RQ entry, and (optionally)
 `~/.config/s2udio/` and `~/.cache/s2udio/`. MPD and your music library are
 untouched.
+
+## Old versions (without the daemon)
+
+**These instructions are for s2udio 0.11.0 git `9e3b493` (2026-10-29) and
+earlier** — the last master before the always-on daemon landed in `4b2a5ff`
+(2026-10-30). The version number is still 0.11.0; the git describe/date is
+what tells the builds apart.
+
+```sh
+git clone https://github.com/NJMRgit/s2udio.git
+cd s2udio
+git checkout 9e3b493            # or an older tag/commit
+cargo build --release
+install -Dm755 target/release/s2u ~/.local/bin/s2udio
+```
+
+Sections 4 (support programs), 6 (configuration), 7 (MPD), 8 (services),
+9 (optional features) and 10 (kitty overrides) apply unchanged. Section 5
+does **not**: there is no `s2udio daemon` command in these builds, so there is
+nothing to start and no `daemon autostart`.
+
+What is different without the daemon:
+
+- **The TUI hosts the stream buffer proxy itself.** Closing the TUI kills the
+  proxy, so a web stream still being served ends with it, and the next web
+  queue row cannot be resolved while no TUI is open. (The detached mpv session
+  and the tracker still cover video, as before.)
+- **Raising needs a live TUI.** `s2udio remote raise` and a media widget's
+  **Raise** work only while the TUI is running. If the QAT was destroyed
+  (screen blank removes the compositor output), there is no daemon to relaunch
+  it, and `CanRaise` is simply "a TUI is running".
+- **The QAT toggle is your own shortcut.** These builds have no KWin/QAT
+  controller: bind `kitten quick-access-terminal` to a shortcut yourself, for
+  example KDE System Settings → Shortcuts → Add Command. The two kitty
+  `kitty_override` lines are still required for raising a hidden QAT.
+- There is no `Meta+T` action owned by s2udio; a leftover
+  `net.local.kitten.desktop` shortcut is the only toggle in these versions.
 
 ## Troubleshooting
 
@@ -322,8 +401,14 @@ untouched.
   mpDris2.service` and the `s2u-helper svc is-active mpDris2` output.
 - **YouTube fails to resolve**: update `yt-dlp`; on YouTube, deploy the
   `s2u-yt` wrapper for PO tokens; see the app's log for the yt-dlp error.
-- **Raising does nothing**: the QAT needs the two kitty overrides above, and
-  the daemon (newer builds) must be running; `s2udio daemon status`.
+- **Raising does nothing**: the QAT needs the two kitty overrides in section
+  10, and the daemon (current version) must be running — `s2udio daemon
+  status`. On a pre-`4b2a5ff` build there is no daemon; raising needs a live
+  TUI by design.
 - **The app cannot connect to MPD**: check the address in
   `~/.config/s2udio/config.ron` and the MPD service; permissions on the music
   directory and the MPD cache/db directory are the usual culprits.
+- **Daemon does not start / autostart does not stick**: check
+  `s2udio daemon status`, `systemctl --user status s2udio-daemon.service`,
+  and the daemon log; a session without a systemd user manager has no unit,
+  so use a login autostart entry that runs `s2udio daemon start`.
