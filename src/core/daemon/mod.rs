@@ -25,8 +25,9 @@ use std::{
 use anyhow::{Context, Result, anyhow, bail};
 use rustix::process::{Pid, Signal, kill_process};
 
-use crate::config::cli::{DaemonCmd, QatAction};
+use crate::config::cli::{AutostartAction, DaemonCmd, QatAction};
 
+pub(crate) mod autostart;
 pub(crate) mod caretaker;
 pub(crate) mod proto;
 pub(crate) mod qat;
@@ -245,6 +246,7 @@ pub(crate) fn run(
             print_info(&info);
         }
         DaemonCmd::Stop => stop()?,
+        DaemonCmd::Autostart { action } => autostart_action(action)?,
         DaemonCmd::Qat { action } => qat_action(action)?,
         DaemonCmd::Serve { config, address, password, partition } => {
             let opts = LaunchOptions {
@@ -259,7 +261,32 @@ pub(crate) fn run(
     Ok(())
 }
 
-/// `s2udio daemon qat [toggle|show|hide|status]`: the same action the
+/// `s2udio daemon autostart [on|off|status]`: what Settings > Advanced's
+/// toggle does, without opening the panel.
+fn autostart_action(action: AutostartAction) -> Result<()> {
+    use crate::config::cli::AutostartAction as A;
+    let state = |on: bool| if on { "enabled" } else { "disabled" };
+    match action {
+        A::Status => {
+            println!(
+                "daemon autostart: {} ({})",
+                state(crate::core::daemon::autostart::enabled()),
+                crate::core::daemon::autostart::unit_path().display()
+            );
+        }
+        A::On | A::Off => {
+            let on = matches!(action, A::On);
+            crate::core::daemon::autostart::set_enabled(on)?;
+            println!("daemon autostart {}", state(on));
+            if !on {
+                println!("(the running daemon was left alone; use `s2udio daemon stop` to stop it)");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `s2udio daemon qat [toggle|raise|show|hide|status]`: the same action the
 /// registered hotkey fires, over the same socket.
 fn qat_action(action: QatAction) -> Result<()> {
     if action == QatAction::Status {

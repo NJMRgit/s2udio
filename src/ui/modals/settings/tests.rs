@@ -696,14 +696,18 @@ mod advanced_tests {
                 format!("{:?}", ContentRow::Advanced(AdvancedRow::DiagnosticsHeader)),
                 format!("{:?}", ContentRow::Advanced(AdvancedRow::MemoryWatchdog)),
                 format!("{:?}", ContentRow::Advanced(AdvancedRow::MemoryWatchdogInterval)),
+                format!("{:?}", ContentRow::Advanced(AdvancedRow::StartupHeader)),
+                format!("{:?}", ContentRow::Advanced(AdvancedRow::DaemonAutostart)),
             ],
             "the Advanced page's rows are a contract, not an implementation detail"
         );
-        // Only the header is a header — otherwise navigation would skip the
-        // two rows the user came here for.
+        // Only the headers are headers — otherwise navigation would skip the
+        // rows the user came here for.
         assert!(rows[0].is_header());
         assert!(!rows[1].is_header());
         assert!(!rows[2].is_header());
+        assert!(rows[3].is_header());
+        assert!(!rows[4].is_header());
     }
 
     /// A `ui:` block that names only one toggle must still parse, filling the
@@ -810,6 +814,30 @@ mod advanced_tests {
             "the live config is untouched until Save"
         );
         assert!(modal.has_changes(), "a staged toggle counts as a change");
+    }
+
+    /// The daemon-autostart row stages like every other toggle: Save is what
+    /// installs/removes the systemd user unit, not the keystroke.
+    #[test]
+    fn daemon_autostart_is_staged_and_saved_as_a_change() {
+        let (mut modal, mut ctx) = fixture();
+        let initial = modal.daemon_autostart_pending;
+        let system_before = crate::core::daemon::autostart::enabled();
+        modal
+            .toggle_advanced(&mut ctx, AdvancedRow::DaemonAutostart)
+            .unwrap();
+        assert_ne!(modal.daemon_autostart_pending, initial, "the staged value flips");
+        assert_eq!(
+            crate::core::daemon::autostart::enabled(),
+            system_before,
+            "toggling must not touch the installed unit"
+        );
+        assert!(modal.has_changes(), "a staged autostart toggle is a change");
+        assert_eq!(
+            modal.staged_settings().daemon_autostart,
+            modal.daemon_autostart_pending,
+            "Save receives the staged value"
+        );
     }
 }
 

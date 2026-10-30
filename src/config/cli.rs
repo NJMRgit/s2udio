@@ -312,6 +312,13 @@ pub enum DaemonCmd {
     Status,
     /// Stop the daemon (graceful request, then SIGTERM/SIGKILL).
     Stop,
+    /// Install/enable (on), disable/remove (off) or report (status) the
+    /// systemd user unit that starts the daemon at login. The same switch as
+    /// Settings > Advanced.
+    Autostart {
+        #[arg(default_value = "status")]
+        action: AutostartAction,
+    },
     /// Launch the player's quick-access terminal, or toggle the running one
     /// (the daemon's registered hotkey does the same thing).
     Qat {
@@ -338,6 +345,13 @@ pub enum DaemonCmd {
         #[arg(long)]
         partition: Option<String>,
     },
+}
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq)]
+#[clap(rename_all = "lower")]
+pub enum AutostartAction {
+    On,
+    Off,
+    Status,
 }
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq)]
 #[clap(rename_all = "lower")]

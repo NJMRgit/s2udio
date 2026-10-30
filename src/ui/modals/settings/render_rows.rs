@@ -489,6 +489,11 @@ impl SettingsModal {
                 AdvancedRow::MemoryWatchdog => {
                     Self::toggle_row("memory watchdog", self.ui_pending.memory_watchdog, style)
                 }
+                AdvancedRow::DaemonAutostart => Self::toggle_row(
+                    "start daemon at login",
+                    self.daemon_autostart_pending,
+                    style,
+                ),
                 AdvancedRow::MemoryWatchdogInterval => {
                     // Round 111: render through the shared stepper row. The
                     // hand-rolled version registered no `DeferredButton`s, so
@@ -501,7 +506,9 @@ impl SettingsModal {
                         style,
                     )
                 }
-                AdvancedRow::DiagnosticsHeader => (Vec::new(), Vec::new(), Vec::new(), None),
+                AdvancedRow::DiagnosticsHeader | AdvancedRow::StartupHeader => {
+                    (Vec::new(), Vec::new(), Vec::new(), None)
+                }
             },
             _ => (Vec::new(), Vec::new(), Vec::new(), None),
         }
@@ -621,6 +628,7 @@ impl SettingsModal {
             ContentRow::Jellyfin(JellyfinRow::Header) => "Jellyfin server".into(),
             ContentRow::Torrent(TorrentRow::Header) => "rqbit torrent engine".into(),
             ContentRow::Advanced(AdvancedRow::DiagnosticsHeader) => "diagnostics".into(),
+            ContentRow::Advanced(AdvancedRow::StartupHeader) => "at login".into(),
             _ => String::new(),
         }
     }
@@ -754,6 +762,9 @@ impl SettingsModal {
             // section's rows.
             ContentRow::Advanced(AdvancedRow::DiagnosticsHeader) => {
                 Line::from(vec![Span::styled(" diagnostics", dim)])
+            }
+            ContentRow::Advanced(AdvancedRow::StartupHeader) => {
+                Line::from(vec![Span::styled(" startup", dim)])
             }
             ContentRow::ThemeFlag(_)
             | ContentRow::AutoTheme

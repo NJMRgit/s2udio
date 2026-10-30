@@ -118,10 +118,15 @@ impl SettingsModal {
             AdvancedRow::MemoryWatchdog => {
                 self.ui_pending.memory_watchdog = !self.ui_pending.memory_watchdog;
             }
-            // The interval is adjusted, not toggled; the header is not
-            // interactive. Reaching either here is a wiring bug, not user
+            AdvancedRow::DaemonAutostart => {
+                self.daemon_autostart_pending = !self.daemon_autostart_pending;
+            }
+            // The interval is adjusted, not toggled; the headers are not
+            // interactive. Reaching any here is a wiring bug, not user
             // input.
-            AdvancedRow::DiagnosticsHeader | AdvancedRow::MemoryWatchdogInterval => {
+            AdvancedRow::DiagnosticsHeader
+            | AdvancedRow::MemoryWatchdogInterval
+            | AdvancedRow::StartupHeader => {
                 unreachable!("toggle_advanced called with a non-toggle row")
             }
         }
@@ -669,6 +674,9 @@ impl SettingsModal {
             },
             ContentRow::Advanced(AdvancedRow::MemoryWatchdog) => {
                 self.toggle_advanced(ctx, AdvancedRow::MemoryWatchdog)
+            }
+            ContentRow::Advanced(AdvancedRow::DaemonAutostart) => {
+                self.toggle_advanced(ctx, AdvancedRow::DaemonAutostart)
             }
             ContentRow::Advanced(_) => Ok(()),
             ContentRow::KeyTableHeader | ContentRow::KeyHeader(_) => Ok(()),

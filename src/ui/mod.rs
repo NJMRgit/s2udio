@@ -1474,6 +1474,16 @@ impl Ui {
                 if let Err(err) = state.save() {
                     status_warn!("Failed to save state: {err}");
                 }
+                // Daemon autostart (Settings > Advanced): install/remove the
+                // systemd user unit. Only when the choice actually changed;
+                // disabling removes the login start, it does not stop the
+                // running daemon.
+                #[cfg(not(test))]
+                if staged.daemon_autostart != crate::core::daemon::autostart::enabled() {
+                    if let Err(err) = crate::core::daemon::autostart::set_enabled(staged.daemon_autostart) {
+                        status_warn!("Failed to update daemon autostart: {err}");
+                    }
+                }
 
                 // Jellyfin credentials from a successful sign-in: persist to
                 // the sidecar (preferred over jellytui's config).

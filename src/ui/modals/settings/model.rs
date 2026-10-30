@@ -136,6 +136,10 @@ pub(super) enum AdvancedRow {
     /// How often the watchdog samples. Only meaningful while the toggle above
     /// is on.
     MemoryWatchdogInterval,
+    StartupHeader,
+    /// Install/remove the systemd user unit that starts the daemon at login.
+    /// Staged like every row; Save runs the installer/remover.
+    DaemonAutostart,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -323,6 +327,11 @@ pub(crate) struct StagedSettings {
     /// user never touched the row (legacy state.ron stays without the
     /// field and the server mode is left untouched).
     pub replay_gain: Option<ReplayGain>,
+    /// Start the daemon at login (Settings > Advanced). Applied on Save by
+    /// installing/enabling or disabling/removing the systemd user unit; the
+    /// unit itself is the persisted state.
+    #[cfg_attr(test, allow(dead_code))]
+    pub daemon_autostart: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -354,7 +363,7 @@ impl ContentRow {
             MpdRow::PlaybackHeader | MpdRow::DevicesHeader) |
             ContentRow::Mpv(MpvRow::Header) | ContentRow::Jellyfin(JellyfinRow::Header) |
             ContentRow::Torrent(TorrentRow::Header) |
-            ContentRow::Advanced(AdvancedRow::DiagnosticsHeader)
+            ContentRow::Advanced(AdvancedRow::DiagnosticsHeader | AdvancedRow::StartupHeader)
         )
     }
 }

@@ -83,6 +83,10 @@ pub struct SettingsModal {
     /// Staged "streaming also downloads" toggle (applied to the torrent
     /// config + persisted to state.ron on Save).
     torrent_stream_downloads_pending: bool,
+    /// Daemon autostart when the panel opened (the systemd user unit exists).
+    daemon_autostart_initial: bool,
+    /// Staged daemon autostart (installed/removed on Save).
+    daemon_autostart_pending: bool,
     /// UI show/hide toggles when the panel opened (staging baseline).
     ui_initial: UiSettings,
     /// Staged UI show/hide toggles (the live config is untouched until Save).
@@ -208,6 +212,7 @@ impl SettingsModal {
             .clone()
             .unwrap_or_default();
         let torrent_stream_downloads = ctx.config.torrent.stream_downloads;
+        let daemon_autostart = crate::core::daemon::autostart::enabled();
         let mut modal = Self {
             id: id::new(),
             section,
@@ -229,6 +234,8 @@ impl SettingsModal {
             torrent_socks_proxy_pending: torrent_socks_proxy,
             torrent_stream_downloads_initial: torrent_stream_downloads,
             torrent_stream_downloads_pending: torrent_stream_downloads,
+            daemon_autostart_initial: daemon_autostart,
+            daemon_autostart_pending: daemon_autostart,
             adjusting: None,
             adjust_snapshot: None,
             ui_initial,
@@ -375,6 +382,8 @@ impl SettingsModal {
                 ContentRow::Advanced(AdvancedRow::DiagnosticsHeader),
                 ContentRow::Advanced(AdvancedRow::MemoryWatchdog),
                 ContentRow::Advanced(AdvancedRow::MemoryWatchdogInterval),
+                ContentRow::Advanced(AdvancedRow::StartupHeader),
+                ContentRow::Advanced(AdvancedRow::DaemonAutostart),
             ],
         }
     }
@@ -427,6 +436,7 @@ impl SettingsModal {
             || !self.pending_remaps.is_empty() || self.jellyfin_credentials.is_some()
             || self.torrent_socks_proxy_pending != self.torrent_socks_proxy_initial
             || self.torrent_stream_downloads_pending != self.torrent_stream_downloads_initial
+            || self.daemon_autostart_pending != self.daemon_autostart_initial
     }
 
     /// The staged changes, handed to the UI to apply on Save.
@@ -446,6 +456,7 @@ impl SettingsModal {
             torrent_socks_proxy: self.torrent_socks_proxy_pending.clone(),
             torrent_stream_downloads: self.torrent_stream_downloads_pending,
             replay_gain: self.replay_gain_cycled.then_some(self.replay_gain_pending),
+            daemon_autostart: self.daemon_autostart_pending,
         }
     }
 
