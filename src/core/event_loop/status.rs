@@ -213,6 +213,23 @@ fn handle_mpd_error(ctx: &Ctx, state: &mut StatusState, err: &str) {
     }
 }
 
+/// The song id the metadata/chapters pipeline above actually ran for, or
+/// `None` when it had no current song to run against.
+///
+/// The marker exists so the queue-refresh catch-up (round 105,
+/// `handle_queue_update`) can re-run the pipeline on the playlist event that
+/// makes the new song visible. Recording a run that found no song defeats
+/// that: `handle_idle_event` also marks a song change on the transition to
+/// `Stop`, where `find_current_song_in_queue()` is `None` by design, so the
+/// pipeline runs against nothing — and the next playlist event, the only thing
+/// that can run the catch-up, then sees the song already "processed". (A status
+/// naming an id the stale queue lacks does *not* set the marker: that path
+/// never sets `song_changed`, so the catch-up already covers it.)
+/// "Processed" must mean "the pipeline had its song", not "it was called".
+fn processed_song_marker(ctx: &Ctx) -> Option<u32> {
+    ctx.find_current_song_in_queue().map(|(_, song)| song.id)
+}
+
 /// Classify MPD's `error:` field for [`handle_mpd_error`].
 fn plan_mpd_error(ctx: &Ctx, err: &str) -> MpdErrorPlan {
     let Some((uri, reason)) = decode_failure(err) else {
@@ -539,7 +556,7 @@ pub(super) fn handle_mpd_command_finished(
                 // ~3 s per transition — the measured storm).
                 crate::ui::modals::paste::warm_next_queue_link(ctx);
                 ctx.auto_show_chapters();
-                ctx.metadata_processed_song = ctx.status.songid;
+                ctx.metadata_processed_song = processed_song_marker(ctx);
             }
 
             // Round 98 (restored 105e): the look ahead is
@@ -831,6 +848,86 @@ mod resolve_current_song_tests {
 
     fn row(id: u32, file: &str) -> Song {
         Song { id, file: file.to_owned(), ..Default::default() }
+    }
+
+    /// The same fixture, but keeping the client receiver so a test can see how
+    /// many commands the path queues.
+    fn rig_with_client(
+        queue: Vec<Song>,
+        songid: Option<u32>,
+        state: State,
+    ) -> (
+        Ctx,
+        crossbeam::channel::Receiver<crate::shared::events::ClientRequest>,
+        crossbeam::channel::Receiver<WorkRequest>,
+    ) {
+        let app = crossbeam::channel::unbounded();
+        let work = crossbeam::channel::unbounded();
+        let client = crossbeam::channel::unbounded();
+        Box::leak(Box::new(app.1.clone()));
+        let work_rx = work.1.clone();
+        let client_rx = client.1.clone();
+        let mut ctx = crate::tests::fixtures::ctx(
+            (app.0, app.1),
+            (work.0, work.1),
+            (client.0, client.1),
+        );
+        ctx.queue = queue;
+        ctx.status.songid = songid;
+        ctx.status.state = state;
+        (ctx, client_rx, work_rx)
+    }
+
+    /// **A playing MPD is held before the current row is resolved.**
+    ///
+    /// This is the general guard, and the one the reported case actually hit:
+    /// the playlist was added while playback was already running, so no play
+    /// path ran and nothing held the player. MPD failed the unresolved row,
+    /// advanced, and this function resolved whichever row it landed on — the
+    /// app walking the queue behind the player ("it skips through multiple
+    /// selections").
+    #[test]
+    fn a_playing_mpd_is_held_while_the_current_row_resolves() {
+        let link = "https://www.youtube.com/watch?v=JJJ";
+        let (ctx, client_rx, work_rx) = rig_with_client(
+            vec![row(4, &format!("{link}#s2u-audio"))],
+            Some(4),
+            State::Play,
+        );
+
+        resolve_current_song(&ctx);
+
+        assert!(
+            asks_play(&work_rx, link, 4),
+            "the row is resolved into playback"
+        );
+        let queued = client_rx
+            .try_iter()
+            .filter(|r| matches!(r, crate::shared::events::ClientRequest::Command(_)))
+            .count();
+        assert_eq!(
+            queued, 1,
+            "MPD is stopped first, so it cannot fail the row and skip onward"
+        );
+    }
+
+    /// A row that needs no resolve leaves the player completely alone: holding
+    /// a healthy play would be an audible stutter.
+    #[test]
+    fn a_resolved_current_row_is_left_playing() {
+        let (ctx, client_rx, work_rx) = rig_with_client(
+            vec![row(4, "http://127.0.0.1:39235/s2u/audio/abc")],
+            Some(4),
+            State::Play,
+        );
+
+        resolve_current_song(&ctx);
+
+        assert!(
+            client_rx.try_iter().count() == 0,
+            "nothing is queued for a row that is already playable"
+        );
+        assert!(work_rx.try_iter().next().is_none(), "and nothing is resolved");
     }
 
     fn asks_play(work_rx: &crossbeam::channel::Receiver<WorkRequest>, link: &str, id: u32) -> bool {
@@ -1176,5 +1273,65 @@ mod mpd_error_plan_tests {
             "the stuck row is resolved and played"
         );
         assert_eq!(state.decode_recoveries.len(), 1, "one recovery was spent");
+    }
+}
+
+/// The `metadata_processed_song` invariant: the marker names the song the
+/// pipeline ran for, never a run that had no current song.
+#[cfg(test)]
+mod processed_marker_tests {
+    use super::processed_song_marker;
+    use crate::{
+        ctx::Ctx,
+        mpd::commands::{Song, State},
+    };
+
+    fn ctx_with(queue: Vec<(u32, &str)>, songid: Option<u32>, state: State) -> Ctx {
+        let app = crossbeam::channel::unbounded();
+        let work = crossbeam::channel::unbounded();
+        let client = crossbeam::channel::unbounded();
+        // Keep the fixture's receivers alive: other code may send on them.
+        Box::leak(Box::new(app.1.clone()));
+        Box::leak(Box::new(work.1.clone()));
+        Box::leak(Box::new(client.1.clone()));
+        let mut ctx = crate::tests::fixtures::ctx(
+            (app.0, app.1),
+            (work.0, work.1.clone()),
+            (client.0, client.1.clone()),
+        );
+        ctx.queue = queue
+            .into_iter()
+            .map(|(id, file)| Song { id, file: file.to_owned(), ..Default::default() })
+            .collect();
+        ctx.status.songid = songid;
+        ctx.status.state = state;
+        ctx
+    }
+
+    #[test]
+    fn a_playing_song_is_marked_processed() {
+        let ctx = ctx_with(vec![(7, "http://example/stream")], Some(7), State::Play);
+        assert_eq!(processed_song_marker(&ctx), Some(7));
+    }
+
+    /// The pipeline also runs on the *state* change to `Stop`, where
+    /// `find_current_song_in_queue()` is `None` by design: it does nothing.
+    /// Recording the id there made the queue-refresh catch-up (round 105) skip
+    /// the song on the next playlist event — the only event that can run it —
+    /// so the pipeline never got a real run while that song stayed current.
+    #[test]
+    fn a_stopped_player_marks_nothing() {
+        let ctx = ctx_with(vec![(7, "http://example/stream")], Some(7), State::Stop);
+        assert_eq!(processed_song_marker(&ctx), None);
+    }
+
+    /// The helper's contract: it names a song the pipeline could actually see.
+    /// (This path does not reach the pipeline today — a stale queue with the
+    /// player running never sets `song_changed` — but the invariant must not
+    /// depend on that.)
+    #[test]
+    fn a_song_the_stale_queue_does_not_hold_marks_nothing() {
+        let ctx = ctx_with(vec![(6, "http://example/old")], Some(7), State::Play);
+        assert_eq!(processed_song_marker(&ctx), None);
     }
 }

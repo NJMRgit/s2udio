@@ -720,9 +720,9 @@ impl JellyfinPane {
             .find(|card| card.rect.contains(position))
             .cloned()
     }
-    /// Activate the focused card: a movie/episode plays, a song plays through
-    /// MPD, a series/season opens in the tree, a **library** opens the tree on
-    /// that library.
+    /// Activate the focused card: a movie/episode opens the library tree on
+    /// itself and plays, a song plays through MPD, a series/season opens in the
+    /// tree, a **library** opens the tree on that library.
     pub(super) fn home_activate(&mut self, ctx: &Ctx) -> Result<()> {
         match self.home_focus_clamped() {
             HomeFocus::Libraries => {
@@ -757,21 +757,94 @@ impl JellyfinPane {
                         }
                         Ok(())
                     }
+                    // A video **shows where it lives**: the jump switches to
+                    // the tree page, expands the path to the item, selects it
+                    // and only then plays it (the search result's behaviour —
+                    // "playing something should leave me looking at it in the
+                    // library", 2026-10-26).
+                    //
+                    // A partly watched item asks **Continue / Start over
+                    // while the carousels are still on screen**: the answer
+                    // decides the position, so switching pages first would
+                    // take the question to a page the user has not chosen to
+                    // be on. Both answers arm the item (`pending_resume`) and
+                    // the jump, which `on_event`'s `ModalClosed` performs.
                     "Movie" | "Episode" | "Video" => {
-                        let Some(url) = self.stream_url(&item) else { return Ok(()) };
-                        Self::play_video(
-                            ctx,
-                            url,
-                            item.name.clone(),
-                            item.id.clone(),
-                            item.season_id.clone(),
-                            item.resume_secs(),
-                        )
+                        if let Some(seconds) = item
+                            .resume_secs()
+                            .filter(|secs| crate::core::event_loop::should_prompt_resume(
+                                *secs as f64,
+                            ))
+                        {
+                            return self.prompt_resume_then_jump(item, seconds, ctx);
+                        }
+                        self.start_jump(item, true, None, None, ctx)
                     }
                     _ => self.start_jump(item, false, None, None, ctx),
                 }
             }
         }
+    }
+    /// Ask the resume question **without leaving the carousels**: the answer
+    /// arms both the position (`ctx.mpv.pending_resume`) and the tree jump
+    /// (`ctx.pending_jf_tree_jump`), and the pane's `ModalClosed` handling
+    /// opens the tree on the item and starts it.
+    fn prompt_resume_then_jump(
+        &mut self,
+        item: JfItem,
+        seconds: u64,
+        ctx: &Ctx,
+    ) -> Result<()> {
+        use crate::core::mpv::PendingResume;
+        use crate::ui::modals::confirm_modal::{Action, ConfirmModal};
+        let formatted = ctx.config.duration_format.format(seconds);
+        let name = item.name.clone();
+        let continue_item = item.clone();
+        let start_item = item;
+        let continue_id = continue_item.id.clone();
+        let start_id = start_item.id.clone();
+        crate::shared::macros::modal!(
+            ctx,
+            ConfirmModal::builder()
+                .ctx(ctx)
+                .message(vec![
+                    format!("Resume {name}?"),
+                    format!("Continue from {formatted}."),
+                ])
+                .action(Action::CustomButtons {
+                    buttons: vec![
+                        (
+                            "Continue",
+                            Box::new(move |ctx| {
+                                *ctx.mpv.pending_resume.borrow_mut() = Some((
+                                    continue_id.clone(),
+                                    PendingResume::Continue(seconds as f64),
+                                ));
+                                ctx.pending_jf_tree_jump
+                                    .borrow_mut()
+                                    .replace(continue_item.clone());
+                                Ok(())
+                            }),
+                        ),
+                        (
+                            "Start over",
+                            Box::new(move |ctx| {
+                                *ctx.mpv.pending_resume.borrow_mut() = Some((
+                                    start_id.clone(),
+                                    PendingResume::StartOver,
+                                ));
+                                ctx.pending_jf_tree_jump
+                                    .borrow_mut()
+                                    .replace(start_item.clone());
+                                Ok(())
+                            }),
+                        ),
+                    ],
+                })
+                .size((56, 7))
+                .build()
+        );
+        Ok(())
     }
     /// Open the library tree on one library view (a Libraries card).
     fn open_library(&mut self, view: JfItem, ctx: &Ctx) -> Result<()> {
@@ -1145,8 +1218,20 @@ impl JellyfinPane {
         let base = ctx.config.as_list_text_style();
         let dim = base.add_modifier(Modifier::DIM);
         let header_rect = Rect { x: area.x, y, width: area.width, height: 1 };
+        // Hovering anywhere over a row brightens its header, the same
+        // "this is what a click lands on" cue the lists give.
+        let mouse = ctx.mouse_pos();
+        let row_rect = Rect {
+            x: area.x,
+            y,
+            width: area.width,
+            height: metrics.card_h.saturating_add(1),
+        };
+        let row_hovered = mouse.is_some_and(|pos| row_rect.contains(pos));
         let header_style = if focused {
             name_style.add_modifier(Modifier::BOLD)
+        } else if row_hovered {
+            name_style
         } else {
             dim
         };
@@ -1219,9 +1304,16 @@ impl JellyfinPane {
                 width: metrics.img_w.min(box_rect.width.saturating_sub(2)),
                 height: box_rect.height.saturating_sub(2),
             };
+            let card_hit = Rect {
+                height: box_rect.height + 2,
+                ..box_rect
+            };
             let selected = focused && index == view.cursor;
+            let hovered = mouse.is_some_and(|pos| card_hit.contains(pos));
             let style = if selected {
                 selected_style
+            } else if hovered {
+                crate::config::hover_style(border_style)
             } else if focused {
                 border_style
             } else {
@@ -1270,6 +1362,8 @@ impl JellyfinPane {
             let label_y = box_rect.bottom();
             let label_style = if selected {
                 selected_style.add_modifier(Modifier::BOLD)
+            } else if hovered {
+                crate::config::hover_style(name_style)
             } else if focused {
                 name_style
             } else {
@@ -1310,7 +1404,6 @@ impl JellyfinPane {
         } else {
             dim
         };
-        let mouse = ctx.mouse_pos();
         let mut arrow =
             |layout: &mut HomeLayout, strip: Rect, at: u16, glyph: &str, dir: i64| {
                 let style = if mouse.is_some_and(|pos| strip.contains(pos)) {

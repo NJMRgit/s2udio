@@ -517,6 +517,29 @@ mod tests {
         assert_eq!(subject.offset(), 15, "clamped to content_len - viewport_len");
     }
 
+    /// A follow jump runs on a status poll, **before** the next render has
+    /// measured the list — so `content_len` is still unknown for that frame.
+    /// `select_at_top` must still move the selection; bailing out silently is
+    /// the reported "the selection never lands on the track that starts
+    /// playing" after adding a playlist and pressing play.
+    ///
+    /// `select` (used everywhere else) already tolerates this: it reads
+    /// `content_len.unwrap_or_default()`. `select_at_top` returning early on
+    /// `None` was the asymmetry.
+    #[test]
+    fn select_at_top_selects_when_content_len_is_unknown() {
+        let mut subject: DirState<ListState> = DirState::default();
+        subject.set_content_len(None);
+
+        subject.select_at_top(3);
+
+        assert_eq!(
+            subject.get_selected(),
+            Some(3),
+            "the selection must move even before the list has been measured"
+        );
+    }
+
     #[test]
     fn select_at_top_handles_empty_content() {
         let mut subject: DirState<ListState> = DirState::default();
@@ -527,10 +550,11 @@ mod tests {
         assert_eq!(subject.get_selected(), None);
         assert_eq!(subject.offset(), 0);
 
-        // An unknown length is **not** an empty list: the list has simply not
+        // An unknown length is **not** an empty list: the list simply has not
         // been measured yet (the follow jump runs before the next render), so
         // the selection must still move. Treating this as a no-op was the
-        // "selection never lands on the track that starts playing" bug.
+        // "selection never lands" bug — see
+        // `select_at_top_selects_when_content_len_is_unknown`.
         let mut subject: DirState<ListState> = DirState::default();
         subject.select_at_top(3);
         assert_eq!(subject.get_selected(), Some(3));

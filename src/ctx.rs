@@ -222,6 +222,24 @@ pub struct Ctx {
     #[debug(skip)]
     pub(crate) lrc_index: LrcIndex,
     pub(crate) rendered_frames: u64,
+    /// The one frame clock every animation and every stepped surface goes
+    /// through (`ui::anim`). Panes ask it for frames while they render; the
+    /// loop arms a single scheduler job from the shortest request, and
+    /// `finish_frame` disarms it when nothing asks.
+    pub(crate) animator: crate::ui::anim::Animator,
+    /// The UI is not on screen (a hidden tmux pane): the frame clock arms
+    /// nothing and continuous pacing stops. Set by the event loop's tmux hook
+    /// handler, read by `sync_animator`.
+    pub(crate) frames_paused: Cell<bool>,
+    /// Where the surfaces that paint **outside** the frame buffer are on
+    /// screen (album art, Jellyfin poster, cava band). Their owners declare
+    /// here; `Ui::refresh_overlays_after_clear` reads it, and anything that
+    /// needs to know what is under a point can ask it instead of the layout.
+    pub(crate) placements: RefCell<crate::ui::image::placements::Placements>,
+    /// How far the modal backdrop is dimmed right now, animated toward 1 while
+    /// a modal is open and back to 0 when the last one closes
+    /// (`advance_modal_fade` feeds `ui::scrim::dim_backdrop`).
+    pub(crate) modal_fade: Cell<crate::ui::anim::Fade>,
     #[debug(skip)]
     pub(crate) scheduler: Scheduler<
         (Sender<AppEvent>, Sender<ClientRequest>),
@@ -288,6 +306,12 @@ pub struct Ctx {
     /// this keeps the request to one per queue entry (`resolve_tagged_queue_entry`
     /// prunes it against the queue on every insert).
     pub(crate) pending_stream_resolve: RefCell<HashSet<(String, u32)>>,
+    /// A ready-to-play Jellyfin item whose **Continue / Start over** answer
+    /// arrived while the Home carousels were still on screen: the pane opens
+    /// the library tree on it (and starts it) as soon as that answer's modal
+    /// closes, so the switch away from Home happens only after the user has
+    /// chosen. See `JellyfinPane::on_event`'s `ModalClosed` arm.
+    pub(crate) pending_jf_tree_jump: RefCell<Option<crate::jellyfin::JfItem>>,
     /// Song file -> chapter markers (YouTube videos, Jellyfin items, local
     /// files with embedded chapters). Shown in the Queue tab via the
     /// Queue / Chapters toggle.
@@ -436,9 +460,19 @@ pub struct Ctx {
     /// functionally identical.
     pub(crate) torrent_picker_item:
         RefCell<Option<crate::ui::modals::paste::PastedItem>>,
-    /// The gated Stream button's animation frame (bumps on every picker
-    /// refresh so the spinner glyph moves while phase 4 is pending).
-    pub(crate) torrent_picker_spinner: std::cell::Cell<usize>,
+    /// The picker's spinner no longer owns a tick: it asks the shared frame
+    /// clock for a 120 ms cadence while the Stream button spins
+    /// (`Ctx::animator`), so there is no job id to keep here.
+    /// What the user has DONE in the open picker — the cursor row, the
+    /// ticked files and whether the footer buttons hold the focus. The picker
+    /// is rebuilt from scratch on every scan event (the spinner ticks once a
+    /// second while phase 4 is pending), and a fresh `MenuModal` starts with
+    /// its cursor on row 0 and every row ticked; without this the ticks the
+    /// user just made were wiped by the next rebuild — read back as "clicking
+    /// an item unselects it briefly, then it selects itself again".
+    /// `None` until the user touches the picker: every rebuild before that
+    /// keeps the defaults (every file ticked, cursor on the first row).
+    pub(crate) torrent_picker_ui: RefCell<Option<crate::ui::modals::torrent_picker::PickerUi>>,
     /// A download-only commit that has not shown its progress panel yet:
     /// the torrent's scan key. The 1 s `DlStatePoll` opens the job's
     /// download panel (`InfoListModal`) and clears this once the daemon
@@ -662,6 +696,10 @@ impl Ctx {
             app_event_sender,
             work_sender,
             scheduler,
+            animator: crate::ui::anim::Animator::default(),
+            frames_paused: Cell::new(false),
+            modal_fade: Cell::new(crate::ui::anim::Fade::at_rest(0.0)),
+            placements: RefCell::new(crate::ui::image::placements::Placements::default()),
             accent: crate::core::accent::AccentState::default(),
             client_request_sender,
             needs_render: Cell::new(false),
@@ -682,6 +720,7 @@ impl Ctx {
             pending_yt_links: RefCell::new(HashMap::new()),
             pending_start_seek: RefCell::new(HashMap::new()),
             pending_stream_resolve: RefCell::new(HashSet::new()),
+            pending_jf_tree_jump: RefCell::new(None),
             chapters: RefCell::new(HashMap::new()),
             queue_tab: Cell::new(QueueTabMode::Audio),
             playlist_import: RefCell::new(None),
@@ -708,7 +747,7 @@ impl Ctx {
             torrent_file_lists: RefCell::new(HashMap::new()),
             torrent_picker_key: RefCell::new(None),
             torrent_picker_item: RefCell::new(None),
-            torrent_picker_spinner: std::cell::Cell::new(0),
+            torrent_picker_ui: RefCell::new(None),
             dl_panel_pending: RefCell::new(None),
             paste_modal_items: RefCell::new(None),
             paste_modal_id: Cell::new(None),
@@ -832,9 +871,74 @@ impl Ctx {
             *slot = None;
         }
     }
+    /// The playback position to **draw**: MPD's `elapsed` advanced to now
+    /// while a track plays, so the bar moves between status answers instead of
+    /// stepping once per answer. See `ui::timeline` for the guards.
+    ///
+    /// This is a display value only. Seek targets, MPRIS/Jellyfin position
+    /// reports and lyrics lookups must keep using `status.elapsed`.
+    pub(crate) fn display_elapsed(&self) -> Duration {
+        let playing = self.status.state == crate::mpd::commands::State::Play
+            && self.status.error.is_none();
+        crate::ui::timeline::display_elapsed(
+            self.status.elapsed,
+            self.status.duration,
+            self.last_status_update.elapsed(),
+            playing,
+        )
+    }
+    /// How strongly the modal backdrop dims the screen right now, in
+    /// `0.0..=1.0`, and the reason the dim is animated rather than a switch.
+    ///
+    /// Called once per rendered frame from `Ui::render` with whether a modal is
+    /// on the stack. The fade is retargeted when the answer changes (and left
+    /// alone otherwise), and while it is still moving the frame clock is asked
+    /// for the next frame — so the backdrop fades in and out at the frame rate
+    /// and then stops costing anything.
+    pub(crate) fn advance_modal_fade(&self, modal_open: bool) -> crate::ui::anim::Fade {
+        const FADE: Duration = Duration::from_millis(120);
+        let now = Instant::now();
+        let target = if modal_open { 1.0 } else { 0.0 };
+        let mut fade = self.modal_fade.get();
+        if (fade.target() - target).abs() > f32::EPSILON {
+            fade.retarget(now, target, FADE);
+        }
+        if !fade.is_resting(now) {
+            self.animator.request_frame();
+        }
+        self.modal_fade.set(fade);
+        fade
+    }
+    /// Arm or cancel the UI's single frame tick from what the frame just drawn
+    /// asked for. Called once per rendered frame by [`Ctx::finish_frame`].
+    ///
+    /// The shortest request wins, `max_fps` is a hard ceiling, and a paused UI
+    /// arms nothing — so a hidden pane costs no frames and a spinner that
+    /// stops asking stops the clock on the next frame.
+    fn sync_animator(&self) {
+        let budget = crate::ui::anim::frame_budget(self.config.max_fps);
+        match self.animator.take_interval(budget, self.frames_paused.get()) {
+            Some(every) => {
+                let id = self.animator.job();
+                self.scheduler.schedule_replace(id, every, |(tx, _)| {
+                    tx.send(AppEvent::RequestRender)?;
+                    Ok(())
+                });
+            }
+            None => {
+                if let Some(id) = self.animator.idle() {
+                    self.scheduler.cancel(id);
+                }
+            }
+        }
+    }
     pub(crate) fn finish_frame(&mut self) {
         self.needs_render.replace(false);
         self.rendered_frames.add_assign(1);
+        // Consume this frame's animation requests and arm (or cancel) the one
+        // shared tick. Runs for every rendered frame, so a pane that stops
+        // asking stops the clock on the very next frame.
+        self.sync_animator();
         let stickers = self.stickers_to_fetch.take();
         if !stickers.is_empty() {
             match self.stickers_supported {

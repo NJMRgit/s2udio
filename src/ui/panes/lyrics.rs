@@ -1223,7 +1223,21 @@ impl LyricsPane {
     /// Year / Runtime / URL), with the same yellow group labels as the
     /// song info box. Scrollable with the mouse wheel; the offset resets
     /// when the video changes.
-    fn render_mpv_info(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) {
+    /// `described` is the stream the box must describe when the caller knows
+    /// which row is being described (the queue tab's selection); `None` means
+    /// "whatever is playing", which is what the mpv/video path wants.
+    ///
+    /// **This split is the whole fix for the 2026-10-21 report.** The queue
+    /// tab picked the right row for its decision but the box still rendered
+    /// `current_yt_info(ctx)` — the *playing* song — so the description never
+    /// followed the highlight. One lookup, two meanings, two callers.
+    fn render_mpv_info(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        ctx: &Ctx,
+        described: Option<&crate::shared::ytdlp::YtStreamInfo>,
+    ) {
         let key_style = ctx.config.theme.preview_label_style;
         let base = ctx.config.as_text_style();
         let list_style = ctx.config.as_list_text_style();
@@ -1239,7 +1253,11 @@ impl LyricsPane {
         let push_body = |body: &mut Vec<InfoBodyLine>, text: &str, style: Style| {
             body.push(InfoBodyLine::new(text, style));
         };
-        if let Some(yt) = crate::ui::modals::paste::current_yt_info(ctx) {
+        let stream = match described {
+            Some(info) => Some(info.clone()),
+            None => crate::ui::modals::paste::current_yt_info(ctx),
+        };
+        if let Some(yt) = stream {
             if !yt.title.is_empty() {
                 title = yt.title.clone();
             }
@@ -1569,7 +1587,7 @@ impl Pane for LyricsPane {
             self.edit_btn_area = Rect::default();
             self.word_areas.clear();
             self.pressed_btn = None;
-            self.render_mpv_info(frame, area, ctx);
+            self.render_mpv_info(frame, area, ctx, None);
             return Ok(());
         }
         if self.showing_info(ctx) {
@@ -1589,13 +1607,27 @@ impl Pane for LyricsPane {
                     .get()
                     .and_then(|id| ctx.queue.iter().find(|song| song.id == id))
             };
-            let song = if ctx.status.state == State::Stop {
-                selected()
+            let current = ctx.find_current_song_in_queue().map(|(_, song)| song);
+            // **Paused shows the highlighted row, not the one that is paused**
+            // (2026-10-21, user): browsing the queue while playback is paused
+            // is exactly when the box is read, and it described the paused
+            // track instead. Matches the Video list, which already follows its
+            // highlight (see `render_video_selection_info` above).
+            let selected_over_current = matches!(ctx.status.state, State::Pause | State::Stop);
+            let song = if selected_over_current {
+                selected().or(current)
             } else {
-                ctx.find_current_song_in_queue().map(|(_, song)| song).or_else(selected)
+                current.or_else(selected)
             };
-            if crate::ui::modals::paste::current_yt_info(ctx).is_some() {
-                self.render_mpv_info(frame, area, ctx);
+            // The stream layout belongs to the item the box describes, not to
+            // whatever is playing behind it. Asking `current_yt_info` (which
+            // looks at the *current* song) meant a paused stream's layout
+            // covered a highlighted local file, so the selection appeared to
+            // do nothing until playback moved on — the reported regression.
+            if let Some(described) = song
+                .and_then(|song| crate::ui::modals::paste::song_stream_info(ctx, &song.file))
+            {
+                self.render_mpv_info(frame, area, ctx, Some(&described));
                 return Ok(());
             }
             if let Some(song) = song {
@@ -2382,5 +2414,167 @@ mod info_margin_tests {
                 trimmed
             );
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod selection_info_tests {
+    use ratatui::{Terminal, backend::TestBackend};
+
+    use crate::{
+        shared::ytdlp::YtStreamInfo,
+        ui::panes::{Pane, lyrics::LyricsPane},
+    };
+
+    fn ctx() -> crate::ctx::Ctx {
+        let app = crossbeam::channel::unbounded();
+        let work = crossbeam::channel::unbounded();
+        let client = crossbeam::channel::unbounded();
+        Box::leak(Box::new(app.1.clone()));
+        Box::leak(Box::new(work.1.clone()));
+        Box::leak(Box::new(client.1.clone()));
+        crate::tests::fixtures::ctx((app.0, app.1), (work.0, work.1), (client.0, client.1))
+    }
+
+    fn song(id: u32, file: &str) -> crate::mpd::commands::Song {
+        crate::mpd::commands::Song { id, file: file.to_owned(), ..Default::default() }
+    }
+
+    /// Render the pane and return its text.
+    fn render(pane: &mut LyricsPane, ctx: &crate::ctx::Ctx) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(80, 16)).unwrap();
+        terminal
+            .draw(|frame| {
+                pane.render(frame, frame.area(), ctx).unwrap();
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// **The reported regression.** With a web stream paused, highlighting a
+    /// different queue row left the box on the stream: the stream layout was
+    /// chosen by asking `current_yt_info` (the *playing* song) rather than the
+    /// item the box describes, so the selection appeared dead until playback
+    /// moved on. The Video list already followed its highlight.
+    /// Two *streams*, because a stream row takes the rich layout either way —
+    /// which is how the 2026-10-21 follow-up slipped through: the box picked
+    /// the right row to describe, then rendered the **playing** stream's info
+    /// inside it. A local file as the second row cannot catch that, because it
+    /// renders the plain layout.
+    #[test]
+    fn a_paused_queue_describes_the_highlighted_stream() {
+        let mut ctx = ctx();
+        let playing = "https://www.youtube.com/watch?v=playing0001";
+        let highlighted = "https://www.youtube.com/watch?v=selected001";
+        for (link, title, channel) in [
+            (playing, "The paused one", "Channel A"),
+            (highlighted, "The highlighted one", "Channel B"),
+        ] {
+            ctx.yt_info.borrow_mut().insert(
+                link.to_owned(),
+                YtStreamInfo {
+                    title: title.to_owned(),
+                    channel: Some(channel.to_owned()),
+                    description: Some(format!("{title} description")),
+                    duration: Some(120.0),
+                    ..Default::default()
+                },
+            );
+        }
+        ctx.queue = vec![song(1, playing), song(2, highlighted)];
+        ctx.queue_selected_id.set(Some(2));
+        ctx.status.state = crate::mpd::commands::State::Pause;
+        ctx.status.songid = Some(1);
+
+        let mut pane = LyricsPane::new(&ctx);
+        let text = render(&mut pane, &ctx);
+        assert!(
+            text.contains("The highlighted one"),
+            "the box must describe the highlighted stream:\n{text}"
+        );
+        assert!(
+            text.contains("Channel B"),
+            "the highlighted stream's channel, not the paused one's:\n{text}"
+        );
+        assert!(
+            !text.contains("The paused one"),
+            "the paused stream must not supply the description:\n{text}"
+        );
+    }
+
+    #[test]
+    fn a_paused_queue_describes_the_highlighted_row() {
+        let mut ctx = ctx();
+        let stream_link = "https://www.youtube.com/watch?v=stream12345";
+        let local = "some/local/track.flac";
+        // A resolved stream is playing (paused) while a local file is
+        // highlighted.
+        ctx.yt_info.borrow_mut().insert(
+            stream_link.to_owned(),
+            YtStreamInfo {
+                title: "A paused stream".to_owned(),
+                channel: Some("Some Channel".to_owned()),
+                description: Some("Stream description body".to_owned()),
+                duration: Some(200.0),
+                ..Default::default()
+            },
+        );
+        ctx.queue = vec![song(1, stream_link), song(2, local)];
+        ctx.queue_selected_id.set(Some(2));
+        ctx.status.state = crate::mpd::commands::State::Pause;
+        ctx.status.songid = Some(1);
+
+        let mut pane = LyricsPane::new(&ctx);
+        let text = render(&mut pane, &ctx);
+
+        assert!(
+            !text.contains("Some Channel"),
+            "the paused stream's layout must not cover the highlighted row:\n{text}"
+        );
+        assert!(
+            !text.contains("Stream description body"),
+            "the paused stream's description must not be shown for another row:\n{text}"
+        );
+        assert!(
+            text.contains("track.flac") || text.contains("[File]"),
+            "the box must describe the highlighted row:\n{text}"
+        );
+    }
+
+    /// While playing, the box follows playback even if another row is
+    /// highlighted — playback is the thing being watched.
+    #[test]
+    fn while_playing_the_box_describes_the_playing_track() {
+        let mut ctx = ctx();
+        let stream_link = "https://www.youtube.com/watch?v=stream12345";
+        ctx.yt_info.borrow_mut().insert(
+            stream_link.to_owned(),
+            YtStreamInfo {
+                title: "A playing stream".to_owned(),
+                channel: Some("Some Channel".to_owned()),
+                duration: Some(200.0),
+                ..Default::default()
+            },
+        );
+        ctx.queue = vec![song(1, stream_link), song(2, "some/local/track.flac")];
+        ctx.queue_selected_id.set(Some(2));
+        ctx.status.state = crate::mpd::commands::State::Play;
+        ctx.status.songid = Some(1);
+        // `showing_info` needs the lyrics pane's own state out of the way.
+        let mut pane = LyricsPane::new(&ctx);
+        pane.current_lyrics = None;
+
+        let text = render(&mut pane, &ctx);
+        assert!(
+            text.contains("Some Channel"),
+            "while playing, the playing stream supplies the layout:\n{text}"
+        );
     }
 }

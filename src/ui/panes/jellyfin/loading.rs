@@ -90,24 +90,23 @@ impl JellyfinPane {
         }
     }
     /// Round 92: one library fetch started — show the loading indicator and
-    /// keep a slow redraw tick alive so its spinner animates.
+    /// ask the shared frame clock for its spinner cadence.
     fn begin_fetch(&mut self, ctx: &Ctx) {
         self.fetches_in_flight = self.fetches_in_flight.saturating_add(1);
         self.fetch_activity_at = std::time::Instant::now();
         if self.loading_since.is_none() {
             self.loading_since = Some(std::time::Instant::now());
         }
-        self.schedule_loading_tick(ctx);
+        self.request_loading_frames(ctx);
     }
     /// Round 92: one tracked fetch finished (result or error).
-    fn end_fetch(&mut self, ctx: &Ctx) {
+    fn end_fetch(&mut self, _ctx: &Ctx) {
         self.fetches_in_flight = self.fetches_in_flight.saturating_sub(1);
         self.fetch_activity_at = std::time::Instant::now();
         if self.fetches_in_flight == 0 {
+            // Nothing to cancel: the shared clock is only armed by requests,
+            // and the next frame asks for none.
             self.loading_since = None;
-            if let Some(id) = self.loading_tick.take() {
-                ctx.scheduler.cancel(id);
-            }
         }
     }
     /// Result ids whose fetches the loading indicator tracks (poster,
@@ -127,21 +126,11 @@ impl JellyfinPane {
                 | JF_SEARCH
         )
     }
-    /// Arm (and re-arm) the single redraw tick that animates the indicator.
-    pub(super) fn schedule_loading_tick(&mut self, ctx: &Ctx) {
-        let id = self.loading_tick.unwrap_or_else(|| {
-            let id = crate::shared::id::new();
-            self.loading_tick = Some(id);
-            id
-        });
-        ctx.scheduler.schedule_replace(
-            id,
-            std::time::Duration::from_millis(LOADING_FRAME_MS),
-            move |(tx, _)| {
-                tx.send(crate::AppEvent::RequestRender)?;
-                Ok(())
-            },
-        );
+    /// Ask the shared frame clock for the indicator's cadence. Called from
+    /// every frame that is still loading; a frame that is not asks nothing and
+    /// the clock disarms itself.
+    pub(super) fn request_loading_frames(&self, ctx: &Ctx) {
+        ctx.animator.request_every(std::time::Duration::from_millis(LOADING_FRAME_MS));
     }
     /// Request one library fetch (round 92: every request goes through
     /// here, so the loading indicator always matches what is in flight; a

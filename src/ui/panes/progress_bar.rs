@@ -40,12 +40,24 @@ impl Pane for ProgressBarPane {
             _ => {
                 let bar_cfg = &ctx.config.theme.progress_bar;
                 // While an mpv video plays, the seekbar mirrors mpv.
+                // f64 seconds, not `as_secs()`: the bar's fraction needs
+                // sub-second precision or it steps once per second — exactly
+                // the quantisation the live timeline exists to remove (the VM
+                // recorded it stepping 3 times in 3 s).
                 let (elapsed, duration) = if crate::core::mpv::mpv_is_ui_source(ctx) {
-                    (ctx.mpv.position as u64, ctx.mpv.duration as u64)
+                    (ctx.mpv.position, ctx.mpv.duration)
                 } else {
-                    (ctx.status.elapsed.as_secs(), ctx.status.duration.as_secs())
+                    // The live timeline: draw the position extrapolated to
+                    // this frame instead of the value MPD answered with, and
+                    // ask the clock for the next frame while it advances.
+                    if ctx.status.state == crate::mpd::commands::State::Play
+                        && !ctx.status.duration.is_zero()
+                    {
+                        ctx.animator.request_frame();
+                    }
+                    (ctx.display_elapsed().as_secs_f64(), ctx.status.duration.as_secs_f64())
                 };
-                let value = if duration == 0 { 0.0 } else { elapsed as f32 / duration as f32 };
+                let value = if duration <= 0.0 { 0.0 } else { (elapsed / duration) as f32 };
                 // Hovering the seekbar lightens the colors left of the
                 // pointer (the "played-portion" highlight); the rest of
                 // the bar keeps its normal colors.

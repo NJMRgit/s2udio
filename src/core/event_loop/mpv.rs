@@ -1018,8 +1018,9 @@ pub(crate) fn apply_pending_resume(ctx: &Ctx, url: &str) {
     let Some((item_id, choice)) = ctx.mpv.pending_resume.borrow_mut().take() else {
         return;
     };
-    // The answer belongs to the item it was asked about: a session that
-    // starts in between must not inherit the position.
+    // The answer belongs to the item it was asked about. The play path can
+    // take a few steps before mpv starts (Home opens the library tree first),
+    // so a session that starts in between must not inherit the position.
     if ctx.mpv.item_id.as_deref() != Some(item_id.as_str()) {
         log::debug!(
             answered_for:? = item_id.as_str(), playing:? = ctx.mpv.item_id.as_deref();
@@ -1182,8 +1183,9 @@ mod tests {
         );
     }
 
-    /// An answer asked about one item must never seek another: a session can
-    /// begin between the question and the launch it belongs to.
+    /// An answer asked about one item must never seek another: the play path
+    /// can span several steps (Home asks, then opens the library tree, then
+    /// starts), and a session can begin in between.
     #[test]
     fn an_answer_for_another_item_is_dropped() {
         let mut ctx = rig();

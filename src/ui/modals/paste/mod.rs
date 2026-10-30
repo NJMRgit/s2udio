@@ -613,11 +613,21 @@ pub fn on_torrent_scan_progress(
     if ctx.paste_modal_items.borrow().is_none() && !picker_open {
         return;
     }
-    ctx.torrent_scan_progress.borrow_mut().insert(key, progress);
+    let previous = ctx
+        .torrent_scan_progress
+        .borrow_mut()
+        .insert(key.clone(), progress)
+        .map(|previous| previous.elapsed_secs);
     // The wait may be an open torrent picker (the scan's phase 3/4) or the
     // paste popup's own `[Torrent]` row — refresh whichever is showing.
-    if ctx.torrent_picker_key.borrow().is_some() {
-        crate::ui::modals::torrent_picker::refresh_torrent_picker(ctx);
+    if picker_open {
+        // The picker's spinner is animated by its own redraw tick; the only
+        // thing this event can change on screen is the wait counter, and a
+        // rebuild for a counter that has not ticked yet would churn the modal
+        // (and everything the user is doing in it) once a second for nothing.
+        if previous != Some(progress.elapsed_secs) {
+            crate::ui::modals::torrent_picker::refresh_torrent_picker(ctx);
+        }
     } else {
         refresh_paste_modal(ctx);
     }
@@ -820,7 +830,7 @@ fn open_torrent_picker(
     *ctx.torrent_picker_item.borrow_mut() = Some(item.clone());
     *ctx.torrent_picker_key.borrow_mut() = Some(picker_key.clone());
     let picker =
-        crate::ui::modals::torrent_picker::TorrentPicker::new(ctx, picker_key, label, 0);
+        crate::ui::modals::torrent_picker::TorrentPicker::new(ctx, picker_key, label);
     modal!(ctx, picker);
     Ok(())
 }

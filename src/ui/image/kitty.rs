@@ -1,4 +1,8 @@
-use std::{io::Write, time::Instant};
+use std::{
+    io::Write,
+    sync::atomic::{AtomicU32, Ordering},
+    time::Instant,
+};
 
 use anyhow::{Context, Result};
 use base64::Engine;
@@ -24,8 +28,241 @@ use crate::{
     try_skip,
 };
 
-#[derive(Debug)]
-pub struct Kitty;
+/// Where album-art image ids start.
+///
+/// The id has to be unique across every image the app transmits, because kitty
+/// keys its image store by it. Three allocators coexist: the Home carousel
+/// owns a small contiguous block starting at 2 (one per slot), id 1 is the
+/// legacy single-image poster id, and the album art / poster overlay path
+/// takes ids from here — far above the wall's block, so a growing wall can
+/// never walk into the art's ids.
+const IMAGE_ID_BASE: u32 = 1 << 16;
+/// The highest id a placeholder cell can carry: the id IS the cell's
+/// foreground colour, and kitty reads it as a **24-bit** value in true colour
+/// mode (8-bit in 256-colour mode — see [`placeholder_foreground`]).
+const IMAGE_ID_MAX: u32 = 1 << 24;
+static NEXT_IMAGE_ID: AtomicU32 = AtomicU32::new(IMAGE_ID_BASE);
+
+/// A fresh image id for one encoded payload, always inside the placeholder
+/// space (`IMAGE_ID_BASE..IMAGE_ID_MAX`).
+pub fn next_image_id() -> u32 {
+    let raw = NEXT_IMAGE_ID.fetch_add(1, Ordering::Relaxed);
+    IMAGE_ID_BASE + raw % (IMAGE_ID_MAX - IMAGE_ID_BASE)
+}
+
+/// The escape that colours a placeholder cell with its image id.
+///
+/// Kitty's unicode placeholders carry the image id in the cell's **foreground
+/// colour**: "you are limited to either 8-bit IDs in 256 color mode or 24-bit
+/// IDs in true color mode". The 256-colour form (`38;5;<n>`) tops out at 255,
+/// so the moment image ids moved above that (this round's allocator starts at
+/// 1<<16) every picture was transmitted correctly and then drawn as **nothing**
+/// — the cells carried an id the terminal could not represent. The 24-bit form
+/// carries any id below 2^24.
+fn placeholder_foreground(image_id: u32) -> String {
+    let r = (image_id >> 16) & 0xff;
+    let g = (image_id >> 8) & 0xff;
+    let b = image_id & 0xff;
+    format!("\x1b[38;2;{r};{g};{b}m")
+}
+
+/// How many transmitted payloads one backend keeps alive in the terminal.
+///
+/// A re-place of a known id costs a placement command and the placeholder
+/// cells — not the payload. The cap bounds the terminal's image store: art
+/// changes on every track, and a long session must not accumulate every cover
+/// it ever showed.
+const TRANSMIT_CACHE: usize = 6;
+
+/// The kitty backend for one overlay (album art, the Jellyfin poster, …).
+///
+/// Every encoded payload carries its own image id (`next_image_id`), so this
+/// backend can:
+///
+/// * **transmit once and place many** — the payload goes over the wire when its
+///   id is new, and every later draw of the same encode is a placement command
+///   (`a=p`) plus the placeholder cells. Re-placing after the frame repainted
+///   the pane, or after a resize, no longer re-sends the image;
+/// * **delete only its own image** — `hide` frees this backend's image id
+///   instead of nuking the terminal's whole image store (`a=d,d=A`), which used
+///   to take the Jellyfin poster down with the album art. The payload is
+///   dropped too (not just the placement): an overlay that comes back
+///   re-transmits in one go, which is cheaper than trusting an id the terminal
+///   may have dropped in the meantime (a window resize can clear kitty's
+///   store);
+/// * **keep a small payload cache** so toggling a pane back on is free, while
+///   evicting the oldest payloads so the terminal's memory stays bounded.
+#[derive(Debug, Default)]
+pub struct Kitty {
+    /// Transmitted payload ids, oldest first.
+    transmitted: Vec<u32>,
+    /// The id this backend currently displays (what `hide` deletes).
+    current: Option<u32>,
+    /// The cell rect [`Self::current`] was drawn into: a re-place at this size
+    /// needs neither a clear nor a transfer, only the placement and the cells.
+    current_area: Option<Rect>,
+}
+
+impl Kitty {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Send the payload only if the terminal does not already hold this id,
+    /// then remember it (evicting the oldest payloads past [`TRANSMIT_CACHE`]).
+    ///
+    /// This is the whole point of the id model: the expensive, chunked,
+    /// base64'd transfer happens once per encode, and every later draw of the
+    /// same payload is a placement command plus the placeholder cells.
+    fn transmit_once(&mut self, w: &mut impl Write, data: &ImageData) -> Result<()> {
+        if !self.transmitted.contains(&data.image_id) {
+            try_skip!(
+                transfer_image_data(
+                    w,
+                    data.image_id,
+                    &data.content,
+                    data.img_width,
+                    data.img_height,
+                    data.is_compressed
+                ),
+                "Failed to transfer image data"
+            );
+            self.remember(data.image_id, w)?;
+        }
+        Ok(())
+    }
+
+    /// Draw `data`, honouring `reveal` by painting only the first
+    /// `reveal_columns(...)` columns of the placeholder grid.
+    fn paint(
+        &mut self,
+        w: &mut impl Write,
+        data: Data,
+        ctx: &Ctx,
+        reveal: super::Reveal,
+    ) -> Result<()> {
+        let bg = ctx.config.theme.background_color.map(IntoCrossterm::into_crossterm);
+        match data {
+            Data::ImageData(data) => {
+                let id = data.image_id;
+                try_skip!(self.transmit_once(w, &data), "Failed to transfer image data");
+                // Size the placement for the grid this frame paints: a re-place
+                // is this command plus the cells, never another transfer.
+                try_skip!(place_image(w, id, data.aligned_area), "Failed to place the image");
+                try_skip!(
+                    create_unicode_placeholder_grid(
+                        w,
+                        bg,
+                        data.aligned_area,
+                        id,
+                        reveal_columns(data.aligned_area.width, reveal)
+                    ),
+                    "Failed to create unicode placeholders"
+                );
+                self.current = Some(id);
+                self.current_area = Some(data.aligned_area);
+            }
+            Data::AnimationData(data) => {
+                let id = data.image_id;
+                let aligned_area = data.aligned_area;
+                // A GIF is transmitted as a kitty animation: the `a=T` frame
+                // carries the placement (and `c`/`r`), and the terminal plays
+                // the remaining frames itself. An animation is not re-placed
+                // mid-flight, so `reveal` does not apply to it.
+                try_skip!(transfer_animation_data(w, data), "Failed to transfer animation data");
+                try_skip!(
+                    create_unicode_placeholder_grid(
+                        w,
+                        bg,
+                        aligned_area,
+                        id,
+                        aligned_area.width
+                    ),
+                    "Failed to create unicode placeholders"
+                );
+                self.remember(id, w)?;
+                self.current = Some(id);
+                self.current_area = Some(aligned_area);
+            }
+        }
+        Ok(())
+    }
+
+    /// Free the image this backend is showing (`d=I`) and forget it, so a later
+    /// draw transmits again instead of trusting a stale id.
+    fn retire(&mut self, w: &mut impl Write) -> Result<()> {
+        let Some(id) = self.current.take() else {
+            return Ok(());
+        };
+        self.current_area = None;
+        self.transmitted.retain(|candidate| *candidate != id);
+        try_skip!(delete_image(w, id), "Failed to free the image");
+        Ok(())
+    }
+
+    /// Note a transmitted id and bound the terminal's image store.
+    ///
+    /// The id currently on screen is never evicted (its placement is what the
+    /// user is looking at), so the cache can sit one over the cap for a frame.
+    fn remember(&mut self, id: u32, w: &mut impl Write) -> Result<()> {
+        if !self.transmitted.contains(&id) {
+            self.transmitted.push(id);
+        }
+        while self.transmitted.len() > TRANSMIT_CACHE {
+            let Some(pos) = self
+                .transmitted
+                .iter()
+                .position(|candidate| Some(*candidate) != self.current)
+            else {
+                break;
+            };
+            let evicted = self.transmitted.remove(pos);
+            try_skip!(delete_image(w, evicted), "Failed to free an evicted image");
+        }
+        Ok(())
+    }
+}
+
+/// Size an already-transmitted image for a `cols` x `rows` cell rectangle so a
+/// unicode-placeholder grid can display it (`a=p`).
+///
+/// Kitty takes the *position* from the placeholder cells, so this is the only
+/// command a re-place needs: no payload, no delete, no flicker.
+fn place_image(w: &mut impl Write, image_id: u32, area: Rect) -> Result<()> {
+    if area.width == 0 || area.height == 0 {
+        return Ok(());
+    }
+    tmux_write!(
+        w,
+        "\x1b_Ga=p,U=1,i={image_id},c={cols},r={rows},q=2\x1b\\",
+        cols = area.width,
+        rows = area.height
+    )?;
+    Ok(())
+}
+
+/// How many placeholder columns to paint for a reveal.
+///
+/// `None` is "all of it"; a fraction is how much of the image's **width** is
+/// visible. The picture keeps its size and is clipped, so the reveal is a wipe
+/// rather than a squeeze — cell (row, col) always maps to the same pixels.
+pub(crate) fn reveal_columns(width: u16, reveal: super::Reveal) -> u16 {
+    let Some(fraction) = reveal else {
+        return width;
+    };
+    if fraction.is_nan() {
+        return width;
+    }
+    let fraction = f64::from(fraction.clamp(0.0, 1.0));
+    let columns = (f64::from(width) * fraction).round().clamp(0.0, f64::from(width));
+    columns as u16
+}
+
+/// Free an image and all of its placements (`d=I`).
+fn delete_image(w: &mut impl Write, image_id: u32) -> Result<()> {
+    tmux_write!(w, "\x1b_Ga=d,d=I,i={image_id},q=2\x1b\\")?;
+    Ok(())
+}
 
 impl Backend for Kitty {
     type EncodedData = Data;
@@ -36,49 +273,57 @@ impl Backend for Kitty {
         area: Rect,
         bg_color: Option<crossterm::style::Color>,
     ) -> Result<()> {
-        super::clear_area(w, bg_color, area)?;
-        tmux_write!(w, "\x1b_Ga=d,d=A,q=2\x1b\\")?;
+        // Blank the cells the placeholders occupied (the tracked rect when we
+        // know it: the caller's `area` is the pane, not the aligned image)...
+        super::clear_area(w, bg_color, self.current_area.unwrap_or(area))?;
+        self.current_area = None;
+        // ...then free THIS backend's image only. The other overlays (the
+        // Jellyfin poster, a Home wall tile) each own their own id now, so
+        // they survive — a `d=A` here used to take the whole terminal's image
+        // store with it.
+        self.retire(w)?;
 
         Ok(())
     }
 
     fn display(&mut self, w: &mut impl Write, data: Self::EncodedData, ctx: &Ctx) -> Result<()> {
-        match data {
-            Data::ImageData(data) => {
-                try_skip!(
-                    transfer_image_data(
-                        w,
-                        &data.content,
-                        data.img_width,
-                        data.img_height,
-                        data.is_compressed
-                    ),
-                    "Failed to transfer image data"
-                );
+        self.paint(w, data, ctx, None)
+    }
 
-                try_skip!(
-                    create_unicode_placeholder_grid(
-                        w,
-                        ctx.config.theme.background_color.map(|c| c.into_crossterm()),
-                        data.aligned_area
-                    ),
-                    "Failed to create unicode placeholders"
-                );
-            }
-            Data::AnimationData(data) => {
-                let aligned_area = data.aligned_area;
-                try_skip!(transfer_animation_data(w, data), "Failed to transfer animation data");
-                try_skip!(
-                    create_unicode_placeholder_grid(
-                        w,
-                        ctx.config.theme.background_color.map(|c| c.into_crossterm()),
-                        aligned_area
-                    ),
-                    "Failed to create unicode placeholders"
-                );
-            }
+    /// Re-place an image this backend already transmitted (a frame repainted
+    /// its cells, or the pane moved) without paying for the payload again; a
+    /// genuinely different payload retires the old image first.
+    fn replace(
+        &mut self,
+        w: &mut impl Write,
+        // Unused: this backend clears the rect it actually drew (the aligned
+        // image box), not the caller's pane rect.
+        _size: Rect,
+        bg_color: Option<crossterm::style::Color>,
+        data: Self::EncodedData,
+        ctx: &Ctx,
+        reveal: super::Reveal,
+    ) -> Result<()> {
+        let (id, area) = match &data {
+            Data::ImageData(data) => (data.image_id, data.aligned_area),
+            Data::AnimationData(data) => (data.image_id, data.aligned_area),
+        };
+        // Same payload in the same box: nothing on screen has to move. This is
+        // the path the reveal runs on, once per frame.
+        if self.current == Some(id) && self.current_area == Some(area) {
+            return self.paint(w, data, ctx, reveal);
         }
-        Ok(())
+        // The image has to move (or a different one has to take its place):
+        // blank what we drew, then drop the old payload unless this is the
+        // same image at a new size — a resize keeps the bytes.
+        if let Some(previous) = self.current_area {
+            try_skip!(super::clear_area(w, bg_color, previous), "Failed to clear the old placement");
+            self.current_area = None;
+        }
+        if self.current.is_some_and(|current| current != id) {
+            try_skip!(self.retire(w), "Failed to free the previous image");
+        }
+        self.paint(w, data, ctx, reveal)
     }
 
     fn create_data(
@@ -110,6 +355,7 @@ impl Backend for Kitty {
                 create_aligned_area(area, (width, height), max_size, halign, valign).area;
 
             Ok(Data::AnimationData(AnimationData {
+                image_id: next_image_id(),
                 frames,
                 is_compressed: false,
                 img_width: width,
@@ -140,6 +386,10 @@ impl Backend for Kitty {
                 "Image payload prepared"
             );
             Ok(Data::ImageData(ImageData {
+                // Allocated at encode time, not at draw time: the id is the
+                // payload's identity, and it has to survive every re-place of
+                // the same encode (see `Kitty`).
+                image_id: next_image_id(),
                 content: payload.content,
                 is_compressed: payload.compressed,
                 aligned_area: aligned_area.area,
@@ -212,15 +462,24 @@ fn create_unicode_placeholder_grid(
     w: &mut impl Write,
     bg_color: Option<crossterm::style::Color>,
     area: Rect,
+    image_id: u32,
+    columns: u16,
 ) -> Result<()> {
     let colors = Colors { background: bg_color, foreground: None };
     let mut buf = Vec::with_capacity(area.width as usize * area.height as usize * 2);
     execute!(buf, SetColors(colors))?;
+    let columns = columns.min(area.width);
+    if columns == 0 {
+        return Ok(());
+    }
     for y in 0..area.height {
         csi_move!(buf, area.left(), area.top() + y)?;
-        write!(buf, "\x1b[38;5;1m")?;
+        // The placeholder's foreground colour IS the image id, so a second
+        // overlay can no longer be mistaken for this one (the old grid
+        // hardcoded id 1). 24-bit on purpose: see `placeholder_foreground`.
+        buf.extend_from_slice(placeholder_foreground(image_id).as_bytes());
 
-        for x in 0..area.width {
+        for x in 0..columns {
             write!(buf, "{DELIM}{row}{col}", row = GRID[y as usize], col = GRID[x as usize])?;
         }
 
@@ -234,9 +493,16 @@ fn create_unicode_placeholder_grid(
 
 fn transfer_animation_data(w: &mut impl Write, data: AnimationData) -> Result<()> {
     let start_time = Instant::now();
-    let AnimationData { frames, is_compressed, img_width, img_height, aligned_area } = data;
+    let AnimationData {
+        image_id,
+        frames,
+        is_compressed,
+        img_width,
+        img_height,
+        aligned_area,
+    } = data;
 
-    log::debug!(frames = frames.len(), img_width, img_height, aligned_area:?; "Transferring animation data");
+    log::debug!(frames = frames.len(), image_id, img_width, img_height, aligned_area:?; "Transferring animation data");
 
     if frames.len() < 2 {
         log::warn!("Less than two frames, invalid animation data");
@@ -252,7 +518,7 @@ fn transfer_animation_data(w: &mut impl Write, data: AnimationData) -> Result<()
     // Create image and transfer first frame
     tmux_write!(
         w,
-        "\x1b_Gi=1,f=32,U=1,a=T,t=d,m={m},z={delay},q=2,s={img_width},v={img_height},c={cols},r={rows}{compression};{chunk}\x1b\\",
+        "\x1b_Gi={image_id},f=32,U=1,a=T,t=d,m={m},z={delay},q=2,s={img_width},v={img_height},c={cols},r={rows}{compression};{chunk}\x1b\\",
         compression = if is_compressed { ",o=z" } else { "" },
         cols = aligned_area.width,
         rows = aligned_area.height
@@ -262,7 +528,7 @@ fn transfer_animation_data(w: &mut impl Write, data: AnimationData) -> Result<()
     while first_frame_iter.peek().is_some() {
         let chunk: String = first_frame_iter.by_ref().take(4096).collect();
         let m = i32::from(first_frame_iter.peek().is_some());
-        tmux_write!(w, "\x1b_Gi=1,m={m};{chunk}\x1b\\")?;
+        tmux_write!(w, "\x1b_Gi={image_id},m={m};{chunk}\x1b\\")?;
     }
 
     // Transfer rest of the frames, skip first because it was already
@@ -273,26 +539,30 @@ fn transfer_animation_data(w: &mut impl Write, data: AnimationData) -> Result<()
 
         tmux_write!(
             w,
-            "\x1b_Gi=1,a=f,t=d,m={m},z={delay},q=2,s={img_width},v={img_height}{compression};{chunk}\x1b\\",
+            "\x1b_Gi={image_id},a=f,t=d,m={m},z={delay},q=2,s={img_width},v={img_height}{compression};{chunk}\x1b\\",
             compression = if is_compressed { ",o=z" } else { "" }
         )?;
 
         while frame_iter.peek().is_some() {
             let chunk: String = frame_iter.by_ref().take(4096).collect();
             let m = i32::from(frame_iter.peek().is_some());
-            tmux_write!(w, "\x1b_Ga=f,i=1,m={m};{chunk}\x1b\\")?;
+            tmux_write!(w, "\x1b_Ga=f,i={image_id},m={m};{chunk}\x1b\\")?;
         }
     }
 
     // Run the animation
-    tmux_write!(w, "\x1b_Ga=a,i=1,s=3\x1b\\")?;
+    tmux_write!(w, "\x1b_Ga=a,i={image_id},s=3\x1b\\")?;
     log::debug!(duration:? = start_time.elapsed(); "Transfer finished");
 
     Ok(())
 }
 
+/// Store a payload in the terminal's image store under `image_id`, **without
+/// displaying it** (`a=t`, not `a=T`): the caller places it separately, so a
+/// re-place never pays for the payload again.
 fn transfer_image_data(
     w: &mut impl Write,
+    image_id: u32,
     content: &str,
     img_width: u32,
     img_height: u32,
@@ -300,7 +570,7 @@ fn transfer_image_data(
 ) -> Result<()> {
     let start_time = Instant::now();
     log::debug!(
-        bytes = content.len(), img_width, img_height, is_compressed;
+        bytes = content.len(), image_id, img_width, img_height, is_compressed;
         "Transferring image data"
     );
     let mut iter = content.chars().peekable();
@@ -311,15 +581,18 @@ fn transfer_image_data(
     // then fail to inflate it. The flag travels with the payload.
     let compression = if is_compressed { ",o=z" } else { "" };
     let first: String = iter.by_ref().take(4096).collect();
+    // `m` says whether another chunk follows; a small payload must not claim
+    // one (the terminal would wait for it forever).
+    let more = i32::from(iter.peek().is_some());
     tmux_write!(
         w,
-        "\x1b_Gi=1,f=32,U=1,t=d,a=T,m=1,q=2{compression},s={img_width},v={img_height};{first}\x1b\\"
+        "\x1b_Gi={image_id},f=32,U=1,t=d,a=t,m={more},q=2{compression},s={img_width},v={img_height};{first}\x1b\\"
     )?;
 
     while iter.peek().is_some() {
         let chunk: String = iter.by_ref().take(4096).collect();
         let m = i32::from(iter.peek().is_some());
-        tmux_write!(w, "\x1b_Gm={m};{chunk}\x1b\\")?;
+        tmux_write!(w, "\x1b_Gi={image_id},m={m};{chunk}\x1b\\")?;
     }
     log::debug!(duration:? = start_time.elapsed(); "Transfer finished");
 
@@ -334,6 +607,8 @@ pub enum Data {
 
 #[derive(derive_more::Debug, Clone)]
 pub struct ImageData {
+    /// The kitty image id this payload is stored under (`next_image_id`).
+    image_id: u32,
     #[debug(skip)]
     content: String,
     /// Whether `content` is zlib-compressed and must be transferred with
@@ -354,6 +629,8 @@ pub struct AnimationFrame {
 
 #[derive(derive_more::Debug, Clone)]
 pub struct AnimationData {
+    /// The kitty image id the animation is stored under (`next_image_id`).
+    image_id: u32,
     #[debug(skip)]
     frames: Vec<AnimationFrame>,
     is_compressed: bool,
@@ -475,7 +752,7 @@ pub fn display_wall_tile(
     let colors = Colors { background: bg_color, foreground: None };
     let mut buf = Vec::with_capacity(usize::from(area.width) * usize::from(area.height) * 8);
     execute!(buf, crossterm::cursor::SavePosition, SetColors(colors))?;
-    write!(buf, "\x1b[38;5;{}m", tile.id)?;
+    buf.extend_from_slice(placeholder_foreground(tile.id).as_bytes());
     for y in 0..area.height {
         csi_move!(buf, area.left(), area.top() + y)?;
         for x in 0..area.width {
@@ -898,5 +1175,292 @@ mod tests {
         let payload = encode_image_payload(&[]);
         assert_eq!(payload.encoded_len, 0);
         assert!(payload.content.is_empty());
+    }
+
+    // --- transmit-once / place-many --------------------------------------
+
+    /// An `ImageData` payload of `len` printable characters, under `id`.
+    fn payload(id: u32, len: usize) -> ImageData {
+        ImageData {
+            image_id: id,
+            content: "A".repeat(len),
+            is_compressed: false,
+            img_width: 64,
+            img_height: 64,
+            aligned_area: Rect::new(0, 0, 8, 4),
+        }
+    }
+
+    fn out_of(write: impl FnOnce(&mut Vec<u8>)) -> String {
+        let mut out = Vec::new();
+        write(&mut out);
+        String::from_utf8_lossy(&out).into_owned()
+    }
+
+    /// The payload goes over the wire once. Every later draw of the same
+    /// encode is a placement plus the placeholder cells — this is what makes
+    /// re-placing after a repaint or a resize cheap.
+    #[test]
+    fn a_payload_is_transmitted_once_per_id() {
+        let mut kitty = Kitty::new();
+        let data = payload(9001, 64);
+
+        let first = out_of(|w| kitty.transmit_once(w, &data).expect("first transmit"));
+        assert!(first.contains("i=9001"), "{first}");
+        assert!(first.contains("a=t,"), "transmit must not display: {first}");
+        assert!(!first.contains("a=T"), "{first}");
+
+        let second = out_of(|w| kitty.transmit_once(w, &data).expect("second transmit"));
+        assert!(second.is_empty(), "a re-place must not retransmit: {second}");
+
+        let placed = out_of(|w| place_image(w, 9001, Rect::new(2, 3, 8, 4)).expect("place"));
+        assert!(placed.contains("a=p,U=1,i=9001"), "{placed}");
+        assert!(placed.contains("c=8,r=4"), "{placed}");
+        // A payload command ends `q=2;<base64>`; a place command does not.
+        assert!(!placed.contains("q=2;"), "a place carries no payload: {placed}");
+    }
+
+    /// The chunk marker must tell the truth: a payload that fits in one chunk
+    /// may not claim a follow-up, or the terminal waits for a chunk that never
+    /// comes.
+    #[test]
+    fn a_short_payload_does_not_claim_a_following_chunk() {
+        let mut kitty = Kitty::new();
+        let data = payload(7001, 64);
+        let text = out_of(|w| kitty.transmit_once(w, &data).expect("transmit"));
+        assert!(text.contains("m=0"), "{text}");
+    }
+
+    #[test]
+    fn a_long_payload_announces_following_chunks() {
+        let mut kitty = Kitty::new();
+        // Two full 4096-char chunks plus a remainder.
+        let data = payload(7002, 9000);
+        let text = out_of(|w| kitty.transmit_once(w, &data).expect("transmit"));
+        assert!(text.contains("m=1"), "{text}");
+        // The continuation chunks name the same image id.
+        assert!(text.matches("i=7002").count() >= 3, "{text}");
+    }
+
+    /// Hiding this overlay frees its own placement only. The old `d=A` took
+    /// every image in the terminal with it — including the Jellyfin poster,
+    /// which then had to be re-placed by hand after every clear.
+    #[test]
+    fn hide_frees_only_its_own_image() {
+        let mut kitty = Kitty::new();
+        kitty.current = Some(4242);
+        kitty.transmitted.push(4242);
+        let text = out_of(|w| kitty.hide(w, Rect::new(1, 1, 4, 2), None).expect("hide"));
+        assert!(text.contains("a=d,d=I,i=4242"), "{text}");
+        assert!(!text.contains("d=A"), "hide must not nuke the image store: {text}");
+        assert_eq!(kitty.current, None, "the overlay is no longer showing");
+        assert!(
+            kitty.transmitted.is_empty(),
+            "a freed image is not claimed as transmitted"
+        );
+        // Coming back re-transmits once, then places for free.
+        let data = payload(4242, 32);
+        let again = out_of(|w| kitty.transmit_once(w, &data).expect("re-transmit"));
+        assert!(again.contains("a=t,"), "a re-shown overlay transfers once: {again}");
+    }
+
+    #[test]
+    fn hide_with_nothing_displayed_deletes_nothing() {
+        let mut kitty = Kitty::new();
+        let text = out_of(|w| kitty.hide(w, Rect::new(0, 0, 2, 2), None).expect("hide"));
+        assert!(!text.contains("a=d"), "nothing to free: {text}");
+    }
+
+    /// The payload cache is bounded: the terminal keeps at most
+    /// `TRANSMIT_CACHE` art images, and a new one evicts the oldest.
+    #[test]
+    fn the_payload_cache_evicts_the_oldest_image() {
+        let mut kitty = Kitty::new();
+        for n in 0..=TRANSMIT_CACHE {
+            let id = 5000 + n as u32;
+            let data = payload(id, 32);
+            let _ = out_of(|w| kitty.transmit_once(w, &data).expect("transmit"));
+        }
+        assert_eq!(kitty.transmitted.len(), TRANSMIT_CACHE, "cache is bounded");
+        let evicted = 5000;
+        assert!(
+            !kitty.transmitted.contains(&evicted),
+            "the oldest payload was freed"
+        );
+        let text = out_of(|w| delete_image(w, evicted).expect("delete"));
+        assert!(text.contains("a=d,d=I,i=5000"), "{text}");
+    }
+
+    /// The image currently on screen is never evicted, even when the cache is
+    /// over its cap: freeing the placement the user is looking at would blank
+    /// the pane.
+    #[test]
+    fn the_visible_image_survives_eviction() {
+        let mut kitty = Kitty::new();
+        let first = payload(6000, 32);
+        let _ = out_of(|w| kitty.transmit_once(w, &first).expect("transmit"));
+        kitty.current = Some(6000);
+        for n in 1..=TRANSMIT_CACHE {
+            let data = payload(6000 + n as u32, 32);
+            let _ = out_of(|w| kitty.transmit_once(w, &data).expect("transmit"));
+        }
+        assert!(
+            kitty.transmitted.contains(&6000),
+            "the displayed image is still transmitted"
+        );
+    }
+
+    // --- the reveal -------------------------------------------------------
+
+    /// The wipe is linear and clips the picture: the fraction is how much of
+    /// the image's width is visible, and cell (row, col) always maps to the
+    /// same pixels.
+    #[test]
+    fn reveal_columns_is_a_clip_of_the_width() {
+        assert_eq!(reveal_columns(80, None), 80, "no reveal = everything");
+        assert_eq!(reveal_columns(80, Some(0.0)), 0);
+        assert_eq!(reveal_columns(80, Some(0.5)), 40);
+        assert_eq!(reveal_columns(80, Some(1.0)), 80);
+        assert_eq!(reveal_columns(80, Some(2.0)), 80, "clamped");
+        assert_eq!(reveal_columns(80, Some(-1.0)), 0, "clamped");
+        assert_eq!(reveal_columns(80, Some(f32::NAN)), 80, "NaN shows the art");
+        assert_eq!(reveal_columns(7, Some(0.5)), 4, "rounds to the nearest column");
+        assert_eq!(reveal_columns(0, Some(0.5)), 0);
+    }
+
+    fn placeholder_runes(text: &str) -> usize {
+        text.matches('\u{10EEEE}').count()
+    }
+
+    #[test]
+    fn the_grid_paints_only_the_columns_it_is_given() {
+        let area = Rect::new(2, 1, 8, 4);
+        let full = out_of(|w| {
+            create_unicode_placeholder_grid(w, None, area, 77, 8).expect("grid")
+        });
+        assert_eq!(placeholder_runes(&full), 32, "8x4 cells");
+        assert!(
+            full.contains("38;2;0;0;77"),
+            "the placeholder carries the id as a 24-bit foreground: {full}"
+        );
+
+        let half = out_of(|w| {
+            create_unicode_placeholder_grid(w, None, area, 77, 4).expect("grid")
+        });
+        assert_eq!(placeholder_runes(&half), 16, "4 columns x 4 rows");
+
+        let none = out_of(|w| {
+            create_unicode_placeholder_grid(w, None, area, 77, 0).expect("grid")
+        });
+        assert_eq!(placeholder_runes(&none), 0, "nothing is painted before the reveal starts");
+        assert!(none.is_empty(), "and nothing is written: {none}");
+    }
+
+    fn test_ctx() -> Ctx {
+        crate::tests::fixtures::ctx(
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+        )
+    }
+
+    /// A reveal draws once per frame: the first frame pays for the transfer,
+    /// every later one is a placement plus a growing set of placeholder cells.
+    #[test]
+    fn a_re_place_skips_the_transfer_and_follows_the_reveal() {
+        let ctx = test_ctx();
+        let mut kitty = Kitty::new();
+        let data = payload(9100, 64);
+        let area = Rect::new(0, 0, 8, 4);
+
+        let first = out_of(|w| {
+            kitty.replace(w, area, None, Data::ImageData(data.clone()), &ctx, None)
+                .expect("first draw")
+        });
+        assert!(first.contains("a=t,"), "the first draw transmits: {first}");
+        assert_eq!(placeholder_runes(&first), 32, "and paints every cell");
+
+        let half = out_of(|w| {
+            kitty.replace(w, area, None, Data::ImageData(data.clone()), &ctx, Some(0.5))
+                .expect("reveal frame")
+        });
+        assert!(!half.contains("a=t,"), "a re-place must not retransmit: {half}");
+        assert_eq!(placeholder_runes(&half), 16, "half the columns");
+
+        let done = out_of(|w| {
+            kitty.replace(w, area, None, Data::ImageData(data), &ctx, None)
+                .expect("final frame")
+        });
+        assert!(!done.contains("a=t,"), "{done}");
+        assert_eq!(placeholder_runes(&done), 32, "the wipe finishes on the whole grid");
+    }
+
+    /// Same image, new box (a resize): the payload is kept, only the old cells
+    /// are blanked.
+    #[test]
+    fn a_same_payload_at_a_new_size_keeps_its_image() {
+        let ctx = test_ctx();
+        let mut kitty = Kitty::new();
+        let first = payload(9200, 64);
+        let _ = out_of(|w| {
+            kitty
+                .replace(w, Rect::new(0, 0, 8, 4), None, Data::ImageData(first), &ctx, None)
+                .expect("draw")
+        });
+
+        let mut moved = payload(9200, 64);
+        moved.aligned_area = Rect::new(0, 2, 6, 3);
+        let text = out_of(|w| {
+            kitty
+                .replace(w, Rect::new(0, 0, 8, 4), None, Data::ImageData(moved), &ctx, None)
+                .expect("move")
+        });
+        assert!(!text.contains("a=t,"), "no transfer: {text}");
+        assert!(!text.contains("d=I"), "and the payload is not freed: {text}");
+    }
+
+    /// A different picture retires the old payload and transmits the new one.
+    #[test]
+    fn a_new_payload_frees_the_old_image_and_transmits() {
+        let ctx = test_ctx();
+        let mut kitty = Kitty::new();
+        let _ = out_of(|w| {
+            kitty
+                .replace(w, Rect::new(0, 0, 8, 4), None, Data::ImageData(payload(9300, 32)), &ctx, None)
+                .expect("draw")
+        });
+        let text = out_of(|w| {
+            kitty
+                .replace(w, Rect::new(0, 0, 8, 4), None, Data::ImageData(payload(9301, 32)), &ctx, None)
+                .expect("swap")
+        });
+        assert!(text.contains("a=d,d=I,i=9300"), "the old image is freed: {text}");
+        assert!(text.contains("a=t,"), "the new one is transmitted: {text}");
+        assert!(text.contains("i=9301"), "{text}");
+    }
+
+    /// The placeholder id is a 24-bit value in the cell's foreground colour;
+    /// ids the 8-bit form could not express must round-trip.
+    #[test]
+    fn the_placeholder_foreground_carries_the_image_id_in_24_bits() {
+        // Small ids (the wall's) keep working...
+        assert_eq!(placeholder_foreground(7), "\x1b[38;2;0;0;7m");
+        // ...and the art allocator's ids are expressible, byte by byte.
+        assert_eq!(placeholder_foreground(65537), "\x1b[38;2;1;0;1m");
+        assert_eq!(placeholder_foreground(0x0A_0B_0C), "\x1b[38;2;10;11;12m");
+    }
+
+    /// The allocator never leaves the 24-bit placeholder space, and never
+    /// hands back an id the Home wall owns (2..).
+    #[test]
+    fn image_ids_stay_inside_the_placeholder_space() {
+        let mut previous = 0;
+        for _ in 0..1000 {
+            let id = next_image_id();
+            assert!(id >= IMAGE_ID_BASE, "id {id} collides with the wall's block");
+            assert!(id < IMAGE_ID_MAX, "id {id} cannot be a placeholder colour");
+            assert_ne!(id, previous, "ids are not reused back to back");
+            previous = id;
+        }
     }
 }

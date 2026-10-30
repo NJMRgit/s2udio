@@ -221,7 +221,6 @@ pub struct JellyfinPane {
     /// reports back must not leave the indicator up forever).
     fetch_activity_at: std::time::Instant,
     /// Scheduler id of the indicator's redraw tick (None = no tick running).
-    loading_tick: Option<crate::shared::id::Id>,
     /// When the indicator came up (drives the spinner frame; wall clock, so
     /// no render keeps its own animation state).
     loading_since: Option<std::time::Instant>,
@@ -357,7 +356,6 @@ impl JellyfinPane {
             initialized: false,
             fetches_in_flight: 0,
             fetch_activity_at: std::time::Instant::now(),
-            loading_tick: None,
             loading_since: None,
             tree_area: Rect::default(),
             items_area: Rect::default(),
@@ -523,6 +521,13 @@ impl Pane for JellyfinPane {
                 self.is_modal_open = false;
                 self.poster.drawn_area = None;
                 self.wall.redraw_next_flush();
+                // A Home card's Continue / Start over answer asked for the
+                // library tree: the page switch (and playback) belongs to the
+                // answer, so it happens now that the question is gone.
+                if let Some(item) = ctx.pending_jf_tree_jump.borrow_mut().take() {
+                    self.start_jump(item, true, None, None, ctx)?;
+                    return Ok(());
+                }
                 ctx.render()?;
             }
             UiEvent::Displayed => {

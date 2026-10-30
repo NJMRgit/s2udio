@@ -77,6 +77,14 @@ trait Section {
         false
     }
 
+    /// `Enter` on a row moves the focus onto the first footer button
+    /// (`Stream`, then `Download`, then `Cancel`) instead of ticking the row
+    /// — the torrent picker: its glyph and `Space` toggle a row, `Enter`
+    /// leaves the list for the actions under it.
+    fn enter_moves_to_buttons(&mut self) -> bool {
+        false
+    }
+
     /// Rows of footer buttons this section wants drawn BELOW the window
     /// border (the torrent picker). `0` for every other section.
     fn outside_button_rows(&self) -> u16 {
@@ -404,6 +412,13 @@ impl Section for SectionType<'_> {
         match self {
             SectionType::Menu(s) => s.confirm_on_enter(ctx),
             _ => Ok(false),
+        }
+    }
+
+    fn enter_moves_to_buttons(&mut self) -> bool {
+        match self {
+            SectionType::Menu(s) => s.enter_moves_to_buttons(),
+            _ => false,
         }
     }
 

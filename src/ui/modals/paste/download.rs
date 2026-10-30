@@ -360,25 +360,37 @@ pub(crate) fn commit_to_daemon(
         return Ok(());
     }
     let scan = ctx.torrent_scans.borrow().get(key).cloned().and_then(Result::ok);
+    // The picker's ticks, named by their TORRENT file index (`ScannedFile::
+    // index`), which is what rqbit's stream endpoint and `only_files` address
+    // — never a position in `scan.files`. Logged because a download that
+    // fetched the wrong file is otherwise invisible on the TUI side (the
+    // daemon log only shows the set it was handed).
+    log::debug!(
+        key:?; "Torrent commit: picker indices={:?} have_scan={}", indices, scan.is_some()
+    );
     let (infohash, torrent_name, kept) = match &scan {
         Some(scan) => {
-            let file_indices: Vec<usize> = if indices.is_empty() {
-                scan.pick_playable().into_iter().map(|f| f.index).collect()
-            } else {
-                indices.iter().filter(|i| **i < scan.files.len()).copied().collect()
-            };
-            let kept = file_indices
-                .iter()
-                .filter_map(|i| scan.files.get(*i))
-                .map(|f| crate::core::dlctl::DlKeptFile {
-                    index: f.index,
-                    name: f.name.clone(),
-                    length: f.length,
-                })
-                .collect::<Vec<_>>();
+            let kept = kept_files_for(scan, &indices);
+            log::debug!(
+                key:?; "Torrent commit: keeping {} of {} files for picks {:?}",
+                kept.len(), scan.files.len(), indices
+            );
             (scan.info_hash.clone(), Some(scan.torrent_name.clone()), kept)
         }
-        None => (None, None, Vec::new()),
+        None => {
+            // Phase 4 has not landed (a fresh magnet is usually still
+            // fetching): the picks resolve against the PHASE-3 file list the
+            // picker rendered its rows from. Without this the selection was
+            // dropped and the daemon downloaded the "best playable" file —
+            // episode 1 — no matter what was ticked.
+            let listing = ctx.torrent_file_lists.borrow().get(key).cloned();
+            let kept = kept_files_for_listing(listing.as_ref(), &indices);
+            log::debug!(
+                key:?; "Torrent commit (no scan yet): keeping {} file(s) for picks {:?}",
+                kept.len(), indices
+            );
+            (None, listing.map(|(name, _)| name), kept)
+        }
     };
     let infohash = infohash.or_else(|| match item {
         PastedItem::Magnet(magnet) => magnet_infohash_full(magnet),
@@ -414,13 +426,86 @@ pub(crate) fn commit_to_daemon(
             .unwrap_or_else(|| item.label());
         status_info!("Downloading {label}…");
         // A download-only commit never waits for the engine (no phase 4), so
-        // there is no "Preparing downloader…" window to show. Instead the
-        // job's own download panel opens as soon as the daemon registers it
-        // (matched by the scan key, `DlJob::source_key`) — the user sees live
-        // progress without leaving the flow or hunting the Downloads modal.
+        // there is no "Preparing downloader…" window to show. The Downloads
+        // modal opens instead — as soon as the daemon registers the job
+        // (matched by the scan key, `DlJob::source_key`) — so the user sees
+        // the download JOIN the list it lives in rather than a one-job info
+        // box that hides the rest.
         *ctx.dl_panel_pending.borrow_mut() = Some(key.to_owned());
     }
     Ok(())
+}
+
+/// The job's kept files for a picker selection.
+///
+/// `indices` are **torrent file indices** (`ScannedFile::index`) — what the
+/// picker's rows carry, and what rqbit's stream endpoint and `only_files`
+/// address. They are resolved against `scan.files` **by that index, not by
+/// position**: the two only coincide while every file in the torrent is
+/// media, and a pack with a `.nfo` or a sample ahead of episode one shifts
+/// them apart. An empty pick means "the single best playable file", which is
+/// what a bare commit (no picker) asks for.
+fn kept_files_for(
+    scan: &crate::core::torrent::TorrentScan,
+    indices: &[usize],
+) -> Vec<crate::core::dlctl::DlKeptFile> {
+    let files = scan.files.as_slice();
+    if indices.is_empty() {
+        return scan
+            .pick_playable()
+            .map(kept_file_of)
+            .into_iter()
+            .collect();
+    }
+    resolve_picks(files, indices)
+}
+
+/// [`kept_files_for`] from the **phase-3** file list
+/// (`Ctx.torrent_file_lists`) — the list the picker renders before the scan
+/// has reported the torrent `live`.
+///
+/// A fresh magnet's Download is pressed while the engine is still fetching
+/// pieces, so `Ctx.torrent_scans` (phase 4) is often EMPTY at commit time.
+/// Resolving only from the scan dropped the picks entirely and the daemon fell
+/// back to "the single best playable file" — always episode 1, whatever was
+/// ticked (2026-10-23 user report: `picker indices=[1,2,3,4,5,6,7]
+/// have_scan=false`).
+pub(super) fn kept_files_for_listing(
+    listing: Option<&(String, Vec<crate::core::torrent::ScannedFile>)>,
+    indices: &[usize],
+) -> Vec<crate::core::dlctl::DlKeptFile> {
+    let Some((_, files)) = listing else { return Vec::new() };
+    if indices.is_empty() {
+        // No picks: the largest playable file — the same rule the scan path
+        // applies (`TorrentScan::pick_playable`), over the phase-3 listing.
+        let videos: Vec<&crate::core::torrent::ScannedFile> =
+            files.iter().filter(|f| f.is_video()).collect();
+        let audio: Vec<&crate::core::torrent::ScannedFile> =
+            files.iter().filter(|f| f.is_audio()).collect();
+        let pool = if videos.is_empty() { audio } else { videos };
+        return pool.into_iter().max_by_key(|f| f.length).map(kept_file_of).into_iter().collect();
+    }
+    resolve_picks(files, indices)
+}
+
+fn kept_file_of(file: &crate::core::torrent::ScannedFile) -> crate::core::dlctl::DlKeptFile {
+    crate::core::dlctl::DlKeptFile {
+        index: file.index,
+        name: file.name.clone(),
+        length: file.length,
+    }
+}
+
+/// Picks resolved to files **by torrent index**, never by position.
+fn resolve_picks(
+    files: &[crate::core::torrent::ScannedFile],
+    indices: &[usize],
+) -> Vec<crate::core::dlctl::DlKeptFile> {
+    indices
+        .iter()
+        .filter_map(|wanted| files.iter().find(|file| file.index == *wanted))
+        .map(kept_file_of)
+        .collect()
 }
 
 /// A plain re-stream of a torrent that has an ACTIVE committed job
@@ -504,9 +589,16 @@ pub fn start_daemon_play(
     response: &crate::core::dlctl::DlJobResponse,
     retried: bool,
 ) {
+    // Only the files the daemon waited for have to be served — the FIRST
+    // one, which mpv opens. The later entries of a pack stream while they
+    // download: probing them too held the first episode's playback until the
+    // whole torrent was done (the daemon answered as soon as the torrent was
+    // `live`, which a running download reaches only after every file has its
+    // data).
     let failures: Vec<String> = response
         .files
         .iter()
+        .take(response.ready_count().max(1))
         .filter_map(|file| {
             crate::core::torrent::probe_stream_url(&file.stream_url)
                 .err()
@@ -1025,6 +1117,138 @@ mod download_target_tests {
     use super::*;
     use crate::shared::ytdlp::{ReplaceAction, YtListMeta, YtStreamInfo};
 
+    /// `scan.files` whose POSITIONS differ from their torrent indices: a
+    /// `.nfo` sits at position 0 with index 0, so episode 1 has index 1 at
+    /// position 1 — and every later file is shifted the same way.
+    fn shiftable_scan() -> crate::core::torrent::TorrentScan {
+        use crate::core::torrent::ScannedFile;
+        let files: Vec<ScannedFile> = [
+            ("info.nfo", 5u64),
+            ("ep1.mkv", 100),
+            ("ep2.mkv", 200),
+            ("ep3.mkv", 300),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, (name, length))| ScannedFile {
+            index,
+            name: name.to_owned(),
+            length,
+        })
+        .collect();
+        crate::core::torrent::TorrentScan {
+            engine: None,
+            torrent_id: "1".to_owned(),
+            torrent_name: "Pack".to_owned(),
+            info_hash: None,
+            files,
+        }
+    }
+
+    /// **The pick must survive a download started before phase 4.**
+    ///
+    /// 2026-10-23 user report: the picker showed episodes 2-8 ticked and the
+    /// commit logged `picker indices=[1, 2, 3, 4, 5, 6, 7] have_scan=false` —
+    /// the torrent had not reported `live` yet, so `ctx.torrent_scans` had no
+    /// entry and the selection was dropped. Download is enabled at phase 3
+    /// (the file list), so this is the NORMAL path for a fresh magnet, not an
+    /// edge case: the daemon then fell back to "the single best playable
+    /// file" — always the first episode, whatever was ticked.
+    #[test]
+    fn a_commit_before_phase_four_still_keeps_the_picked_files() {
+        let scan = shiftable_scan();
+        // Only the phase-3 list is known (the scan map is empty for the key).
+        let listing = (scan.torrent_name.clone(), scan.files.clone());
+        let kept = kept_files_for_listing(Some(&listing), &[2, 3]);
+        assert_eq!(
+            kept.iter().map(|f| (f.index, f.name.as_str())).collect::<Vec<_>>(),
+            vec![(2, "ep2.mkv"), (3, "ep3.mkv")],
+            "the pick resolves from the phase-3 file list"
+        );
+    }
+
+    /// The whole commit path with NO scan entry: the request the daemon gets
+    /// carries the picks (not the single best playable file). This is the
+    /// exact shape of the user's failing run (`have_scan=false`).
+    #[test]
+    fn a_phase_three_commit_sends_the_picks_to_the_daemon() {
+        use crate::core::dlctl::DlJobRequest;
+        // The commit writes its request into the cache dir; point that at a
+        // scratch directory so the test never touches the real spool.
+        let xdg = std::env::temp_dir().join(format!("s2u-commit-xdg-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&xdg);
+        crate::shared::env::ENV
+            .set("XDG_CACHE_HOME".to_owned(), xdg.to_string_lossy().into_owned());
+        let ctx = ctx();
+        let key = "101ad324cfefc9e20d554427664ccf31f3eb4e51";
+        let scan = shiftable_scan();
+        // Only phase 3 landed: the file list, no scan map entry.
+        ctx.torrent_file_lists
+            .borrow_mut()
+            .insert(key.to_owned(), (scan.torrent_name.clone(), scan.files.clone()));
+        *ctx.torrent_picker_key.borrow_mut() = Some(key.to_owned());
+        *ctx.torrent_picker_item.borrow_mut() = Some(PastedItem::Magnet(
+            "magnet:?xt=urn:btih:101ad324cfefc9e20d554427664ccf31f3eb4e51".to_owned(),
+        ));
+
+        let item = PastedItem::Magnet(
+            "magnet:?xt=urn:btih:101ad324cfefc9e20d554427664ccf31f3eb4e51".to_owned(),
+        );
+        commit_to_daemon(&ctx, &item, key, vec![2, 3], false).expect("the commit is written");
+
+        // Read the spooled request the daemon will consume.
+        let request = crate::core::dlctl::take_newest_spooled_request()
+            .expect("a request was spooled");
+        match request {
+            DlJobRequest::Enqueue { files, .. } => {
+                assert_eq!(
+                    files.iter().map(|f| (f.index, f.name.as_str())).collect::<Vec<_>>(),
+                    vec![(2, "ep2.mkv"), (3, "ep3.mkv")],
+                    "the daemon receives the ticked files, not the best playable one"
+                );
+            }
+            other => panic!("expected an Enqueue, got {other:?}"),
+        }
+        crate::shared::env::ENV.remove("XDG_CACHE_HOME");
+        let _ = std::fs::remove_dir_all(&xdg);
+    }
+
+    /// The picked TORRENT INDICES resolve to those same files — episodes 2
+    /// and 3 for the picks `[2, 3]`, never "position 2 and 3".
+    #[test]
+    fn picks_resolve_by_torrent_index_not_by_position() {
+        let scan = shiftable_scan();
+        let kept = kept_files_for(&scan, &[2, 3]);
+        assert_eq!(
+            kept.iter().map(|f| (f.index, f.name.as_str())).collect::<Vec<_>>(),
+            vec![(2, "ep2.mkv"), (3, "ep3.mkv")],
+            "the pick's own indices select the files the user ticked"
+        );
+    }
+
+    /// Everything except the first episode: the picks `[1, 2, 3]` keep
+    /// episodes 1-3 and never the `.nfo`.
+    #[test]
+    fn a_partial_pick_keeps_exactly_those_files() {
+        let scan = shiftable_scan();
+        let kept = kept_files_for(&scan, &[1, 2, 3]);
+        let names: Vec<&str> = kept.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, vec!["ep1.mkv", "ep2.mkv", "ep3.mkv"]);
+        assert!(
+            !names.contains(&"info.nfo"),
+            "a non-media file is never kept by a picker selection"
+        );
+    }
+
+    /// No pick at all means the single best playable file (a bare commit).
+    #[test]
+    fn an_empty_pick_falls_back_to_the_best_playable_file() {
+        let scan = shiftable_scan();
+        let kept = kept_files_for(&scan, &[]);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].name, "ep3.mkv", "the largest video");
+    }
+
     /// Round 110: a failed stream probe retries **once**, and only while the
     /// job still has an engine to re-register (`active`). A finished, stopped
     /// or vanished job is reported instead of retried.
@@ -1040,6 +1264,7 @@ mod download_target_tests {
             ),
             torrent_name: "name".to_owned(),
             kept_files: Vec::new(),
+            file_progress: Vec::new(),
             status,
             progress_percent: 0.0,
             engine: None,

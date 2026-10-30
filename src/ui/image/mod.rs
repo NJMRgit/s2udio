@@ -21,11 +21,20 @@ use crate::{
 
 pub mod block;
 pub mod facade;
+pub mod placements;
 pub mod iterm2;
 pub mod kitty;
 pub mod sixel;
 pub mod ueberzug;
 pub mod wall;
+
+/// How much of a freshly-drawn image to show this frame.
+///
+/// `None` draws all of it. `Some(fraction)` asks for the first `fraction` of the
+/// image's columns — a reveal. Only a backend that can paint a *partial* image
+/// honours it (kitty, through its placeholder cells); every other backend draws
+/// the whole image, which is the pre-reveal behaviour.
+pub type Reveal = Option<f32>;
 
 #[allow(unused)]
 pub trait Backend {
@@ -40,6 +49,26 @@ pub trait Backend {
         Ok(())
     }
     fn display(&mut self, w: &mut impl Write, data: Self::EncodedData, ctx: &Ctx) -> Result<()>;
+    /// Draw `data`, replacing whatever this backend last drew in `size`.
+    ///
+    /// The default retires the old drawing and draws the new one. A backend
+    /// that can tell "same payload, new place" apart — kitty, by image id —
+    /// overrides this so a re-place skips the transfer, which is what makes
+    /// the reveal animation (one draw per frame) affordable.
+    fn replace(
+        &mut self,
+        w: &mut impl Write,
+        size: Rect,
+        bg_color: Option<crossterm::style::Color>,
+        data: Self::EncodedData,
+        ctx: &Ctx,
+        reveal: Reveal,
+    ) -> Result<()> {
+        // No partial painting here: the image appears whole.
+        let _ = reveal;
+        self.hide(w, size, bg_color)?;
+        self.display(w, data, ctx)
+    }
     fn create_data(
         image_data: &[u8],
         area: Rect,

@@ -149,13 +149,22 @@ enum DownloadRow {
         /// `true`: state is Downloading, `false`: Queued.
         downloading: bool,
     },
+    /// One file of a daemon torrent job. A committed torrent commit keeps
+    /// several files (a season pack keeps every episode), and each one is its
+    /// own download the user wants to see — so each gets its own row, not one
+    /// row per job. The rows of one job share its engine and stream actions.
     Torrent {
+        /// Stable row key (`torrent:<job id>:<file index>`).
         key: String,
         /// The daemon job id behind the row.
         job_id: String,
+        /// The file's label (its own name within the torrent).
         label: String,
-        /// Overall progress of the kept files (0-100).
+        /// This file's progress (0-100).
         progress: f64,
+        /// Where the file sits in the job: `(index among the job's kept
+        /// files, how many the job keeps)`.
+        position: (usize, usize),
     },
 }
 /// Round 107: what a double click or `Right` does on a downloads row. The
@@ -237,17 +246,57 @@ fn list_rows(ctx: &Ctx) -> Vec<DownloadRow> {
     }
     if let Some(state) = ctx.dl_state.borrow().as_ref() {
         for job in state.jobs.iter().filter(|job| job.status.active()) {
-            rows.push(DownloadRow::Torrent {
-                key: format!("torrent:{}", job.job_id),
-                job_id: job.job_id.clone(),
-                label: job.torrent_name.clone(),
-                progress: job.progress_percent,
-            });
+            // One row per kept file: a season-pack commit keeps every
+            // episode, and the user tracks each of them on its own. A job
+            // whose file list is not known yet (still fetching the metainfo)
+            // shows as the torrent itself, the way it always did.
+            let total = job.kept_files.len().max(1);
+            if job.kept_files.is_empty() {
+                rows.push(DownloadRow::Torrent {
+                    key: format!("torrent:{}", job.job_id),
+                    job_id: job.job_id.clone(),
+                    label: job.torrent_name.clone(),
+                    progress: job.progress_percent,
+                    position: (1, 1),
+                });
+                continue;
+            }
+            for (pos, file) in job.kept_files.iter().enumerate() {
+                rows.push(DownloadRow::Torrent {
+                    key: format!("torrent:{}:{}", job.job_id, file.index),
+                    job_id: job.job_id.clone(),
+                    label: file.name.clone(),
+                    progress: file_progress_percent(job, file),
+                    position: (pos + 1, total),
+                });
+            }
         }
     }
     rows.extend(list_downloads().into_iter().map(DownloadRow::File));
     rows
 }
+/// One kept file's own progress (0-100) within its daemon job.
+///
+/// `DlJob::file_progress` is rqbit's per-file byte array, indexed like the
+/// torrent's file list. A file the daemon has not reported yet (the engine is
+/// still initializing) shows as 0 rather than borrowing the job's overall
+/// figure, which would make every row of a pack look half-done.
+pub(crate) fn file_progress_percent(
+    job: &crate::core::dlctl::DlJob,
+    file: &crate::core::dlctl::DlKeptFile,
+) -> f64 {
+    if file.length == 0 {
+        return job.progress_percent;
+    }
+    let done = job
+        .file_progress
+        .get(file.index)
+        .copied()
+        .unwrap_or(0)
+        .min(file.length);
+    (done as f64 / file.length as f64) * 100.0
+}
+
 /// The download rows, typed by media kind: `S` for audio, `▶` for video.
 fn download_items(
     items: &[DownloadRow],
@@ -284,12 +333,16 @@ fn download_items(
                         let suffix = Some(Span::styled(subtitle, config.as_list_text_style()));
                         (prefix, label.clone(), suffix)
                     }
-                    DownloadRow::Torrent { label, progress, .. } => {
+                    DownloadRow::Torrent { label, progress, position, .. } => {
                         let prefix = Span::styled("↓", config.theme.level_styles.warn);
-                        let suffix = Some(Span::styled(
-                            format!("  torrent · {progress:.0}%"),
-                            config.as_list_text_style(),
-                        ));
+                        // A pack's rows say which file they are; a single
+                        // kept file stays "torrent · 42%".
+                        let what = if position.1 > 1 {
+                            format!("  torrent {}/{} · {progress:.0}%", position.0, position.1)
+                        } else {
+                            format!("  torrent · {progress:.0}%")
+                        };
+                        let suffix = Some(Span::styled(what, config.as_list_text_style()));
                         (prefix, label.clone(), suffix)
                     }
                 };
@@ -443,15 +496,19 @@ impl DownloadsPane {
                     ),
                 )
             }
-            DownloadRow::Torrent { job_id, label, progress, .. } => {
-                // The row keeps its own progress/label even when the job has
-                // left `downloads.json`; the shared helper adds the rest.
+            DownloadRow::Torrent { job_id, label, progress, position, .. } => {
+                // The row keeps its own file name/progress even when the job
+                // has left `downloads.json`; the shared helper adds the job
+                // facts (the torrent behind the file among them).
                 let mut rows = vec![
-                    vec!["Torrent".to_owned(), label.clone()],
+                    vec![
+                        "File".to_owned(),
+                        format!("{label} ({} of {})", position.0, position.1),
+                    ],
                     vec!["Progress".to_owned(), format!("{progress:.1} %")],
                 ];
                 rows.extend(torrent_info_rows(ctx, job_id));
-                ("Torrent info", rows)
+                ("Download info", rows)
             }
         };
         modal!(
@@ -860,10 +917,11 @@ mod primary_action_tests {
 
     fn torrent_row() -> DownloadRow {
         DownloadRow::Torrent {
-            key: "torrent:job-1".to_owned(),
+            key: "torrent:job-1:3".to_owned(),
             job_id: "job-1".to_owned(),
-            label: "a torrent".to_owned(),
+            label: "ep1.mkv".to_owned(),
             progress: 12.5,
+            position: (1, 4),
         }
     }
 
@@ -886,5 +944,113 @@ mod primary_action_tests {
     fn a_directory_row_has_no_primary_action() {
         let row = DownloadRow::File(DirOrSong::name_only("a folder".to_owned()));
         assert_eq!(primary_action(&row), PrimaryAction::None);
+    }
+}
+
+#[cfg(test)]
+mod per_file_row_tests {
+    //! A committed torrent commit keeps several files (a season pack keeps
+    //! every episode); each of them is a download of its own in the Downloads
+    //! tab. The tab used to list one row per daemon JOB, so a pack showed a
+    //! single "torrent · 40 %" line.
+
+    use super::*;
+
+    fn kept(index: usize, name: &str, length: u64) -> crate::core::dlctl::DlKeptFile {
+        crate::core::dlctl::DlKeptFile { index, name: name.to_owned(), length }
+    }
+
+    fn job(files: Vec<crate::core::dlctl::DlKeptFile>) -> crate::core::dlctl::DlJob {
+        crate::core::dlctl::DlJob {
+            job_id: "dl-1".to_owned(),
+            request_id: "req-1".to_owned(),
+            infohash: Some("abc".to_owned()),
+            source_key: "key".to_owned(),
+            torrent_item: crate::core::dlctl::DlTorrentItem::Magnet("magnet:x".to_owned()),
+            torrent_name: "Season 1".to_owned(),
+            kept_files: files,
+            file_progress: vec![100, 50, 0],
+            status: crate::core::dlctl::DlStatus::Downloading,
+            progress_percent: 40.0,
+            engine: None,
+            torrent_id: Some("1".to_owned()),
+            error: None,
+            updated_at: 0,
+            done_at: None,
+            moved_to: None,
+        }
+    }
+
+    fn torrent_rows(rows: &[DownloadRow]) -> Vec<&DownloadRow> {
+        rows.iter().filter(|row| matches!(row, DownloadRow::Torrent { .. })).collect()
+    }
+
+    #[test]
+    fn every_kept_file_gets_its_own_row() {
+        let ctx = crate::tests::fixtures::ctx(
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+        );
+        let mut state = crate::core::dlctl::DlStateFile::default();
+        state.jobs.push(job(vec![
+            kept(0, "ep1.mkv", 100),
+            kept(1, "ep2.mkv", 100),
+            kept(2, "ep3.mkv", 100),
+        ]));
+        *ctx.dl_state.borrow_mut() = Some(state);
+        let rows = list_rows(&ctx);
+        let torrents = torrent_rows(&rows);
+        assert_eq!(torrents.len(), 3, "one row per kept file, not one per job");
+        // Each row is its own file, in the pack's order, keyed by the file.
+        for (pos, row) in torrents.iter().enumerate() {
+            let DownloadRow::Torrent { key, label, position, job_id, .. } = row else {
+                unreachable!()
+            };
+            assert_eq!(label, &format!("ep{}.mkv", pos + 1));
+            assert_eq!(position, &(pos + 1, 3), "the row knows where it sits in the pack");
+            assert_eq!(job_id, "dl-1", "the rows share their job");
+            assert_eq!(key, &format!("torrent:dl-1:{pos}"), "one stable key per file");
+        }
+        // The keys are distinct, so the selection survives a rescan.
+        let keys: std::collections::HashSet<String> =
+            torrents.iter().map(|row| row.as_path().to_owned()).collect();
+        assert_eq!(keys.len(), 3);
+    }
+
+    #[test]
+    fn each_row_carries_its_own_progress() {
+        let j = job(vec![
+            kept(0, "ep1.mkv", 100),
+            kept(1, "ep2.mkv", 100),
+            kept(2, "ep3.mkv", 100),
+        ]);
+        let progress: Vec<f64> = j
+            .kept_files
+            .iter()
+            .map(|file| file_progress_percent(&j, file))
+            .collect();
+        assert_eq!(progress, vec![100.0, 50.0, 0.0], "not the job's 40 % on every row");
+    }
+
+    #[test]
+    fn a_job_without_its_file_list_stays_one_row() {
+        // Still fetching the metainfo: there is nothing to split yet.
+        let ctx = crate::tests::fixtures::ctx(
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+        );
+        let mut state = crate::core::dlctl::DlStateFile::default();
+        let mut pending = job(Vec::new());
+        pending.status = crate::core::dlctl::DlStatus::Adding;
+        state.jobs.push(pending);
+        *ctx.dl_state.borrow_mut() = Some(state);
+        let rows = list_rows(&ctx);
+        let torrents = torrent_rows(&rows);
+        assert_eq!(torrents.len(), 1);
+        let DownloadRow::Torrent { label, position, .. } = torrents[0] else { unreachable!() };
+        assert_eq!(label, "Season 1", "the torrent stands in until its files are known");
+        assert_eq!(position, &(1, 1));
     }
 }

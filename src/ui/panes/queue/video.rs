@@ -16,6 +16,7 @@ use ratatui::{
 use unicode_width::UnicodeWidthStr;
 
 use super::{Areas, CHAPTER_DURATION_COL, QueuePane, truncate_to_width};
+use crate::core::mpv::MpvPlaylistEntry;
 use crate::{
     config::keys::{CommonAction, DirectoriesActions, QueueActions},
     ctx::Ctx,
@@ -67,14 +68,13 @@ impl QueuePane {
                 let max_offset = (playlist.len() + 1).saturating_sub(viewport);
                 *self.video_state.offset_mut() = max_offset;
             }
-            self.schedule_spinner_tick(ctx);
+            self.request_spinner_frames(ctx);
         } else {
             self.video_import_loading_shown = false;
             // Nothing in the Video list spins once the import's line is gone
             // (the audio list's Duration spinners are not drawn in this mode),
-            // so the shared redraw tick stops here instead of repainting at
-            // the spinner rate forever.
-            self.cancel_spinner_tick(ctx);
+            // so this frame asks the clock for nothing and the tick stops
+            // instead of repainting at the spinner rate forever.
         }
         self.video_items_len = playlist.len() + usize::from(import_loading);
         // The playlist can change under the marks (session switches,
@@ -168,7 +168,7 @@ impl QueuePane {
                 let duration = crate::ui::modals::paste::video_entry_duration(ctx, entry)
                     .map(|d| fmt.format(d as u64))
                     .unwrap_or_else(|| "-".to_owned());
-                let prefix = if is_current { "❯ " } else { "  " };
+                let prefix = video_row_prefix(entry, is_current);
                 let mut title = entry.title.clone();
                 truncate_to_width(&mut title, title_field.saturating_sub(2));
                 let title_pad = title_field.saturating_sub(2 + title.width());
@@ -191,6 +191,7 @@ impl QueuePane {
                 ctx.config.theme.highlighted_item_style
             });
         StatefulWidget::render(list, area, frame.buffer_mut(), &mut self.video_state);
+        self.render_video_band_marquee(frame, ctx, area);
 
         if import_loading {
             self.render_video_import_loading_row(frame, ctx, playlist.len());
@@ -249,6 +250,36 @@ impl QueuePane {
                 width: area.width,
                 height: 1,
             },
+        );
+    }
+
+    /// Opt-in (`[theme] band_rect`): the band around the video rows a drag is
+    /// selecting — top and bottom rules only, the same shape the audio list
+    /// draws (see `QueuePane::render_band_marquee`), from its own band state.
+    fn render_video_band_marquee(&self, frame: &mut Frame, ctx: &Ctx, area: Rect) {
+        if !ctx.config.theme.band_rect {
+            return;
+        }
+        let band = self.video_band;
+        if !band.is_active() {
+            return;
+        }
+        let (Some(anchor), Some(current)) = (band.anchor, band.current) else {
+            return;
+        };
+        let Some(rect) =
+            crate::ui::band::marquee_rect(area, self.video_state.offset(), anchor, current, 1)
+        else {
+            return;
+        };
+        frame.render_widget(
+            ratatui::widgets::Block::default()
+                // Top and bottom only: a side border would cover a cell of
+                // every row in the band (the lists have no gutter).
+                .borders(ratatui::widgets::Borders::TOP | ratatui::widgets::Borders::BOTTOM)
+                .border_type(ratatui::widgets::BorderType::Rounded)
+                .border_style(ctx.config.theme.highlight_border_style),
+            rect,
         );
     }
 
@@ -510,6 +541,23 @@ impl QueuePane {
     }
 }
 
+/// The two-column marker before a Video row's title.
+///
+/// A row a paste inserted before its link was resolved
+/// ([`MpvPlaylistEntry::pending`]) shows the resolving spinner there: the
+/// title/URL/duration are on their way, and the row is already selectable (its
+/// thumbnail and description resolve from the link in the meantime). The
+/// playing entry keeps the `❯` marker.
+fn video_row_prefix(entry: &MpvPlaylistEntry, is_current: bool) -> String {
+    if entry.pending {
+        format!("{} ", super::render::spinner_frame())
+    } else if is_current {
+        "❯ ".to_owned()
+    } else {
+        "  ".to_owned()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -529,6 +577,28 @@ mod tests {
     }
 
     const LINK: &str = "https://www.youtube.com/watch?v=abc123";
+
+    /// A row inserted by a paste before `yt-dlp` answered renders with the
+    /// resolving spinner instead of the `❯`/blank marker — the visible half of
+    /// "the queue populates immediately, the details follow".
+    #[test]
+    fn a_pending_row_shows_the_resolving_spinner() {
+        let mut entry = MpvPlaylistEntry::pending_link(LINK);
+        assert_eq!(
+            super::video_row_prefix(&entry, false),
+            format!("{} ", crate::ui::panes::queue::render::spinner_frame()),
+            "a resolving row is marked with the spinner"
+        );
+        // A pending row is not "playing" even when it holds the index.
+        assert_ne!(
+            super::video_row_prefix(&entry, true),
+            "❯ ",
+            "the spinner wins over the marker"
+        );
+        entry.pending = false;
+        assert_eq!(super::video_row_prefix(&entry, true), "❯ ");
+        assert_eq!(super::video_row_prefix(&entry, false), "  ");
+    }
 
     /// The reported bug: five queued YouTube videos read `0:00 total time`
     /// while the Duration cells that had been resolved showed real values.

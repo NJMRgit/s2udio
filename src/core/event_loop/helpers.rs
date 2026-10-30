@@ -203,17 +203,23 @@ pub(super) fn complete_stream_download(
     status_info!("Saved {} file(s) to s2udio-downloads", files.len());
 }
 
-/// Opens the download panel for a just-committed download-only job: the
-/// torrent picker's `Download` does not wait for the torrent to be `live`,
-/// so there is no "Preparing downloader…" window — the job's own panel
-/// (`InfoListModal`, the same one the Downloads modal shows) appears as soon
-/// as the daemon registers the job.
+/// Opens the **Downloads modal** for a just-committed download-only job: the
+/// torrent picker's `Download` does not wait for the torrent to be `live`, so
+/// there is no "Preparing downloader…" window — the list the download lives
+/// in appears as soon as the daemon registers the job.
+///
+/// It used to open a one-job `InfoListModal` progress panel instead (2026-10-23
+/// user report: "it shows a big download info box — it should open the
+/// downloads modal instead so the user can see it added to the list"). The
+/// panel also hid the rest: a whole season pack showed as one info box rather
+/// than as the rows the Downloads tab/modal already carry (§ docs/design/
+/// Tabs/downloads-tab.md), and the user had one more place to hunt for it.
 ///
 /// Matching is by `DlJob::source_key`, the picker's own scan key: the
 /// daemon generates the job id, so it is not known when the request is
 /// written. Same-source commits coalesce onto one job, so the first match
 /// wins. The pending key is cleared even when no job shows up: a spooled
-/// request that the daemon has not picked up yet must not open a panel
+/// request that the daemon has not picked up yet must not open the modal
 /// later, out of context.
 pub(super) fn open_pending_download_panel(ctx: &mut Ctx) {
     let Some(key) = ctx.dl_panel_pending.borrow().clone() else { return };
@@ -233,14 +239,113 @@ pub(super) fn open_pending_download_panel(ctx: &mut Ctx) {
         log::debug!(key:?; "Committed download has no daemon job yet (spooled)");
         return;
     };
-    if crate::ui::modals::info_list_modal::torrent_info_rows(ctx, &job_id).is_empty() {
-        return;
+    log::debug!(job_id:?; "Opening the Downloads modal for the committed download");
+    // The modal renders from `Ctx.dl_state`, which the 1 s poll refreshes; ask
+    // for a poll first so the modal comes up with the new job already listed
+    // instead of being empty for a beat (the same sequence the modal's own
+    // open path uses).
+    let _ = ctx.app_event_sender.send(crate::AppEvent::DlStatePoll);
+    let modal = crate::ui::modals::downloads::DownloadsModal::new(ctx);
+    crate::shared::macros::modal!(ctx, modal);
+}
+
+#[cfg(test)]
+mod download_panel_tests {
+    //! The torrent picker's `Download` commits a daemon job and then shows the
+    //! user what happened. It used to open a one-job `InfoListModal` progress
+    //! panel; 2026-10-23 user report: "it shows a big download info box — it
+    //! should open the downloads modal instead so the user can see it added to
+    //! the list". These pin that the modal sent is the Downloads one.
+
+    use super::*;
+
+    fn ctx() -> (Ctx, crossbeam::channel::Receiver<crate::AppEvent>) {
+        let app = crossbeam::channel::unbounded();
+        let receiver = app.1.clone();
+        Box::leak(Box::new(app.1.clone()));
+        let ctx = crate::tests::fixtures::ctx(
+            app,
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+        );
+        (ctx, receiver)
     }
-    log::debug!(job_id:?; "Opening the committed download's progress panel");
-    let menu = crate::ui::modals::InfoListModal::builder()
-        .rows(crate::ui::modals::info_list_modal::torrent_info_rows(ctx, &job_id))
-        .title("Download info")
-        .column_widths(crate::ui::modals::info_list_modal::INFO_COLUMN_WIDTHS)
-        .build();
-    crate::shared::macros::modal!(ctx, menu);
+
+    fn job(source_key: &str) -> crate::core::dlctl::DlJob {
+        crate::core::dlctl::DlJob {
+            job_id: "dl-1".to_owned(),
+            request_id: "req-1".to_owned(),
+            infohash: Some("101ad324".to_owned()),
+            source_key: source_key.to_owned(),
+            torrent_item: crate::core::dlctl::DlTorrentItem::Magnet("magnet:x".to_owned()),
+            torrent_name: "Lanterns.S01.2160p".to_owned(),
+            kept_files: vec![crate::core::dlctl::DlKeptFile {
+                index: 0,
+                name: "Lanterns.S01E01.mkv".to_owned(),
+                length: 100,
+            }],
+            file_progress: Vec::new(),
+            status: crate::core::dlctl::DlStatus::Downloading,
+            progress_percent: 0.0,
+            engine: None,
+            torrent_id: None,
+            error: None,
+            updated_at: 0,
+            done_at: None,
+            moved_to: None,
+        }
+    }
+
+    /// The modal that reached the UI, if any.
+    fn sent_modal(
+        receiver: &crossbeam::channel::Receiver<crate::AppEvent>,
+    ) -> Option<Box<dyn crate::ui::modals::Modal>> {
+        while let Ok(event) = receiver.try_recv() {
+            if let crate::AppEvent::UiEvent(crate::ui::UiAppEvent::Modal(modal)) = event {
+                return Some(modal);
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn a_committed_download_opens_the_downloads_modal() {
+        let (mut ctx, receiver) = ctx();
+        let mut state = crate::core::dlctl::DlStateFile::default();
+        state.jobs.push(job("magnet:key"));
+        *ctx.dl_state.borrow_mut() = Some(state);
+        *ctx.dl_panel_pending.borrow_mut() = Some("magnet:key".to_owned());
+
+        open_pending_download_panel(&mut ctx);
+
+        let modal = sent_modal(&receiver).expect("the commit opens a modal");
+        let debug = format!("{modal:?}");
+        assert!(
+            debug.contains("DownloadsModal"),
+            "the Downloads modal opens so the job is seen joining the list: {debug}"
+        );
+        assert!(
+            !debug.contains("InfoListModal"),
+            "not a one-job info box: {debug}"
+        );
+        assert!(ctx.dl_panel_pending.borrow().is_none(), "the pending key is consumed");
+    }
+
+    #[test]
+    fn a_still_spooled_commit_opens_nothing() {
+        // The daemon has not registered the job yet: opening the modal now
+        // would show a list without it, out of context later.
+        let (mut ctx, receiver) = ctx();
+        *ctx.dl_panel_pending.borrow_mut() = Some("magnet:key".to_owned());
+        open_pending_download_panel(&mut ctx);
+        assert!(sent_modal(&receiver).is_none(), "no modal without the job");
+        assert!(ctx.dl_panel_pending.borrow().is_none(), "the pending key is still consumed");
+    }
+
+    #[test]
+    fn no_pending_commit_opens_nothing() {
+        let (mut ctx, receiver) = ctx();
+        open_pending_download_panel(&mut ctx);
+        assert!(sent_modal(&receiver).is_none());
+    }
 }

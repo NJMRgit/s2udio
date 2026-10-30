@@ -101,10 +101,9 @@ pub struct QueuePane {
     video_band: crate::ui::band::BandState,
     /// Click areas of the Audio / Video / Chapters toggle.
     pub(crate) toggle_areas: [Rect; 4],
-    /// Round 95: the redraw tick that keeps the Duration column's spinner
-    /// moving while a queued stream resolve is in flight. Armed only while
-    /// such a row is on screen, so the animation costs nothing otherwise.
-    loading_tick: Option<crate::shared::id::Id>,
+    /// Round 95: the Duration column's spinner goes through the shared frame
+    /// clock (`Ctx::animator`), which is asked only while a stream resolve is
+    /// in flight — so the animation costs no frames while no row spins.
     /// The audio list has scrolled to the pasted-playlist import's loading
     /// row (2026-10-24): the scroll happens once, on the frame the import
     /// starts, so a later redraw cannot yank a list the user is reading.
@@ -504,7 +503,6 @@ impl QueuePane {
             chapters_scrollbar_drag: crate::shared::mouse_event::ScrollbarDrag::default(),
             video_band: crate::ui::band::BandState::default(),
             toggle_areas: [Rect::default(); 4],
-            loading_tick: None,
             import_loading_shown: false,
             video_import_loading_shown: false,
             warmed_selection_id: None,
@@ -1539,6 +1537,71 @@ mod follow_the_track_tests {
             "the deferred jump lands once the refreshed list holds the row"
         );
         assert_eq!(r.offset(), pos, "at the top of the list");
+    }
+
+    /// **Reported 2026-10-20: starting an unresolved stream snapped the
+    /// selection back to the previous item.**
+    ///
+    /// The row-resolve flow stops MPD on purpose ("Holding MPD while the
+    /// requested row resolves") while `status.songid` still names the
+    /// **previous** track. A stopped player makes `find_current_song_in_queue`
+    /// return `None`, which the deferral read as "a new track whose row is not
+    /// in the queue copy yet" — so it remembered the *previous* id, and the
+    /// queue refresh replayed that jump. The live log shows it exactly: the
+    /// deferral armed song `25` (the track that had just stopped) while the
+    /// user was resolving row `81`, and the replay put the selection on `25`.
+    ///
+    /// A deferral is a decision now: no new track, no deferred jump.
+    #[test]
+    fn a_stop_while_a_row_resolves_does_not_replay_the_previous_track() {
+        let mut r = rig(0, 30);
+        // Row 0 (id 1) has been playing; its change was already decided.
+        r.song_changed();
+        assert_eq!(r.pane.followed_song_id, Some(1), "the previous track was handled");
+
+        // The user starts row 12 (an unresolved link): the app holds MPD — a
+        // stop — and the highlight stays on the row they started.
+        r.pane.queue.select_idx(12, 0);
+        r.ctx.status.state = State::Stop;
+        r.ctx.status.songid = Some(1);
+        r.song_changed();
+        assert_eq!(
+            r.pane.pending_follow_song_id, None,
+            "a stopped player has nothing to follow, so the previous track's id is not deferred"
+        );
+
+        // The resolve lands and the swap's queue refresh arrives.
+        let mut ev = crate::ui::UiEvent::QueueChanged;
+        r.pane.on_event(&mut ev, true, &r.ctx).expect("the pane handles it");
+        assert_eq!(
+            r.selected(),
+            Some(12),
+            "the highlight stays on the row the user started, not the previous item"
+        );
+    }
+
+    /// The replay deliberately does not re-consult the gate — so a deferral
+    /// must never be armed from a decision the gate declined. Otherwise a
+    /// navigation just before the change is honoured, and then seconds later
+    /// the deferred replay yanks the selection anyway.
+    #[test]
+    fn a_suppressed_decision_does_not_arm_a_deferred_jump() {
+        let mut r = rig(0, 30);
+        r.pane.queue.select_idx(3, 0);
+        r.pane.note_user_navigation();
+        // A new track whose row the pane's stale list does not have yet.
+        let pos = 20;
+        r.ctx.queue[pos].id = 777;
+        r.ctx.status.song = Some(pos);
+        r.ctx.status.songid = Some(777);
+        r.song_changed();
+        assert_eq!(
+            r.pane.pending_follow_song_id, None,
+            "the gate declined this change, so nothing is owed to the refresh"
+        );
+        let mut ev = crate::ui::UiEvent::QueueChanged;
+        r.pane.on_event(&mut ev, true, &r.ctx).expect("the pane handles it");
+        assert_eq!(r.selected(), Some(3), "the user's position survives the refresh");
     }
 
     /// **The second reported miss.** The follow jump runs (the log shows

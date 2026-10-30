@@ -116,8 +116,10 @@ fn main_task<B: Backend + std::io::Write>(
     // pass cleans up any artifacts from the first (terminal-side overlays
     // redraw at the new size, stale cells from the blank resize state).
     let mut resize_render_passes = 0u8;
-    let max_fps = f64::from(ctx.config.max_fps);
-    let mut min_frame_duration = Duration::from_secs_f64(1f64 / max_fps);
+    // The frame budget (`max_fps`): the shortest gap between two frames.
+    // `frame_pacing` decides whether every budget tick renders or only the
+    // ticks something asked for (see the end of the render block).
+    let mut min_frame_duration = crate::ui::anim::frame_budget(ctx.config.max_fps);
     let mut last_render = std::time::Instant::now().sub(Duration::from_secs(10));
     // Round-54 downloader daemon state: re-reads `downloads.json` once
     // per second while the daemon has jobs (or the Downloads modal is
@@ -202,6 +204,12 @@ fn main_task<B: Backend + std::io::Write>(
         }
     };
 
+    // A pane that starts hidden must not burn continuous frames before the
+    // first tmux hook tells us it is visible.
+    if let Some(tmux) = &tmux {
+        ctx.frames_paused.set(!tmux.visible);
+    }
+
     // Execute on_song_change at startup if
     // configured and current song is available. Round 38: with
     // `lyrics_source: LocalOnly` the hook (the network-fetch vehicle) is
@@ -273,8 +281,8 @@ fn main_task<B: Backend + std::io::Write>(
                     new_config.active_panes =
                         Config::calc_active_panes(&new_config.tabs.tabs, &new_config.theme.layout);
                     ctx.config = Arc::new(*new_config);
-                    let max_fps = f64::from(ctx.config.max_fps);
-                    min_frame_duration = Duration::from_secs_f64(1f64 / max_fps);
+                    min_frame_duration =
+                        crate::ui::anim::frame_budget(ctx.config.max_fps);
 
                     // Update lyrics watcher as needed
                     if ctx.config.enable_lyrics_hot_reload != lyrics_watcher.is_some()
@@ -749,6 +757,15 @@ fn main_task<B: Backend + std::io::Write>(
                             _ => continue,
                         };
 
+                        // A hidden pane is off screen: the frame clock arms
+                        // nothing and continuous pacing stops (no point
+                        // rendering into a buffer nobody can see). Either
+                        // transition renders once: a pane coming back may have
+                        // been resized while hidden, so its first frame must
+                        // not wait for the next unrelated event.
+                        ctx.frames_paused.set(!tmux.visible);
+                        render_wanted = true;
+
                         match ui.on_event(event, &mut ctx) {
                             Ok(()) => {}
                             Err(err) => {
@@ -862,7 +879,14 @@ fn main_task<B: Backend + std::io::Write>(
                 resize_render_passes -= 1;
                 render_wanted = true;
             } else {
-                render_wanted = false;
+                // Continuous pacing: keep asking for the next budget tick so
+                // every animation and live timeline is computed per frame
+                // instead of waiting for an event. An unchanged frame emits
+                // no bytes (ratatui diffs), so this costs CPU, not output;
+                // `frame_pacing: OnDemand` restores the block-until-changed
+                // behaviour, and a hidden tmux pane pauses it either way.
+                render_wanted =
+                    ctx.config.frame_pacing.is_continuous() && !ctx.frames_paused.get();
             }
         }
     }

@@ -129,8 +129,9 @@ impl JellyfinPane {
         resume_secs: Option<u64>,
     ) -> Result<()> {
         use crate::ui::modals::confirm_modal::{Action, ConfirmModal};
-        // An answer asked for this item already exists (the Home page asks
-        // before it leaves for the tree): launch instead of asking twice.
+        // The Home page asks before it leaves for the tree (it needs the
+        // answer to decide *whether* to switch), so its answer is already
+        // armed for this item: launch instead of asking a second time.
         let answered = ctx
             .mpv
             .pending_resume
@@ -228,6 +229,17 @@ impl JellyfinPane {
     /// (mpv / MPD audio / ask).
     pub(super) fn play_selected(&mut self, ctx: &Ctx) -> Result<()> {
         let Some(item) = self.selected_item() else { return Ok(()) };
+        self.play_item(&item, ctx)
+    }
+    /// Play one specific item (video through mpv per `video.playback`, audio
+    /// through MPD as a temporary entry). The explicit target is what the
+    /// tree jump plays: the cursor may have fallen back to another row, and
+    /// playing the item the user asked for must not depend on that.
+    pub(super) fn play_item(
+        &mut self,
+        item: &crate::jellyfin::JfItem,
+        ctx: &Ctx,
+    ) -> Result<()> {
         if !item.is_playable() {
             return Ok(());
         }

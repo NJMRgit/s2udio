@@ -104,6 +104,21 @@ impl Modal for MenuModal<'_> {
     fn restore_submenu_path(&mut self, path: &[String], ctx: &mut Ctx) {
         self.restore_row_path(path, ctx);
     }
+    fn vis(&self) -> Option<crate::ui::view_state::ModalVis> {
+        // The rows' state lives on the list section; the successor reads it
+        // back out of `Ctx` when it builds (see the torrent picker).
+        self.rows_vis().map(crate::ui::view_state::ModalVis::TorrentPicker)
+    }
+    fn restore_vis(&mut self, vis: crate::ui::view_state::ModalVis, _ctx: &mut Ctx) {
+        // Only the flows that live on a menu section have state to restore
+        // (the torrent picker's checkbox rows and footer buttons).
+        if let crate::ui::view_state::ModalVis::TorrentPicker(carried) = vis
+            && let Some(SectionType::Menu(section)) =
+                self.sections.get_mut(self.current_section_idx)
+        {
+            section.restore_picker_ui(&carried);
+        }
+    }
     fn render(&mut self, frame: &mut Frame, ctx: &mut Ctx) -> Result<()> {
         // A running drag auto-scroll steps once per frame; asking for the next
         // frame keeps it going while the pointer is held past the list's edge.
@@ -351,6 +366,11 @@ impl Modal for MenuModal<'_> {
                         } else {
                             ctx.render()?;
                         }
+                    } else if self.active_section_mut().enter_moves_to_buttons() {
+                        // A picker whose rows are toggled by their glyph and
+                        // `Space`: Enter leaves the list for the buttons, on
+                        // the first one (the torrent picker's Stream).
+                        ctx.render()?;
                     } else if self.active_section_mut().confirm_on_enter(ctx)? {
                         // The multi-stream download picker: its rows are ticked
                         // already, so Enter on the list starts the download
@@ -582,6 +602,37 @@ impl<'a> MenuModal<'a> {
     pub fn height_cap_fraction(mut self, num: u16, den: u16) -> Self {
         self.height_cap = Some((num, den.max(1)));
         self
+    }
+
+    /// The popup's checkbox list (the torrent picker's file rows), if it has
+    /// one. Used to re-apply the user's ticks and cursor onto a freshly built
+    /// popup — which must happen AFTER `build()`, since `build()` runs
+    /// `section.down()` and would move (or, on the last row, clear) the
+    /// restored cursor.
+    pub fn check_section(&mut self) -> Option<&mut ListSection> {
+        self.sections.iter_mut().find_map(|section| match section {
+            SectionType::Menu(section) if section.is_check_list() => Some(section),
+            _ => None,
+        })
+    }
+
+    /// The rows' user state — the torrent picker's file list: its cursor,
+    /// its ticks and whether the footer buttons hold the focus.
+    ///
+    /// It reads the first checkbox-list section, NOT only the currently
+    /// active one: a picker whose footer buttons hold the focus has no
+    /// section selected, and looking at the active section alone returned
+    /// `None` — which silently dropped the user's cursor and ticks on the
+    /// next rebuild (they came back on row 0, fully re-ticked). `None` only
+    /// when the popup has no checkbox list at all (the picker's wait window,
+    /// any other menu).
+    pub fn rows_vis(&self) -> Option<crate::ui::modals::torrent_picker::PickerUi> {
+        self.sections.iter().find_map(|section| match section {
+            SectionType::Menu(section) if section.is_check_list() => {
+                Some(section.picker_ui())
+            }
+            _ => None,
+        })
     }
 
     /// The replacement id this modal refreshes in place under (see

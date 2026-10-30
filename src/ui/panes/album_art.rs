@@ -890,4 +890,41 @@ mod tests {
         );
         assert_eq!(AlbumArtPane::resolved_art_uri(&ctx, tagged.to_owned()), resolved);
     }
+
+    #[test]
+    fn a_selected_video_row_shows_its_derived_thumbnail() {
+        // 2026-10-20: the Video list's highlight is an mpv playlist entry, not
+        // an MPD song, so it publishes its own channel. Selecting one while
+        // nothing plays must show its artwork like an audio row does — and the
+        // id is in the link, so it does not wait for the resolve.
+        let (app_tx, app_rx) = crossbeam::channel::unbounded();
+        let (work_tx, work_rx) = crossbeam::channel::unbounded();
+        let mut ctx = ctx(
+            (app_tx, app_rx),
+            (work_tx.clone(), work_rx.clone()),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+        );
+        ctx.queue_tab.set(crate::ctx::QueueTabMode::Video);
+        *ctx.video_selected.borrow_mut() =
+            Some("https://www.youtube.com/watch?v=dpSUbK-bOLA".to_owned());
+        ctx.status.state = State::Stop;
+        let mut screen = AlbumArtPane::new(&ctx);
+
+        screen.before_show(&ctx).unwrap();
+        assert!(
+            matches!(
+                work_rx.try_recv(),
+                Ok(WorkRequest::FetchYtThumbnail { url })
+                    if url == "https://i.ytimg.com/vi/dpSUbK-bOLA/hqdefault.jpg"
+            ),
+            "the selected video's thumbnail is fetched without playing it"
+        );
+
+        // Resting on the same selection does not re-fetch every frame.
+        screen.before_show(&ctx).unwrap();
+        assert!(
+            work_rx.try_recv().is_err(),
+            "an unchanged video selection is not re-fetched"
+        );
+    }
 }

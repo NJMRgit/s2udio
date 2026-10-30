@@ -382,7 +382,7 @@ pub struct TorrentFileInfo {
 }
 /// `GET /torrents/{id}/stats/v1` — the bandwidth-gate (M3) and the
 /// "Play and Download" completion check inputs.
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, Debug, Clone)]
 pub struct TorrentStats {
     /// Consumed by the M3 bandwidth gate; unread until then.
     #[allow(dead_code)]
@@ -408,7 +408,7 @@ pub struct TorrentStats {
     pub live: Option<LiveStats>,
 }
 /// Smoothed live statistics inside [`TorrentStats`].
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, Debug, Clone)]
 pub struct LiveStats {
     /// Smoothed download speed (rqbit v9 returns `{mbps,
     /// human_readable}` — the M3 gate converts `mbps` → KB/s).
@@ -417,7 +417,7 @@ pub struct LiveStats {
 }
 /// A speed value as rqbit reports it: `mbps` (megabits/s) plus a
 /// human-readable string (e.g. "0.00 MiB/s").
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, Debug, Clone)]
 pub struct Speed {
     /// Megabits per second; the M3 bandwidth gate converts to KB/s.
     #[allow(dead_code)]
@@ -433,7 +433,20 @@ pub fn add_torrent(
     engine: &TorrentEngine,
     source: TorrentSource<'_>,
 ) -> Result<String, String> {
-    add_torrent_at(&engine.base_url, &engine.auth_header, source)
+    add_torrent_at(&engine.base_url, &engine.auth_header, source, &[])
+}
+/// Re-add a torrent telling the engine to fetch **only** `only_files` (the
+/// positional indices of the torrent's file list) — everything else stays out
+/// of the cache. `overwrite=true` makes this adopt the existing partial cache
+/// instead of restarting, and rqbit's `only_files` is applied to the new
+/// selection (the already-cached files are kept, and a file that was fetched
+/// before is simply not extended).
+pub fn add_torrent_only_files(
+    engine: &TorrentEngine,
+    source: TorrentSource<'_>,
+    only_files: &[usize],
+) -> Result<String, String> {
+    add_torrent_at(&engine.base_url, &engine.auth_header, source, only_files)
 }
 /// The add HTTP call, addressable without a full `TorrentEngine` (the
 /// scan thread runs it on a sub-thread; the engine itself cannot be
@@ -444,6 +457,7 @@ fn add_torrent_at(
     base_url: &str,
     auth_header: &str,
     source: TorrentSource<'_>,
+    only_files: &[usize],
 ) -> Result<String, String> {
     let body: Vec<u8> = match source {
         TorrentSource::Magnet(magnet) => magnet.as_bytes().to_vec(),
@@ -453,7 +467,17 @@ fn add_torrent_at(
                 .map_err(|err| format!("Cannot read {}: {err}", file.display()))?
         }
     };
-    let url = format!("{base_url}/torrents?overwrite=true");
+    // `only_files` (rqbit's comma-separated file indices) is what makes the
+    // engine CACHE only the picked files: without it rqbit creates and fetches
+    // every file of the torrent, so a download of one episode out of a season
+    // still filled the cache with the other seven (2026-10-23 user report).
+    // An empty list leaves the parameter off — rqbit rejects `only_files=` with
+    // nothing in it, and "everything" is its default.
+    let mut url = format!("{base_url}/torrents?overwrite=true");
+    if !only_files.is_empty() {
+        let joined = only_files.iter().map(usize::to_string).collect::<Vec<_>>().join(",");
+        url.push_str(&format!("&only_files={joined}"));
+    }
     let response = add_agent()
         .post(&url)
         .set("Authorization", auth_header)
@@ -565,6 +589,34 @@ pub fn torrent_stats(engine: &TorrentEngine, id: &str) -> Result<TorrentStats, S
     serde_json::from_str(&response)
         .map_err(|err| format!("Cannot parse torrent stats: {err}"))
 }
+/// Change which files the engine fetches for a torrent it ALREADY manages
+/// (`POST /torrents/{id}/update_only_files` with `{"only_files":[i,j,…]}`).
+///
+/// This is the live counterpart of the restricted add: a second commit for a
+/// torrent that is still downloading must not restart it (the forget/re-add
+/// cycle would), and rqbit ignores `only_files` on a re-post of a managed
+/// torrent — so the selection is pushed onto the running torrent instead.
+pub fn update_only_files(
+    engine: &TorrentEngine,
+    id: &str,
+    only_files: &[usize],
+) -> Result<(), String> {
+    let body = serde_json::json!({ "only_files": only_files });
+    let url = format!("{}/torrents/{id}/update_only_files", engine.base_url);
+    let response = add_agent()
+        .post(&url)
+        .set("Authorization", &engine.auth_header)
+        .set("Content-Type", "application/json")
+        .send_string(&body.to_string())
+        .map_err(|err| format!("POST {url}: {err}"))?;
+    let status = response.status();
+    if (200..300).contains(&status) {
+        Ok(())
+    } else {
+        Err(format!("POST {url} answered HTTP {status}"))
+    }
+}
+
 /// Remove a torrent from the engine (stops seeding/downloading it).
 /// rqbit v9 removed the `DELETE /torrents/{id}` verb (405) — the delete
 /// endpoint is `POST /torrents/{id}/delete` (files removed too).
@@ -834,7 +886,7 @@ pub fn scan_torrent(
             ),
         )
         .spawn(move || {
-            let result = add_torrent_at(&add_base_url, &add_auth, add_item.source());
+            let result = add_torrent_at(&add_base_url, &add_auth, add_item.source(), &[]);
             let _ = add_tx.send(result);
         })
         .map_err(|err| format!("Failed to spawn torrent add thread: {err}"))?;
@@ -1173,6 +1225,9 @@ class H(http.server.BaseHTTPRequestHandler):
     def _record(self):
         with open(log, "a") as f:
             f.write(self.command + " " + self.path + " " + str(self.headers.get("Authorization", "")) + "\n")
+            # The add path carries the file selection (`only_files`) and the
+            # replacement flow (`forget`) — both are asserted by tests.
+            f.flush()
     def do_GET(self):
         self._record()
         if self.path == "/stats":
@@ -1184,10 +1239,25 @@ class H(http.server.BaseHTTPRequestHandler):
             if os.path.exists(os.path.join(os.path.dirname(log), "not-live")):
                 body = b'{"state":"initializing","progress_bytes":0,"total_bytes":100,"finished":false,"live":{"download_speed":{"mbps":0.0,"human_readable":"0.00 MiB/s"}}}'
             else:
-                body = b'{"state":"live","progress_bytes":0,"total_bytes":100,"finished":false,"live":{"download_speed":{"mbps":0.0,"human_readable":"0.00 MiB/s"}}}'
+                # The "file-progress" marker simulates a pack whose first
+                # two files have data and whose third has none yet: a stream
+                # that plays the first file is ready, one that waits for the
+                # third is not.
+                marker = os.path.join(os.path.dirname(log), "file-progress")
+                if os.path.exists(marker):
+                    try:
+                        progress = [int(n) for n in open(marker).read().split(",") if n.strip()]
+                    except ValueError:
+                        progress = [0]
+                    body = ('{"state":"live","file_progress":%s,"progress_bytes":0,"total_bytes":100,"finished":false,"live":{"download_speed":{"mbps":0.0,"human_readable":"0.00 MiB/s"}}}' % (progress,)).encode()
+                else:
+                    body = b'{"state":"live","progress_bytes":0,"total_bytes":100,"finished":false,"live":{"download_speed":{"mbps":0.0,"human_readable":"0.00 MiB/s"}}}'
         elif self.path.startswith("/torrents/"):
             if os.path.exists(os.path.join(os.path.dirname(log), "no-files")):
                 body = b'{"name":"fake.torrent","files":[]}'
+            elif os.path.exists(os.path.join(os.path.dirname(log), "file-progress")):
+                # A season pack: three episodes of 100 bytes.
+                body = b'{"name":"fake.torrent","files":[{"name":"ep1.mkv","length":100,"included":true},{"name":"ep2.mkv","length":100,"included":true},{"name":"ep3.mkv","length":100,"included":true}]}'
             else:
                 body = b'{"name":"fake.torrent","files":[{"name":"movie.mkv","length":100,"included":true}]}'
         else:
@@ -1201,7 +1271,9 @@ class H(http.server.BaseHTTPRequestHandler):
         self._record()
         length = int(self.headers.get("Content-Length", 0))
         data = self.rfile.read(length)
-        if self.path.endswith("/delete"):
+        if self.path.endswith("/delete") or self.path.endswith("/forget"):
+            body = b"{}"
+        elif self.path.endswith("/update_only_files"):
             body = b"{}"
         else:
             # Round-18 regression (host finding 2026-08-09): rqbit's real
@@ -1215,8 +1287,17 @@ class H(http.server.BaseHTTPRequestHandler):
                     time.sleep(float(open(slow).read().strip()))
                 except ValueError:
                     pass
-            # rqbit v8+ add response: object with a numeric id.
-            body = b'{"id":1,"details":{},"output_folder":"","seen_peers":null}'
+            # rqbit v8+ add response: object with a numeric id. Each add
+            # takes a FRESH id, exactly like rqbit (the picker's `Download`
+            # replaces a torrent to apply its file selection, and the job has
+            # to follow the new id: stream URLs are built from it).
+            counter = os.path.join(os.path.dirname(log), "add-count")
+            try:
+                n = int(open(counter).read().strip()) + 1
+            except (OSError, ValueError):
+                n = 1
+            open(counter, "w").write(str(n))
+            body = ('{"id":%d,"details":{},"output_folder":"","seen_peers":null}' % n).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))

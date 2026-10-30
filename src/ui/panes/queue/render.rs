@@ -114,31 +114,57 @@ impl QueuePane {
         }
     }
 
-    /// Round 95: arm (and re-arm) the redraw tick that animates the
-    /// Duration column's spinner, the same way the Jellyfin indicator does.
-    /// The Video list's import loading row uses the same tick (2026-10-24).
-    pub(super) fn schedule_spinner_tick(&mut self, ctx: &Ctx) {
-        let id = self.loading_tick.unwrap_or_else(|| {
-            let id = crate::shared::id::new();
-            self.loading_tick = Some(id);
-            id
-        });
-        ctx.scheduler.schedule_replace(
-            id,
-            std::time::Duration::from_millis(SPINNER_FRAME_MS),
-            move |(tx, _)| {
-                tx.send(crate::AppEvent::RequestRender)?;
-                Ok(())
-            },
+    /// Opt-in (`[theme] band_rect`): a band around the rows a mouse drag is
+    /// selecting.
+    ///
+    /// **Top and bottom rules only.** A list has no gutter, so a full rectangle
+    /// would paint its left and right edges over the first and last character
+    /// of every row in the band (seen on the VM: "irst Sight"). The rules are
+    /// drawn one row outside the band (`band::marquee_rect` grows it), so the
+    /// selected rows keep every cell. Border only, never a fill: a fill over an
+    /// out-of-band surface drops the image (`backend/image-overlays`).
+    ///
+    /// Off by default — the marked-row highlight already shows the band.
+    fn render_band_marquee(&self, frame: &mut Frame, ctx: &Ctx) {
+        if !ctx.config.theme.band_rect {
+            return;
+        }
+        let band = self.queue.state.band;
+        if !band.is_active() {
+            return;
+        }
+        let (Some(anchor), Some(current)) = (band.anchor, band.current) else {
+            return;
+        };
+        let Some(rect) = crate::ui::band::marquee_rect(
+            self.areas[Areas::Table],
+            self.queue.state.offset(),
+            anchor,
+            current,
+            1,
+        ) else {
+            return;
+        };
+        frame.render_widget(
+            ratatui::widgets::Block::default()
+                // No side borders: there is no gutter to draw them in, and a
+                // side would eat the first/last cell of every banded row.
+                .borders(ratatui::widgets::Borders::TOP | ratatui::widgets::Borders::BOTTOM)
+                .border_type(ratatui::widgets::BorderType::Rounded)
+                .border_style(ctx.config.theme.highlight_border_style),
+            rect,
         );
     }
 
-    /// Round 95: stop the tick once no row is parsing any more (and once the
-    /// Video list's import loading row is gone, 2026-10-24).
-    pub(super) fn cancel_spinner_tick(&mut self, ctx: &Ctx) {
-        if let Some(id) = self.loading_tick.take() {
-            ctx.scheduler.cancel(id);
-        }
+    /// Round 95: ask the shared frame clock for the cadence that animates the
+    /// Duration column's spinner, the same way the Jellyfin indicator does.
+    /// The Video list's import loading row uses the same request (2026-10-24).
+    ///
+    /// There is nothing to cancel any more: the clock is armed from whatever a
+    /// frame asked for, so a queue with no spinning row simply stops asking
+    /// and [`crate::ctx::Ctx::finish_frame`] disarms the tick.
+    pub(super) fn request_spinner_frames(&self, ctx: &Ctx) {
+        ctx.animator.request_every(std::time::Duration::from_millis(SPINNER_FRAME_MS));
     }
 }
 
@@ -219,17 +245,16 @@ impl QueuePane {
         let current_song_id = ctx.find_current_song_in_queue().map(|(_, song)| song.id);
         let marked = std::mem::take(self.queue.marked_mut());
         let filter = ctx.input.value(self.queue.filter_buffer_id);
-        // Round 95: the spinner in a Duration cell needs a redraw tick; one
-        // is armed while any stream resolve is in flight and dropped as soon
-        // as none is. Round 107: the play-marker column's spinner uses the
-        // same tick, so a pending entry resolve arms it too.
+        // Round 95: the spinner in a Duration cell needs fresh frames; the
+        // shared clock is asked while any stream resolve is in flight and
+        // asked for nothing as soon as none is. Round 107: the play-marker
+        // column's spinner uses the same request, so a pending entry resolve
+        // keeps it alive too.
         let spinning_any = import_loading
             || !ctx.pending_yt_links.borrow().is_empty()
             || !ctx.pending_stream_resolve.borrow().is_empty();
         if spinning_any {
-            self.schedule_spinner_tick(ctx);
-        } else {
-            self.cancel_spinner_tick(ctx);
+            self.request_spinner_frames(ctx);
         }
         let table = VirtualizedTable::new(&self.queue.items)
             .column_widths(self.column_widths.clone())
@@ -349,6 +374,7 @@ impl QueuePane {
                 self.areas[Areas::Table],
                 &mut self.queue.state,
             );
+        self.render_band_marquee(frame, ctx);
         let _ = std::mem::replace(self.queue.marked_mut(), marked);
         if import_loading {
             self.render_import_loading_row(frame, ctx);
@@ -730,6 +756,54 @@ use super::{Areas, QueuePane};
             .collect::<String>()
             .trim_end()
             .to_owned()
+    }
+
+    /// The opt-in marquee (`[theme] band_rect`) draws a rounded border around
+    /// the video rows a drag covers. Off by default: the marked-row highlight
+    /// already shows the band, and the border covers the band's outer cells.
+    #[test]
+    fn the_band_marquee_is_opt_in_and_borders_the_band() {
+        let (mut ctx, _tx) = queue_ctx();
+        *ctx.video_playlist.borrow_mut() = entries(8);
+
+        let mut pane = video_pane(&mut ctx);
+        // An active drag from row 1 to row 3.
+        pane.video_band.arm(1, false);
+        pane.video_band.update(3);
+        let render = |ctx: &crate::ctx::Ctx, pane: &mut QueuePane| {
+            let backend = TestBackend::new(80, 24);
+            let mut terminal = ratatui::Terminal::new(backend).unwrap();
+            terminal
+                .draw(|frame| pane.render(frame, Rect::new(0, 0, 80, 24), ctx).unwrap())
+                .unwrap();
+            terminal.backend().buffer().clone()
+        };
+
+        let off = render(&ctx, &mut pane);
+        let mut config = ctx.config.as_ref().clone();
+        config.theme.band_rect = true;
+        ctx.config = std::sync::Arc::new(config);
+        let on = render(&ctx, &mut pane);
+
+        assert_ne!(off, on, "the knob changes the frame");
+        let text = |buf: &ratatui::buffer::Buffer| {
+            (0..24)
+                .flat_map(|y| (0..80).map(move |x| (x, y)))
+                .map(|(x, y)| buf[(x, y)].symbol().to_owned())
+                .collect::<String>()
+        };
+        let rules = |buf: &ratatui::buffer::Buffer| text(buf).matches('─').count();
+        // Top and bottom rules only, one row outside the band: no corner
+        // glyphs, and the banded rows keep every cell of their text.
+        assert_eq!(rules(&off), 0, "no marquee while the knob is off");
+        assert!(rules(&on) > 0, "the marquee draws its rules");
+        for title in ["v1", "v2", "v3"] {
+            assert_eq!(
+                text(&off).matches(title).count(),
+                text(&on).matches(title).count(),
+                "row {title} keeps its text under the marquee"
+            );
+        }
     }
 
     /// The reported bug at the surface the user saw: a queued YouTube video

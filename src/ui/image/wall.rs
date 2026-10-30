@@ -649,7 +649,7 @@ mod tests {
             &text[..text.len().min(300)]
         );
         assert!(
-            text.contains("38;5;41"),
+            text.contains("38;2;0;0;41"),
             "and its placeholder cells name that id: {}",
             &text[..text.len().min(300)]
         );
@@ -673,7 +673,10 @@ mod tests {
         let text = String::from_utf8_lossy(&out);
         assert!(text.contains("a=T,U=1,i=7"), "{text}");
         assert!(text.contains("c=10,r=6"), "{text}");
-        assert!(text.contains("38;5;7"), "placeholder cells carry the id: {text}");
+        assert!(
+            text.contains("38;2;0;0;7"),
+            "placeholder cells carry the id as a 24-bit foreground: {text}"
+        );
         assert!(text.contains("\u{10EEEE}"), "placeholder glyphs: {text}");
 
         let mut deleted = Vec::new();

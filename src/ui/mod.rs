@@ -55,6 +55,7 @@ use crate::{
 };
 use unicode_width::UnicodeWidthStr;
 
+pub mod anim;
 pub mod band;
 pub mod browser;
 pub mod dir_or_song;
@@ -63,10 +64,13 @@ pub mod image;
 pub mod input;
 pub mod modals;
 pub mod panes;
+pub mod scrim;
 pub mod seekbar;
 pub mod song_list;
 pub mod tab_screen;
+pub mod timeline;
 pub mod tree_browser;
+pub mod view_state;
 pub mod widgets;
 
 #[derive(Debug)]
@@ -441,9 +445,19 @@ impl Ui {
             ctx,
         )?;
 
-        if ctx.config.theme.modal_backdrop && !self.modals.is_empty() {
-            let buffer = frame.buffer_mut();
-            buffer.set_style(*buffer.area(), Style::default().fg(Color::DarkGray));
+        if ctx.config.theme.modal_backdrop {
+            // Blend the whole screen toward the theme background before the
+            // modals draw, so the dialog comes forward at full brightness and
+            // the panes behind it keep their shape (the old pass flattened
+            // every foreground to DarkGray). The factor is animated: 0 while
+            // nothing is open, 1 once a modal has settled in.
+            let open = !self.modals.is_empty();
+            let fade = ctx.advance_modal_fade(open);
+            let factor = fade.value(std::time::Instant::now());
+            if factor > 0.0 {
+                let backdrop = crate::ui::scrim::backdrop(ctx.config.theme.background_color);
+                crate::ui::scrim::dim_backdrop(frame.buffer_mut(), factor, backdrop);
+            }
         }
 
         for modal in &mut self.modals {
@@ -1305,11 +1319,19 @@ impl Ui {
                     // submenu chain over so the user's open level and cursor
                     // row survive the refresh (round 88).
                     let path = existing_modal.submenu_path();
+                    // A menu's rows and ticks (the torrent picker) are the
+                    // user's, not the rebuild's: a background scan event must
+                    // not re-tick a file the user just unticked or move the
+                    // cursor off the row they are on.
+                    let vis = existing_modal.vis();
                     *existing_modal = modal;
                     if !path.is_empty() {
                         log::debug!(path:?; "Carrying the open submenu chain into the refreshed menu");
                     }
                     existing_modal.restore_submenu_path(&path, ctx);
+                    if let Some(vis) = vis {
+                        existing_modal.restore_vis(vis, ctx);
+                    }
                 } else {
                     self.modals.push(modal);
                 }
@@ -1787,6 +1809,25 @@ impl Ui {
     /// its draw state so the next frame re-places it (no global events,
     /// no other pane touched).
     pub(crate) fn refresh_overlays_after_clear(&mut self, ctx: &Ctx) -> Result<()> {
+        // Which terminal-side overlays are on screen is the placement
+        // registry's answer, not a guess about the active tab: a clear wipes
+        // the cells of every one of them.
+        let declared: Vec<_> = ctx.placements.borrow().surfaces().collect();
+        if declared.is_empty() {
+            return Ok(());
+        }
+        log::debug!(
+            surfaces:? = declared,
+            poster_area:? = ctx.placements.borrow().area(crate::ui::image::placements::Surface::Poster);
+            "Re-placing terminal-side overlays after a clear"
+        );
+        // The album art heals itself (the clear changed the art cells, so the
+        // next frame's region snapshot re-places it), and the cava band is
+        // repainted by its own thread once it restarts. The Jellyfin poster
+        // gates its draw on `drawn_area`, so it has to be told.
+        if !declared.contains(&crate::ui::image::placements::Surface::Poster) {
+            return Ok(());
+        }
         let Some(tab) = self.tabs.get_mut(&ctx.active_tab) else {
             return Ok(());
         };

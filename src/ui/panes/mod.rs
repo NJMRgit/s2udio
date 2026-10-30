@@ -2151,4 +2151,95 @@ mod queue_box_title_tests {
         ));
         assert_eq!(video_box_title(&ctx), "1 videos / 2:00 total time");
     }
+
+    /// The Video list's selected entry gets a real info box before it plays
+    /// (2026-10-20): the entry's own title/duration first, then — once the
+    /// selection-time metadata resolve lands — the `[YouTube]` title and
+    /// description the playing path shows, and a `Resolving` row while that
+    /// resolve is in flight.
+    #[test]
+    fn the_video_lists_selected_entry_describes_itself() {
+        let ctx = ctx();
+        let link = "https://www.youtube.com/watch?v=dpSUbK-bOLA";
+        let entry = MpvPlaylistEntry::new("Entry title", link, Some(120.0));
+
+        // Nothing resolved yet, resolve not requested: the entry's own fields.
+        let groups = super::video_selection_groups(
+            Default::default(),
+            Default::default(),
+            &ctx,
+            Some(&entry),
+            None,
+            false,
+        );
+        let text: Vec<String> = groups
+            .iter()
+            .flat_map(|group| group.items.iter())
+            .map(|item| format!("{item:?}"))
+            .collect();
+        assert!(
+            text.iter().any(|row| row.contains("Entry title")),
+            "the entry's title is described — rows: {text:?}"
+        );
+        assert!(
+            text.iter().any(|row| row.contains("2:00")),
+            "and its known length — rows: {text:?}"
+        );
+        assert!(
+            !text.iter().any(|row| row.contains("Resolving")),
+            "no resolve is pending, so nothing claims to be resolving — rows: {text:?}"
+        );
+
+        // A resolve in flight says so rather than looking finished-but-empty.
+        let pending = super::video_selection_groups(
+            Default::default(),
+            Default::default(),
+            &ctx,
+            Some(&entry),
+            None,
+            true,
+        );
+        let pending_text: Vec<String> =
+            pending.iter().flat_map(|group| group.items.iter()).map(|item| format!("{item:?}")).collect();
+        assert!(
+            pending_text.iter().any(|row| row.contains("Resolving")),
+            "the pending resolve renders as a spinner row — rows: {pending_text:?}"
+        );
+
+        // The resolved metadata wins, with the description the video box shows.
+        let info = YtStreamInfo {
+            original_url: link.to_owned(),
+            title: "Resolved title".to_owned(),
+            channel: Some("A channel".to_owned()),
+            description: Some("First line of the description".to_owned()),
+            duration: Some(180.0),
+            ..Default::default()
+        };
+        let resolved = super::video_selection_groups(
+            Default::default(),
+            Default::default(),
+            &ctx,
+            Some(&entry),
+            Some(&info),
+            false,
+        );
+        let headers: Vec<&str> = resolved.iter().filter_map(|group| group.name).collect();
+        assert!(
+            headers.contains(&" [YouTube] "),
+            "the resolved info carries the [YouTube] group — headers: {headers:?}"
+        );
+        let resolved_text: Vec<String> = resolved
+            .iter()
+            .flat_map(|group| group.items.iter())
+            .map(|item| format!("{item:?}"))
+            .collect();
+        assert!(
+            resolved_text.iter().any(|row| row.contains("Resolved title")),
+            "the resolved title replaces the entry's — rows: {resolved_text:?}"
+        );
+        assert!(
+            resolved_text.iter().any(|row| row.contains("First line of the description")),
+            "the description is what makes this box worth showing — rows: {resolved_text:?}"
+        );
+    }
 }

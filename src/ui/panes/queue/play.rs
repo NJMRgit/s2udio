@@ -350,6 +350,57 @@ mod play_from_stop_tests {
         })
     }
 
+    /// **A play request on an unresolved row must hold MPD still until the
+    /// stream is ready.**
+    ///
+    /// Reported: pressing play on a freshly added playlist of web streams
+    /// "skips through multiple" entries instead of playing the one asked for.
+    /// MPD is already playing (or is started) and cannot open an unresolved
+    /// `#s2u-audio` link, so it fails the row and advances — and the app's
+    /// status-driven recovery then resolves whichever row MPD landed on next.
+    /// The result is a chase down the queue rather than playback of the row the
+    /// user chose.
+    ///
+    /// The user's requirement: resolve the row **first**, keep MPD where it is,
+    /// and start that row once its stream exists.
+    #[test]
+    fn a_play_request_holds_mpd_while_the_row_resolves() {
+        let (mut ctx, client_rx, work_rx) = rig(vec![
+            row(4, format!("{FIRST}#s2u-audio")),
+            row(5, format!("{SECOND}#s2u-audio")),
+        ]);
+        // MPD is playing: it is free to fail the unresolved row and skip on.
+        ctx.status.state = State::Play;
+        ctx.status.songid = Some(4);
+        play_queue_song(&row(4, format!("{FIRST}#s2u-audio")), &ctx);
+        assert!(asks_resolve(&work_rx, FIRST, 4), "the chosen row is resolved");
+
+        // MPD must be held. The command carries a closure that a test cannot
+        // read (the same limitation `2026-10-15-3.md` records for the swap
+        // commands), so this pins the two things that *are* observable: a hold
+        // command was queued, and it was queued **before** the resolve — i.e.
+        // MPD is stopped rather than left free to fail forward through the
+        // links while yt-dlp runs.
+        let mut holds = 0;
+        let mut resolve_index = None;
+        for (i, r) in client_rx.try_iter().enumerate() {
+            if matches!(r, crate::shared::events::ClientRequest::Command(_)) {
+                holds += 1;
+                resolve_index.get_or_insert(i);
+            }
+        }
+        assert_eq!(
+            holds, 1,
+            "exactly one command is queued on the play path: the hold (the \
+             resolve itself goes to the work channel, not the client)"
+        );
+        assert!(
+            resolve_index.is_some(),
+            "the hold is issued when the play request arrives, not after the \
+             stream lands — otherwise MPD has already skipped onward"
+        );
+    }
+
     /// A stopped queue whose first row is a stream link starts by resolving
     /// that row (ReplaceAndPlay) instead of handing MPD the link - the
     /// Space-start path matches the double-click path.

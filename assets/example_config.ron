@@ -4,7 +4,15 @@
 (
     address: "127.0.0.1:6600",
     password: None,
+    // The frame budget: the shortest gap between two frames. 60 by default;
+    // values up to 240 are accepted (120/144 Hz terminals, a 90 fps feel).
     max_fps: 60,
+    // continuous (default): render on every budget tick while the UI is
+    // visible, so animations, spinners and the progress bar move per frame
+    // (an unchanged frame writes nothing to the terminal).
+    // on_demand: render only when something changed — cheaper on battery,
+    // but motion then follows events instead of the clock.
+    frame_pacing: Continuous,
     status_update_interval_ms: 16,
     // Round 23: s2udio's own .lrc library lives inside its config dir;
     // the user's MPD library is checked first (read-only) for their own

@@ -1,4 +1,6 @@
-use std::{io::Write, sync::Arc};
+use std::{io::Write, sync::Arc, time::Instant};
+
+use crate::ui::anim::{Anim, Ease};
 use anyhow::Result;
 use crossbeam::channel::Sender;
 use ratatui::{buffer::Buffer, layout::Rect, prelude::IntoCrossterm};
@@ -10,6 +12,13 @@ use crate::{
     config::album_art::ImageMethod, ctx::Ctx,
     shared::{events::WorkRequest, macros::status_error, terminal::TERMINAL},
 };
+/// How long a freshly-shown picture takes to wipe in.
+///
+/// Linear on purpose: a wipe reads as a constant reveal, where an eased curve
+/// looks like the picture hesitates. Not configurable yet — 180 ms is short
+/// enough that it never delays the art, long enough to read as motion.
+const ART_REVEAL: std::time::Duration = std::time::Duration::from_millis(180);
+
 /// One encoded album-art frame plus the pane rect and encode epoch it was
 /// made for. The epoch lets the facade drop a result that finished after the
 /// pane moved (a resize while the encode was in flight): drawing it would
@@ -55,6 +64,12 @@ pub struct AlbumArtFacade {
     /// The last frame's diff rewrote cells inside the art pane area (the
     /// image may have been wiped and needs a re-place).
     region_dirty: bool,
+    /// The reveal in flight for a freshly-shown picture (a wipe, one draw per
+    /// frame). `None` once it finished or when the art just appeared.
+    reveal: Option<Anim>,
+    /// The next encode is a **new** picture (not the same art re-encoded for a
+    /// new size), so it should wipe in.
+    reveal_pending: bool,
 }
 #[derive(Debug, Default)]
 enum ImageBackend {
@@ -89,7 +104,7 @@ impl AlbumArtFacade {
     pub fn new(ctx: &Ctx) -> Self {
         let config = ctx.config.as_ref();
         let image_backend = match config.album_art.method {
-            ImageMethod::Kitty => ImageBackend::Kitty(Kitty),
+            ImageMethod::Kitty => ImageBackend::Kitty(Kitty::new()),
             ImageMethod::UeberzugWayland => {
                 ImageBackend::Ueberzug(Ueberzug::new(Layer::Wayland))
             }
@@ -114,6 +129,8 @@ impl AlbumArtFacade {
             prev_art_region: Vec::new(),
             prev_art_region_area: Rect::default(),
             region_dirty: false,
+            reveal: None,
+            reveal_pending: false,
         }
     }
     /// Whether real art was last shown. The album art pane uses it to
@@ -168,6 +185,12 @@ impl AlbumArtFacade {
         let size = self.last_size;
         let generation = self.encode_generation;
         let data = data.into();
+        // Same `Arc` = the same picture re-shown (a resize re-encode, a pane
+        // toggled back on): it must not wipe again. A new `Arc` is new art.
+        self.reveal_pending = self
+            .current_album_art
+            .as_ref()
+            .is_none_or(|current| !Arc::ptr_eq(current, &data));
         self.current_album_art = Some(Arc::clone(&data));
         self.request_queue.push(Arc::clone(&data));
         if self.request_queue.len() > 1 {
@@ -383,6 +406,15 @@ impl AlbumArtFacade {
             }
             return FlushAction::Draw(data);
         }
+        // A reveal re-draws every frame whether or not the frame's diff
+        // touched the art cells: the wipe IS the drawing.
+        if self.reveal.is_some()
+            && self.is_showing
+            && self.last_drawn_size == self.last_size
+            && let Some(data) = &self.last_drawn
+        {
+            return FlushAction::Draw(data.clone());
+        }
         match &self.last_drawn {
             Some(data) if self.is_showing && self.region_dirty
                 && self.last_drawn_size == self.last_size => FlushAction::Draw(data.clone()),
@@ -409,36 +441,38 @@ impl AlbumArtFacade {
             }
             FlushAction::Draw(data) => data,
         };
+        let now = Instant::now();
+        // A brand-new picture wipes in; a re-place of the same payload (the
+        // frame repainted the art cells, the pane moved) just redraws.
+        if self.reveal_pending {
+            self.reveal_pending = false;
+            self.reveal = Some(Anim::new(now, ART_REVEAL, Ease::Linear));
+        }
+        let reveal = self.reveal.map(|anim| anim.sample(now));
         let w = TERMINAL.writer();
         let mut w = w.lock();
         let w = w.by_ref();
         let c = ctx.config.theme.background_color.map(|c| c.into_crossterm());
         let drawn = data.clone();
+        // `replace` retires the previous drawing and draws this one. The kitty
+        // backend recognizes "same payload, same box" and skips the transfer,
+        // which is what makes a per-frame reveal affordable; every other
+        // backend falls back to hide + display (and ignores the fraction).
         let result = match (&mut self.image_backend, data) {
             (ImageBackend::Kitty(kitty), EncodeData::Kitty(data)) => {
-                kitty
-                    .hide(w, self.last_size, c)
-                    .and_then(|()| kitty.display(w, data, ctx))
+                kitty.replace(w, self.last_size, c, data, ctx, reveal)
             }
             (ImageBackend::Ueberzug(ueberzug), EncodeData::Ueberzug(data)) => {
-                ueberzug
-                    .hide(w, self.last_size, c)
-                    .and_then(|()| ueberzug.display(w, data, ctx))
+                ueberzug.replace(w, self.last_size, c, data, ctx, reveal)
             }
             (ImageBackend::Iterm2(iterm2), EncodeData::Iterm2(data)) => {
-                iterm2
-                    .hide(w, self.last_size, c)
-                    .and_then(|()| iterm2.display(w, data, ctx))
+                iterm2.replace(w, self.last_size, c, data, ctx, reveal)
             }
             (ImageBackend::Sixel(sixel), EncodeData::Sixel(data)) => {
-                sixel
-                    .hide(w, self.last_size, c)
-                    .and_then(|()| sixel.display(w, data, ctx))
+                sixel.replace(w, self.last_size, c, data, ctx, reveal)
             }
             (ImageBackend::Block(block), EncodeData::Block(data)) => {
-                block
-                    .hide(w, self.last_size, c)
-                    .and_then(|()| block.display(w, data, ctx))
+                block.replace(w, self.last_size, c, data, ctx, reveal)
             }
             (ImageBackend::None, EncodeData::Empty) => {
                 log::warn!("Tried to display image but no backend is selected");
@@ -453,10 +487,22 @@ impl AlbumArtFacade {
         };
         if let Err(err) = result {
             status_error!("Failed to display image {err:#}");
+            self.reveal = None;
         } else {
             self.last_drawn = Some(drawn);
             self.last_drawn_size = self.last_size;
             self.region_dirty = false;
+            // The art is a terminal-side overlay: declare the rect so a clear
+            // and any "what is under this point" question can find it.
+            ctx.placements
+                .borrow_mut()
+                .declare(crate::ui::image::placements::Surface::AlbumArt, self.last_size);
+            match self.reveal {
+                Some(anim) if anim.is_done(now) => self.reveal = None,
+                // Still wiping: the next frame is what advances it.
+                Some(_) => ctx.animator.request_frame(),
+                None => {}
+            }
         }
         Ok(())
     }
@@ -464,6 +510,8 @@ impl AlbumArtFacade {
     /// resolved to "nothing to show", so a later re-show must not re-place
     /// a stale image. Callers erase separately through [`Self::hide`].
     pub fn forget(&mut self) {
+        self.reveal = None;
+        self.reveal_pending = false;
         self.current_album_art = None;
         self.request_queue.clear();
         self.encode_generation = self.encode_generation.wrapping_add(1);
@@ -473,6 +521,9 @@ impl AlbumArtFacade {
         self.region_dirty = false;
     }
     pub fn hide(&mut self, ctx: &Ctx) -> Result<()> {
+        ctx.placements
+            .borrow_mut()
+            .release(crate::ui::image::placements::Surface::AlbumArt);
         // An encode that is still in flight was made for a geometry that is
         // no longer on screen: its result must not be drawn when it lands.
         self.encode_generation = self.encode_generation.wrapping_add(1);
@@ -480,6 +531,8 @@ impl AlbumArtFacade {
         self.pending_size = None;
         self.last_drawn = None;
         self.region_dirty = false;
+        self.reveal = None;
+        self.reveal_pending = false;
         self.request_queue.clear();
         if !self.is_showing {
             // Nothing is on screen: skip the backend erase. The erase

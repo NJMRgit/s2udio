@@ -136,7 +136,7 @@ enum PosterBackend {
 impl JfPoster {
     pub(super) fn new(ctx: &Ctx) -> Self {
         let backend = match ctx.config.album_art.method {
-            crate::config::album_art::ImageMethod::Kitty => PosterBackend::Kitty(Kitty),
+            crate::config::album_art::ImageMethod::Kitty => PosterBackend::Kitty(Kitty::new()),
             crate::config::album_art::ImageMethod::UeberzugWayland => {
                 PosterBackend::Ueberzug(Ueberzug::new(Layer::Wayland))
             }
@@ -178,6 +178,9 @@ impl JfPoster {
         self.img_px = None;
     }
     fn hide_at(&mut self, area: Rect, ctx: &Ctx) {
+        ctx.placements
+            .borrow_mut()
+            .release(crate::ui::image::placements::Surface::Poster);
         let bg = ctx.config.theme.background_color.map(|c| c.into_crossterm());
         let writer = crate::shared::terminal::TERMINAL.writer();
         let mut w = writer.lock();
@@ -349,6 +352,11 @@ impl JfPoster {
         }
         if self.display(data, ctx) {
             self.drawn_area = Some(area);
+            // The poster is a terminal-side overlay: record its rect so a
+            // clear (or anything asking what is under a point) finds it.
+            ctx.placements
+                .borrow_mut()
+                .declare(crate::ui::image::placements::Surface::Poster, area);
         }
     }
     /// Force the next render to redraw the overlay (the tab was reopened

@@ -202,6 +202,12 @@ pub struct DlJob {
     pub torrent_name: String,
     /// The files to keep in `s2udio-downloads` once the download is done.
     pub kept_files: Vec<DlKeptFile>,
+    /// Per-file downloaded bytes, aligned with the TORRENT's file list (the
+    /// same layout as rqbit's `stats.file_progress`), so the Downloads tab can
+    /// show one row — and one progress figure — per kept file by its
+    /// `DlKeptFile::index`. Empty until the first stats poll of a run.
+    #[serde(default)]
+    pub file_progress: Vec<u64>,
     pub status: DlStatus,
     /// Overall progress of the kept files (0-100).
     pub progress_percent: f64,
@@ -374,8 +380,22 @@ pub struct DlJobResponse {
     pub engine: DlEngineInfo,
     /// The files to play (stream URLs in play order).
     pub files: Vec<DlResponseFile>,
+    /// How many of `files` (from the front) must be readable before the TUI
+    /// may launch mpv: the FIRST one — the episode that starts playing.
+    /// Later entries of a pack stream while they download, so waiting for
+    /// them would hold playback until the whole torrent finished. `None`
+    /// (an older daemon's response) = wait for every file.
+    #[serde(default)]
+    pub ready_files: Option<usize>,
     #[serde(default)]
     pub error: Option<String>,
+}
+
+impl DlJobResponse {
+    /// The number of `files` that must be readable before playback starts.
+    pub fn ready_count(&self) -> usize {
+        self.ready_files.unwrap_or(self.files.len()).min(self.files.len())
+    }
 }
 
 /// The TUI's streaming marker content (R2.5).
@@ -481,6 +501,31 @@ pub fn new_request_id() -> String {
 pub fn request_path(request_id: &str) -> Option<PathBuf> {
     jobs_dir().map(|dir| dir.join(format!("{request_id}.json")))
 }
+/// Read back the newest spooled request (tests only): what a TUI commit
+/// actually wrote for the daemon to consume.
+#[cfg(test)]
+pub fn take_newest_spooled_request() -> Option<DlJobRequest> {
+    let dir = jobs_dir()?;
+    let mut entries: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .ok()?
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.extension().is_some_and(|ext| ext == "json")
+                && !path
+                    .file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .is_some_and(|stem| stem.starts_with('.'))
+        })
+        .collect();
+    entries.sort_by_key(|path| {
+        std::fs::metadata(path).and_then(|meta| meta.modified()).ok()
+    });
+    let path = entries.pop()?;
+    let content = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&content).ok()
+}
+
 /// The response file path of a request.
 pub fn response_path(request_id: &str) -> Option<PathBuf> {
     responses_dir().map(|dir| dir.join(format!("{request_id}.json")))
@@ -761,6 +806,10 @@ extern "C" fn on_signal(_: libc::c_int) {
 struct PendingResponse {
     request_id: String,
     kind: ResponseKind,
+    /// The files the caller will play, in play order. Only the FIRST is
+    /// waited for: it is the one mpv opens, the rest stream while they
+    /// download (a pack's later episodes must not hold the first one up).
+    picked: Vec<DlKeptFile>,
 }
 enum ResponseKind {
     /// The job's kept files (an enqueue with `play: true`).
@@ -781,17 +830,26 @@ enum AddOutcome {
     Failed(String),
 }
 
-/// The policy for answering a queued play/stream response: only once the
-/// engine reports the torrent `live`, because rqbit answers HTTP 500 on the
-/// stream endpoint while it initializes (it is checksum-validating a
-/// re-added torrent's cache files) — handing mpv that URL made "stream"
-/// behave exactly like "download" (2026-10-19, user report).
+/// The policy for answering a queued play/stream response.
+///
+/// The response is answered once the engine will serve what is played: it
+/// reports the torrent `live` — rqbit answers HTTP 500 on the stream endpoint
+/// while it initializes (checksum-validating a re-added torrent's cache files),
+/// and handing mpv that URL made "stream" behave exactly like "download"
+/// (2026-10-19, user report) — AND the **first** file of the response has data
+/// downloaded (`ready`).
+///
+/// Only the first file: it is the one mpv opens. Waiting for the whole torrent
+/// (or for every ticked file) held a season pack's playback until the last
+/// episode had finished downloading — the stream never started for hours. The
+/// later episodes stream while they download, exactly as a later entry of an
+/// mpv playlist does.
 ///
 /// `Wait` while initializing, `Timeout` once [`STREAM_READY_TIMEOUT`] has
 /// passed: the download itself keeps running either way, only the playback
 /// wait gives up.
-fn pending_gate(live: bool, since: Option<Instant>) -> PendingGate {
-    if live {
+fn pending_gate(ready: bool, since: Option<Instant>) -> PendingGate {
+    if ready {
         return PendingGate::Answer;
     }
     match since {
@@ -803,9 +861,9 @@ fn pending_gate(live: bool, since: Option<Instant>) -> PendingGate {
 /// What to do with a queued play/stream response (see [`pending_gate`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PendingGate {
-    /// The torrent is live: answer now.
+    /// The torrent is live and the first played file is readable: answer.
     Answer,
-    /// Still initializing: keep waiting.
+    /// Still initializing (or the first file has no data): keep waiting.
     Wait,
     /// Waited long enough: answer with an error.
     Timeout,
@@ -830,6 +888,12 @@ struct JobRuntime {
     /// state was queued (`None` = nothing waiting). Anchor for
     /// [`STREAM_READY_TIMEOUT`].
     pending_since: Option<Instant>,
+    /// The file selection last pushed to the engine's torrent (`None` = not
+    /// pushed yet, or the engine fetches everything). The stats poll compares
+    /// the job's current kept files against it and pushes a change, so a
+    /// re-commit that adds or drops files reaches a torrent that is ALREADY
+    /// downloading instead of only the next add.
+    applied_selection: Option<Vec<usize>>,
 }
 
 /// The daemon: owns the engines, consumes the spool, writes the state.
@@ -877,6 +941,7 @@ impl Daemon {
                     pending_responses: Vec::new(),
                     move_defer_since: None,
                     pending_since: None,
+                    applied_selection: None,
                 });
                 let len = self.runtimes.len();
                 self.start_add(len - 1);
@@ -890,6 +955,7 @@ impl Daemon {
                     pending_responses: Vec::new(),
                     move_defer_since: None,
                     pending_since: None,
+                    applied_selection: None,
                 });
             }
         }
@@ -1070,6 +1136,7 @@ impl Daemon {
                     torrent_item,
                     torrent_name: name,
                     kept_files: files,
+                    file_progress: Vec::new(),
                     status: DlStatus::Queued,
                     progress_percent: 0.0,
                     engine: None,
@@ -1088,13 +1155,16 @@ impl Daemon {
                     pending_responses: Vec::new(),
                     move_defer_since: None,
                     pending_since: None,
+                    applied_selection: None,
                 });
                 let len = self.runtimes.len();
                 self.start_add(len - 1);
                 if play {
+                    let picked = self.play_picks(len - 1);
                     self.runtimes[len - 1].pending_responses.push(PendingResponse {
                         request_id: id,
                         kind: ResponseKind::EnqueuePlay,
+                        picked,
                     });
                 }
             }
@@ -1117,6 +1187,7 @@ impl Daemon {
                 let pending = PendingResponse {
                     request_id: id,
                     kind: ResponseKind::Stream(file_indices),
+                    picked: Vec::new(),
                 };
                 if self.engine_ready(idx) && self.torrent_is_live(idx) {
                     self.respond(idx, pending);
@@ -1194,17 +1265,16 @@ impl Daemon {
         if let Some(infohash) = infohash {
             self.runtimes[idx].job.infohash = Some(infohash);
         }
-        let existing_indices: std::collections::HashSet<usize> = self.runtimes[idx]
-            .job
-            .kept_files
-            .iter()
-            .map(|f| f.index)
-            .collect();
-        for file in files {
-            if existing_indices.contains(&file.index) {
-                continue;
-            }
-            self.runtimes[idx].job.kept_files.push(file);
+        // The new commit's ticked set REPLACES the job's kept files — it does
+        // not union with them. The picker sends the complete selection every
+        // time, so unioning pinned files a LATER commit had unticked: a job
+        // that once kept episode 1 (the "best playable" pick of a first
+        // attempt) kept it forever, and a follow-up commit with everything
+        // EXCEPT episode 1 still asked the engine for `only_files=0`
+        // (2026-10-23 user report). An empty list keeps the old set: a
+        // download-only commit that names nothing means "the job's files".
+        if !files.is_empty() {
+            self.runtimes[idx].job.kept_files = files;
         }
         // A stopped/failed job is revived by the new committed action.
         if !self.runtimes[idx].job.status.active() {
@@ -1216,6 +1286,7 @@ impl Daemon {
             let pending = PendingResponse {
                 request_id: request_id.to_owned(),
                 kind: ResponseKind::EnqueuePlay,
+                picked: self.play_picks(idx),
             };
             if self.engine_ready(idx) {
                 self.respond(idx, pending);
@@ -1415,6 +1486,52 @@ impl Daemon {
             }
             return;
         }
+        // Limit the engine to the kept files BEFORE it starts fetching.
+        //
+        // The enqueue cannot carry the selection: a magnet's file list is only
+        // known after the metainfo arrives, and the add is what fetches it.
+        // So the torrent is added normally, and as soon as the list is in
+        // (`wait_for_files`) it is replaced by an add carrying rqbit's
+        // `only_files` — the engine then caches ONLY the ticked files.
+        // Without this the whole torrent was fetched: unticking the first
+        // episode of a season and downloading the rest still downloaded
+        // episode one, and the cache filled with every file (2026-10-23 user
+        // report).
+        //
+        // rqbit refuses to change the selection of a torrent it already
+        // manages (`AlreadyManaged` returns the OLD handle and ignores the
+        // new options), hence forget-then-add. That yields a NEW torrent id,
+        // and the id is what every stream URL is built from — so the job
+        // adopts the new one.
+        // Read through the `runtime` borrow already held (round 55 F1: a
+        // second `self.runtimes[idx]` here would borrow `self` twice).
+        let only_files: Vec<usize> =
+            runtime.job.kept_files.iter().map(|file| file.index).collect();
+        let all_selected = only_files.len() >= details.files.len();
+        if !all_selected && !only_files.is_empty() {
+            let item: crate::core::torrent::TorrentItem =
+                runtime.job.torrent_item.clone().into();
+            log::info!(
+                job_id:? = runtime.job.job_id, kept = only_files.len(),
+                total = details.files.len();
+                "Restricting the torrent engine to the picked files"
+            );
+            match restrict_to_picked_files(&engine, &item, &torrent_id, &only_files) {
+                Ok(new_id) => {
+                    runtime.job.torrent_id = Some(new_id);
+                    runtime.applied_selection = Some(only_files.clone());
+                }
+                Err(err) => {
+                    // The selection is a cache optimisation, never a reason to
+                    // fail a download the user asked for: log it and keep the
+                    // job on the unrestricted torrent.
+                    log::warn!(
+                        error:? = err;
+                        "Could not restrict the torrent to the picked files; downloading the whole torrent"
+                    );
+                }
+            }
+        }
         runtime.engine = Some(engine);
         runtime.details = Some(details);
         runtime.job.status = DlStatus::Downloading;
@@ -1463,8 +1580,86 @@ impl Daemon {
 
     /// Whether a queued play/stream response may be answered yet (see
     /// [`pending_gate`]).
-    fn pending_gate(&self, idx: usize, live: bool) -> PendingGate {
-        pending_gate(live, self.runtimes[idx].pending_since)
+    fn pending_gate(&self, idx: usize, ready: bool) -> PendingGate {
+        pending_gate(ready, self.runtimes[idx].pending_since)
+    }
+
+    /// The files a play request for runtime `idx` plays, in play order: the
+    /// job's kept files, or — when the job keeps none yet (the metainfo has
+    /// not landed) — the single best playable file, which is what the answer
+    /// falls back to. Only the first one gates the response (see
+    /// [`pending_gate`]).
+    fn play_picks(&self, idx: usize) -> Vec<DlKeptFile> {
+        let Some(runtime) = self.runtimes.get(idx) else { return Vec::new() };
+        if !runtime.job.kept_files.is_empty() {
+            return runtime.job.kept_files.clone();
+        }
+        runtime
+            .details
+            .as_ref()
+            .and_then(|details| crate::core::torrent::pick_playable_file(&details.files))
+            .map(|(index, file)| DlKeptFile {
+                index,
+                name: file.name.clone(),
+                length: file.length,
+            })
+            .into_iter()
+            .collect()
+    }
+
+    /// The single file a queued response has to wait for: the FIRST file the
+    /// play will open. A plain re-stream names its indices explicitly; an
+    /// empty index list (or a play, whose response is built at answer time)
+    /// falls back to the job's picks.
+    fn gate_file(&self, idx: usize, pending: &PendingResponse) -> Option<usize> {
+        match &pending.kind {
+            ResponseKind::Stream(indices) => match indices.first() {
+                Some(index) => Some(*index),
+                // No explicit indices: the job's best pick, as the response
+                // itself resolves it.
+                None => self
+                    .runtimes
+                    .get(idx)
+                    .and_then(|runtime| runtime.details.as_ref())
+                    .and_then(|details| {
+                        crate::core::torrent::pick_playable_file(&details.files)
+                            .map(|(index, _)| index)
+                    }),
+            },
+            ResponseKind::EnqueuePlay => Some(
+                pending
+                    .picked
+                    .first()
+                    .map(|file| file.index)
+                    .or_else(|| self.play_picks(idx).first().map(|file| file.index))?,
+            ),
+        }
+    }
+
+    /// Whether a queued response is ready to be answered: the engine serves
+    /// streams for this torrent (`live`) and the first file it will open has
+    /// data downloaded — or the torrent as a whole is complete.
+    ///
+    /// Two cases fall back to `live` alone, because there is no per-file
+    /// figure to read: the engine reports no file progress at all (a torrent
+    /// it has not started sampling, an older API) and no file is known yet.
+    /// A wheel without samples must not hold playback forever.
+    fn pending_ready(
+        &self,
+        idx: usize,
+        pending: &PendingResponse,
+        stats: &crate::core::torrent::TorrentStats,
+    ) -> bool {
+        if !crate::core::torrent::torrent_state_is_live(stats.state.as_deref()) {
+            return false;
+        }
+        if stats.finished || stats.file_progress.is_empty() {
+            return true;
+        }
+        match self.gate_file(idx, pending) {
+            Some(index) => stats.file_progress.get(index).copied().unwrap_or(0) > 0,
+            None => true,
+        }
     }
 
     /// Answers every queued play/stream response for runtime `idx` and
@@ -1599,10 +1794,16 @@ impl Daemon {
                     // A queued play/stream response waits for `live` (see
                     // `pending_gate`): rqbit answers HTTP 500 until then.
                     if !self.runtimes[idx].pending_responses.is_empty() {
-                        let live = crate::core::torrent::torrent_state_is_live(
-                            stats.state.as_deref(),
-                        );
-                        match self.pending_gate(idx, live) {
+                        // Every queued response waits for its own first file;
+                        // they are answered together once all of them are
+                        // ready (a request pair for the same job names the
+                        // same first file).
+                        let ready = self
+                            .runtimes[idx]
+                            .pending_responses
+                            .iter()
+                            .all(|pending| self.pending_ready(idx, pending, &stats));
+                        match self.pending_gate(idx, ready) {
                             PendingGate::Answer => self.answer_pending(idx),
                             PendingGate::Wait => {}
                             PendingGate::Timeout => {
@@ -1624,6 +1825,35 @@ impl Daemon {
                     }
                     let runtime = &mut self.runtimes[idx];
                     runtime.job.progress_percent = job_progress(&stats, &runtime.job.kept_files);
+                    // The Downloads tab tracks each kept file on its own.
+                    runtime.job.file_progress = stats.file_progress.clone();
+                    // A re-commit may have changed which files the job keeps
+                    // while the torrent was already running: push the new
+                    // selection onto the live torrent (rqbit's
+                    // `update_only_files`), so the engine stops fetching what
+                    // the user just unticked. A no-op while the selection is
+                    // unchanged, which is the normal case on every tick.
+                    let wanted: Vec<usize> =
+                        runtime.job.kept_files.iter().map(|f| f.index).collect();
+                    let selection_changed = !wanted.is_empty()
+                        && runtime.applied_selection.as_ref() != Some(&wanted);
+                    if selection_changed {
+                        let applied = runtime.engine.as_ref().map(|engine| {
+                            crate::core::torrent::update_only_files(engine, &torrent_id, &wanted)
+                        });
+                        if let Some(Err(err)) = applied {
+                            log::warn!(
+                                job_id:? = runtime.job.job_id, error:? = err;
+                                "Could not update the torrent's file selection on the running engine"
+                            );
+                        } else {
+                            log::info!(
+                                job_id:? = runtime.job.job_id, files = wanted.len();
+                                "Updated the running torrent's file selection"
+                            );
+                        }
+                        runtime.applied_selection = Some(wanted);
+                    }
                     let kept_pairs: Vec<(usize, u64)> = kept
                         .iter()
                         .map(|f| (f.index, f.length))
@@ -1770,6 +2000,10 @@ impl Daemon {
     /// Write one response file (or an error response) for a pending
     /// request. The response is built from the job's engine + torrent.
     fn respond(&mut self, idx: usize, pending: PendingResponse) {
+        // Only the first file has to be readable before playback (the rest
+        // stream as they download): the response says so, and the TUI waits
+        // for exactly that file.
+        let ready_files = Some(usize::from(self.gate_file(idx, &pending).is_some()));
         let resolved = self.response_files(idx, &pending);
         match resolved {
             Ok(files) if !files.is_empty() => {
@@ -1801,6 +2035,7 @@ impl Daemon {
                     torrent_name,
                     engine,
                     files,
+                    ready_files,
                     error: None,
                 };
                 write_response(&pending.request_id, &response);
@@ -1891,10 +2126,30 @@ impl Daemon {
                 cache_dir: String::new(),
             },
             files: Vec::new(),
+            ready_files: None,
             error: Some(error.to_owned()),
         };
         write_response(request_id, &response);
     }
+}
+
+/// Replace the engine's torrent with one restricted to `only_files` and
+/// return the NEW torrent id (rqbit assigns fresh ids, and every stream URL
+/// is built from the id).
+///
+/// rqbit only reads `only_files` when it actually ADDS a torrent: re-posting
+/// one it already manages answers `AlreadyManaged` with the old handle and the
+/// new selection is ignored — which is why the torrent is forgotten first.
+/// A failure at either step returns the error, and the caller keeps the
+/// original torrent (the selection is an optimisation, not a requirement).
+fn restrict_to_picked_files(
+    engine: &crate::core::torrent::TorrentEngine,
+    item: &crate::core::torrent::TorrentItem,
+    torrent_id: &str,
+    only_files: &[usize],
+) -> Result<String, String> {
+    crate::core::torrent::forget_torrent(engine, torrent_id)?;
+    crate::core::torrent::add_torrent_only_files(engine, item.source(), only_files)
 }
 
 fn now_unix() -> u64 {
@@ -2262,6 +2517,375 @@ mod stream_gate_tests {
         assert!(response.error.is_none());
 
         // Cleanup: the engine child dies with the daemon value.
+        drop(daemon);
+        crate::shared::env::ENV.remove("XDG_CACHE_HOME");
+        unsafe {
+            std::env::remove_var("S2UDIO_RQBIT_BIN");
+        }
+        let _ = std::fs::remove_dir_all(&xdg);
+    }
+
+    /// A re-commit of the same torrent must take the NEW selection, not
+    /// union it with what an earlier attempt kept.
+    ///
+    /// 2026-10-23 user report (second round): "it's trying to download the
+    /// first episode even though I have everything EXCEPT the first episode
+    /// selected", with earlier attempts of the same torrent in the list.
+    /// `merge_enqueue` only ever ADDED indices, so a job that had once kept
+    /// episode 0 kept it forever — a later "everything except ep1" commit
+    /// still carried index 0 and the engine was told `only_files=0`.
+    #[test]
+    fn a_recommit_replaces_the_kept_files_instead_of_unioning_them() {
+        let mut daemon = Daemon {
+            config: Arc::new(test_config()),
+            started_at: now_unix(),
+            runtimes: Vec::new(),
+            dirty: false,
+        };
+        let kept = |index: usize| DlKeptFile {
+            index,
+            name: format!("ep{}.mkv", index + 1),
+            length: 100,
+        };
+        let enqueue = |id: &str, files: Vec<DlKeptFile>| DlJobRequest::Enqueue {
+            id: id.to_owned(),
+            infohash: Some("0123456789abcdef".to_owned()),
+            source_key: "magnet:?xt=urn:btih:0123456789abcdef".to_owned(),
+            torrent_item: crate::core::dlctl::DlTorrentItem::Magnet(
+                "magnet:?xt=urn:btih:0123456789abcdef".to_owned(),
+            ),
+            torrent_name: Some("Pack".to_owned()),
+            files,
+            play: false,
+        };
+
+        // First attempt: just episode 1 (the picker's "best playable" pick).
+        daemon.handle_request(enqueue("req-1", vec![kept(0)]));
+        assert_eq!(daemon.runtimes.len(), 1);
+        // It fails / is stopped, and the user commits again with everything
+        // but episode 1 ticked.
+        daemon.runtimes[0].job.status = DlStatus::Stopped;
+        daemon.handle_request(enqueue("req-2", vec![kept(1), kept(2), kept(3)]));
+
+        let indices: Vec<usize> = daemon.runtimes[0]
+            .job
+            .kept_files
+            .iter()
+            .map(|file| file.index)
+            .collect();
+        assert_eq!(
+            indices,
+            vec![1, 2, 3],
+            "the new selection replaces the old kept set (episode 1 is not kept any more)"
+        );
+        assert_eq!(daemon.runtimes.len(), 1, "still one job for the torrent");
+    }
+
+    /// **Only the ticked files are fetched.** Unticking one episode of a
+    /// season and downloading must not make the engine pull that episode:
+    /// 2026-10-23 user report — "I unselect the first episode and click
+    /// download, but when the download starts it's only trying to download
+    /// the first episode and none of the others".
+    ///
+    /// The enqueue cannot carry the selection (a magnet's file list arrives
+    /// with the metainfo), so the daemon adds the torrent, then replaces it
+    /// with an add carrying rqbit's `only_files` — and adopts the new id.
+    #[test]
+    fn a_partial_pick_restricts_the_engine_to_the_ticked_files() {
+        let _guard = RQBIT_ENV_LOCK.lock().unwrap();
+        let xdg = std::env::temp_dir().join(format!("dl-pick-xdg-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&xdg);
+        crate::shared::env::ENV
+            .set("XDG_CACHE_HOME".to_owned(), xdg.to_string_lossy().into_owned());
+
+        let (bin, log) = fake_engine_bin("dl-pick");
+        // Three episodes, all fully downloaded, so the torrent goes `live`
+        // straight away and the add path settles.
+        std::fs::write(log.with_file_name("file-progress"), "100,100,100").unwrap();
+        unsafe {
+            std::env::set_var("S2UDIO_RQBIT_BIN", &bin);
+        }
+
+        let mut daemon = Daemon {
+            config: Arc::new(test_config()),
+            started_at: now_unix(),
+            runtimes: Vec::new(),
+            dirty: false,
+        };
+        let id = new_request_id();
+        // Episodes 2 and 3 only: index 0 is unticked in the picker.
+        let files = vec![
+            DlKeptFile { index: 1, name: "ep2.mkv".to_owned(), length: 100 },
+            DlKeptFile { index: 2, name: "ep3.mkv".to_owned(), length: 100 },
+        ];
+        daemon.handle_request(DlJobRequest::Enqueue {
+            id: id.clone(),
+            infohash: Some("0123456789abcdef".to_owned()),
+            source_key: "magnet:?xt=urn:btih:0123456789abcdef".to_owned(),
+            torrent_item: crate::core::dlctl::DlTorrentItem::Magnet(
+                "magnet:?xt=urn:btih:0123456789abcdef".to_owned(),
+            ),
+            torrent_name: Some("Pack".to_owned()),
+            files,
+            play: false,
+        });
+        // Let the add land (no play response to wait for).
+        for _ in 0..40 {
+            daemon.resume_adds();
+            daemon.poll_jobs();
+            if daemon.runtimes.first().is_some_and(|r| r.engine.is_some()) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+
+        let requests = std::fs::read_to_string(&log).unwrap_or_default();
+        let add_with_only_files = requests
+            .lines()
+            .find(|line| line.contains("/torrents?") && line.contains("only_files="))
+            .map(str::to_owned);
+        let add = add_with_only_files.unwrap_or_else(|| {
+            panic!("no add carried a file selection; requests were:\n{requests}")
+        });
+        assert!(
+            add.contains("only_files=1,2"),
+            "the engine is told to fetch episodes 2 and 3, not episode 1: {add}"
+        );
+        assert!(
+            requests.lines().any(|line| line.contains("/forget")),
+            "the unrestricted torrent is forgotten before the restricted add:\n{requests}"
+        );
+        // The job follows the id the restricted add got (the add before it
+        // was id 1, so this one is 2): stream URLs are built from it.
+        assert_eq!(
+            daemon.runtimes[0].job.torrent_id.as_deref(),
+            Some("2"),
+            "the job adopts the id of the restricted torrent"
+        );
+        assert_eq!(
+            daemon.runtimes[0].job.kept_files.len(),
+            2,
+            "and still keeps exactly the ticked files"
+        );
+
+        drop(daemon);
+        crate::shared::env::ENV.remove("XDG_CACHE_HOME");
+        unsafe {
+            std::env::remove_var("S2UDIO_RQBIT_BIN");
+        }
+        let _ = std::fs::remove_dir_all(&xdg);
+    }
+
+    /// A re-commit while the torrent is ALREADY downloading pushes the new
+    /// selection onto the running engine instead of ignoring it: the engine
+    /// gets `POST /torrents/{id}/update_only_files`.
+    #[test]
+    fn a_recommit_while_running_updates_the_engine_selection() {
+        let _guard = RQBIT_ENV_LOCK.lock().unwrap();
+        let xdg = std::env::temp_dir().join(format!("dl-live-xdg-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&xdg);
+        crate::shared::env::ENV
+            .set("XDG_CACHE_HOME".to_owned(), xdg.to_string_lossy().into_owned());
+
+        let (bin, log) = fake_engine_bin("dl-live");
+        std::fs::write(log.with_file_name("file-progress"), "100,100,100").unwrap();
+        unsafe {
+            std::env::set_var("S2UDIO_RQBIT_BIN", &bin);
+        }
+        let mut daemon = Daemon {
+            config: Arc::new(test_config()),
+            started_at: now_unix(),
+            runtimes: Vec::new(),
+            dirty: false,
+        };
+        let kept = |index: usize| DlKeptFile {
+            index,
+            name: format!("ep{}.mkv", index + 1),
+            length: 100,
+        };
+        let enqueue = |id: &str, files: Vec<DlKeptFile>| DlJobRequest::Enqueue {
+            id: id.to_owned(),
+            infohash: Some("0123456789abcdef".to_owned()),
+            source_key: "magnet:?xt=urn:btih:0123456789abcdef".to_owned(),
+            torrent_item: crate::core::dlctl::DlTorrentItem::Magnet(
+                "magnet:?xt=urn:btih:0123456789abcdef".to_owned(),
+            ),
+            torrent_name: Some("Pack".to_owned()),
+            files,
+            play: false,
+        };
+
+        // First commit keeps episodes 1 and 2; let it settle into Downloading.
+        daemon.handle_request(enqueue("req-1", vec![kept(0), kept(1)]));
+        for _ in 0..40 {
+            daemon.resume_adds();
+            daemon.poll_jobs();
+            if daemon.runtimes.first().is_some_and(|r| {
+                r.engine.is_some() && r.job.torrent_id.is_some() && r.applied_selection.is_some()
+            }) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let before = std::fs::read_to_string(&log).unwrap_or_default();
+        assert!(
+            !before.lines().any(|l| l.contains("update_only_files")),
+            "no selection push on the first pass:\n{before}"
+        );
+
+        // The user re-commits with everything except episode 1: the job is
+        // still active, so nothing restarts — the selection is pushed.
+        daemon.handle_request(enqueue("req-2", vec![kept(1), kept(2)]));
+        for _ in 0..20 {
+            daemon.poll_jobs();
+            let now = std::fs::read_to_string(&log).unwrap_or_default();
+            if now.lines().any(|l| l.contains("update_only_files")) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+
+        let requests = std::fs::read_to_string(&log).unwrap_or_default();
+        assert!(
+            requests
+                .lines()
+                .any(|l| l.contains("update_only_files") && l.contains("/torrents/")),
+            "the running torrent's selection is updated:\n{requests}"
+        );
+
+        drop(daemon);
+        crate::shared::env::ENV.remove("XDG_CACHE_HOME");
+        unsafe {
+            std::env::remove_var("S2UDIO_RQBIT_BIN");
+        }
+        let _ = std::fs::remove_dir_all(&xdg);
+    }
+
+    /// A full pick adds the torrent once and never re-adds it: nothing to
+    /// restrict when every file is being kept, and a pointless forget/add
+    /// cycle would restart the download.
+    #[test]
+    fn a_full_pick_adds_once_without_a_selection() {
+        let _guard = RQBIT_ENV_LOCK.lock().unwrap();
+        let xdg = std::env::temp_dir().join(format!("dl-full-xdg-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&xdg);
+        crate::shared::env::ENV
+            .set("XDG_CACHE_HOME".to_owned(), xdg.to_string_lossy().into_owned());
+
+        let (bin, log) = fake_engine_bin("dl-full");
+        std::fs::write(log.with_file_name("file-progress"), "100,100,100").unwrap();
+        unsafe {
+            std::env::set_var("S2UDIO_RQBIT_BIN", &bin);
+        }
+        let mut daemon = Daemon {
+            config: Arc::new(test_config()),
+            started_at: now_unix(),
+            runtimes: Vec::new(),
+            dirty: false,
+        };
+        daemon.handle_request(DlJobRequest::Enqueue {
+            id: new_request_id(),
+            infohash: Some("0123456789abcdef".to_owned()),
+            source_key: "magnet:?xt=urn:btih:0123456789abcdef".to_owned(),
+            torrent_item: crate::core::dlctl::DlTorrentItem::Magnet(
+                "magnet:?xt=urn:btih:0123456789abcdef".to_owned(),
+            ),
+            torrent_name: Some("Pack".to_owned()),
+            files: (0..3)
+                .map(|index| DlKeptFile {
+                    index,
+                    name: format!("ep{}.mkv", index + 1),
+                    length: 100,
+                })
+                .collect(),
+            play: false,
+        });
+        for _ in 0..40 {
+            daemon.resume_adds();
+            daemon.poll_jobs();
+            if daemon.runtimes.first().is_some_and(|r| r.engine.is_some()) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let requests = std::fs::read_to_string(&log).unwrap_or_default();
+        assert!(
+            !requests.lines().any(|line| line.contains("only_files=")),
+            "a full pick needs no selection:\n{requests}"
+        );
+        assert!(
+            !requests.lines().any(|line| line.contains("/forget")),
+            "and no restart:\n{requests}"
+        );
+
+        drop(daemon);
+        crate::shared::env::ENV.remove("XDG_CACHE_HOME");
+        unsafe {
+            std::env::remove_var("S2UDIO_RQBIT_BIN");
+        }
+        let _ = std::fs::remove_dir_all(&xdg);
+    }
+
+    /// A season pack kept in full (the picker's default: every file ticked)
+    /// streams as soon as the FIRST episode has data — the later ones keep
+    /// downloading while mpv plays. The old gate asked for the torrent to be
+    /// `live`, which a running download only reports once every file has its
+    /// data: playback used to wait for the last episode.
+    #[test]
+    fn a_pack_streams_once_its_first_episode_has_data() {
+        let _guard = RQBIT_ENV_LOCK.lock().unwrap();
+        let xdg = std::env::temp_dir().join(format!("dl-pack-xdg-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&xdg);
+        crate::shared::env::ENV
+            .set("XDG_CACHE_HOME".to_owned(), xdg.to_string_lossy().into_owned());
+
+        let (bin, log) = fake_engine_bin("dl-pack-gate");
+        // Three episodes in the torrent; ep1 and ep2 have their 100 bytes, ep3
+        // has none yet — the download is still running.
+        std::fs::write(log.with_file_name("file-progress"), "100,100,0").unwrap();
+        unsafe {
+            std::env::set_var("S2UDIO_RQBIT_BIN", &bin);
+        }
+
+        let mut daemon = Daemon {
+            config: Arc::new(test_config()),
+            started_at: now_unix(),
+            runtimes: Vec::new(),
+            dirty: false,
+        };
+        let id = new_request_id();
+        // The picker's Stream: every file ticked, so all three are kept.
+        let files = (0..3)
+            .map(|index| DlKeptFile {
+                index,
+                name: format!("ep{}.mkv", index + 1),
+                length: 100,
+            })
+            .collect();
+        daemon.handle_request(DlJobRequest::Enqueue {
+            id: id.clone(),
+            infohash: Some("0123456789abcdef".to_owned()),
+            source_key: "magnet:?xt=urn:btih:0123456789abcdef".to_owned(),
+            torrent_item: crate::core::dlctl::DlTorrentItem::Magnet(
+                "magnet:?xt=urn:btih:0123456789abcdef".to_owned(),
+            ),
+            torrent_name: Some("Pack".to_owned()),
+            files,
+            play: true,
+        });
+
+        assert!(
+            poll_until_answered(&mut daemon, &id, Duration::from_secs(15)),
+            "the pack's stream waited for the whole download instead of its first episode"
+        );
+        let response = take_response(&id).expect("the response file parses");
+        assert_eq!(response.files.len(), 3, "every ticked file is in the playlist");
+        assert_eq!(
+            response.ready_count(),
+            1,
+            "only the first episode has to be readable before playback"
+        );
+
         drop(daemon);
         crate::shared::env::ENV.remove("XDG_CACHE_HOME");
         unsafe {

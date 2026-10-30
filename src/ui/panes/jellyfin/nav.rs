@@ -224,19 +224,39 @@ impl JellyfinPane {
         // Drop the jump before playing: the play path can prompt, and a
         // leftover jump would re-run on the next children result.
         self.jump = None;
-        // Only play when the item actually landed in the list: falling back
-        // to row 0 and playing would start the wrong episode (e.g. a search
-        // hit the season's child list does not contain).
-        if jump.play && row.is_some() {
-            self.play_selected(ctx)?;
-        } else if jump.play {
-            log::warn!(
-                item:? = jump.target.id.as_str();
-                "The searched item is not in its parent's list; not starting playback"
-            );
+        // A container target (a series/season reached with an S##E## hint)
+        // played its highlighted row; everything else plays the item the jump
+        // targeted, not the row the cursor fell back to — an item the parent's
+        // list does not contain (a Home card whose season fetch has not landed
+        // yet) must still start, and it must never start the wrong thing.
+        if jump.play {
+            if open_into {
+                self.play_selected(ctx)?;
+            } else {
+                // The tree's copy of the item is what plays (see
+                // [`Self::jump_play_item`]): it carries the `UserData` a
+                // `SearchHint` lacks, so a partly watched result opens the
+                // Continue / Start over question **before** mpv is spawned and
+                // nothing plays until the answer (2026-10-29).
+                let item = self.jump_play_item(&jump);
+                self.play_item(&item, ctx)?;
+            }
         }
         ctx.render()?;
         Ok(())
+    }
+    /// The item a jump starts, **as the freshly populated tree holds it**: the
+    /// parent's list carries the `UserData` and `SeasonId` a `SearchHints`
+    /// result lacks, so a partly watched item's Continue / Start over question
+    /// is asked before mpv starts and an episode plays with its season
+    /// playlist. Falls back to the jump target when the parent's list does not
+    /// contain it (a Home card whose season fetch has not landed yet).
+    fn jump_play_item(&self, jump: &JfJump) -> JfItem {
+        self.items
+            .iter()
+            .find(|item| item.id == jump.target.id)
+            .cloned()
+            .unwrap_or_else(|| jump.target.clone())
     }
     /// Which row of the freshly populated items pane the cursor goes to
     /// (`None` when the item is not in the list at all).

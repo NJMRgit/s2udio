@@ -109,8 +109,20 @@ Details that matter:
   players cannot open now makes the ladder continue instead of dying in MPD.
   A single 403 is retried after 8 s first (a fresh URL can 403 on its first
   request and 206 seconds later).
+- **The wrapper drops a leaked interpreter environment.** It execs a *Python*
+  program, so it must own that program's interpreter environment: before any
+  pass it unsets `LD_PRELOAD` / `PYTHONHOME` / `PYTHONPATH` (logging
+  `ENV_CLEANSED` when it had to). This matters because mpv passes its whole
+  environment to the children it spawns, and on a box whose mpv is launched
+  through **SVP4's mpv wrapper** that environment carries SVP's portable
+  CPython 3.12 — which makes the real yt-dlp die with
+  `ModuleNotFoundError: No module named 'yt_dlp'` before it reads an argument
+  (2026-10-06; see Troubleshooting). The parent keeps its own copy, so SVP is
+  unaffected.
 - Decisions are logged (cheaply) to `/tmp/s2u-yt-wrapper.log`
-  (`PHASE1_PROBE403`, `PHASE2_PROBE403`, `FALLBACK_HLS`, `DROP deprecated …`).
+  (`PHASE1_PROBE403`, `PHASE2_PROBE403`, `PHASE1_FAIL`, `PHASE2_FAIL`,
+  `FALLBACK_HLS`, `ENV_CLEANSED`, `DROP deprecated …`). Set `S2U_YT_LOG` to log
+  somewhere else (the regression test does).
 - The probe has a network-free self-test: `bin/s2u-yt-probe.py --self-test`.
 - YouTube's behaviour still **flaps window-to-window** (an open window means
   DASH/206, a closed one means 403s). The ladder means playback keeps working
@@ -156,7 +168,9 @@ tail -20 /tmp/s2u-yt-wrapper.log                      # which phase answered
 ```
 
 Then play the video in s2udio: the mpv window should open and
-`/tmp/s2udio_1000.log` should not show `mpv exited … 512` right after launch.
+`/tmp/s2udio_1000.log` should not show `mpv exited …` with a non-zero status
+right after launch (`unix_wait_status(512)` = exit 2, `(768)` = exit 3 — both
+mean mpv never opened the stream).
 Radio and downloads use the same fixed path.
 
 ## Uninstall
@@ -196,6 +210,22 @@ Tips:
 
 ## Troubleshooting
 
+- **A YouTube video opens no mpv window at all** (or the window flashes and
+  closes; s2udio's log shows `mpv exited … unix_wait_status(768)` — exit code 3
+  — right after `Launching mpv for video playback`): mpv's own ytdl hook could
+  not start yt-dlp. Check mpv's message:
+  `mpv --vo=null --ao=null --frames=1 --msg-level=all=v <url>` and look for
+  `ModuleNotFoundError: No module named 'yt_dlp'` under `[ytdl_hook]`. If it is
+  there, something in mpv's environment is breaking the Python interpreter —
+  most often **SVP4's mpv launcher**, which exports its portable CPython
+  through `LD_PRELOAD`/`PYTHONPATH` and so passes it to every child mpv spawns.
+  The wrapper unsets those three variables itself (since v2026-10-06), so
+  re-install/refresh the wrapper (`./install.sh`) and the path works again;
+  confirm with `tail /tmp/s2u-yt-wrapper.log` (expect `ENV_CLEANSED`, then no
+  `PHASE2_FAIL`). Verify the real yt-dlp on its own with
+  `~/.local/share/pipx/venvs/yt-dlp/bin/yt-dlp --version` — a clean
+  environment must print a version; if it does, the install is fine and the
+  environment is the problem.
 - **`npm ci` fails**: missing build tooling for the `canvas` native module on
   your platform. Install gcc/make plus cairo/pango/jpeg/gif dev packages (the
   package name varies by distro) and re-run; or use a node version for which

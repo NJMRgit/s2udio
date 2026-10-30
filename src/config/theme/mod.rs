@@ -52,6 +52,11 @@ pub struct UiConfig {
     pub header_background_color: Option<Color>,
     pub modal_background_color: Option<Color>,
     pub modal_backdrop: bool,
+    /// Draw a border-only marquee around the rows a mouse drag is selecting.
+    /// Off by default: the marked-row highlight already shows the band, and a
+    /// marquee necessarily covers the band's outer cells (a list has no gutter
+    /// to draw into).
+    pub band_rect: bool,
     pub text_color: Option<Color>,
     /// The text color as configured in the theme file. The blur accent
     /// derivation never touches it, so the queue and the tab lists'
@@ -117,6 +122,7 @@ pub struct UiConfigFile {
     pub(super) header_background_color: Option<String>,
     pub(super) modal_background_color: Option<String>,
     pub(super) modal_backdrop: bool,
+    pub(super) band_rect: bool,
     pub(super) borders_style: Option<StyleFile>,
     pub(super) highlighted_item_style: Option<StyleFile>,
     pub(super) current_item_style: Option<StyleFile>,
@@ -152,6 +158,7 @@ impl UiConfigFile {
             header: HeaderConfigFile::default(),
             modal_background_color: None,
             modal_backdrop: false,
+            band_rect: false,
             borders_style: Some(StyleFile {
                 fg: Some("blue".to_string()),
                 bg: None,
@@ -408,6 +415,7 @@ impl TryFrom<UiConfigFile> for UiConfig {
                 .to_color()?
                 .or(bg_color),
             modal_backdrop: value.modal_backdrop,
+            band_rect: value.band_rect,
             text_color: StringColor(value.text_color.clone()).to_color()?,
             list_text_color: StringColor(value.text_color).to_color()?,
             header_background_color: header_bg_color,

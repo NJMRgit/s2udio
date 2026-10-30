@@ -510,6 +510,75 @@ impl ListSection {
         self.items.iter().any(|item| item.checked.is_some())
     }
 
+    /// The user's own state in this section, for the in-place successor of a
+    /// rebuilt modal (see `MenuModal::carried_vis`): the cursor row, the
+    /// ticked rows — by **label**, so a re-listed file list maps back onto the
+    /// same files — and whether the footer buttons hold the focus.
+    pub fn picker_ui(&self) -> crate::ui::modals::torrent_picker::PickerUi {
+        crate::ui::modals::torrent_picker::PickerUi {
+            cursor: self.state.get_selected(),
+            ticks: self
+                .items
+                .iter()
+                .filter(|item| item.checked == Some(true))
+                .map(|item| item.label.clone())
+                .collect(),
+            buttons_focused: self.button_focus.is_some(),
+        }
+    }
+
+    /// Re-applies [`ListSection::picker_ui`] on a freshly built section: the
+    /// ticked rows are the ones whose labels the carried state ticked, the
+    /// cursor goes back where it was, and the footer focus too — so the
+    /// user's ticks and position survive a background refresh.
+    pub fn restore_picker_ui(
+        &mut self,
+        carried: &crate::ui::modals::torrent_picker::PickerUi,
+    ) {
+        // The first build (or every rebuild before the user touched the
+        // picker) keeps its own defaults: every file ticked.
+        if carried.ticks.is_empty() && carried.cursor.is_none() && !carried.buttons_focused {
+            return;
+        }
+        for item in &mut self.items {
+            if item.checked.is_some() {
+                item.checked = Some(carried.ticks.iter().any(|label| *label == item.label));
+            }
+        }
+        if let Some(cursor) = carried.cursor
+            && cursor < self.items.len()
+            && !self.items[cursor].disabled
+        {
+            // `DirState::select` clamps against the state's `content_len`, and
+            // this restore runs from inside `MenuModal::list_section`'s
+            // builder — BEFORE `build()` calls `set_content_len`, when the
+            // length is still 0. Without it every index clamps down to row 0,
+            // which is the "cursor resets on every refresh" the user saw.
+            self.state.set_content_len(Some(self.items.len()));
+            self.select(cursor);
+        }
+        self.button_focus = carried.buttons_focused.then(|| {
+            // Back on the first ACTION button — `Stream`, which `Enter` lands
+            // on (see `enter_moves_to_buttons`) — not on the first button that
+            // happens to be enabled: while the torrent is not live `Stream` is
+            // gated, and `Cancel` is always enabled, so keying off "enabled"
+            // would silently move the focus to Cancel.
+            self.buttons
+                .iter()
+                .position(|button| matches!(button.kind, ListButtonKind::Confirm(_)))
+                .unwrap_or(0)
+        });
+        self.refresh_buttons();
+    }
+
+    /// `Enter` on a row moves the focus onto the first footer button
+    /// (`Stream` first, then `Download`, then `Cancel`) instead of ticking the
+    /// row: the tick glyph and `Space` toggle a row, `Enter` leaves the list
+    /// for the actions under it. `false` when there are no buttons.
+    pub fn enter_moves_to_buttons(&mut self) -> bool {
+        self.focus_buttons()
+    }
+
     /// Makes `Enter` on a row activate the first footer button directly
     /// (instead of the usual move-the-focus-onto-it step). The multi-stream
     /// download picker uses it: every row is ticked already, so one `Enter`
@@ -584,6 +653,13 @@ impl ListSection {
     }
 
     /// The screen rects of the footer buttons (mirrors `render_buttons`).
+    /// The screen rect of footer button `idx` — the tests' way to aim a real
+    /// click at `[ Download ]`.
+    #[cfg(test)]
+    pub fn button_area_for_test(&self, idx: usize) -> Option<Rect> {
+        self.button_areas().into_iter().nth(idx)
+    }
+
     fn button_areas(&self) -> Vec<Rect> {
         let area = self.areas[ListSectionArea::Buttons];
         if area.width == 0 {

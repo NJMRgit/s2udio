@@ -33,6 +33,14 @@ pub struct MpvPlaylistEntry {
     /// already running. `None` for every other source.
     #[serde(default)]
     pub start_secs: Option<f64>,
+    /// A row inserted **the moment a link was pasted**, before `yt-dlp`
+    /// finished resolving it: the Video list paints it as a resolving row
+    /// (spinner) and the resolve fills its title/URL/duration in place (see
+    /// [`complete_video_playlist`]), so a paste shows up immediately instead
+    /// of after a silent wait. Not persisted — after a restart the row is
+    /// just an unresolved link the warm resolve fills on selection.
+    #[serde(skip)]
+    pub pending: bool,
 }
 impl MpvPlaylistEntry {
     pub fn new(
@@ -46,6 +54,21 @@ impl MpvPlaylistEntry {
             duration,
             original_url: None,
             start_secs: None,
+            pending: false,
+        }
+    }
+    /// The placeholder row a paste inserts before its link is resolved. The
+    /// title is the link itself until [`complete_video_playlist`] fills in
+    /// the real one, so the row is recognisable (and playable — mpv resolves
+    /// a watch link itself) even while `yt-dlp` runs.
+    pub fn pending_link(link: &str) -> Self {
+        Self {
+            title: link.to_owned(),
+            url: link.to_owned(),
+            duration: None,
+            original_url: Some(link.to_owned()),
+            start_secs: None,
+            pending: true,
         }
     }
     /// The identity key for yt-info / chapters / thumbnail lookups: the
@@ -107,9 +130,10 @@ pub struct MpvSession {
     pub resume_prompted_for: std::cell::RefCell<Option<String>>,
     /// The answer to a pre-launch resume prompt (see [`PendingResume`]),
     /// together with the Jellyfin item it was asked about: the play path can
-    /// take several steps before mpv is spawned, and a video started some
-    /// other way in between must not inherit the position. Taken at session
-    /// start; cleared when a session ends.
+    /// take several steps before mpv is spawned (the Home page opens the
+    /// library tree first), and a video started some other way in between
+    /// must not inherit the position. Taken at session start; cleared when a
+    /// session ends.
     pub pending_resume: std::cell::RefCell<Option<(String, PendingResume)>>,
     /// The Jellyfin item whose saved resume position is being fetched. The
     /// `JF_RESUME` handler only acts on a response while the item playing
@@ -1233,6 +1257,64 @@ pub fn add_to_video_playlist(
     }
     log::debug!(added = entries.len(); "Added entries to the video playlist");
 }
+/// Fill the placeholder rows a paste inserted ([`MpvPlaylistEntry::pending`])
+/// with their resolved entries.
+///
+/// The rows are matched by their lookup URL (the pasted link), so a resolve
+/// that lands seconds later updates the row the user already sees instead of
+/// appending a second one: position, order and any marks stay where they
+/// were. Both the persistent video playlist and the live mpv-session list are
+/// updated; an entry with no placeholder (a resolve that ran for a set with
+/// no queued rows) is appended like before.
+///
+/// Returns `(resolved, appended)`: the resolved entries in the order they
+/// were given (what a "and play" action starts) and how many had to be
+/// appended because no placeholder was waiting for them.
+pub fn complete_video_playlist(
+    ctx: &Ctx,
+    entries: Vec<MpvPlaylistEntry>,
+    after_current: bool,
+) -> (Vec<MpvPlaylistEntry>, usize) {
+    let mut resolved: Vec<MpvPlaylistEntry> = Vec::with_capacity(entries.len());
+    let mut unmatched: Vec<MpvPlaylistEntry> = Vec::new();
+    for mut entry in entries {
+        entry.pending = false;
+        let key = entry.lookup_url().to_owned();
+        let mut filled = false;
+        // The persistent list (rows queued while no mpv session ran).
+        for slot in ctx.video_playlist.borrow_mut().iter_mut() {
+            if slot.pending && slot.lookup_url() == key {
+                *slot = entry.clone();
+                filled = true;
+                break;
+            }
+        }
+        // The live session's mirror (rows queued while a video played).
+        for slot in ctx.mpv.playlist.borrow_mut().iter_mut() {
+            if slot.pending && slot.lookup_url() == key {
+                *slot = entry.clone();
+                filled = true;
+                break;
+            }
+        }
+        if filled {
+            resolved.push(entry);
+        } else {
+            unmatched.push(entry);
+        }
+    }
+    let appended = unmatched.len();
+    if appended > 0 {
+        add_to_video_playlist(ctx, unmatched, after_current);
+    } else {
+        crate::ui::modals::paste::save_video_playlist(ctx);
+        ctx.render().ok();
+    }
+    log::debug!(
+        filled = resolved.len(), appended; "Completed the video queue's resolving rows"
+    );
+    (resolved, appended)
+}
 /// Detach a spawned child from the terminal's session/process group
 /// (`setsid`) and ignore SIGHUP, so closing the TUI cannot kill it: the
 /// terminal driver sends SIGHUP to the foreground process group on window
@@ -1602,7 +1684,66 @@ mod tests {
     use std::os::unix::net::UnixListener;
     use std::path::Path;
 
-    use super::{MpvPlaylistEntry, read_mpv_state, read_mpv_title};
+    use super::{MpvPlaylistEntry, complete_video_playlist, read_mpv_state, read_mpv_title};
+
+    /// A resolved entry for `link`: what `apply_resolved_streams` builds.
+    fn resolved(link: &str, title: &str, url: &str) -> MpvPlaylistEntry {
+        let mut entry = MpvPlaylistEntry::new(title, url, Some(120.0));
+        entry.original_url = Some(link.to_owned());
+        entry
+    }
+
+    /// The row a paste inserted is **filled in place**: same position, no
+    /// second row, and the resolved URL/title/duration are the ones the list
+    /// shows from now on — the visible half of "rows appear immediately, the
+    /// details follow".
+    #[test]
+    fn a_resolved_entry_fills_its_placeholder_in_place() {
+        let ctx = crate::tests::fixtures::ctx(
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+        );
+        let link = "https://www.youtube.com/watch?v=AAA";
+        *ctx.video_playlist.borrow_mut() = vec![
+            MpvPlaylistEntry::new("Before", "before", None),
+            MpvPlaylistEntry::pending_link(link),
+            MpvPlaylistEntry::new("After", "after", None),
+        ];
+        let (filled, appended) =
+            complete_video_playlist(&ctx, vec![resolved(link, "Real title", "http://cdn/1")], true);
+        assert_eq!(appended, 0, "the placeholder took the entry");
+        assert_eq!(filled.len(), 1);
+        let list = ctx.video_playlist.borrow();
+        assert_eq!(list.len(), 3, "no duplicate row was added");
+        assert_eq!(list[1].title, "Real title");
+        assert_eq!(list[1].url, "http://cdn/1");
+        assert_eq!(list[1].duration, Some(120.0));
+        assert!(!list[1].pending, "the row stops spinning");
+        assert_eq!(list[0].title, "Before", "the rows around it keep their place");
+        assert_eq!(list[2].title, "After");
+    }
+
+    /// A resolve whose placeholder is gone (the user deleted the row while it
+    /// resolved) still lands, as an appended row — never silently dropped.
+    #[test]
+    fn a_resolved_entry_without_a_placeholder_is_appended() {
+        let ctx = crate::tests::fixtures::ctx(
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+        );
+        let link = "https://www.youtube.com/watch?v=BBB";
+        ctx.video_playlist.borrow_mut().clear();
+        let (filled, appended) =
+            complete_video_playlist(&ctx, vec![resolved(link, "Title", "http://cdn/2")], false);
+        assert!(filled.is_empty());
+        assert_eq!(appended, 1);
+        let list = ctx.video_playlist.borrow();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].title, "Title");
+        assert!(!list[0].pending);
+    }
 
     /// A `Ctx` for the resume-seek logic: the socket path points nowhere, so
     /// every `mpv_seek` is a fast connect failure and only the state machine

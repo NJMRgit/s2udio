@@ -5,6 +5,24 @@
         shared::events::WorkRequest,
     };
 
+    /// The style the pane paints at one cell (rendered fresh, so a hover
+    /// change is measurable).
+    fn style_at(
+        pane: &mut JellyfinPane,
+        ctx: &crate::ctx::Ctx,
+        x: u16,
+        y: u16,
+    ) -> ratatui::style::Style {
+        let backend = ratatui::backend::TestBackend::new(100, 40);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                pane.render(frame, ratatui::prelude::Rect::new(0, 0, 100, 40), ctx).unwrap()
+            })
+            .unwrap();
+        terminal.backend().buffer()[(x, y)].style()
+    }
+
     /// Render the pane at `width`x`height` and return the text grid.
     fn render_text_at(
         pane: &mut JellyfinPane,
@@ -392,6 +410,233 @@
         (pane, ctx, work_rx)
     }
 
+    /// A pane with a server plus both receivers, so a play path's work
+    /// requests and the modals it opens can both be inspected.
+    fn play_rig() -> (
+        JellyfinPane,
+        crate::ctx::Ctx,
+        crossbeam::channel::Receiver<WorkRequest>,
+        crossbeam::channel::Receiver<crate::AppEvent>,
+    ) {
+        let (app_tx, app_rx) = crossbeam::channel::unbounded();
+        let (work_tx, work_rx) = crossbeam::channel::unbounded();
+        let mut ctx = crate::tests::fixtures::ctx(
+            (app_tx, app_rx.clone()),
+            (work_tx, work_rx.clone()),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+        );
+        {
+            // `Mpv` (not the `ask` menu): the modal a play opens is then the
+            // resume question and nothing else.
+            let mut config = ctx.config.as_ref().clone();
+            config.video.playback = crate::config::video::VideoPlaybackMode::Mpv;
+            ctx.config = std::sync::Arc::new(config);
+        }
+        let mut pane = JellyfinPane::new(&ctx);
+        pane.server = Some(crate::jellyfin::Jellyfin {
+            base: "http://jf:8096".to_owned(),
+            token: "tok".to_owned(),
+            user_id: "u".to_owned(),
+        });
+        (pane, ctx, work_rx, app_rx)
+    }
+
+    /// Activating a video on the Home page leaves the user **looking at it in
+    /// the library**: the tab switches to the tree page and the jump expands
+    /// the path to the item, selects it and plays it there (the search
+    /// result's behaviour). Before this, Home started playback and stayed on
+    /// the carousels.
+    #[test]
+    fn playing_a_home_card_opens_the_tree_on_it() {
+        let (mut pane, ctx, work_rx, _app_rx) = play_rig();
+        pane.home = crate::jellyfin::JfHome {
+            continue_watching: vec![{
+                let mut item = jf_item("ep1", "Pilot", "Episode");
+                item.series_name = Some("Show".to_owned());
+                item.season_id = Some("season1".to_owned());
+                item
+            }],
+            next_up: Vec::new(),
+            recently_added: Vec::new(),
+            library_latest: Vec::new(),
+        };
+        pane.rebuild_home_sections();
+        let _ = render_text(&mut pane, &ctx);
+        pane.home_activate(&ctx).unwrap();
+        assert_eq!(
+            pane.mode,
+            JellyfinTabMode::Libraries,
+            "the tree page is what the user is left looking at"
+        );
+        assert!(
+            pane.jump.as_ref().is_some_and(|jump| jump.target.id == "ep1" && jump.play),
+            "the jump targets the card and plays it once the path is open"
+        );
+        assert!(
+            matches!(
+                work_rx.try_recv(),
+                Ok(WorkRequest::FetchJellyfinAncestors { item_id }) if item_id == "ep1"
+            ),
+            "the ancestors are fetched so the tree can open on the item"
+        );
+    }
+
+    /// Activating a **partly watched** Home card asks first: the carousels
+    /// stay on screen (nothing is fetched, no jump is armed, mpv is not
+    /// started) until the user picks Continue or Start over — the page switch
+    /// belongs to the answer, not to the keypress.
+    #[test]
+    fn a_partly_watched_home_card_asks_before_opening_the_tree() {
+        let (mut pane, ctx, work_rx, app_rx) = play_rig();
+        let mut item = jf_item("ep1", "Pilot", "Episode");
+        item.series_name = Some("Show".to_owned());
+        item.season_id = Some("season1".to_owned());
+        item.runtime_secs = Some(1421);
+        item.playback_position_secs = 600.0;
+        pane.home = crate::jellyfin::JfHome {
+            continue_watching: vec![item],
+            next_up: Vec::new(),
+            recently_added: Vec::new(),
+            library_latest: Vec::new(),
+        };
+        pane.rebuild_home_sections();
+        let _ = render_text(&mut pane, &ctx);
+        pane.home_activate(&ctx).unwrap();
+        assert_eq!(
+            pane.mode,
+            JellyfinTabMode::Home,
+            "the carousels stay put until the question is answered"
+        );
+        assert!(pane.jump.is_none(), "no tree jump is armed yet");
+        assert!(
+            work_rx.try_recv().is_err(),
+            "nothing is fetched for the tree before the answer"
+        );
+        assert!(
+            matches!(
+                app_rx.try_recv(),
+                Ok(crate::AppEvent::UiEvent(crate::ui::UiAppEvent::Modal(_)))
+            ),
+            "the Continue / Start over question is what opens"
+        );
+    }
+
+    /// The answer is what performs the switch: the armed intent is picked up
+    /// when its modal closes, the tree opens on the item and playback is
+    /// requested — and the answer is consumed exactly once.
+    #[test]
+    fn answering_the_home_prompt_opens_the_tree_and_plays() {
+        let (mut pane, ctx, work_rx, _app_rx) = play_rig();
+        let mut item = jf_item("ep1", "Pilot", "Episode");
+        item.season_id = Some("season1".to_owned());
+        *ctx.mpv.pending_resume.borrow_mut() = Some((
+            "ep1".to_owned(),
+            crate::core::mpv::PendingResume::Continue(600.0),
+        ));
+        ctx.pending_jf_tree_jump.borrow_mut().replace(item);
+        let mut closed = crate::ui::UiEvent::ModalClosed;
+        pane.on_event(&mut closed, true, &ctx).unwrap();
+        assert_eq!(pane.mode, JellyfinTabMode::Libraries, "the answer moved the page");
+        assert!(
+            pane.jump.as_ref().is_some_and(|jump| jump.target.id == "ep1" && jump.play),
+            "and the jump opens the item and plays it"
+        );
+        assert!(
+            matches!(
+                work_rx.try_recv(),
+                Ok(WorkRequest::FetchJellyfinAncestors { item_id }) if item_id == "ep1"
+            ),
+            "the tree path is fetched"
+        );
+        assert!(ctx.pending_jf_tree_jump.borrow().is_none(), "consumed once");
+        assert!(
+            ctx.mpv.pending_resume.borrow().is_some(),
+            "the armed answer is left for the session start"
+        );
+    }
+
+    /// The Home answer already settled the question: the play path must not
+    /// ask it a second time behind the tree page.
+    #[test]
+    fn an_armed_answer_is_not_asked_twice() {
+        let (_pane, ctx, work_rx, app_rx) = play_rig();
+        *ctx.mpv.pending_resume.borrow_mut() = Some((
+            "ep1".to_owned(),
+            crate::core::mpv::PendingResume::Continue(600.0),
+        ));
+        JellyfinPane::play_video(
+            &ctx,
+            "http://jf:8096/Videos/ep1/stream?static=true".to_owned(),
+            "Pilot".to_owned(),
+            "ep1".to_owned(),
+            Some("season1".to_owned()),
+            Some(600),
+        )
+        .unwrap();
+        assert!(
+            matches!(
+                work_rx.try_recv(),
+                Ok(WorkRequest::FetchJellyfinSeason { .. })
+            ),
+            "the video starts immediately"
+        );
+        assert!(app_rx.try_recv().is_err(), "no second question");
+    }
+
+    /// A partly watched video asks Continue / Start over **before** mpv is
+    /// spawned: a slow answer used to leave mpv owning the window (it had
+    /// already launched behind the prompt). Nothing is started until the
+    /// answer arrives.
+    #[test]
+    fn a_partly_watched_video_asks_before_starting() {
+        let (_pane, ctx, work_rx, app_rx) = play_rig();
+        JellyfinPane::play_video(
+            &ctx,
+            "http://jf:8096/Videos/ep1/stream?static=true".to_owned(),
+            "Pilot".to_owned(),
+            "ep1".to_owned(),
+            Some("season1".to_owned()),
+            Some(1200),
+        )
+        .unwrap();
+        assert!(
+            work_rx.try_recv().is_err(),
+            "no season/mpv launch is requested before the answer"
+        );
+        let opened = app_rx.try_recv().expect("the Continue / Start over modal");
+        assert!(
+            matches!(
+                opened,
+                crate::AppEvent::UiEvent(crate::ui::UiAppEvent::Modal(_))
+            ),
+            "a modal asks the question: {opened:?}"
+        );
+    }
+
+    /// A video the server has no position for starts straight away — the
+    /// prompt must not become a gate on every play.
+    #[test]
+    fn a_fresh_video_starts_without_asking() {
+        let (_pane, ctx, work_rx, app_rx) = play_rig();
+        JellyfinPane::play_video(
+            &ctx,
+            "http://jf:8096/Videos/ep2/stream?static=true".to_owned(),
+            "Second".to_owned(),
+            "ep2".to_owned(),
+            Some("season1".to_owned()),
+            None,
+        )
+        .unwrap();
+        assert!(
+            matches!(
+                work_rx.try_recv(),
+                Ok(WorkRequest::FetchJellyfinSeason { .. })
+            ),
+            "without a saved position the video starts immediately"
+        );
+        assert!(app_rx.try_recv().is_err(), "and no modal is opened");
+    }
+
     fn jf_item(id: &str, name: &str, kind: &str) -> crate::jellyfin::JfItem {
         crate::jellyfin::JfItem {
             id: id.to_owned(),
@@ -546,6 +791,42 @@
             library: jf_item(&format!("lib-{name}"), name, "CollectionFolder"),
             items: ids.iter().map(|id| jf_item(id, id, "Movie")).collect(),
         }
+    }
+
+    /// The carousel answers the mouse: the card under the pointer lights its
+    /// border (and its name), and the row's header brightens — the hover cue
+    /// every list pane has and the Home page was missing.
+    #[test]
+    fn hovering_a_card_lights_it_and_its_row() {
+        let (mut pane, ctx) = home_rig();
+        pane.home = shelf_home();
+        pane.rebuild_home_sections();
+        // Continue Watching is the first row and starts focused; move the
+        // focus away so the header measurement is about hover, not focus.
+        pane.home_focus = home::HomeFocus::Section(1);
+        let _ = render_text(&mut pane, &ctx);
+        let card = pane
+            .home_layout
+            .cards
+            .iter()
+            .find(|card| card.row == home::HomeRowId::Section(0))
+            .cloned()
+            .expect("a Continue Watching card");
+        let header_y = pane.home_layout.sections[0].0.y;
+        let border = (card.rect.x, card.rect.y + 2);
+        let title = (2u16, header_y);
+
+        let idle_border = style_at(&mut pane, &ctx, border.0, border.1);
+        let idle_title = style_at(&mut pane, &ctx, title.0, title.1);
+        ctx.set_mouse_pos(Some(ratatui::layout::Position::new(
+            card.rect.x + 2,
+            card.rect.y + 2,
+        )));
+        let hover_border = style_at(&mut pane, &ctx, border.0, border.1);
+        let hover_title = style_at(&mut pane, &ctx, title.0, title.1);
+
+        assert_ne!(idle_border, hover_border, "the hovered card's border lights up");
+        assert_ne!(idle_title, hover_title, "and so does its row's header");
     }
 
     /// One carousel per non-empty shelf, each with its own cursor.
@@ -897,53 +1178,6 @@
         assert_eq!(hint.season, None);
     }
 
-    /// A pane with a server plus both receivers, so a play path's work
-    /// requests and the modals it opens can both be inspected. The video
-    /// playback mode is `mpv`, so the only modal a play ever opens is a
-    /// question about the play itself.
-    fn play_rig() -> (
-        JellyfinPane,
-        crate::ctx::Ctx,
-        crossbeam::channel::Receiver<WorkRequest>,
-        crossbeam::channel::Receiver<crate::AppEvent>,
-    ) {
-        let (app_tx, app_rx) = crossbeam::channel::unbounded();
-        let (work_tx, work_rx) = crossbeam::channel::unbounded();
-        let mut ctx = crate::tests::fixtures::ctx(
-            (app_tx, app_rx.clone()),
-            (work_tx, work_rx.clone()),
-            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
-        );
-        {
-            let mut config = ctx.config.as_ref().clone();
-            config.video.playback = crate::config::video::VideoPlaybackMode::Mpv;
-            ctx.config = std::sync::Arc::new(config);
-        }
-        let mut pane = JellyfinPane::new(&ctx);
-        pane.server = Some(crate::jellyfin::Jellyfin {
-            base: "http://jf:8096".to_owned(),
-            token: "tok".to_owned(),
-            user_id: "u".to_owned(),
-        });
-        (pane, ctx, work_rx, app_rx)
-    }
-
-    /// Every modal the pane opened, drained from the app channel.
-    fn opened_modals(
-        app_rx: &crossbeam::channel::Receiver<crate::AppEvent>,
-    ) -> Vec<crate::AppEvent> {
-        let mut modals = Vec::new();
-        while let Ok(event) = app_rx.try_recv() {
-            if matches!(
-                event,
-                crate::AppEvent::UiEvent(crate::ui::UiAppEvent::Modal(_))
-            ) {
-                modals.push(event);
-            }
-        }
-        modals
-    }
-
     /// Picking a result on the search page leaves the page and asks for the
     /// item's ancestors: the browser then walks the tree to it. An episode
     /// (and a movie) result plays once the tree is on it.
@@ -1013,19 +1247,83 @@
         );
     }
 
-    /// A series result has no play action, so the context-menu key opens
-    /// nothing for it — the search menu belongs to the playable video results
-    /// (movies/episodes).
+    /// A partly watched result picked in the search **asks Continue / Start
+    /// over first, and the video waits for the answer**: the jump plays the
+    /// tree's own copy of the item (it carries the `UserData`/`SeasonId` a
+    /// search hint lacks), so `start_video` has the saved position before mpv
+    /// is spawned — no mpv launch, no season playlist, nothing playing until
+    /// the user chooses (2026-10-29 user report).
     #[test]
-    fn a_series_search_result_opens_no_context_menu() {
-        let (mut pane, ctx, _work_rx, app_rx) = play_rig();
+    fn a_partly_watched_search_result_asks_before_the_video_starts() {
+        let (mut pane, ctx, work_rx, app_rx) = play_rig();
+        pane.views = vec![jf_item("lib", "TV", "CollectionFolder")];
+        let series = jf_item("series", "Futurama", "Series");
+        let season = jf_item("season1", "Season 1", "Season");
+        // The tree's copy of the episode is the one with the real metadata.
+        let mut ep1 = jf_item("ep1", "Space Pilot 3000", "Episode");
+        ep1.season_id = Some("season1".to_owned());
+        let mut ep2 = jf_item("ep2", "The Series Has Landed", "Episode");
+        ep2.season_id = Some("season1".to_owned());
+        ep2.runtime_secs = Some(1421);
+        ep2.playback_position_secs = 600.0;
+        let library = pane.views[0].clone();
+
+        // The search hits are bare hints: no SeasonId, no UserData.
         pane.mode = JellyfinTabMode::Search;
-        pane.search_results = vec![jf_item("series", "Futurama", "Series")];
+        pane.search_results = vec![jf_item("ep2", "The Series Has Landed", "Episode")];
         pane.search_results_state.select(Some(0));
-        pane.search_context_menu(&ctx).unwrap();
+        pane.search_activate(&ctx).unwrap();
+
+        feed(&mut pane, &ctx, JF_ANCESTORS, JellyfinResult::Ancestors {
+            item_id: "ep2".to_owned(),
+            items: vec![season.clone(), series.clone(), library],
+        });
+        feed(&mut pane, &ctx, JF_FOLDER, JellyfinResult::Children {
+            parent_id: "lib".to_owned(),
+            items: vec![series],
+        });
+        feed(&mut pane, &ctx, JF_FOLDER, JellyfinResult::Children {
+            parent_id: "series".to_owned(),
+            items: vec![season],
+        });
+        feed(&mut pane, &ctx, JF_FOLDER, JellyfinResult::Children {
+            parent_id: "season1".to_owned(),
+            items: vec![ep1, ep2],
+        });
+
+        // The clicked episode is what the tree shows, and it is selected.
+        assert_eq!(pane.selected.as_ref().map(JfNodeKind::id), Some("season1"));
+        assert_eq!(pane.item_list.selected(), Some(1), "the clicked episode");
         assert!(
-            opened_modals(&app_rx).is_empty(),
-            "no item menu is opened for a container"
+            pane.tree_list.selected().is_some(),
+            "the season row is selected in the tree"
+        );
+        // The question comes from the tree copy's position — and nothing is
+        // started while it is unanswered.
+        let mut events = Vec::new();
+        while let Ok(event) = app_rx.try_recv() {
+            events.push(event);
+        }
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                crate::AppEvent::UiEvent(crate::ui::UiAppEvent::Modal(_))
+            )),
+            "the Continue / Start over modal is asked: {events:?}"
+        );
+        let mut requests = Vec::new();
+        while let Ok(request) = work_rx.try_recv() {
+            requests.push(request);
+        }
+        assert!(
+            !requests
+                .iter()
+                .any(|request| matches!(request, WorkRequest::FetchJellyfinSeason { .. })),
+            "the video waits for the answer instead of starting"
+        );
+        assert!(
+            ctx.mpv.pending_resume.borrow().is_none(),
+            "no position is armed before the question is answered"
         );
     }
 
@@ -1082,126 +1380,39 @@
             }),
             "the clicked episode starts"
         );
-        assert!(opened_modals(&app_rx).is_empty(), "a fresh item asks nothing");
-    }
-
-    /// A partly watched video asks Continue / Start over **before** mpv is
-    /// spawned: a slow answer used to leave mpv owning the window (it had
-    /// already launched behind the prompt). Nothing starts until the answer.
-    #[test]
-    fn a_partly_watched_video_asks_before_starting() {
-        let (_pane, ctx, work_rx, app_rx) = play_rig();
-        JellyfinPane::play_video(
-            &ctx,
-            "http://jf:8096/Videos/ep1/stream?static=true".to_owned(),
-            "Pilot".to_owned(),
-            "ep1".to_owned(),
-            Some("season1".to_owned()),
-            Some(1200),
-        )
-        .unwrap();
-        assert!(
-            work_rx.try_recv().is_err(),
-            "no season/mpv launch is requested before the answer"
-        );
-        assert!(
-            !opened_modals(&app_rx).is_empty(),
-            "the Continue / Start over modal asks the question"
-        );
-        assert!(
-            ctx.mpv.pending_resume.borrow().is_none(),
-            "no position is armed before the answer"
-        );
-    }
-
-    /// A video the server has no position for starts straight away — the
-    /// prompt must not become a gate on every play.
-    #[test]
-    fn a_fresh_video_starts_without_asking() {
-        let (_pane, ctx, work_rx, app_rx) = play_rig();
-        JellyfinPane::play_video(
-            &ctx,
-            "http://jf:8096/Videos/ep2/stream?static=true".to_owned(),
-            "Second".to_owned(),
-            "ep2".to_owned(),
-            Some("season1".to_owned()),
-            None,
-        )
-        .unwrap();
-        assert!(
-            matches!(
-                work_rx.try_recv(),
-                Ok(WorkRequest::FetchJellyfinSeason { .. })
-            ),
-            "without a saved position the video starts immediately"
-        );
-        assert!(opened_modals(&app_rx).is_empty(), "and no modal is opened");
-    }
-
-    /// A partly watched result picked in the search asks Continue / Start
-    /// over **before** the video starts: the jump plays the tree's own copy of
-    /// the item (it carries the `UserData` a search hint lacks), so the
-    /// question comes from the play path and neither mpv nor the season
-    /// playlist starts until the answer.
-    #[test]
-    fn a_partly_watched_search_result_asks_before_the_video_starts() {
-        let (mut pane, ctx, work_rx, app_rx) = play_rig();
-        pane.views = vec![jf_item("lib", "TV", "CollectionFolder")];
-        let series = jf_item("series", "Futurama", "Series");
-        let season = jf_item("season1", "Season 1", "Season");
-        let mut ep1 = jf_item("ep1", "Space Pilot 3000", "Episode");
-        ep1.season_id = Some("season1".to_owned());
-        let mut ep2 = jf_item("ep2", "The Series Has Landed", "Episode");
-        ep2.season_id = Some("season1".to_owned());
-        ep2.runtime_secs = Some(1421);
-        ep2.playback_position_secs = 600.0;
-        let library = pane.views[0].clone();
-
-        // The search hits are bare hints: no SeasonId, no UserData.
-        pane.mode = JellyfinTabMode::Search;
-        pane.search_results = vec![jf_item("ep2", "The Series Has Landed", "Episode")];
-        pane.search_results_state.select(Some(0));
-        pane.search_activate(&ctx).unwrap();
-        feed(&mut pane, &ctx, JF_ANCESTORS, JellyfinResult::Ancestors {
-            item_id: "ep2".to_owned(),
-            items: vec![season.clone(), series.clone(), library],
-        });
-        feed(&mut pane, &ctx, JF_FOLDER, JellyfinResult::Children {
-            parent_id: "lib".to_owned(),
-            items: vec![series],
-        });
-        feed(&mut pane, &ctx, JF_FOLDER, JellyfinResult::Children {
-            parent_id: "series".to_owned(),
-            items: vec![season],
-        });
-        feed(&mut pane, &ctx, JF_FOLDER, JellyfinResult::Children {
-            parent_id: "season1".to_owned(),
-            items: vec![ep1, ep2],
-        });
-
-        assert_eq!(pane.selected.as_ref().map(JfNodeKind::id), Some("season1"));
-        assert_eq!(pane.item_list.selected(), Some(1), "the clicked episode");
-        assert!(
-            pane.tree_list.selected().is_some(),
-            "the season row is selected in the tree"
-        );
-        assert!(
-            !opened_modals(&app_rx).is_empty(),
-            "the Continue / Start over modal is asked"
-        );
-        let mut requests = Vec::new();
-        while let Ok(request) = work_rx.try_recv() {
-            requests.push(request);
+        let mut events = Vec::new();
+        while let Ok(event) = app_rx.try_recv() {
+            events.push(event);
         }
         assert!(
-            !requests
-                .iter()
-                .any(|request| matches!(request, WorkRequest::FetchJellyfinSeason { .. })),
-            "the video waits for the answer instead of starting"
+            !events.iter().any(|event| matches!(
+                event,
+                crate::AppEvent::UiEvent(crate::ui::UiAppEvent::Modal(_))
+            )),
+            "a fresh item asks nothing: {events:?}"
         );
+    }
+
+    /// A series result has no play action, so the context-menu key opens
+    /// nothing for it — the search menu belongs to the playable video results
+    /// (movies/episodes).
+    #[test]
+    fn a_series_search_result_opens_no_context_menu() {
+        let (mut pane, ctx, _work_rx, app_rx) = play_rig();
+        pane.mode = JellyfinTabMode::Search;
+        pane.search_results = vec![jf_item("series", "Futurama", "Series")];
+        pane.search_results_state.select(Some(0));
+        pane.search_context_menu(&ctx).unwrap();
+        let mut events = Vec::new();
+        while let Ok(event) = app_rx.try_recv() {
+            events.push(event);
+        }
         assert!(
-            ctx.mpv.pending_resume.borrow().is_none(),
-            "no position is armed before the question is answered"
+            !events.iter().any(|event| matches!(
+                event,
+                crate::AppEvent::UiEvent(crate::ui::UiAppEvent::Modal(_))
+            )),
+            "no item menu is opened for a container: {events:?}"
         );
     }
 

@@ -627,6 +627,15 @@ fn buffered_player_url(
     }
 }
 
+/// Whether the action inserted resolving video placeholders that must be
+/// settled even when the resolve produced nothing (every link failed).
+fn action_leaves_video_rows(action: &YtAction) -> bool {
+    matches!(
+        action,
+        YtAction::AddToVideoQueue | YtAction::AppendVideoQueue | YtAction::AddToVideoQueueAndPlay
+    )
+}
+
 /// The class a `YtAction`'s resolved streams belong to: the video actions
 /// fill the persistent mpv playlist, everything else the MPD queue.
 fn action_class(action: &YtAction) -> crate::core::stream_cache::StreamClass {
@@ -648,7 +657,10 @@ pub fn apply_resolved_streams(
     action: YtAction,
     failures: Vec<String>,
 ) {
-    if info.is_empty() {
+    // A video queue action still runs when every link failed: the resolving
+    // rows it inserted must stop spinning (they are filled with the failed
+    // link, which is exactly the row the pre-placeholder code appended).
+    if info.is_empty() && !action_leaves_video_rows(&action) {
         return;
     }
     // Round 91b: stamp the resolve so a later play of the same link can
@@ -997,12 +1009,19 @@ pub fn apply_resolved_streams(
                     entries.push(MpvPlaylistEntry::new(url.clone(), url, None));
                 }
             }
+            // The rows were inserted as resolving placeholders when the
+            // paste happened (one click of waiting, not an empty queue):
+            // fill them in place, so the list the user is already looking at
+            // gains titles, durations and artwork instead of new rows.
+            let (resolved, appended) =
+                crate::core::mpv::complete_video_playlist(ctx, entries, after_current);
+            let count = resolved.len() + appended;
             if matches!(action, YtAction::AddToVideoQueueAndPlay) {
-                crate::core::mpv::add_to_video_playlist(ctx, entries.clone(), after_current);
-                crate::core::mpv::play_video_entries(ctx, entries);
+                if !resolved.is_empty() {
+                    crate::core::mpv::play_video_entries(ctx, resolved);
+                }
                 status_info!("Added {count} item(s) to the video queue and started playback");
             } else {
-                crate::core::mpv::add_to_video_playlist(ctx, entries, after_current);
                 status_info!(
                     "{} {count} item(s) to the video queue",
                     if after_current { "Added" } else { "Appended" }
@@ -1303,6 +1322,113 @@ mod stream_pending_tests {
             "the selected row shows its spinner while the warm resolves"
         );
         assert!(stream_parse_pending(&ctx, link), "the same marker is visible under the bare link");
+    }
+
+    /// A `Ctx` whose work channel the test can drain (the module's `ctx()`
+    /// helper drops the receiver, which is fine for the pure lookups but not
+    /// for asserting a resolve request).
+    #[allow(clippy::type_complexity)]
+    fn ctx_with_work() -> (
+        crate::ctx::Ctx,
+        crossbeam::channel::Receiver<crate::shared::events::WorkRequest>,
+    ) {
+        let (app_tx, app_rx) = crossbeam::channel::unbounded();
+        let (work_tx, work_rx) = crossbeam::channel::unbounded();
+        let (client_tx, client_rx) = crossbeam::channel::unbounded();
+        Box::leak(Box::new(app_rx.clone()));
+        Box::leak(Box::new(client_rx.clone()));
+        let ctx = crate::tests::fixtures::ctx((app_tx, app_rx), (work_tx, work_rx.clone()), (client_tx, client_rx));
+        (ctx, work_rx)
+    }
+
+    #[test]
+    fn a_merely_selected_video_row_warms_its_metadata() {
+        // 2026-10-20 report: "file/stream info is not parsed until playback,
+        // unlike audio which resolves and displays artwork/description when an
+        // item is selected". The Video list's highlight is an mpv playlist
+        // entry, so the audio warm could never see it; it now has its own
+        // branch and asks for display metadata the moment the selection rests.
+        let link = "https://www.youtube.com/watch?v=VVVVVVVVVVV";
+        let (mut ctx, work_rx) = ctx_with_work();
+        ctx.queue_tab.set(crate::ctx::QueueTabMode::Video);
+        *ctx.video_selected.borrow_mut() = Some(link.to_owned());
+        ctx.status.state = crate::mpd::commands::State::Stop;
+
+        warm_selected_queue_info(&ctx);
+
+        let asked: Vec<(Vec<String>, bool)> = work_rx
+            .try_iter()
+            .filter_map(|request| match request {
+                crate::shared::events::WorkRequest::ResolveYtStreams { urls, meta_only, .. } => {
+                    Some((urls, meta_only))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(asked.len(), 1, "one resolve for the selected video — asked: {asked:?}");
+        assert_eq!(asked[0].0, vec![link.to_owned()], "the entry's own link is resolved");
+        assert!(asked[0].1, "display metadata only — nothing here needs a playable URL");
+        assert!(
+            stream_parse_pending(&ctx, link),
+            "the entry spins while its metadata resolve is in flight"
+        );
+
+        // One request per link: a resting selection does not re-resolve on
+        // every debounce tick.
+        warm_selected_queue_info(&ctx);
+        assert!(
+            work_rx.try_iter().all(|request| !matches!(
+                request,
+                crate::shared::events::WorkRequest::ResolveYtStreams { .. }
+            )),
+            "the same selection is resolved once"
+        );
+    }
+
+    #[test]
+    fn a_video_selection_with_nothing_to_resolve_is_left_alone() {
+        // A local file (or torrent stream) has no yt-dlp metadata to fetch.
+        let (mut ctx, work_rx) = ctx_with_work();
+        ctx.queue_tab.set(crate::ctx::QueueTabMode::Video);
+        *ctx.video_selected.borrow_mut() = Some("/home/stoned/Videos/episode.mkv".to_owned());
+        ctx.status.state = crate::mpd::commands::State::Stop;
+
+        warm_selected_queue_info(&ctx);
+
+        assert!(
+            work_rx.try_iter().all(|request| !matches!(
+                request,
+                crate::shared::events::WorkRequest::ResolveYtStreams { .. }
+            )),
+            "a local file is not handed to yt-dlp"
+        );
+    }
+
+    #[test]
+    fn a_video_whose_info_is_already_known_is_not_warmed_again() {
+        let link = "https://www.youtube.com/watch?v=WWWWWWWWWWW";
+        let (mut ctx, work_rx) = ctx_with_work();
+        ctx.queue_tab.set(crate::ctx::QueueTabMode::Video);
+        *ctx.video_selected.borrow_mut() = Some(link.to_owned());
+        ctx.status.state = crate::mpd::commands::State::Stop;
+        ctx.yt_info.borrow_mut().insert(
+            link.to_owned(),
+            crate::shared::ytdlp::YtStreamInfo {
+                original_url: link.to_owned(),
+                title: "Already resolved".to_owned(),
+                ..Default::default()
+            },
+        );
+
+        warm_selected_queue_info(&ctx);
+
+        assert!(
+            work_rx.try_iter().all(|request| !matches!(
+                request,
+                crate::shared::events::WorkRequest::ResolveYtStreams { .. }
+            )),
+            "a resolved video costs no yt-dlp call"
+        );
     }
 
     #[test]
@@ -1644,6 +1770,40 @@ mod stale_stream_tests {
             ReplacementTarget::AlreadySwapped(2),
             "the row is found by the original link the proxy URL was registered \
              from, not by the raw player URL"
+        );
+    }
+
+    /// **Reported 2026-10-20: "playback doesn't start after resolve — I have to
+    /// double-click or reselect + play."**
+    ///
+    /// The takeover above used to require a waiting `▶▶` step. But the common
+    /// shape is a plain play: the one-entry look ahead warms the row after the
+    /// current track, the user clicks **that** row, the app holds MPD while its
+    /// own resolve runs, and the warm-up's in-place swap lands first. With the
+    /// step-only gate the user's landing found neither its id nor a row to play,
+    /// so nothing started until they clicked again. A landed play takes the row
+    /// over whether or not a step is waiting.
+    #[test]
+    fn a_plain_play_takes_over_a_row_the_look_ahead_already_swapped() {
+        let swapped = vec!["http://127.0.0.1:39235/s2u/audio/swapped".to_owned()];
+        let songs = vec![row(1, "a"), row(2, &swapped[0]), row(3, "c")];
+        assert_eq!(
+            replacement_target(None, &songs, 99, &swapped),
+            ReplacementTarget::AlreadySwapped(2),
+            "the user's play lands on the row the warm-up swapped, not on nothing"
+        );
+    }
+
+    /// A row that holds **none** of this resolve's stream keys was not swapped by
+    /// it: the row is genuinely gone (a cleared queue, a consume-mode removal),
+    /// and the play must never invent a copy of it.
+    #[test]
+    fn a_landed_play_whose_stream_is_absent_re_adds_nothing() {
+        let songs = vec![row(1, "a"), row(2, "http://127.0.0.1:39235/s2u/audio/other")];
+        assert_eq!(
+            replacement_target(None, &songs, 99, &["http://127.0.0.1:39235/s2u/audio/mine".to_owned()]),
+            ReplacementTarget::Nothing,
+            "no row holds this stream, so nothing is played or re-added"
         );
     }
 

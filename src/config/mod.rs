@@ -131,6 +131,28 @@ use crate::{
     tmux,
 };
 use ratatui::{prelude::IntoCrossterm, style::{Color, Style}};
+/// How the event loop paces frames.
+///
+/// `Continuous` (the default) keeps a frame on every `max_fps` budget tick
+/// while the UI is visible: every animation, spinner and live timeline is
+/// computed per frame, and an unchanged frame writes **nothing** to the
+/// terminal (ratatui diffs cells), so smooth motion costs no output. `OnDemand`
+/// renders only when something asked for a frame — the pre-round behaviour,
+/// and the battery-friendly choice.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FramePacing {
+    #[default]
+    Continuous,
+    OnDemand,
+}
+
+impl FramePacing {
+    /// Whether the loop should render on every budget tick.
+    pub fn is_continuous(self) -> bool {
+        matches!(self, FramePacing::Continuous)
+    }
+}
+
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -146,7 +168,11 @@ pub struct Config {
     /// last fallback); `LocalOnly` never spawns the fetch.
     pub lyrics_source: LyricsSource,
     pub volume_step: u8,
+    /// The frame budget: the shortest gap two frames may have. `frame_pacing`
+    /// decides whether the loop takes that budget every tick or only when
+    /// something asked for a frame.
     pub max_fps: u32,
+    pub frame_pacing: FramePacing,
     pub scrolloff: usize,
     pub wrap_navigation: bool,
     pub keybinds: KeyConfig,
@@ -263,6 +289,7 @@ pub struct ConfigFile {
     auto_theme: AutoThemeConfig,
     volume_step: u8,
     pub max_fps: u32,
+    pub frame_pacing: FramePacing,
     scrolloff: usize,
     wrap_navigation: bool,
     status_update_interval_ms: Option<u64>,
@@ -334,7 +361,11 @@ impl ConfigFile {
             mpd_write_timeout_ms: 5_000,
             mpd_read_timeout_ms: 10_000,
             mpd_idle_read_timeout_ms: None,
-            max_fps: 30,
+            // 60 everywhere: `max_fps` is the frame budget, not a ceiling the
+            // UI idles under (see `frame_pacing`). Higher values (up to 240)
+            // are accepted for 120/144 Hz terminals.
+            max_fps: 60,
+            frame_pacing: FramePacing::default(),
             theme: None,
             cache_dir: None,
             lyrics_dir: None,
@@ -554,7 +585,10 @@ impl ConfigFile {
             address,
             password,
             volume_step: self.volume_step,
-            max_fps: self.max_fps,
+            // Clamped at the boundary so a hand-edited 0 can never reach the
+            // frame budget (it would divide by zero).
+            max_fps: self.max_fps.clamp(1, crate::ui::anim::MAX_FPS),
+            frame_pacing: self.frame_pacing,
             scrolloff: self.scrolloff,
             wrap_navigation: self.wrap_navigation,
             status_update_interval_ms: self.status_update_interval_ms.map(|v| v.max(16)),

@@ -146,13 +146,9 @@ pub struct ControlsPane {
     /// playback, `(0, mpv title)` while an mpv session is the UI source;
     /// `None` when nothing plays. The carousel restarts when it changes.
     last_song_key: Option<(u32, String)>,
-    /// 2026-10-15: the redraw tick that animates the `▶▶` resolver spinner.
-    /// Armed only while a step is waiting for its row to resolve, so it costs
-    /// nothing otherwise. The status update loop already drives frames while
-    /// playback runs, but that loop stops when MPD is stopped or paused — and a
-    /// step can be pressed from either state — so the spinner needs its own
-    /// tick to animate there.
-    spinner_tick: Option<crate::shared::id::Id>,
+    // 2026-10-15: the `▶▶` resolver spinner used to own a redraw tick here. It
+    // asks the shared frame clock instead (`Ctx::animator`), which keeps the
+    // cadence alive from either playback state without a per-surface job.
 }
 impl ControlsPane {
     pub fn new() -> Self {
@@ -163,7 +159,6 @@ impl ControlsPane {
             carousel_anchor: None,
             last_tab: None,
             last_song_key: None,
-            spinner_tick: None,
         }
     }
     fn mode_info(mode: Mode) -> &'static str {
@@ -199,35 +194,19 @@ impl ControlsPane {
         let free = volume_start.saturating_sub(area.x + 1 + time_w);
         area.x + 1 + time_w + free.saturating_sub(TRANSPORT_CLUSTER_W) / 2
     }
-    /// Arm the redraw tick while the `▶▶` spinner is on screen, and cancel it
-    /// the moment the step finishes, so an idle controls bar costs no frames.
+    /// Ask the shared frame clock for the `▶▶` spinner's cadence while a step
+    /// is in flight, and for nothing the moment it finishes — so an idle
+    /// controls bar costs no frames.
     ///
-    /// The same shape as the Queue pane's Duration spinner
-    /// (`QueuePane::schedule_spinner_tick`): one fixed job id re-armed with
-    /// `schedule_replace`, so the repeats cannot pile up, and cancelled
-    /// explicitly when nothing is spinning (a scheduler job is one-shot, so it
-    /// does not stop on its own).
-    fn sync_spinner_tick(&mut self, ctx: &Ctx) {
+    /// The same shape as the Queue pane's Duration spinner and the Jellyfin
+    /// loading indicator, all of which now ask `Ctx::animator` instead of
+    /// owning a job id: the clock arms one tick from the shortest request, and
+    /// a frame that asks nothing disarms it.
+    fn request_spinner_frames(&self, ctx: &Ctx) {
         use crate::ui::panes::queue::SPINNER_FRAME_MS;
-        if ctx.pending_next_step.get().is_none() {
-            if let Some(id) = self.spinner_tick.take() {
-                ctx.scheduler.cancel(id);
-            }
-            return;
+        if ctx.pending_next_step.get().is_some() {
+            ctx.animator.request_every(std::time::Duration::from_millis(SPINNER_FRAME_MS));
         }
-        if self.spinner_tick.is_some() {
-            return;
-        }
-        let id = crate::shared::id::new();
-        self.spinner_tick = Some(id);
-        ctx.scheduler.schedule_replace(
-            id,
-            std::time::Duration::from_millis(SPINNER_FRAME_MS),
-            |(tx, _)| {
-                tx.send(crate::AppEvent::RequestRender)?;
-                Ok(())
-            },
-        );
     }
     /// The `▶▶` slot's label: the button itself, or a spinner while the step it
     /// started is still resolving.
@@ -468,7 +447,8 @@ impl ControlsPane {
             );
             return format!("{elapsed} / {duration}");
         }
-        let elapsed = ctx.status.elapsed.to_string();
+        // Display only: extrapolated to this frame (`Ctx::display_elapsed`).
+        let elapsed = ctx.display_elapsed().to_string();
         let duration = ctx.status.duration.to_string();
         match bitrate {
             Some(bitrate) => format!("{elapsed} / {duration} ({bitrate} kbps)"),
@@ -715,12 +695,20 @@ impl ControlsPane {
         if bar_w == 0 {
             return;
         }
+        // f64 seconds, not `as_secs()` — see the same note in `progress_bar`.
         let (elapsed, duration) = if crate::core::mpv::mpv_is_ui_source(ctx) {
-            (ctx.mpv.position as u64, ctx.mpv.duration as u64)
+            (ctx.mpv.position, ctx.mpv.duration)
         } else {
-            (ctx.status.elapsed.as_secs(), ctx.status.duration.as_secs())
+            // The controls bar draws the same live timeline as the Queue
+            // tab's seekbar, so both move between MPD status answers.
+            if ctx.status.state == crate::mpd::commands::State::Play
+                && !ctx.status.duration.is_zero()
+            {
+                ctx.animator.request_frame();
+            }
+            (ctx.display_elapsed().as_secs_f64(), ctx.status.duration.as_secs_f64())
         };
-        let value = if duration == 0 { 0.0 } else { elapsed as f32 / duration as f32 };
+        let value = if duration <= 0.0 { 0.0 } else { (elapsed / duration) as f32 };
         let mouse = ctx.mouse_pos();
         let hovered = mouse.is_some_and(|p| p.y == y && p.x >= bar_x && p.x < bar_x + bar_w);
         let hover_col = mouse.filter(|_| hovered).map(|p| p.x.saturating_sub(bar_x));
@@ -795,7 +783,7 @@ impl Pane for ControlsPane {
         // loop already drives frames while MPD plays, but it stops when MPD is
         // stopped or paused, and a step can be pressed from either state — so
         // the tick is armed here, while the spinner is actually on screen.
-        self.sync_spinner_tick(ctx);
+        self.request_spinner_frames(ctx);
         let buf = frame.buffer_mut();
         let theme = ControlsTheme::from_ctx(ctx);
         let left = area.x;
@@ -1463,25 +1451,35 @@ mod tests {
         );
     }
 
-    /// The spinner's redraw tick is armed only while a step is in flight, so an
-    /// idle controls bar schedules no frames.
+    /// The spinner asks the shared clock for frames only while a step is in
+    /// flight, so an idle controls bar schedules no frames.
     #[test]
     fn the_spinner_tick_is_armed_only_while_a_step_waits() {
         let ctx = playing_ctx(ctx_fixture());
-        let mut pane = ControlsPane::new();
-        assert!(pane.spinner_tick.is_none(), "nothing armed at rest");
-        pane.sync_spinner_tick(&ctx);
-        assert!(pane.spinner_tick.is_none(), "still nothing while idle");
+        let pane = ControlsPane::new();
+        pane.request_spinner_frames(&ctx);
+        assert!(!ctx.animator.wants_frames(), "nothing asked at rest");
         ctx.pending_next_step.set(Some(7));
-        pane.sync_spinner_tick(&ctx);
-        assert!(pane.spinner_tick.is_some(), "a waiting step arms the tick");
-        let armed = pane.spinner_tick;
-        // A second render must not arm a second job.
-        pane.sync_spinner_tick(&ctx);
-        assert_eq!(pane.spinner_tick, armed, "the tick is not re-armed every frame");
+        pane.request_spinner_frames(&ctx);
+        assert!(ctx.animator.wants_frames(), "a waiting step asks for frames");
+        // Asking again is the same request, not a second tick: the frame
+        // consumes both and arms one job.
+        pane.request_spinner_frames(&ctx);
+        let budget = crate::ui::anim::frame_budget(ctx.config.max_fps);
+        assert_eq!(
+            ctx.animator.take_interval(budget, false),
+            Some(std::time::Duration::from_millis(
+                crate::ui::panes::queue::SPINNER_FRAME_MS
+            )),
+            "one cadence for one spinner"
+        );
         ctx.pending_next_step.set(None);
-        pane.sync_spinner_tick(&ctx);
-        assert!(pane.spinner_tick.is_none(), "the tick is dropped when the step ends");
+        pane.request_spinner_frames(&ctx);
+        assert_eq!(
+            ctx.animator.take_interval(budget, false),
+            None,
+            "the request is dropped when the step ends"
+        );
     }
 
     fn ctx_fixture() -> Ctx {

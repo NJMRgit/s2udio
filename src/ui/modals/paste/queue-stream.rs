@@ -76,6 +76,9 @@ fn all_yt(vids: &[PastedItem]) -> bool {
 /// mpv without touching the persistent video playlist.
 pub(super) fn play_video_now(ctx: &Ctx, vids: &[PastedItem]) {
     if all_yt(vids) {
+        // Nothing is on screen while the link resolves (play-now adds no
+        // row), so the status line says what the wait is for.
+        status_info!("Resolving the video link… mpv starts when it lands");
         let _ = ctx
             .work_sender
             .send(WorkRequest::ResolveYtStreams {
@@ -94,62 +97,47 @@ pub(super) fn play_video_now(ctx: &Ctx, vids: &[PastedItem]) {
 /// the added videos start playing immediately. A set may mix both kinds
 /// (round 89) — see the comment inside.
 pub(super) fn queue_videos(ctx: &Ctx, vids: &[PastedItem], after_current: bool, play: bool) {
-    if all_yt(vids) {
-        let action = if play {
-            YtAction::AddToVideoQueueAndPlay
-        } else if after_current {
-            YtAction::AddToVideoQueue
-        } else {
-            YtAction::AppendVideoQueue
-        };
-        let _ = ctx
-            .work_sender
-            .send(WorkRequest::ResolveYtStreams {
-                urls: yt_urls(vids),
-                action,
-                meta_only: false,
-                play_stamp: play
-                    .then(crate::shared::ytdlp::play_request::next),
-            });
-        return;
-    }
+    use crate::core::mpv::MpvPlaylistEntry;
     // Round 89: one video set can mix local videos and YouTube-style links
     // (the paste popup's `Add to queue [> Video]` on a paste that holds
-    // both). The links need yt-dlp before mpv can open them — they are
-    // resolved on the work thread and land as they arrive — while the local
-    // ones enter the video playlist right away.
+    // both). 2026-10-26 (user): the rows land **immediately**, like the audio
+    // queue's: local files as they are, links as resolving placeholders the
+    // resolve fills in place. Waiting for `yt-dlp` before adding anything
+    // left the video queue empty for seconds after a paste.
     let links = yt_urls(vids);
     let local: Vec<PastedItem> = vids
         .iter()
         .filter(|item| !matches!(item, PastedItem::Yt(_)))
         .cloned()
         .collect();
-    if !local.is_empty() {
-        let entries = video_entries_for(&local);
-        crate::core::mpv::add_to_video_playlist(ctx, entries.clone(), after_current);
-        // With links in the same set, playback is started by the links'
-        // resolve (the local entries precede them, so nothing is skipped).
-        if play && links.is_empty() {
+    let mut entries = video_entries_for(&local);
+    entries.extend(links.iter().map(|link| MpvPlaylistEntry::pending_link(link)));
+    if entries.is_empty() {
+        return;
+    }
+    crate::core::mpv::add_to_video_playlist(ctx, entries.clone(), after_current);
+    if links.is_empty() {
+        // Nothing to resolve: playback (when asked for) starts right away.
+        if play {
             crate::core::mpv::play_video_entries(ctx, entries);
         }
+        return;
     }
-    if !links.is_empty() {
-        let action = if play {
-            YtAction::AddToVideoQueueAndPlay
-        } else if after_current {
-            YtAction::AddToVideoQueue
-        } else {
-            YtAction::AppendVideoQueue
-        };
-        let _ = ctx
-            .work_sender
-            .send(WorkRequest::ResolveYtStreams {
-                urls: links,
-                action,
-                meta_only: false,
-                play_stamp: play.then(crate::shared::ytdlp::play_request::next),
-            });
-    }
+    let action = if play {
+        YtAction::AddToVideoQueueAndPlay
+    } else if after_current {
+        YtAction::AddToVideoQueue
+    } else {
+        YtAction::AppendVideoQueue
+    };
+    let _ = ctx
+        .work_sender
+        .send(WorkRequest::ResolveYtStreams {
+            urls: links,
+            action,
+            meta_only: false,
+            play_stamp: play.then(crate::shared::ytdlp::play_request::next),
+        });
 }
 /// The stored-playlist URIs of the given video items: local files keep
 /// their path, direct URLs and YouTube-style links their (stable) link —
@@ -461,5 +449,99 @@ pub fn save_video_playlist(ctx: &Ctx) {
         if let Err(err) = std::fs::write(&path, bytes) {
             log::error!(error:? = err; "Failed to save the video playlist");
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    fn rig() -> (crate::ctx::Ctx, crossbeam::channel::Receiver<WorkRequest>) {
+        let (app_tx, app_rx) = crossbeam::channel::unbounded();
+        let (work_tx, work_rx) = crossbeam::channel::unbounded();
+        let (client_tx, client_rx) = crossbeam::channel::unbounded();
+        Box::leak(Box::new(client_rx));
+        let ctx = crate::tests::fixtures::ctx(
+            (app_tx, app_rx),
+            (work_tx, work_rx.clone()),
+            (client_tx, crossbeam::channel::unbounded().1),
+        );
+        (ctx, work_rx)
+    }
+
+    /// The reported asymmetry: the audio queue showed a pasted link the
+    /// moment it was added (as a tagged row that resolves later), while the
+    /// video queue showed nothing until `yt-dlp` answered — a silent wait of
+    /// several seconds. The row now lands as a resolving placeholder straight
+    /// away, and the resolve is what it waits for.
+    #[test]
+    fn a_pasted_video_link_lands_in_the_queue_before_it_resolves() {
+        let (ctx, work_rx) = rig();
+        let link = "https://www.youtube.com/watch?v=AAA";
+        queue_videos(&ctx, &[PastedItem::Yt(link.to_owned())], true, false);
+        {
+            let playlist = ctx.video_playlist.borrow();
+            assert_eq!(playlist.len(), 1, "the row is there immediately");
+            assert!(playlist[0].pending, "and says it is still resolving");
+            assert_eq!(playlist[0].lookup_url(), link, "the link is its key");
+        }
+        assert_eq!(
+            ctx.queue_tab.get(),
+            crate::ctx::QueueTabMode::Video,
+            "the tab switches to the list the row went into"
+        );
+        assert!(
+            matches!(
+                work_rx.try_recv(),
+                Ok(WorkRequest::ResolveYtStreams { urls, .. }) if urls == vec![link.to_owned()]
+            ),
+            "the link is handed to the resolver"
+        );
+    }
+
+    /// A resolve that produced nothing still settles the rows it inserted:
+    /// the failed link's row stops spinning and keeps the link as its title
+    /// (instead of spinning forever on a dead video).
+    #[test]
+    fn a_failed_resolve_stops_the_row_spinning() {
+        let (ctx, _work_rx) = rig();
+        let link = "https://www.youtube.com/watch?v=CCC";
+        *ctx.video_playlist.borrow_mut() =
+            vec![crate::core::mpv::MpvPlaylistEntry::pending_link(link)];
+        crate::ui::modals::paste::apply_resolved_streams(
+            &ctx,
+            Vec::new(),
+            YtAction::AddToVideoQueue,
+            vec![format!("{link}: video unavailable")],
+        );
+        let playlist = ctx.video_playlist.borrow();
+        assert_eq!(playlist.len(), 1, "the row is kept, not duplicated");
+        assert!(!playlist[0].pending, "the spinner stops");
+        assert_eq!(playlist[0].url, link);
+    }
+
+    /// A mixed paste keeps its order: local files are queued as they are and
+    /// the links follow as placeholders.
+    #[test]
+    fn a_mixed_paste_queues_the_local_files_and_the_links_together() {
+        let (ctx, work_rx) = rig();
+        let link = "https://www.youtube.com/watch?v=BBB";
+        queue_videos(
+            &ctx,
+            &[
+                PastedItem::VideoFile("/tmp/a.mp4".to_owned()),
+                PastedItem::Yt(link.to_owned()),
+            ],
+            true,
+            false,
+        );
+        let playlist = ctx.video_playlist.borrow();
+        assert_eq!(playlist.len(), 2);
+        assert_eq!(playlist[0].url, "/tmp/a.mp4");
+        assert!(!playlist[0].pending, "a local file needs no resolve");
+        assert!(playlist[1].pending);
+        drop(playlist);
+        assert!(matches!(work_rx.try_recv(), Ok(WorkRequest::ResolveYtStreams { .. })));
     }
 }

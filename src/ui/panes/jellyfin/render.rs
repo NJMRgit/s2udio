@@ -156,13 +156,11 @@ pub(super) fn render_toggle(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx)
                 in_flight = self.fetches_in_flight; "Jellyfin fetch never reported back; clearing the loading indicator"
             );
             self.fetches_in_flight = 0;
+            // Nothing left to animate: this frame asks the clock for nothing.
             self.loading_since = None;
-            if let Some(id) = self.loading_tick.take() {
-                ctx.scheduler.cancel(id);
-            }
             return;
         }
-        self.schedule_loading_tick(ctx);
+        self.request_loading_frames(ctx);
         let frame_idx = (since.elapsed().as_millis() as u64 / LOADING_FRAME_MS) as usize
             % LOADING_FRAMES.len();
         let spinner = LOADING_FRAMES[frame_idx];

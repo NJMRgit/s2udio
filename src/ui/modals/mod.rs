@@ -93,6 +93,18 @@ pub(crate) trait Modal: std::fmt::Debug {
     /// replacement.
     fn restore_submenu_path(&mut self, _path: &[String], _ctx: &mut Ctx) {}
 
+    /// The user's own state inside the modal (the torrent picker's cursor,
+    /// ticked rows and button focus), handed to the in-place successor by
+    /// [`Modal::restore_vis`]. Carried in the successor's `Ctx` so the state
+    /// survives a background refresh without living in the handed-over
+    /// object. `None` for every other modal.
+    fn vis(&self) -> Option<crate::ui::view_state::ModalVis> {
+        None
+    }
+
+    /// Restores what [`Modal::vis`] reported, after an in-place replacement.
+    fn restore_vis(&mut self, _vis: crate::ui::view_state::ModalVis, _ctx: &mut Ctx) {}
+
     fn hide(&mut self, ctx: &Ctx) -> Result<()> {
         ctx.app_event_sender
             .send(crate::AppEvent::UiEvent(crate::ui::UiAppEvent::PopModal(self.id())))?;

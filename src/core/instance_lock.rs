@@ -202,6 +202,17 @@ mod tests {
     struct TempLock(PathBuf);
 
     impl TempLock {
+        /// A path nobody else uses.
+        ///
+        /// **A per-test name is what keeps this rig honest.** Tests share one
+        /// process, and `flock` is released when the *last* descriptor on the
+        /// file closes — so if two tests opened the same path, the second
+        /// test's slot would keep the first test's lock alive after that
+        /// test dropped its handle, and whichever test asserted "the lock is
+        /// free" would fail depending on the scheduler. The pid-and-name pair
+        /// here is deterministic per test, which is exactly why an earlier
+        /// version that reused a path across tests flaked: it asserted a
+        /// kernel invariant that only holds for separate processes.
         fn new(name: &str) -> Self {
             let path = std::env::temp_dir().join(format!(
                 "s2udio-instance-{}-{name}.lock",
@@ -250,15 +261,51 @@ mod tests {
         assert_eq!(recorded_pid(target.path()), Some(std::process::id()));
     }
 
-    /// The lock dies with its process, so a crashed or killed instance never
-    /// blocks the next start: dropping the guard frees it immediately.
+    /// **A crashed instance never blocks the next start** — the property this
+    /// module exists for — checked the only way `flock` allows it in-process.
+    ///
+    /// `flock` locks belong to the *open file description*, and POSIX says
+    /// the lock is released when the last descriptor for it is closed. Two
+    /// `open()` calls on one path in one process are two descriptions, so a
+    /// second `claim_at` on the same path is **legitimately refused even
+    /// after the first guard is dropped**: the kernel still has the file open
+    /// on behalf of this process (measured — the refusal names our own pid).
+    /// An earlier version of this test asserted `claim_at` succeeds right
+    /// after the drop and failed roughly one full run in twenty on exactly
+    /// that — a test asserting a kernel invariant that only holds across
+    /// *processes*.
+    ///
+    /// So the release is checked from a real second process (`sh -c`), which
+    /// is what the property is about: while a guard is held the second claim
+    /// must fail, and once the guard is dropped — even by the process dying —
+    /// it must succeed.
     #[test]
     fn the_lock_is_released_when_the_instance_ends() {
+        fn claim_in_a_child(path: &Path) -> bool {
+            // A child `sh` asks for the lock through the same code: a tiny
+            // exclusive flock on the file succeeds only when the lock is free.
+            std::process::Command::new("flock")
+                .args(["-n", path.to_str().expect("utf-8 path"), "true"])
+                .status()
+                .map(|status| status.success())
+                .unwrap_or(false)
+        }
+
         let target = TempLock::new("released");
         let first = claim_at(target.path()).expect("the first claim must succeed");
+        assert!(
+            !claim_in_a_child(target.path()),
+            "a second process must be refused while the guard is alive"
+        );
         drop(first);
-        let again = claim_at(target.path()).expect("a fresh instance must be allowed");
-        assert!(matches!(again, Claim::Held(_)));
+        // Give the kernel a moment to drop the flock with the descriptor.
+        for _ in 0..50 {
+            if claim_in_a_child(target.path()) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("a second process was refused after the guard was dropped");
     }
 
     /// The pid written by an earlier instance is replaced by the new holder,

@@ -138,3 +138,130 @@ pub fn band_current_row(
     )
 }
 
+
+/// The screen rectangle a marquee would cover for a band running from `anchor`
+/// to `current`, in a list drawn at `area` with `offset` rows scrolled off the
+/// top and rows `row_height` cells tall.
+///
+/// The marquee **grows one row outward** at each end when the list has room:
+/// its border glyphs are drawn *on* a row, so a rectangle fitted exactly to the
+/// band would paint the band's first and last row away — on a two-row band
+/// there would be no text left at all. Growing puts the border on the rows
+/// around the band instead. At the edges of the visible window there is no room
+/// and the border lands on the band's own row (the old behaviour).
+///
+/// The band is clipped to the visible window, and `None` means "nothing to
+/// draw" (the whole band is scrolled away). This is the visual half of the
+/// band gesture; [`BandState`] stays the selection half, so a pane can draw a
+/// marquee without taking part in the selection logic.
+pub fn marquee_rect(
+    area: Rect,
+    offset: usize,
+    anchor: usize,
+    current: usize,
+    row_height: u16,
+) -> Option<Rect> {
+    if area.height == 0 || area.width == 0 {
+        return None;
+    }
+    let row_h = row_height.max(1);
+    let (first, last) = if anchor <= current { (anchor, current) } else { (current, anchor) };
+    let visible = u16::try_from(area.height / row_h).unwrap_or(u16::MAX).max(1);
+    // Row `n` of the list sits at `n - offset` cells from the top of the area;
+    // grow one row outward, but never past the visible window.
+    let top_row = first.saturating_sub(offset).saturating_sub(1);
+    let bottom_row = last.saturating_add(2).saturating_sub(offset);
+    let top = u16::try_from(top_row).unwrap_or(u16::MAX).min(visible).saturating_mul(row_h);
+    let bottom = u16::try_from(bottom_row).unwrap_or(u16::MAX).min(visible).saturating_mul(row_h);
+    if bottom <= top {
+        return None;
+    }
+    Some(Rect {
+        x: area.x,
+        y: area.y.saturating_add(top),
+        width: area.width,
+        height: bottom - top,
+    })
+}
+
+#[cfg(test)]
+mod marquee_tests {
+    use super::*;
+
+    fn area() -> Rect {
+        Rect::new(2, 5, 40, 10)
+    }
+
+    #[test]
+    fn a_band_in_view_maps_to_its_rows_plus_one_either_side() {
+        // Rows 2..=4 of the list, no scroll. The border sits on rows 1 and 5,
+        // so the band's own rows keep their text.
+        assert_eq!(marquee_rect(area(), 0, 2, 4, 1), Some(Rect::new(2, 6, 40, 5)));
+    }
+
+    /// The case that forced the growth: a two-row band used to be drawn with
+    /// both rows as the border, leaving no text inside at all.
+    #[test]
+    fn a_short_band_still_has_rows_inside_the_marquee() {
+        let rect = marquee_rect(area(), 0, 3, 4, 1).expect("rect");
+        // Border rows are the area's rows 2 and 5; rows 3 and 4 are interior.
+        assert_eq!(rect, Rect::new(2, 7, 40, 4));
+        assert!(rect.height > 2, "a two-row band needs an interior");
+    }
+
+    #[test]
+    fn a_backwards_band_covers_the_same_rows() {
+        assert_eq!(
+            marquee_rect(area(), 0, 4, 2, 1),
+            marquee_rect(area(), 0, 2, 4, 1),
+            "dragging up selects the same band as dragging down"
+        );
+    }
+
+    #[test]
+    fn the_scroll_offset_moves_the_band_up() {
+        // Rows 10..=11 with 8 scrolled off: they are the 3rd and 4th row, and
+        // the marquee takes the row above and below them too.
+        assert_eq!(marquee_rect(area(), 8, 10, 11, 1), Some(Rect::new(2, 6, 40, 4)));
+    }
+
+    #[test]
+    fn a_band_starting_above_the_window_is_clipped() {
+        // Rows 0..=12 with 5 scrolled: the first visible row is 5, there is no
+        // row above it, so the border lands on the top edge of the list.
+        assert_eq!(marquee_rect(area(), 5, 0, 12, 1), Some(Rect::new(2, 5, 40, 9)));
+    }
+
+    #[test]
+    fn a_band_ending_below_the_window_is_clipped() {
+        // The window shows 10 rows; a band to row 30 stops at the bottom.
+        assert_eq!(marquee_rect(area(), 0, 0, 30, 1), Some(Rect::new(2, 5, 40, 10)));
+    }
+
+    #[test]
+    fn a_band_scrolled_out_of_view_draws_nothing() {
+        // Rows 0..=3 while the list is scrolled to row 20.
+        assert_eq!(marquee_rect(area(), 20, 0, 3, 1), None);
+        // Rows 40..=41 with only ten rows visible and no scroll.
+        assert_eq!(marquee_rect(area(), 0, 40, 41, 1), None);
+    }
+
+    #[test]
+    fn an_empty_area_draws_nothing() {
+        assert_eq!(marquee_rect(Rect::new(0, 0, 0, 0), 0, 0, 0, 1), None);
+        assert_eq!(marquee_rect(Rect::new(0, 0, 10, 0), 0, 0, 0, 1), None);
+    }
+
+    #[test]
+    fn tall_rows_scale_the_band() {
+        // A grid of 3-cell tiles: rows 1..=2 occupy cells 3..9, and the growth
+        // reaches the top of the viewport.
+        assert_eq!(marquee_rect(area(), 0, 1, 2, 3), Some(Rect::new(2, 5, 40, 9)));
+    }
+
+    #[test]
+    fn a_zero_row_height_is_treated_as_one() {
+        // One row band on row 1: rows 0..=2, i.e. three cells from area.y.
+        assert_eq!(marquee_rect(area(), 0, 1, 1, 0), Some(Rect::new(2, 5, 40, 3)));
+    }
+}

@@ -96,6 +96,11 @@ impl CavaPane {
             area: self.area,
         })?;
         self.sent_area = self.area;
+        // The bars are painted by the cava thread, outside the frame buffer:
+        // declare the band so a clear knows those cells hold an image.
+        ctx.placements
+            .borrow_mut()
+            .declare(crate::ui::image::placements::Surface::Cava, self.area);
         Ok(())
     }
     /// Deferred start: called by the UI right after the first frame of a
@@ -637,6 +642,9 @@ impl Pane for CavaPane {
     ) -> Result<()> {
         match event {
             UiEvent::Exit => {
+                ctx.placements
+                    .borrow_mut()
+                    .release(crate::ui::image::placements::Surface::Cava);
                 self.command(CavaCommand::Stop)?;
                 if let Some(handle) = self.handle.take() {
                     handle.join().expect("Failed to join cava thread")?;
