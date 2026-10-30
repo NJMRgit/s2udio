@@ -42,7 +42,7 @@ pub(crate) use model::{PendingRemap, StagedSettings};
 
 use model::{
     AdjustSnapshot, AdvancedRow, Click, ContentRow, GeneralRow, JellyfinRow, MpvRow, MpdRow, PwNode,
-    Section, SettingsFocus, StagedCava, TorrentRow, REPLAY_GAIN_SNAPSHOT,
+    Section, SettingsFocus, StagedCava, ThemeFlag, TorrentRow, REPLAY_GAIN_SNAPSHOT,
 };
 
 #[derive(Debug)]
@@ -131,6 +131,9 @@ pub struct SettingsModal {
     /// Staged appearance changes, applied only when the panel is closed with
     /// Save (indexed by AppearanceTarget).
     appearance_pending: [StagedColor; 7],
+    /// Staged `[theme]` booleans (see [`ThemeFlag`]), applied on Save.
+    theme_flags_pending: [bool; 2],
+    theme_flags_initial: [bool; 2],
     /// The auto-theme source when the panel opened (staging baseline).
     auto_theme_initial: crate::config::auto_theme::AutoThemeSource,
     /// Staged auto-theme source (the live config is untouched until Save).
@@ -248,6 +251,11 @@ impl SettingsModal {
             pending_remaps: Vec::new(),
             capturing: false,
             appearance_pending: [StagedColor::Unchanged; 7],
+            theme_flags_pending: [
+                ctx.config.theme.modal_backdrop,
+                ctx.config.theme.band_rect,
+            ],
+            theme_flags_initial: [ctx.config.theme.modal_backdrop, ctx.config.theme.band_rect],
             auto_theme_initial: ctx.config.auto_theme.source,
             auto_theme_pending: ctx.config.auto_theme.source,
             editing_color: None,
@@ -309,6 +317,9 @@ impl SettingsModal {
                         .map(ContentRow::Appearance),
                 );
                 rows.push(ContentRow::AutoTheme);
+                // The `[theme]` booleans: theme-file keys that live in the
+                // panel so they do not need a hand-written theme file.
+                rows.extend(ThemeFlag::ALL.into_iter().map(ContentRow::ThemeFlag));
                 rows
             }
             Section::Keybinds => {
@@ -408,6 +419,7 @@ impl SettingsModal {
             || self.replay_gain_pending != self.replay_gain_initial
             || self.cava_pending != self.cava_initial
             || self.auto_theme_pending != self.auto_theme_initial
+            || self.theme_flags_pending != self.theme_flags_initial
             || self
                 .appearance_pending
                 .iter()
@@ -423,6 +435,7 @@ impl SettingsModal {
             ui: self.ui_pending,
             cava: self.cava_pending.to_overrides(),
             appearance: self.appearance_pending,
+            theme_flags: self.theme_flags_pending,
             auto_theme: self.auto_theme_pending,
             remaps: self.pending_remaps.clone(),
             video_playback: self.video_pending,

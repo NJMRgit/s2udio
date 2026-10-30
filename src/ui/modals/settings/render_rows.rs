@@ -66,6 +66,9 @@ impl SettingsModal {
         avail: usize,
     ) -> (Vec<Span<'static>>, Vec<Span<'static>>, Vec<DeferredButton>, Option<Click>) {
         match row {
+            ContentRow::ThemeFlag(flag) => {
+                Self::toggle_row(flag.name(), self.theme_flags_pending[flag.index()], style)
+            }
             ContentRow::Mpv(m) => match m {
                 MpvRow::Header => (
                     vec![Span::styled("[ mpv ]", dim)],
@@ -752,7 +755,8 @@ impl SettingsModal {
             ContentRow::Advanced(AdvancedRow::DiagnosticsHeader) => {
                 Line::from(vec![Span::styled(" diagnostics", dim)])
             }
-            ContentRow::AutoTheme
+            ContentRow::ThemeFlag(_)
+            | ContentRow::AutoTheme
             | ContentRow::General(_)
             | ContentRow::Mpd(_)
             | ContentRow::Mpv(_)
@@ -825,6 +829,7 @@ impl SettingsModal {
             ContentRow::KeyItem(_)
                 | ContentRow::Appearance(_)
                 | ContentRow::AutoTheme
+                | ContentRow::ThemeFlag(_)
                 | ContentRow::General(_)
                 | ContentRow::Mpd(_)
                 | ContentRow::Mpv(_)

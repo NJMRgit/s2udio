@@ -49,6 +49,10 @@ pub struct AppStateFile {
     /// `AppearanceTarget::all()` order: a hex string, "" for transparent,
     /// absent = leave the theme's default.
     pub appearance: Option<Vec<Option<String>>>,
+    /// The `[theme]` booleans toggled in the settings panel, in
+    /// `ThemeFlag::ALL` order (`modal_backdrop`, `band_rect`); absent = keep
+    /// whatever the theme file / defaults say.
+    pub theme_flags: Option<Vec<bool>>,
     /// The auto-theme source chosen in Settings -> Appearance
     /// ("off" / "auto" / "sttm" / "matugen" / "kde"); overrides the
     /// `auto_theme.source` config value when present.

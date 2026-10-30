@@ -818,6 +818,7 @@ mod advanced_tests {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod auto_theme_tests {
+    use super::super::model::ThemeFlag;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     use ratatui::style::Style;
@@ -870,6 +871,60 @@ mod auto_theme_tests {
         (modal, ctx)
     }
 
+    /// The two `[theme]` toggles are actually painted in the appearance
+    /// section, with their state — the panel is where a user finds them, so a
+    /// row that exists but never renders is the same as missing.
+    #[test]
+    fn the_theme_flag_rows_render_in_the_appearance_section() {
+        let (mut modal, mut ctx) = fixture();
+        let backend = ratatui::backend::TestBackend::new(110, 30);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        // Walk to the last rows so they are inside the rendered viewport.
+        modal.handle_raw_key(key(KeyCode::Char('d')), &mut ctx).unwrap();
+        for _ in 0..modal.rows.len() {
+            modal.handle_raw_key(key(KeyCode::Down), &mut ctx).unwrap();
+        }
+        terminal.draw(|frame| modal.render(frame, &mut ctx).unwrap()).unwrap();
+        let buf = terminal.backend().buffer();
+        let text: String = (0..30)
+            .flat_map(|y| (0..110).map(move |x| (x, y)))
+            .map(|(x, y)| buf[(x, y)].symbol().to_owned())
+            .collect();
+        for label in ["dim behind modals", "band marquee while dragging"] {
+            assert!(text.contains(label), "the row `{label}` is rendered: {text}");
+        }
+        assert!(text.contains("[x]"), "the rows show their state: {text}");
+    }
+
+    /// The `[theme]` booleans are ordinary staged rows: flipping one changes
+    /// its pending value, marks the panel dirty and leaves the live theme
+    /// alone until Save.
+    #[test]
+    fn the_theme_flag_rows_toggle_and_stage() {
+        let (mut modal, mut ctx) = fixture();
+        let before = modal.theme_flags_pending;
+        // Walk to the first flag row and activate it.
+        modal.handle_raw_key(key(KeyCode::Char('d')), &mut ctx).unwrap();
+        while !matches!(modal.rows[modal.selected], ContentRow::ThemeFlag(ThemeFlag::ModalBackdrop)) {
+            modal.handle_raw_key(key(KeyCode::Down), &mut ctx).unwrap();
+        }
+        assert!(!modal.has_changes(), "nothing staged yet");
+        modal.handle_raw_key(key(KeyCode::Enter), &mut ctx).unwrap();
+        assert_eq!(
+            modal.theme_flags_pending[ThemeFlag::ModalBackdrop.index()],
+            !before[ThemeFlag::ModalBackdrop.index()],
+            "the row flips its own flag"
+        );
+        assert!(modal.has_changes(), "a flipped flag is a change to save");
+        assert_eq!(
+            ctx.config.theme.modal_backdrop, before[0],
+            "the live theme is untouched until Save"
+        );
+        // Save hands the staged value to the UI.
+        let staged = modal.staged_settings();
+        assert_eq!(staged.theme_flags, modal.theme_flags_pending);
+    }
+
     /// Open the general section and walk down to the auto-theme row (the last
     /// row of the appearance section).
     fn select_auto_theme_row(modal: &mut SettingsModal, ctx: &mut Ctx) {
@@ -882,9 +937,16 @@ mod auto_theme_tests {
     #[test]
     fn the_appearance_section_lists_the_auto_theme_row() {
         let (modal, _ctx) = fixture();
+        // The `[theme]` booleans close the section; auto-theme sits above them.
         assert!(
-            matches!(modal.rows.last(), Some(ContentRow::AutoTheme)),
-            "the auto-theme row closes the appearance section"
+            matches!(
+                modal.rows[modal.rows.len() - 2],
+                ContentRow::ThemeFlag(ThemeFlag::ModalBackdrop)
+            ) && matches!(
+                modal.rows.last(),
+                Some(ContentRow::ThemeFlag(ThemeFlag::BandRect))
+            ),
+            "the theme toggles close the appearance section"
         );
         // It sits below the color rows, not among them.
         let auto = modal

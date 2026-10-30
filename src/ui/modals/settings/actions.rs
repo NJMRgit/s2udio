@@ -4,9 +4,10 @@ use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent};
 
 use super::{
+    
     model::{
         AdvancedRow, Click, ContentRow, GeneralRow, JellyfinRow, MpvLanguageTarget, MpvRow, MpdRow,
-        PendingRemap, TorrentRow, FPS_MAX, FPS_MIN, FREQ_MAX_LIMIT, FREQ_MIN_LIMIT,
+        PendingRemap, ThemeFlag, TorrentRow, FPS_MAX, FPS_MIN, FREQ_MAX_LIMIT, FREQ_MIN_LIMIT,
     },
     SettingsModal,
 };
@@ -97,6 +98,16 @@ impl SettingsModal {
         Ok(())
     }
 
+    /// Stage a `[theme]` boolean (Settings > Appearance). Applied on Save,
+    /// like every other row, so the live theme is untouched while the panel is
+    /// open.
+    pub(super) fn toggle_theme_flag(&mut self, ctx: &mut Ctx, flag: ThemeFlag) -> Result<()> {
+        let slot = &mut self.theme_flags_pending[flag.index()];
+        *slot = !*slot;
+        ctx.render()?;
+        Ok(())
+    }
+
     /// Stage the memory watchdog toggle (Settings > Advanced).
     ///
     /// Staged like every other settings row: the running watchdog is not
@@ -137,6 +148,8 @@ impl SettingsModal {
     /// Step the selected row by `delta` (-1 or +1, scaled per row).
     pub(super) fn adjust(&mut self, ctx: &mut Ctx, delta: i64) -> Result<()> {
         match &self.rows[self.selected] {
+            // A boolean row has nothing to step; left/right act like a press.
+            ContentRow::ThemeFlag(flag) => return self.toggle_theme_flag(ctx, *flag),
             ContentRow::General(g) => match g {
                 GeneralRow::VideoPlayback => {
                     let all = crate::config::video::VideoPlaybackMode::ALL;
@@ -448,6 +461,7 @@ impl SettingsModal {
                 Ok(())
             }
             ContentRow::AutoTheme => self.step_auto_theme(ctx, 1),
+            ContentRow::ThemeFlag(flag) => self.toggle_theme_flag(ctx, *flag),
             ContentRow::KeyItem(_) => {
                 self.capturing = true;
                 ctx.render()?;

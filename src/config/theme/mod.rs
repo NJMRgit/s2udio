@@ -157,7 +157,10 @@ impl UiConfigFile {
             header_column_widths: vec![30, 40, 30],
             header: HeaderConfigFile::default(),
             modal_background_color: None,
-            modal_backdrop: false,
+            // On by default: the backdrop is the thing that makes a modal
+            // read as "in front of" the app (Settings -> appearance turns it
+            // off).
+            modal_backdrop: true,
             band_rect: false,
             borders_style: Some(StyleFile {
                 fg: Some("blue".to_string()),

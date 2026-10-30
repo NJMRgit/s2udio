@@ -460,6 +460,17 @@ fn run_tui(args: &mut Args) -> Result<()> {
             accent_active,
         );
     }
+    // The `[theme]` booleans toggled in the settings panel (dim behind modals,
+    // band marquee). They persist in state.ron so the panel does not need a
+    // hand-written theme file; a theme file still supplies the base value.
+    if let Some(flags) = state.theme_flags.as_deref() {
+        if let Some(v) = flags.first() {
+            config.theme.modal_backdrop = *v;
+        }
+        if let Some(v) = flags.get(1) {
+            config.theme.band_rect = *v;
+        }
+    }
     // The theme as configured (before the accent): what the watcher restores
     // when the accent source goes away.
     let accent_baseline = config.theme.clone();

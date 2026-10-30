@@ -95,6 +95,37 @@ pub(super) enum GeneralRow {
     AppearanceHeader,
 }
 
+/// A `[theme]` boolean the Settings panel can toggle.
+///
+/// These are theme-file keys (`modal_backdrop`, `band_rect`); the panel stages
+/// them so the common case does not need a hand-written theme file, and Save
+/// persists them to `state.ron` (a theme file still provides the base value).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ThemeFlag {
+    /// Dim everything behind an open modal, animated (`frontend/animation`).
+    ModalBackdrop,
+    /// Draw the band rules around a mouse drag selection (`frontend/interaction`).
+    BandRect,
+}
+
+impl ThemeFlag {
+    pub(super) const ALL: [ThemeFlag; 2] = [ThemeFlag::ModalBackdrop, ThemeFlag::BandRect];
+
+    pub(super) fn index(self) -> usize {
+        match self {
+            ThemeFlag::ModalBackdrop => 0,
+            ThemeFlag::BandRect => 1,
+        }
+    }
+
+    pub(super) fn name(self) -> &'static str {
+        match self {
+            ThemeFlag::ModalBackdrop => "dim behind modals",
+            ThemeFlag::BandRect => "band marquee while dragging",
+        }
+    }
+}
+
 /// Settings > Advanced rows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum AdvancedRow {
@@ -264,6 +295,9 @@ pub(crate) struct StagedSettings {
     pub ui: UiSettings,
     pub cava: CavaOverridesFile,
     pub appearance: [StagedColor; 7],
+    /// `[theme]` booleans staged in the settings panel, indexed by
+    /// [`ThemeFlag::index`].
+    pub theme_flags: [bool; 2],
     /// The auto-theme source chosen in the settings panel; applied to the
     /// live config + persisted to state.ron on Save.
     pub auto_theme: crate::config::auto_theme::AutoThemeSource,
@@ -301,6 +335,9 @@ pub(super) enum ContentRow {
     /// The auto-theme source row (Settings -> Appearance, "auto theme"):
     /// off / auto / sttm / matugen / kde.
     AutoTheme,
+    /// A `[theme]` boolean (Settings -> Appearance), staged like every other
+    /// row and persisted to state.ron on Save.
+    ThemeFlag(ThemeFlag),
     Mpd(MpdRow),
     Mpv(MpvRow),
     Jellyfin(JellyfinRow),

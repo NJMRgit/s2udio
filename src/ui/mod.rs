@@ -1446,6 +1446,11 @@ impl Ui {
                 // transient accent, and the watcher clears it on its next
                 // tick when the source is `off`).
                 let accent_baseline = ctx.accent.baseline();
+                // The `[theme]` booleans (dim behind modals, band marquee):
+                // applied to the live theme and persisted to state.ron.
+                config.theme.modal_backdrop = staged.theme_flags[0];
+                config.theme.band_rect = staged.theme_flags[1];
+                state.theme_flags = Some(staged.theme_flags.to_vec());
                 state.appearance = Some(modals::settings::persisted_appearance(
                     &config,
                     accent_baseline.as_ref(),
