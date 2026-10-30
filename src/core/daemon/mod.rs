@@ -127,6 +127,17 @@ pub(crate) fn is_running() -> bool {
     ping().is_ok()
 }
 
+/// Ask the daemon to raise the player. This is the no-live-TUI path for
+/// `s2udio remote raise` and the MPRIS bridges: a live TUI raises itself over
+/// its own socket (with its kitty/QAT session), and only when there is none
+/// does the daemon launch/show the QAT.
+pub(crate) fn raise() -> Result<()> {
+    match request(&proto::Request::Qat { action: "raise".to_owned() })? {
+        proto::Reply::Ok => Ok(()),
+        other => Err(anyhow!("unexpected reply to raise: {other:?}")),
+    }
+}
+
 /// Start the daemon if it is not already running, waiting until its socket
 /// answers. Returns whether a daemon is up afterwards. Idempotent and safe to
 /// call from every TUI start.
@@ -258,6 +269,7 @@ fn qat_action(action: QatAction) -> Result<()> {
     }
     let action = match action {
         QatAction::Toggle => "toggle",
+        QatAction::Raise => "raise",
         QatAction::Show => "show",
         QatAction::Hide => "hide",
         QatAction::Status => unreachable!("handled above"),

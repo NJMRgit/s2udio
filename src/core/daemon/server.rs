@@ -257,6 +257,10 @@ fn handle_connection(mut stream: UnixStream, state: &Arc<State>) -> Result<()> {
                     Ok(()) => Reply::Ok,
                     Err(err) => Reply::error(format!("cannot toggle the QAT: {err}")),
                 },
+                "raise" => match qat::raise(&state.qat) {
+                    Ok(()) => Reply::Ok,
+                    Err(err) => Reply::error(format!("cannot raise the player: {err}")),
+                },
                 other => Reply::error(format!("unknown QAT action {other:?}")),
             },
         };

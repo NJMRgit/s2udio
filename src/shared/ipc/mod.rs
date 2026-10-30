@@ -67,6 +67,44 @@ pub fn list_all_socket_paths() -> Result<impl Iterator<Item = PathBuf>> {
     Ok(socket_paths_in(&std::env::temp_dir())?.into_iter())
 }
 
+/// Whether a TUI accepts a connection on any socket right now. A crashed TUI
+/// leaves its `s2u-<pid>.sock` inode behind; a connect attempt is what
+/// separates it from a live one.
+pub(crate) fn any_live_tui_socket() -> bool {
+    let Ok(paths) = list_all_socket_paths() else {
+        return false;
+    };
+    any_live_tui_socket_in(paths.collect())
+}
+
+fn any_live_tui_socket_in(paths: Vec<PathBuf>) -> bool {
+    paths.into_iter().any(|path| UnixStream::connect(path).is_ok())
+}
+
+/// Ask a live TUI to raise its own window. The TUI knows its kitty/QAT
+/// session, so its raise ladder can show a hidden panel (`resize-os-window
+/// --action=show`) where no external process can. `false` when no TUI
+/// accepted the command — the caller then asks the daemon to bring the
+/// player back.
+pub(crate) fn raise_running_tui() -> bool {
+    let Ok(paths) = list_all_socket_paths() else {
+        return false;
+    };
+    raise_running_tui_in(paths.collect())
+}
+
+fn raise_running_tui_in(paths: Vec<PathBuf>) -> bool {
+    for path in paths {
+        let Ok(ipc) = (RemoteCmd::Raise { tab: None }).write_to_socket(&path) else {
+            continue;
+        };
+        if ipc.read_response().is_ok() {
+            return true;
+        }
+    }
+    false
+}
+
 pub(crate) trait SocketCommandExecute {
     fn execute(
         self,
@@ -111,6 +149,12 @@ impl SocketCommandExecute for SocketCommand {
 }
 
 impl RemoteCmd {
+    /// Whether this is the raise command (the one with a daemon fallback when
+    /// no TUI socket is live).
+    pub(crate) fn is_raise(&self) -> bool {
+        matches!(self, Self::Raise { .. })
+    }
+
     pub(crate) fn write_to_socket(
         self,
         path: &PathBuf,
@@ -232,5 +276,41 @@ mod tests {
         let path = get_socket_path(4321);
         let name = path.file_name().expect("socket name").to_string_lossy();
         assert!(is_socket_name(&name), "{name} is not a socket name");
+    }
+
+    #[test]
+    fn a_stale_tui_socket_does_not_count_as_live() {
+        let dir = scratch_dir("live");
+        std::fs::write(dir.join("s2u-1.sock"), b"").expect("stale inode");
+        assert!(
+            !any_live_tui_socket_in(socket_paths_in(&dir).expect("list")),
+            "a regular file must not count as a running TUI"
+        );
+        let listener = std::os::unix::net::UnixListener::bind(dir.join("s2u-2.sock")).expect("bind");
+        assert!(
+            any_live_tui_socket_in(socket_paths_in(&dir).expect("list")),
+            "a bound socket is a live TUI"
+        );
+        drop(listener);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn raising_sends_the_json_raise_command_to_a_live_tui() {
+        use std::io::{BufRead, BufReader, Write};
+        let dir = scratch_dir("raise");
+        let path = dir.join("s2u-2.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&path).expect("bind");
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut line = String::new();
+            BufReader::new(&stream).read_line(&mut line).expect("read");
+            stream.write_all(b"ok\n").expect("reply");
+            line
+        });
+        assert!(raise_running_tui_in(socket_paths_in(&dir).expect("list")));
+        let line = handle.join().expect("thread");
+        assert!(line.contains("\"Raise\""), "got {line}");
+        let _ = fs::remove_dir_all(&dir);
     }
 }

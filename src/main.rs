@@ -91,6 +91,24 @@ fn main() -> Result<()> {
             )?;
         }
         Some(Command::Remote { command, pid }) => {
+            // `s2udio remote raise` is the one remote command with a daemon
+            // fallback: when no TUI socket answers the QAT/TUI is gone (the
+            // screen blank), and the daemon can bring the player back by
+            // launching the QAT with a fresh TUI attached to the surviving
+            // state. A live TUI keeps the existing raise path (it knows its
+            // kitty/QAT session and can show a hidden panel).
+            if pid.is_none() && command.is_raise() && !crate::shared::ipc::any_live_tui_socket() {
+                match crate::core::daemon::raise() {
+                    Ok(()) => {
+                        println!("Raised the player through the s2udio daemon.");
+                        std::process::exit(0);
+                    }
+                    Err(err) => {
+                        eprintln!("{err}");
+                        std::process::exit(1);
+                    }
+                }
+            }
             handle_remote(command, pid);
         }
         Some(cmd) => {

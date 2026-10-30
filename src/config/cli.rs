@@ -343,6 +343,10 @@ pub enum DaemonCmd {
 #[clap(rename_all = "lower")]
 pub enum QatAction {
     Toggle,
+    /// Bring the player up without the toggle's hide: ask a live TUI to raise
+    /// its window (kitty shows a hidden QAT), or launch the QAT through the
+    /// daemon when it is gone.
+    Raise,
     Show,
     Hide,
     /// Print the daemon's QAT state (attached TUI, registered hotkey).

@@ -45,6 +45,92 @@ import sys
 import time
 import urllib.parse
 
+
+# ---- player raising ------------------------------------------------------
+# The TUI owns the QAT window and raises itself; when it is gone (the screen
+# blank destroys the kitty layer surface) the always-on daemon can bring the
+# player back by launching the QAT with a fresh TUI. Both paths are probed on
+# every Raise so the bridge can outlive the TUI.
+
+def _tui_sockets():
+    import glob
+    import tempfile
+    paths = []
+    for path in glob.glob(os.path.join(tempfile.gettempdir(), "s2u-*.sock")):
+        try:
+            pid = int(os.path.basename(path)[4:-5])
+        except ValueError:
+            continue
+        if os.path.isdir("/proc/%d" % pid):
+            paths.append(path)
+    paths.extend(glob.glob(os.path.join(tempfile.gettempdir(), "rmpc-*.sock")))
+    return paths
+
+
+def _daemon_socket():
+    override = os.environ.get("S2U_DAEMON_SOCKET")
+    if override:
+        return override
+    run = os.environ.get("XDG_RUNTIME_DIR")
+    if run:
+        return os.path.join(run, "s2udio", "daemon.sock")
+    import tempfile
+    return os.path.join(tempfile.gettempdir(),
+                        "s2udio-%d" % os.getuid(), "s2udio", "daemon.sock")
+
+
+def _daemon_up():
+    try:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(0.5)
+        s.connect(_daemon_socket())
+        s.close()
+        return True
+    except OSError:
+        return False
+
+
+def _daemon_raise():
+    try:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(1.0)
+        s.connect(_daemon_socket())
+        s.sendall(b'{"op":"qat","action":"raise"}\n')
+        try:
+            s.recv(256)
+        except OSError:
+            pass
+        s.close()
+        return True
+    except OSError:
+        return False
+
+
+def _send_raise():
+    for path in _tui_sockets():
+        try:
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            s.settimeout(1.0)
+            s.connect(path)
+            s.sendall(b'{"Raise":{"tab":null}}\n')
+            try:
+                s.shutdown(socket.SHUT_WR)
+            except OSError:
+                pass
+            try:
+                s.recv(256)
+            except OSError:
+                pass
+            s.close()
+            return True
+        except OSError:
+            continue
+    return _daemon_raise()
+
+
+def _can_raise():
+    return bool(_tui_sockets()) or _daemon_up()
+
 # Round 19: s2udio-only cache files default to ~/.cache/s2udio (legacy
 # ~/.cache/rmpc honored for migration).
 def _s2u_cache(file):
@@ -617,7 +703,7 @@ class MprisServer:
         return {
             # org.mpris.MediaPlayer2
             "CanQuit": ("b", True),
-            "CanRaise": ("b", True),
+            "CanRaise": ("b", _can_raise()),
             "CanSetFullscreen": ("b", False),
             "Fullscreen": ("b", False),
             "HasTrackList": ("b", False),
@@ -742,6 +828,7 @@ class MprisServer:
                 self.mpv_send(["quit"])
                 return reply()
             if member == "Raise":
+                _send_raise()
                 return reply()
             return error("org.freedesktop.DBus.Error.UnknownMethod", member)
 

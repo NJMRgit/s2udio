@@ -27,8 +27,8 @@ pub enum Request {
     NeedsRefresh { url: String },
     /// Announce a TUI; the connection is kept open and counts as "attached".
     TuiHello { pid: u32 },
-    /// Launch/toggle the QAT (`"toggle"`, `"show"`, `"hide"`). The daemon's
-    /// hotkey reaches the same action through D-Bus.
+    /// QAT actions (`"toggle"`, `"raise"`, `"show"`, `"hide"`). The
+    /// daemon's hotkey reaches toggle through D-Bus; MPRIS uses raise.
     Qat { action: String },
 }
 
@@ -96,6 +96,7 @@ mod tests {
             },
             Request::TuiHello { pid: 42 },
             Request::Qat { action: "toggle".to_owned() },
+            Request::Qat { action: "raise".to_owned() },
         ] {
             let line = serde_json::to_string(&request).expect("request serializes");
             assert!(!line.contains('\n'), "a request must stay on one line: {line}");

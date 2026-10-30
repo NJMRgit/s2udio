@@ -87,6 +87,21 @@ pub(crate) fn toggle(cfg: &QatConfig) -> Result<()> {
     Ok(())
 }
 
+/// Raise the player without ever hiding it.
+///
+/// A live TUI raises its own window: its kitty session knows the QAT panel and
+/// `resize-os-window --action=show` remaps a hidden one, which no external
+/// process can do. Only when no TUI is running does the daemon fall back to
+/// the kitten (which launches the QAT with a fresh TUI, or shows an existing
+/// hidden panel).
+pub(crate) fn raise(cfg: &QatConfig) -> Result<()> {
+    if crate::shared::ipc::raise_running_tui() {
+        log::info!("daemon: asked the running TUI to raise its window");
+        return Ok(());
+    }
+    toggle(cfg)
+}
+
 /// The JavaScript KWin loads to register the shortcut. Kept as a function so
 /// the generated text (and the escaping) is testable.
 pub(crate) fn hotkey_script(hotkey: &str) -> String {
@@ -239,6 +254,14 @@ impl QatService {
         self.toggle_qat();
     }
 
+    /// Raise the player (MPRIS Raise): a live TUI raises itself, and with no
+    /// TUI the daemon launches the QAT with a fresh one.
+    fn raise_qat(&self) {
+        if let Err(err) = raise(&self.cfg) {
+            log::warn!(error:? = err; "daemon: QAT raise from D-Bus failed");
+        }
+    }
+
     fn qat_hotkey(&self) -> String {
         self.cfg.hotkey.clone()
     }
@@ -304,6 +327,34 @@ mod tests {
             ],
             "the panel must run the TUI, and a later call must toggle (kitty's single instance)"
         );
+    }
+
+    #[test]
+    fn raise_asks_a_live_tui_before_launching_the_kitten() {
+        use std::io::{BufRead, BufReader, Write};
+
+        // A fake TUI socket in the real temp dir: `raise` must talk to it and
+        // never reach the (nonexistent) kitten binary.
+        let path = std::env::temp_dir().join(format!("s2u-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let listener = std::os::unix::net::UnixListener::bind(&path).expect("bind");
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut line = String::new();
+            BufReader::new(&stream).read_line(&mut line).expect("read");
+            stream.write_all(b"ok\n").expect("reply");
+            line
+        });
+        let cfg = QatConfig {
+            kitten: PathBuf::from("/nonexistent/kitten"),
+            tui: PathBuf::from("/nonexistent/s2udio"),
+            hotkey: "Meta+T".to_owned(),
+        };
+
+        raise(&cfg).expect("the live TUI is asked to raise");
+        let line = handle.join().expect("thread");
+        assert!(line.contains("\"Raise\""), "got {line}");
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
