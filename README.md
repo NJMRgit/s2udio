@@ -26,6 +26,8 @@ AI assisted with open weight models and open source software
     * allows tui to be closed during playback without interruptions
 - copy + paste and drag n' drop support for audio and video files/links/.magnet/torrent
 - play videos as audio
+- always-on daemon — owns the stream buffer proxy and, with the TUI closed, resolves and preloads the next web streams; it survives the quick-access terminal being destroyed by the compositor and can start at login (Settings -> Advanced)
+- raising that outlives the quick-access terminal — `s2udio remote raise`, the media widget's Raise button, or `s2udio daemon qat raise` bring the player back from a hidden or destroyed QAT
 - download stream/torrent
 - SVP4 (SmoothVideo Project) support — a Settings -> mpv "svp support"
   toggle wires playback to SVP's fixed IPC socket (`/tmp/mpvsocket`) and
@@ -153,9 +155,9 @@ quick-access terminal** (`kitten quick-access-terminal`, the quake-style
 drop-down panel). That panel is a Wayland layer-shell surface — no window
 manager can raise it, and while it is hidden kitty unmaps it outright, so only
 kitty itself can bring it back, over its remote-control channel (off by default,
-because allowing it lets programs in that terminal drive kitty).
-
-Turn it on for the quick-access terminal only, in its own config
+because allowing it lets programs in that terminal drive kitty). `setup.sh`
+offers to create or patch this config automatically; doing it by hand, turn it
+on for the quick-access terminal only in its own config
 (`~/.config/kitty/quick-access-terminal.conf`):
 
 ```conf
@@ -180,6 +182,34 @@ With the panel hidden, the raise maps it again with s2udio focused; with the
 panel already up, the raise leaves it up (it never toggles the panel away).
 Without the setup the raise reports that the quick-access terminal needs kitty
 remote control, and names the two options above.
+
+The panel can also be **destroyed**, not just hidden: when the compositor drops
+its output (screen blank, monitor sleep), kitty closes the layer surface and
+the TUI goes with it. The always-on daemon stays up, and raising then launches
+the QAT with a fresh TUI attached to the surviving proxy/MPD state — no TUI
+socket required:
+
+```sh
+s2udio remote raise        # falls back to the daemon when no TUI answers
+s2udio daemon qat raise    # the daemon's launch-or-show action
+s2udio daemon status       # pid, proxy port, MPD, attached TUI, hotkey
+```
+
+A media widget's **Raise** works the same way (`CanRaise` is live TUI or
+daemon). The daemon registers **Meta+T** (KWin; `S2U_QAT_HOTKEY` overrides) for
+toggle, so there is no desktop-file shortcut to keep; remove an old
+`net.local.kitten.desktop` binding if you had one. To start the daemon at
+login, use **Settings -> Advanced -> startup -> start daemon at login** or
+`s2udio daemon autostart on` (a systemd user unit; see `manual-setup.md`).
+
+## The always-on daemon
+
+`s2udio daemon start|status|stop` manage a detached per-user process. It owns
+the stream buffer proxy, resolves/preloads the next web streams while no TUI is
+attached (the TUI's own look-ahead is authoritative when it is), and controls
+the QAT (toggle + raise + the KWin hotkey). The TUI starts it on demand, so the
+first `s2udio` after a logout brings it up; the Advanced toggle makes it
+permanent. Logs: `~/.local/state/s2udio/s2udio_daemon_<uid>_rCURRENT.log`.
 
 ## rqbit — torrent web UI & commands
 
