@@ -196,7 +196,10 @@ s2udio daemon status       # pid, proxy port, MPD, attached TUI, hotkey
 ```
 
 A media widget's **Raise** works the same way (`CanRaise` is live TUI or
-daemon). The daemon owns the QAT toggle chord (default **Meta+T**): change it
+daemon). When nothing is playing the controls still show a raiseable
+**Nothing Playing** entry with the default artwork (the same image is used for
+audio without cover art), so the Raise button does not disappear between
+tracks. The daemon owns the QAT toggle chord (default **Meta+T**): change it
 in **Settings -> Advanced -> daemon -> qat hotkey**, or with `s2udio daemon
 hotkey <chord>`; it persists to `~/.config/s2udio/daemon.ron` and is applied
 live (the daemon rewrites its KWin script and re-registers the shortcut).

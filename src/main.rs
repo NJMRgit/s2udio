@@ -467,6 +467,9 @@ fn run_tui(args: &mut Args) -> Result<()> {
         config.cache_dir.as_deref(),
         config.ui.mpdris2_notifications,
     );
+    // The mpDris2 bridge's fallback image: "Nothing Playing" (and audio
+    // without cover art) is still raiseable from the media controls.
+    crate::shared::mpdris2::write_default_art(config.cache_dir.as_deref());
     // Auto theming (Settings -> Appearance, "auto theme"): the panel's
     // choice persists in state.ron and overrides the config file.
     if let Some(source) = state.auto_theme_source.as_deref()
