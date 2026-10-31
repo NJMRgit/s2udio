@@ -135,10 +135,14 @@ What the daemon gives you:
 - `s2udio remote raise`, a media widget's **Raise** (MPRIS), and
   `s2udio daemon qat raise` relaunch the QAT with a fresh TUI when the
   compositor destroyed it — no live TUI socket needed;
-- the QAT **Meta+T** hotkey is owned by the daemon (KWin script), with
-  `S2U_QAT_HOTKEY` overriding the chord. Remove an old
-  `net.local.kitten.desktop` shortcut on the same chord; two bindings fight.
-  See section 10 for the kitty side of the QAT.
+- the QAT toggle chord is owned by the daemon (KWin script; default
+  **Meta+T**). Change it in **Settings > Advanced > daemon > qat hotkey** or
+  with `s2udio daemon hotkey <chord>`; it persists to
+  `~/.config/s2udio/daemon.ron` and is applied to the running daemon live
+  (KWin script reload + KGlobalAccel re-registration). `S2U_QAT_HOTKEY` is a
+  startup override. Remove an old `net.local.kitten.desktop` shortcut on the
+  same chord; two bindings fight. See section 10 for the kitty side of the
+  QAT.
 
 `daemon autostart on` writes and enables this systemd **user** unit (the
 daemon detaches, so the unit is a oneshot around the idempotent CLI):
@@ -303,7 +307,8 @@ Notes:
   and no window manager can show it again. `s2udio` asks kitty to
   `resize-os-window --action=show` over the socket above.
 - On the current version the daemon owns the QAT toggle: it registers
-  **Meta+T** through KWin (section 5), so you do **not** need a desktop-file
+  **Meta+T** through KWin (changeable in Settings > Advanced > daemon or with
+  `s2udio daemon hotkey`, section 5), so you do **not** need a desktop-file
   shortcut for the panel. If you keep a custom shortcut bound to `kitten
   quick-access-terminal`, give it a different chord — or remove it.
 - Raising works both ways: with a live TUI the TUI maps/focuses its own
@@ -319,6 +324,7 @@ s2udio version                     # 0.11.0 git 4b2a5ff (or later)
 s2udio debug-info                  # resolves the optional dependencies
 s2udio daemon status               # daemon up, proxy port, MPD, attached TUI
 s2udio daemon autostart status     # enabled/disabled + the unit path
+s2udio daemon hotkey Meta+T        # persist/apply the QAT chord (Advanced row)
 mpc status                         # MPD is reachable
 s2udio                             # the TUI starts and connects
 qdbus6 org.mpris.MediaPlayer2.mpd  # audio MPRIS (after mpDris2 starts)

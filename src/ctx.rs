@@ -424,6 +424,10 @@ pub struct Ctx {
     /// receives `&Ctx`.
     #[debug(skip)]
     pub(crate) torrent_socks_proxy_input: RefCell<Option<String>>,
+    /// The QAT hotkey typed into the Settings input modal; consumed by the
+    /// settings render (same pattern as the torrent proxy).
+    #[debug(skip)]
+    pub(crate) qat_hotkey_input: RefCell<Option<String>>,
     /// Scanned torrents (round 17): item source key -> the scan outcome
     /// (the running engine + torrent id + file list, or the failure the
     /// popup shows as a dim notice). The paste popup's `[Torrent]` section
@@ -749,6 +753,7 @@ impl Ctx {
             plain_stream_torrents: RefCell::new(Vec::new()),
             torrent_webui_engine: RefCell::new(None),
             torrent_socks_proxy_input: RefCell::new(None),
+            qat_hotkey_input: RefCell::new(None),
             torrent_scans: RefCell::new(HashMap::new()),
             torrent_scans_pending: RefCell::new(HashSet::new()),
             torrent_scan_cancels: RefCell::new(HashMap::new()),

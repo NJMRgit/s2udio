@@ -126,11 +126,30 @@ impl SettingsModal {
             // input.
             AdvancedRow::DiagnosticsHeader
             | AdvancedRow::MemoryWatchdogInterval
-            | AdvancedRow::StartupHeader => {
+            | AdvancedRow::DaemonHeader
+            | AdvancedRow::QatHotkey => {
                 unreachable!("toggle_advanced called with a non-toggle row")
             }
         }
         ctx.render()?;
+        Ok(())
+    }
+
+    /// Open the text input for the QAT chord. The modal's confirm writes the
+    /// value into `ctx.qat_hotkey_input`; the settings render consumes and
+    /// validates it.
+    fn edit_qat_hotkey(&mut self, ctx: &mut Ctx) -> Result<()> {
+        let current = self.qat_hotkey_pending.clone();
+        modal!(
+            ctx, InputModal::new(ctx)
+                .title("QAT hotkey (KWin chord)")
+                .input_label("e.g. Meta+Shift+T")
+                .initial_value(current)
+                .on_confirm(|ctx, value| {
+                    *ctx.qat_hotkey_input.borrow_mut() = Some(value.to_string());
+                    Ok(())
+                })
+        );
         Ok(())
     }
 
@@ -678,6 +697,7 @@ impl SettingsModal {
             ContentRow::Advanced(AdvancedRow::DaemonAutostart) => {
                 self.toggle_advanced(ctx, AdvancedRow::DaemonAutostart)
             }
+            ContentRow::Advanced(AdvancedRow::QatHotkey) => self.edit_qat_hotkey(ctx),
             ContentRow::Advanced(_) => Ok(()),
             ContentRow::KeyTableHeader | ContentRow::KeyHeader(_) => Ok(()),
         }

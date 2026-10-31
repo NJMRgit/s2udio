@@ -87,6 +87,10 @@ pub struct SettingsModal {
     daemon_autostart_initial: bool,
     /// Staged daemon autostart (installed/removed on Save).
     daemon_autostart_pending: bool,
+    /// QAT hotkey when the panel opened (the daemon.ron sidecar).
+    qat_hotkey_initial: String,
+    /// Staged QAT hotkey (saved to daemon.ron + applied live on Save).
+    qat_hotkey_pending: String,
     /// UI show/hide toggles when the panel opened (staging baseline).
     ui_initial: UiSettings,
     /// Staged UI show/hide toggles (the live config is untouched until Save).
@@ -213,6 +217,7 @@ impl SettingsModal {
             .unwrap_or_default();
         let torrent_stream_downloads = ctx.config.torrent.stream_downloads;
         let daemon_autostart = crate::core::daemon::autostart::enabled();
+        let qat_hotkey = crate::core::daemon::configured_qat_hotkey();
         let mut modal = Self {
             id: id::new(),
             section,
@@ -236,6 +241,8 @@ impl SettingsModal {
             torrent_stream_downloads_pending: torrent_stream_downloads,
             daemon_autostart_initial: daemon_autostart,
             daemon_autostart_pending: daemon_autostart,
+            qat_hotkey_initial: qat_hotkey.clone(),
+            qat_hotkey_pending: qat_hotkey,
             adjusting: None,
             adjust_snapshot: None,
             ui_initial,
@@ -382,8 +389,9 @@ impl SettingsModal {
                 ContentRow::Advanced(AdvancedRow::DiagnosticsHeader),
                 ContentRow::Advanced(AdvancedRow::MemoryWatchdog),
                 ContentRow::Advanced(AdvancedRow::MemoryWatchdogInterval),
-                ContentRow::Advanced(AdvancedRow::StartupHeader),
+                ContentRow::Advanced(AdvancedRow::DaemonHeader),
                 ContentRow::Advanced(AdvancedRow::DaemonAutostart),
+                ContentRow::Advanced(AdvancedRow::QatHotkey),
             ],
         }
     }
@@ -437,6 +445,7 @@ impl SettingsModal {
             || self.torrent_socks_proxy_pending != self.torrent_socks_proxy_initial
             || self.torrent_stream_downloads_pending != self.torrent_stream_downloads_initial
             || self.daemon_autostart_pending != self.daemon_autostart_initial
+            || self.qat_hotkey_pending != self.qat_hotkey_initial
     }
 
     /// The staged changes, handed to the UI to apply on Save.
@@ -457,6 +466,7 @@ impl SettingsModal {
             torrent_stream_downloads: self.torrent_stream_downloads_pending,
             replay_gain: self.replay_gain_cycled.then_some(self.replay_gain_pending),
             daemon_autostart: self.daemon_autostart_pending,
+            qat_hotkey: self.qat_hotkey_pending.clone(),
         }
     }
 

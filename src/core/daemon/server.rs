@@ -86,7 +86,7 @@ impl State {
             queue_len: self.queue_len.load(Ordering::Relaxed),
             warmed: self.warmed.load(Ordering::Relaxed),
             last_error: (!last_error.is_empty()).then_some(last_error),
-            hotkey: Some(self.qat.hotkey.clone()),
+            hotkey: Some(self.qat.hotkey()),
         }
     }
 
@@ -252,6 +252,10 @@ fn handle_connection(mut stream: UnixStream, state: &Arc<State>) -> Result<()> {
             },
             Request::OriginalLink { key } => Reply::Link { link: stream_cache::original_link_for_key(&key) },
             Request::NeedsRefresh { url } => Reply::Refresh { needed: stream_cache::needs_upstream_refresh(&url) },
+            Request::QatHotkey { chord } => match qat::set_hotkey(&state.qat, &chord) {
+                Ok(()) => Reply::Ok,
+                Err(err) => Reply::error(format!("cannot set the QAT hotkey: {err}")),
+            },
             Request::Qat { action } => match action.as_str() {
                 "toggle" | "show" | "hide" => match qat::toggle(&state.qat) {
                     Ok(()) => Reply::Ok,

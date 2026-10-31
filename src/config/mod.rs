@@ -26,6 +26,7 @@ pub mod album_art;
 pub mod auto_theme;
 pub mod artists;
 pub mod cava;
+pub mod daemon;
 pub mod cli;
 pub mod cli_config;
 mod defaults;

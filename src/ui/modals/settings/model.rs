@@ -136,10 +136,13 @@ pub(super) enum AdvancedRow {
     /// How often the watchdog samples. Only meaningful while the toggle above
     /// is on.
     MemoryWatchdogInterval,
-    StartupHeader,
+    DaemonHeader,
     /// Install/remove the systemd user unit that starts the daemon at login.
     /// Staged like every row; Save runs the installer/remover.
     DaemonAutostart,
+    /// The global QAT toggle chord (KWin syntax), persisted to daemon.ron
+    /// and applied to the running daemon on Save.
+    QatHotkey,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -332,6 +335,9 @@ pub(crate) struct StagedSettings {
     /// unit itself is the persisted state.
     #[cfg_attr(test, allow(dead_code))]
     pub daemon_autostart: bool,
+    /// QAT hotkey (Settings > Advanced > daemon); persisted to the
+    /// daemon.ron sidecar and made live in the running daemon on Save.
+    pub qat_hotkey: String,
 }
 
 #[derive(Debug, Clone)]
@@ -363,7 +369,7 @@ impl ContentRow {
             MpdRow::PlaybackHeader | MpdRow::DevicesHeader) |
             ContentRow::Mpv(MpvRow::Header) | ContentRow::Jellyfin(JellyfinRow::Header) |
             ContentRow::Torrent(TorrentRow::Header) |
-            ContentRow::Advanced(AdvancedRow::DiagnosticsHeader | AdvancedRow::StartupHeader)
+            ContentRow::Advanced(AdvancedRow::DiagnosticsHeader | AdvancedRow::DaemonHeader)
         )
     }
 }

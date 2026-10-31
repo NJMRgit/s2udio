@@ -196,18 +196,24 @@ s2udio daemon status       # pid, proxy port, MPD, attached TUI, hotkey
 ```
 
 A media widget's **Raise** works the same way (`CanRaise` is live TUI or
-daemon). The daemon registers **Meta+T** (KWin; `S2U_QAT_HOTKEY` overrides) for
-toggle, so there is no desktop-file shortcut to keep; remove an old
-`net.local.kitten.desktop` binding if you had one. To start the daemon at
-login, use **Settings -> Advanced -> startup -> start daemon at login** or
-`s2udio daemon autostart on` (a systemd user unit; see `manual-setup.md`).
+daemon). The daemon owns the QAT toggle chord (default **Meta+T**): change it
+in **Settings -> Advanced -> daemon -> qat hotkey**, or with `s2udio daemon
+hotkey <chord>`; it persists to `~/.config/s2udio/daemon.ron` and is applied
+live (the daemon rewrites its KWin script and re-registers the shortcut).
+`S2U_QAT_HOTKEY` remains a startup override. There is no desktop-file
+shortcut to keep; remove an old `net.local.kitten.desktop` binding if you had
+one. To start the daemon at login, use **Settings -> Advanced -> daemon ->
+start daemon at login** or `s2udio daemon autostart on` (a systemd user unit;
+see `manual-setup.md`).
 
 ## The always-on daemon
 
 `s2udio daemon start|status|stop` manage a detached per-user process. It owns
 the stream buffer proxy, resolves/preloads the next web streams while no TUI is
 attached (the TUI's own look-ahead is authoritative when it is), and controls
-the QAT (toggle + raise + the KWin hotkey). The TUI starts it on demand, so the
+the QAT (toggle + raise + the KWin hotkey). **Settings -> Advanced -> daemon**
+holds the login autostart toggle and the editable QAT chord. The TUI starts it
+on demand, so the
 first `s2udio` after a logout brings it up; the Advanced toggle makes it
 permanent. Logs: `~/.local/state/s2udio/s2udio_daemon_<uid>_rCURRENT.log`.
 

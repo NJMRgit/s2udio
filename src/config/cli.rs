@@ -319,6 +319,9 @@ pub enum DaemonCmd {
         #[arg(default_value = "status")]
         action: AutostartAction,
     },
+    /// Change the QAT hotkey (a KWin chord such as `Meta+Shift+T`). The same
+    /// setting as Settings > Advanced > daemon > qat hotkey.
+    Hotkey { chord: String },
     /// Launch the player's quick-access terminal, or toggle the running one
     /// (the daemon's registered hotkey does the same thing).
     Qat {

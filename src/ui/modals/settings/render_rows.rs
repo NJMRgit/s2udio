@@ -506,7 +506,33 @@ impl SettingsModal {
                         style,
                     )
                 }
-                AdvancedRow::DiagnosticsHeader | AdvancedRow::StartupHeader => {
+                AdvancedRow::QatHotkey => {
+                    let value = self.qat_hotkey_pending.clone();
+                    let display = if value.trim().is_empty() {
+                        "(not set)".to_string()
+                    } else {
+                        value
+                    };
+                    let max_value =
+                        avail.saturating_sub(1 + "qat hotkey".len() + 2 + "[edit]".len() + 2);
+                    let display = truncate_col(&display, max_value);
+                    let d = display.chars().count();
+                    (
+                        vec![Span::styled(" qat hotkey", style)],
+                        vec![
+                            Span::styled(display, style.bold()),
+                            Span::raw("  "),
+                            Span::styled("[edit]", style.bold()),
+                        ],
+                        vec![DeferredButton {
+                            offset: d + 2,
+                            label: "[edit]",
+                            click: Click::Edit,
+                        }],
+                        Some(Click::Edit),
+                    )
+                }
+                AdvancedRow::DiagnosticsHeader | AdvancedRow::DaemonHeader => {
                     (Vec::new(), Vec::new(), Vec::new(), None)
                 }
             },
@@ -628,7 +654,7 @@ impl SettingsModal {
             ContentRow::Jellyfin(JellyfinRow::Header) => "Jellyfin server".into(),
             ContentRow::Torrent(TorrentRow::Header) => "rqbit torrent engine".into(),
             ContentRow::Advanced(AdvancedRow::DiagnosticsHeader) => "diagnostics".into(),
-            ContentRow::Advanced(AdvancedRow::StartupHeader) => "at login".into(),
+            ContentRow::Advanced(AdvancedRow::DaemonHeader) => "always-on daemon".into(),
             _ => String::new(),
         }
     }
@@ -763,8 +789,8 @@ impl SettingsModal {
             ContentRow::Advanced(AdvancedRow::DiagnosticsHeader) => {
                 Line::from(vec![Span::styled(" diagnostics", dim)])
             }
-            ContentRow::Advanced(AdvancedRow::StartupHeader) => {
-                Line::from(vec![Span::styled(" startup", dim)])
+            ContentRow::Advanced(AdvancedRow::DaemonHeader) => {
+                Line::from(vec![Span::styled(" daemon", dim)])
             }
             ContentRow::ThemeFlag(_)
             | ContentRow::AutoTheme

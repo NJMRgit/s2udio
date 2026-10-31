@@ -1484,6 +1484,26 @@ impl Ui {
                         status_warn!("Failed to update daemon autostart: {err}");
                     }
                 }
+                // QAT hotkey (Settings > Advanced > daemon): persist the
+                // daemon.ron sidecar and apply the chord to the running
+                // daemon; a stopped daemon reads the file at its next start.
+                #[cfg(not(test))]
+                if staged.qat_hotkey != crate::core::daemon::configured_qat_hotkey() {
+                    let mut file = crate::config::daemon::DaemonConfigFile::load();
+                    file.qat_hotkey = staged.qat_hotkey.clone();
+                    match file.save() {
+                        Err(err) => status_warn!("Failed to save the daemon hotkey: {err}"),
+                        Ok(()) => {
+                            if let Err(err) =
+                                crate::core::daemon::set_qat_hotkey(&staged.qat_hotkey)
+                            {
+                                status_warn!(
+                                    "QAT hotkey saved; it applies when the daemon starts: {err}"
+                                );
+                            }
+                        }
+                    }
+                }
 
                 // Jellyfin credentials from a successful sign-in: persist to
                 // the sidecar (preferred over jellytui's config).

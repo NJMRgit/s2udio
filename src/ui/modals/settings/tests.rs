@@ -696,8 +696,9 @@ mod advanced_tests {
                 format!("{:?}", ContentRow::Advanced(AdvancedRow::DiagnosticsHeader)),
                 format!("{:?}", ContentRow::Advanced(AdvancedRow::MemoryWatchdog)),
                 format!("{:?}", ContentRow::Advanced(AdvancedRow::MemoryWatchdogInterval)),
-                format!("{:?}", ContentRow::Advanced(AdvancedRow::StartupHeader)),
+                format!("{:?}", ContentRow::Advanced(AdvancedRow::DaemonHeader)),
                 format!("{:?}", ContentRow::Advanced(AdvancedRow::DaemonAutostart)),
+                format!("{:?}", ContentRow::Advanced(AdvancedRow::QatHotkey)),
             ],
             "the Advanced page's rows are a contract, not an implementation detail"
         );
@@ -708,6 +709,7 @@ mod advanced_tests {
         assert!(!rows[2].is_header());
         assert!(rows[3].is_header());
         assert!(!rows[4].is_header());
+        assert!(!rows[5].is_header());
     }
 
     /// A `ui:` block that names only one toggle must still parse, filling the
@@ -837,6 +839,23 @@ mod advanced_tests {
             modal.staged_settings().daemon_autostart,
             modal.daemon_autostart_pending,
             "Save receives the staged value"
+        );
+    }
+
+    /// The QAT hotkey row stages a chord; Save persists daemon.ron and tells
+    /// the running daemon. The live daemon must not be touched by the edit.
+    #[test]
+    fn qat_hotkey_is_staged_and_saved_as_a_change() {
+        let (mut modal, _ctx) = fixture();
+        let initial = modal.qat_hotkey_pending.clone();
+        assert!(!modal.has_changes(), "a fresh panel has no changes");
+        modal.qat_hotkey_pending = "Meta+Shift+T".to_owned();
+        assert_ne!(modal.qat_hotkey_pending, initial);
+        assert!(modal.has_changes(), "a staged hotkey is a change");
+        assert_eq!(
+            modal.staged_settings().qat_hotkey,
+            "Meta+Shift+T",
+            "Save receives the staged chord"
         );
     }
 }

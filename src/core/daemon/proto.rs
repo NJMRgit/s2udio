@@ -30,6 +30,9 @@ pub enum Request {
     /// QAT actions (`"toggle"`, `"raise"`, `"show"`, `"hide"`). The
     /// daemon's hotkey reaches toggle through D-Bus; MPRIS uses raise.
     Qat { action: String },
+    /// Change the QAT chord of the running daemon. The Settings panel saves
+    /// the daemon.ron sidecar first and then makes the change live.
+    QatHotkey { chord: String },
 }
 
 /// A reply to one request.
@@ -97,6 +100,7 @@ mod tests {
             Request::TuiHello { pid: 42 },
             Request::Qat { action: "toggle".to_owned() },
             Request::Qat { action: "raise".to_owned() },
+            Request::QatHotkey { chord: "Meta+Shift+T".to_owned() },
         ] {
             let line = serde_json::to_string(&request).expect("request serializes");
             assert!(!line.contains('\n'), "a request must stay on one line: {line}");

@@ -12,7 +12,12 @@ use super::{
     model::{ContentRow, Section, SettingsFocus},
     SettingsModal,
 };
-use crate::{config::state::AppStateFile, ctx::Ctx, ui::modals::remap_keys};
+use crate::{
+    config::state::AppStateFile,
+    ctx::Ctx,
+    shared::macros::status_warn,
+    ui::modals::remap_keys,
+};
 
 pub(super) fn render(
     modal: &mut SettingsModal,
@@ -33,6 +38,12 @@ pub(super) fn render(
     }
     if let Some(proxy) = ctx.torrent_socks_proxy_input.borrow_mut().take() {
         modal.torrent_socks_proxy_pending = proxy;
+    }
+    if let Some(chord) = ctx.qat_hotkey_input.borrow_mut().take() {
+        match crate::config::daemon::normalize_hotkey(&chord) {
+            Some(chord) => modal.qat_hotkey_pending = chord,
+            None => status_warn!("The QAT hotkey cannot be empty or contain quotes/newlines"),
+        }
     }
     modal.refresh_rows(ctx);
     modal.library_path = AppStateFile::load().mpd_library_path.unwrap_or_default();

@@ -137,6 +137,7 @@ pub fn ctx(
         plain_stream_torrents: RefCell::new(Vec::new()),
         torrent_webui_engine: RefCell::new(None),
         torrent_socks_proxy_input: RefCell::new(None),
+        qat_hotkey_input: RefCell::new(None),
         torrent_scans: RefCell::new(HashMap::new()),
         torrent_scans_pending: RefCell::new(HashSet::new()),
         torrent_scan_cancels: RefCell::new(HashMap::new()),

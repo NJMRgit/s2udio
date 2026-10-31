@@ -128,6 +128,22 @@ pub(crate) fn is_running() -> bool {
     ping().is_ok()
 }
 
+/// Ask the running daemon to change its QAT hotkey. The caller persists the
+/// sidecar first; this makes the change live (the daemon rewrites the KWin
+/// script and re-registers the shortcut).
+pub(crate) fn set_qat_hotkey(chord: &str) -> Result<()> {
+    match request(&proto::Request::QatHotkey { chord: chord.to_owned() })? {
+        proto::Reply::Ok => Ok(()),
+        other => Err(anyhow!("unexpected reply to the hotkey change: {other:?}")),
+    }
+}
+
+/// The hotkey the daemon will use on its next start (the daemon.ron
+/// sidecar, with the environment override applied by `QatConfig::from_env`).
+pub(crate) fn configured_qat_hotkey() -> String {
+    crate::config::daemon::DaemonConfigFile::load().qat_hotkey
+}
+
 /// Ask the daemon to raise the player. This is the no-live-TUI path for
 /// `s2udio remote raise` and the MPRIS bridges: a live TUI raises itself over
 /// its own socket (with its kitty/QAT session), and only when there is none
@@ -247,6 +263,7 @@ pub(crate) fn run(
         }
         DaemonCmd::Stop => stop()?,
         DaemonCmd::Autostart { action } => autostart_action(action)?,
+        DaemonCmd::Hotkey { chord } => hotkey_action(&chord)?,
         DaemonCmd::Qat { action } => qat_action(action)?,
         DaemonCmd::Serve { config, address, password, partition } => {
             let opts = LaunchOptions {
@@ -257,6 +274,21 @@ pub(crate) fn run(
             };
             server::serve(&opts)?;
         }
+    }
+    Ok(())
+}
+
+/// `s2udio daemon hotkey <chord>`: persist the new chord and make it live in
+/// the running daemon (if there is one).
+fn hotkey_action(chord: &str) -> Result<()> {
+    let chord = crate::config::daemon::normalize_hotkey(chord)
+        .context("The QAT hotkey cannot be empty or contain quotes/newlines")?;
+    let mut file = crate::config::daemon::DaemonConfigFile::load();
+    file.qat_hotkey = chord.clone();
+    file.save().context("Cannot save the daemon settings")?;
+    match set_qat_hotkey(&chord) {
+        Ok(()) => println!("QAT hotkey: {chord} (daemon updated)"),
+        Err(err) => println!("QAT hotkey: {chord} (saved; start the daemon to apply: {err})"),
     }
     Ok(())
 }
