@@ -326,6 +326,20 @@ fn qat_action(action: QatAction) -> Result<()> {
         print_info(&info);
         return Ok(());
     }
+    // A desktop launcher can call `daemon qat raise` before any TUI has
+    // started the daemon (fresh login, s2udio in the entry). Start it on
+    // demand so the launcher always works; the TUI later attaches to it.
+    if !is_running() {
+        let opts = LaunchOptions {
+            config: None,
+            address: None,
+            password: None,
+            partition: None,
+        };
+        if !ensure_running(&opts) {
+            bail!("The s2udio daemon could not be started");
+        }
+    }
     let action = match action {
         QatAction::Toggle => "toggle",
         QatAction::Raise => "raise",

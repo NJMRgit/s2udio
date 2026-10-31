@@ -206,6 +206,12 @@ one. To start the daemon at login, use **Settings -> Advanced -> daemon ->
 start daemon at login** or `s2udio daemon autostart on` (a systemd user unit;
 see `manual-setup.md`).
 
+**The desktop launcher** (`~/.local/share/applications/s2udio.desktop`,
+created/updated by `setup.sh`) runs `s2udio daemon qat raise`: launching
+s2udio focuses an already-running instance — in a standard kitty window or any
+other terminal — and otherwise opens it in the kitty QAT. The command starts
+the daemon if needed, so the entry works after a fresh login too.
+
 ## The always-on daemon
 
 `s2udio daemon start|status|stop` manage a detached per-user process. It owns

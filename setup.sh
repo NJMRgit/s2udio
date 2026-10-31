@@ -277,6 +277,61 @@ qat_conf_step() {
 }
 
 # ---------------------------------------------------------------------------
+# The desktop entry: launching s2udio opens it in the kitty QAT when nothing
+# is running, and focuses an already-running s2udio (in any terminal or kitty
+# window) otherwise - exactly what `s2udio daemon qat raise` does (a live TUI
+# raises its own window, no TUI launches the QAT). Only offered when kitty is
+# installed. An existing s2udio.desktop is updated in place (with a backup) so
+# user customisations (icon, name) survive; a missing one is created.
+qat_desktop_step() {
+    local desktop="$APP_DIR/s2udio.desktop"
+    local exec_line="Exec=\"$BIN_DIR/s2udio\" daemon qat raise"
+    if ! command -v kitty >/dev/null 2>&1; then
+        info "kitty quick access terminal: kitty not installed - s2udio.desktop launcher skipped"
+        return 0
+    fi
+    mkdir -p "$APP_DIR"
+    if [[ -f "$desktop" ]]; then
+        if grep -qF 'daemon qat raise' "$desktop"; then
+            ok "s2udio.desktop already opens/focuses the QAT"
+            return 0
+        fi
+        if confirm "Update $desktop so launching s2udio opens/focuses it in the kitty QAT (an existing s2udio window is focused instead)?"; then
+            local backup="$desktop.bak-qat-$(date +%Y%m%d-%H%M%S)"
+            cp -p "$desktop" "$backup"
+            local tmp
+            tmp=$(mktemp)
+            awk -v line="$exec_line" '
+                /^Exec=/ && !done { print line; done=1; next }
+                { print }
+                END { if (!done) print line }
+            ' "$desktop" > "$tmp"
+            mv "$tmp" "$desktop"
+            chmod 644 "$desktop"
+            command -v kbuildsycoca6 >/dev/null 2>&1 && kbuildsycoca6 >/dev/null 2>&1 || true
+            ok "s2udio.desktop -> QAT raise (backup: $backup)"
+        else
+            warn "s2udio.desktop left as is; the QAT launcher is 's2udio daemon qat raise'"
+        fi
+        return 0
+    fi
+    cat > "$desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=s2udio
+Comment=s2udio media center (kitty quick-access terminal)
+$exec_line
+Icon=applications-multimedia
+Terminal=false
+Categories=AudioVideo;Audio;Player;
+StartupNotify=true
+EOF
+    chmod 644 "$desktop"
+    command -v kbuildsycoca6 >/dev/null 2>&1 && kbuildsycoca6 >/dev/null 2>&1 || true
+    ok "s2udio.desktop -> launching s2udio opens the QAT (existing s2udio windows are focused)"
+}
+
+# ---------------------------------------------------------------------------
 # Radio favourites migration: the favourites used to live as an MPD stored
 # playlist (<playlist>.m3u in MPD's playlist dir), which rmpc's playlist UI
 # showed as a playlist it doesn't understand. They now live in the s2udio
@@ -1117,6 +1172,7 @@ run_arch() {
     # ---------------------------------------------------------------------------
     seed_config_theme
     qat_conf_step
+    qat_desktop_step
 
     # ---------------------------------------------------------------------------
     cava_step "pacman -Q cava" "install it (sudo pacman -S cava)"
@@ -1267,6 +1323,7 @@ run_dnf5() {
     install_s2u_svc
     seed_config_theme
     qat_conf_step
+    qat_desktop_step
     cava_step "" "install it (sudo dnf5 install cava)"
     ensure_mpd_conf
     services_step_systemd
@@ -1309,6 +1366,7 @@ run_apt() {
     install_s2u_svc
     seed_config_theme
     qat_conf_step
+    qat_desktop_step
     cava_step "" "install it (sudo apt-get install cava)"
     ensure_mpd_conf
     services_step_systemd
@@ -1376,6 +1434,7 @@ run_apk() {
     install_s2u_svc
     seed_config_theme
     qat_conf_step
+    qat_desktop_step
     cava_step "" "install it or rebuild from source (see step 1)"
     ensure_mpd_conf
     services_step_launcher
@@ -1429,6 +1488,7 @@ run_xbps() {
     install_s2u_svc
     seed_config_theme
     qat_conf_step
+    qat_desktop_step
     cava_step "" "install it (sudo xbps-install -S cava)"
     ensure_mpd_conf
     services_step_runit
@@ -1484,6 +1544,7 @@ run_nix() {
     install_s2u_svc
     seed_config_theme
     qat_conf_step
+    qat_desktop_step
     cava_step "" "install it (nix profile install nixpkgs#cava)"
     ensure_mpd_conf
 

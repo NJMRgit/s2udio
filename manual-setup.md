@@ -268,10 +268,28 @@ systemctl --user daemon-reload
 systemctl --user enable --now mpDris2.service
 ```
 
-A desktop entry is optional; `s2udio.desktop` in
-`~/.local/share/applications/` can run `s2udio` in your terminal of choice.
-The torrent engine's **S2RQ** entry (`s2udio rq start`) is written by the
-script only when rqbit is installed; copy its `Exec=` line from
+**The s2udio launcher.** Create
+`~/.local/share/applications/s2udio.desktop` (adjust the binary path):
+
+```ini
+[Desktop Entry]
+Type=Application
+Name=s2udio
+Comment=s2udio media center (kitty quick-access terminal)
+Exec=/home/you/.local/bin/s2udio daemon qat raise
+Icon=applications-multimedia
+Terminal=false
+Categories=AudioVideo;Audio;Player;
+StartupNotify=true
+```
+
+`daemon qat raise` gives the launcher its behavior: if s2udio is already
+running anywhere — a standard kitty window, another terminal — that window is
+raised/focused; otherwise s2udio opens in the kitty QAT. The command starts
+the daemon if needed, so it also works on a fresh login. `setup.sh` creates
+this entry, or updates an existing one in place (backup + the other fields
+preserved). The torrent engine's **S2RQ** entry (`s2udio rq start`) is written
+by the script only when rqbit is installed; copy its `Exec=` line from
 `setup.sh` if you want it.
 
 ## 9. Optional features
