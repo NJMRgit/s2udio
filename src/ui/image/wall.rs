@@ -13,7 +13,11 @@
 use std::{collections::HashMap, io::Write, sync::Arc};
 
 use anyhow::Result;
-use ratatui::{buffer::Buffer, layout::Rect, prelude::IntoCrossterm};
+use ratatui::{
+    buffer::{Buffer, Cell},
+    layout::Rect,
+    prelude::IntoCrossterm,
+};
 
 use super::kitty::{self, WallTile};
 use crate::{config::album_art::ImageMethod, ctx::Ctx, shared::terminal::TERMINAL};
@@ -54,6 +58,55 @@ struct Slot {
     /// hold the new layout's text: the rows move when a card's geometry
     /// changes).
     stale_area: Option<Rect>,
+    /// The frame cells this tile covered at the previous flush. A frame whose
+    /// buffer differs here rewrote them — ratatui's diff then wrote the new
+    /// cells over the placeholder grid and kitty dropped the placement — so
+    /// the tile has to go back up (see [`Slot::cells_rewritten`]).
+    prev_cells: Vec<Cell>,
+    /// The placement is gone but the terminal still stores the payload: the
+    /// next flush re-places it instead of transferring it again.
+    re_place: bool,
+}
+
+impl Slot {
+    /// Whether `frame` rewrote the cells this tile's grid covers.
+    ///
+    /// ratatui writes a cell when its buffer content changed, and writing a
+    /// cell deletes the kitty placement sitting on it. The modal backdrop's
+    /// fade is the case that reported it: it recolours **every** cell, so the
+    /// whole Home page lost its posters the moment a menu closed and the scrim
+    /// lifted (2026-11-01).
+    fn cells_rewritten(&self, frame: &Buffer) -> bool {
+        let expected = usize::from(self.area.width) * usize::from(self.area.height);
+        if self.prev_cells.len() != expected {
+            // No snapshot for this area yet (a fresh slot or a moved tile).
+            return true;
+        }
+        let mut seen = 0;
+        for y in self.area.top()..self.area.bottom() {
+            for x in self.area.left()..self.area.right() {
+                if frame.cell((x, y)) != self.prev_cells.get(seen) {
+                    return true;
+                }
+                seen += 1;
+            }
+        }
+        false
+    }
+
+    /// Remember what `frame` drew under this tile, for the next flush's diff.
+    fn remember_cells(&mut self, frame: &Buffer) {
+        self.prev_cells.clear();
+        self.prev_cells.reserve(
+            usize::from(self.area.width) * usize::from(self.area.height),
+        );
+        for y in self.area.top()..self.area.bottom() {
+            for x in self.area.left()..self.area.right() {
+                self.prev_cells
+                    .push(frame.cell((x, y)).cloned().unwrap_or_default());
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -110,6 +163,9 @@ impl PosterWall {
                     slot.area = placement.area;
                     slot.image_id = image_id;
                     slot.dirty = true;
+                    // A new payload (or a new box): the old placement is
+                    // retired by the flush, so there is nothing to re-place.
+                    slot.re_place = false;
                 }
                 None => {
                     self.slots[idx] = Some(Slot {
@@ -121,6 +177,8 @@ impl PosterWall {
                         dirty: true,
                         failed: false,
                         stale_area: None,
+                        prev_cells: Vec::new(),
+                        re_place: false,
                     });
                 }
             }
@@ -207,6 +265,18 @@ impl PosterWall {
             let Some(slot) = self.slots.get_mut(idx).and_then(Option::as_mut) else {
                 continue;
             };
+            // A frame whose diff rewrote this tile's cells wrote them over the
+            // placeholder grid, which deletes the kitty placement. Put the
+            // grid back instead of trusting `placed`; an unchanged frame
+            // leaves `dirty` alone, so a still page never strobes (and costs
+            // no cell snapshot).
+            if let Some(frame) = frame
+                && slot.cells_rewritten(frame)
+            {
+                slot.dirty = true;
+                slot.re_place = slot.placed && slot.encoded.is_some();
+                slot.remember_cells(frame);
+            }
             if !slot.dirty && slot.placed {
                 continue;
             }
@@ -244,6 +314,22 @@ impl PosterWall {
                 }
                 continue;
             };
+            // The frame only repainted the cells (the backdrop's fade, a theme
+            // pass): the terminal still stores this payload, so the tile goes
+            // back up with a placement command and its grid — no delete, no
+            // transfer, no flicker.
+            if slot.re_place && slot.placed {
+                let outcome = kitty::place_wall_tile(w, tile, slot.area, bg);
+                slot.re_place = false;
+                match outcome {
+                    Ok(()) => slot.dirty = false,
+                    Err(err) => {
+                        log::debug!(error:? = err; "Could not re-place a Home carousel image");
+                        slot.failed = true;
+                    }
+                }
+                continue;
+            }
             // Re-transmitting an id requires the old image to be freed first
             // (the kitty protocol mandates it; the new data is not displayed
             // until a placement is created). Always delete: the terminal may
@@ -282,6 +368,9 @@ impl PosterWall {
                 let _ = super::clear_area(w, bg, slot.area);
                 slot.placed = false;
                 slot.dirty = true;
+                // The image is gone from the terminal: a re-place has nothing
+                // to put back, the flush must transfer it again.
+                slot.re_place = false;
             }
         }
         self.placements.clear();
@@ -464,6 +553,53 @@ mod tests {
             "and its subline: {text:?}"
         );
         assert!(wall.slots[0].is_none(), "the slot is retired");
+    }
+
+    /// A frame whose diff rewrote the cells under a placed tile deleted its
+    /// kitty placement: ratatui wrote those cells to the terminal, and the
+    /// placeholder grid that was showing the poster is gone with them. The
+    /// reported case is the modal backdrop's fade — it recolours *every*
+    /// cell, so the Home page lost all of its posters the moment a menu
+    /// closed and the scrim lifted (2026-11-01). The image itself is still in
+    /// the terminal, so the tile is re-placed without a second transfer.
+    #[test]
+    fn a_frame_that_rewrites_the_tile_cells_re_places_the_grid() {
+        let ctx = ctx_with_method(ImageMethod::Kitty);
+        let mut wall = PosterWall::new(&ctx);
+        let mut bytes: HashMap<String, Arc<Vec<u8>>> = HashMap::new();
+        bytes.insert("tag".to_owned(), Arc::new(png_bytes(64, 96)));
+
+        let area = Rect::new(2, 1, 16, 4);
+        wall.set_layout(vec![WallPlacement { slot: 0, tag: "tag".to_owned(), area }]);
+
+        let mut frame = Buffer::empty(Rect::new(0, 0, 40, 8));
+        frame.set_string(2, 1, "card", Style::default());
+        let mut first = Vec::new();
+        wall.flush_to(&mut first, Some(&frame), &bytes, &ctx).expect("first flush");
+        assert!(wall.slots[0].as_ref().is_some_and(|slot| slot.placed));
+
+        // The same frame again: nothing was rewritten, so nothing is
+        // re-placed (an unconditional re-place strobes the posters).
+        let mut steady = Vec::new();
+        wall.flush_to(&mut steady, Some(&frame), &bytes, &ctx).expect("steady flush");
+        assert!(steady.is_empty(), "an unchanged frame must not re-place a tile");
+
+        // The backdrop's fade recoloured every cell, the grid included.
+        let mut dimmed = frame.clone();
+        dimmed.set_style(area, Style::default().bg(ratatui::style::Color::Rgb(9, 9, 9)));
+        let mut healed = Vec::new();
+        wall.flush_to(&mut healed, Some(&dimmed), &bytes, &ctx).expect("heal flush");
+
+        let text = String::from_utf8_lossy(&healed);
+        assert!(
+            text.contains("a=p") && text.contains("i=2"),
+            "the tile must be re-placed from the terminal's copy: {text:?}"
+        );
+        assert!(
+            !text.contains("a=T"),
+            "a re-place sends the placement and the grid, not the payload: {text:?}"
+        );
+        assert!(wall.slots[0].as_ref().is_some_and(|slot| slot.placed));
     }
 
     /// The same hole appears when a tile *moves* (the rows shift when the card

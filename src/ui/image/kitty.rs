@@ -747,12 +747,38 @@ pub fn display_wall_tile(
         let more = i32::from(iter.peek().is_some());
         tmux_write!(w, "\x1b_Gi={id},m={more};{chunk}\x1b\\", id = tile.id)?;
     }
-    // The placeholder cells: every cell names its image id in the
-    // foreground colour and its (row, column) through combining diacritics.
+    paint_wall_grid(w, tile.id, area, bg_color)
+}
+
+/// Re-place a wall tile the terminal already holds: the placement command and
+/// the placeholder grid, **without** the payload.
+///
+/// A frame whose diff rewrote the tile's cells deleted the placement (ratatui
+/// wrote them to the terminal), but kitty still stores the image, so putting
+/// the grid back is a few hundred bytes instead of a re-transfer — the same
+/// "transmit once, place many" path the single-image overlays use.
+pub fn place_wall_tile(
+    w: &mut impl Write,
+    tile: &WallTile,
+    area: Rect,
+    bg_color: Option<crossterm::style::Color>,
+) -> Result<()> {
+    place_image(w, tile.id, area)?;
+    paint_wall_grid(w, tile.id, area, bg_color)
+}
+
+/// The placeholder cells of a wall tile: every cell names its image id in the
+/// foreground colour and its (row, column) through combining diacritics.
+fn paint_wall_grid(
+    w: &mut impl Write,
+    image_id: u32,
+    area: Rect,
+    bg_color: Option<crossterm::style::Color>,
+) -> Result<()> {
     let colors = Colors { background: bg_color, foreground: None };
     let mut buf = Vec::with_capacity(usize::from(area.width) * usize::from(area.height) * 8);
     execute!(buf, crossterm::cursor::SavePosition, SetColors(colors))?;
-    buf.extend_from_slice(placeholder_foreground(tile.id).as_bytes());
+    buf.extend_from_slice(placeholder_foreground(image_id).as_bytes());
     for y in 0..area.height {
         csi_move!(buf, area.left(), area.top() + y)?;
         for x in 0..area.width {
