@@ -8,7 +8,12 @@ use crossterm::{
         Attribute, Color as CrosstermColor, Colors, ResetColor, SetAttribute, SetColors,
     },
 };
-use ratatui::{layout::Rect, prelude::IntoCrossterm, style::Modifier};
+use ratatui::{
+    buffer::{Buffer, Cell},
+    layout::Rect,
+    prelude::IntoCrossterm,
+    style::Modifier,
+};
 
 use crate::{
     config::{
@@ -162,6 +167,45 @@ pub fn paint_area(
     queue!(w, RestorePosition)?;
     queue!(w, ResetColor)?;
     Ok(())
+}
+
+/// Whether the frame rewrote the cells `area` covers since `prev` was
+/// snapshotted: the diff wrote them to the terminal, which deletes any
+/// terminal-side placement sitting on them.
+///
+/// Overlays draw outside the ratatui buffer, so their own writes never show
+/// up in this comparison; only the UI's content does — exactly the writes that
+/// break a kitty placeholder grid. A frame that did not touch the area leaves
+/// the overlay alone (re-placing unconditionally strobes it).
+pub(crate) fn area_rewritten(frame: &Buffer, area: Rect, prev: &[Cell]) -> bool {
+    let expected = usize::from(area.width) * usize::from(area.height);
+    if prev.len() != expected {
+        // No snapshot for this area yet (a fresh overlay or a moved one).
+        return true;
+    }
+    let mut seen = 0;
+    for y in area.top()..area.bottom() {
+        for x in area.left()..area.right() {
+            if frame.cell((x, y)) != prev.get(seen) {
+                return true;
+            }
+            seen += 1;
+        }
+    }
+    false
+}
+
+/// The cells `area` covers in `frame`, for the next [`area_rewritten`] check.
+pub(crate) fn snapshot_area(frame: &Buffer, area: Rect) -> Vec<Cell> {
+    let mut cells = Vec::with_capacity(
+        usize::from(area.width) * usize::from(area.height),
+    );
+    for y in area.top()..area.bottom() {
+        for x in area.left()..area.right() {
+            cells.push(frame.cell((x, y)).cloned().unwrap_or_default());
+        }
+    }
+    cells
 }
 
 /// The ratatui modifiers a repainted cell can carry, in crossterm terms.

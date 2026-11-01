@@ -61,53 +61,13 @@ struct Slot {
     /// The frame cells this tile covered at the previous flush. A frame whose
     /// buffer differs here rewrote them — ratatui's diff then wrote the new
     /// cells over the placeholder grid and kitty dropped the placement — so
-    /// the tile has to go back up (see [`Slot::cells_rewritten`]).
+    /// the tile has to go back up (see [`super::area_rewritten`]).
     prev_cells: Vec<Cell>,
     /// The placement is gone but the terminal still stores the payload: the
     /// next flush re-places it instead of transferring it again.
     re_place: bool,
 }
 
-impl Slot {
-    /// Whether `frame` rewrote the cells this tile's grid covers.
-    ///
-    /// ratatui writes a cell when its buffer content changed, and writing a
-    /// cell deletes the kitty placement sitting on it. The modal backdrop's
-    /// fade is the case that reported it: it recolours **every** cell, so the
-    /// whole Home page lost its posters the moment a menu closed and the scrim
-    /// lifted (2026-11-01).
-    fn cells_rewritten(&self, frame: &Buffer) -> bool {
-        let expected = usize::from(self.area.width) * usize::from(self.area.height);
-        if self.prev_cells.len() != expected {
-            // No snapshot for this area yet (a fresh slot or a moved tile).
-            return true;
-        }
-        let mut seen = 0;
-        for y in self.area.top()..self.area.bottom() {
-            for x in self.area.left()..self.area.right() {
-                if frame.cell((x, y)) != self.prev_cells.get(seen) {
-                    return true;
-                }
-                seen += 1;
-            }
-        }
-        false
-    }
-
-    /// Remember what `frame` drew under this tile, for the next flush's diff.
-    fn remember_cells(&mut self, frame: &Buffer) {
-        self.prev_cells.clear();
-        self.prev_cells.reserve(
-            usize::from(self.area.width) * usize::from(self.area.height),
-        );
-        for y in self.area.top()..self.area.bottom() {
-            for x in self.area.left()..self.area.right() {
-                self.prev_cells
-                    .push(frame.cell((x, y)).cloned().unwrap_or_default());
-            }
-        }
-    }
-}
 
 #[derive(Debug)]
 pub(crate) struct PosterWall {
@@ -271,11 +231,11 @@ impl PosterWall {
             // leaves `dirty` alone, so a still page never strobes (and costs
             // no cell snapshot).
             if let Some(frame) = frame
-                && slot.cells_rewritten(frame)
+                && super::area_rewritten(frame, slot.area, &slot.prev_cells)
             {
                 slot.dirty = true;
                 slot.re_place = slot.placed && slot.encoded.is_some();
-                slot.remember_cells(frame);
+                slot.prev_cells = super::snapshot_area(frame, slot.area);
             }
             if !slot.dirty && slot.placed {
                 continue;

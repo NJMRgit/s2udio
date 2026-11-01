@@ -1,4 +1,5 @@
 use super::*;
+use ratatui::buffer::{Buffer, Cell};
 
 impl JellyfinPane {
     /// Round 64: whether the selected item gets the small poster shelf.
@@ -64,7 +65,7 @@ impl JellyfinPane {
         frame: &ratatui::buffer::Buffer,
         ctx: &Ctx,
     ) {
-        self.poster.flush_pending(ctx);
+        self.poster.flush_pending(Some(frame), ctx);
         // The Home carousel's images are terminal-side overlays as well: they
         // are placed after the frame's buffer flush so the flush cannot
         // overwrite their placeholder cells. The frame goes along so the cells
@@ -123,6 +124,14 @@ pub(super) struct JfPoster {
     /// other tabs were shown).
     pending: Option<EncodeData>,
     pending_area: Option<Rect>,
+    /// The overlay last put on the glass, with the box it filled. A frame that
+    /// rewrites that box's cells deletes the placement (ratatui wrote them to
+    /// the terminal), and the flush re-places *this* encode instead of
+    /// re-encoding the artwork.
+    last_drawn: Option<(EncodeData, Rect)>,
+    /// The frame cells the overlay covered at the previous flush, for the
+    /// [`crate::ui::image::area_rewritten`] check.
+    prev_cells: Vec<Cell>,
 }
 #[derive(Debug)]
 enum PosterBackend {
@@ -162,6 +171,8 @@ impl JfPoster {
             drawn_area: None,
             pending: None,
             pending_area: None,
+            last_drawn: None,
+            prev_cells: Vec::new(),
         }
     }
     /// Clear the current poster: hide the overlay and drop the bytes (used
@@ -176,32 +187,28 @@ impl JfPoster {
         self.bytes = None;
         self.item_id = None;
         self.img_px = None;
+        self.last_drawn = None;
+        self.prev_cells.clear();
     }
     fn hide_at(&mut self, area: Rect, ctx: &Ctx) {
+        let writer = crate::shared::terminal::TERMINAL.writer();
+        let mut w = writer.lock();
+        let _ = self.hide_at_to(w.by_ref(), area, ctx);
+    }
+    /// [`Self::hide_at`] against a caller-supplied writer (tests replay the
+    /// escape stream instead of drawing on the terminal).
+    fn hide_at_to(&mut self, w: &mut impl Write, area: Rect, ctx: &Ctx) -> Result<()> {
         ctx.placements
             .borrow_mut()
             .release(crate::ui::image::placements::Surface::Poster);
         let bg = ctx.config.theme.background_color.map(|c| c.into_crossterm());
-        let writer = crate::shared::terminal::TERMINAL.writer();
-        let mut w = writer.lock();
-        let w = w.by_ref();
         match &mut self.backend {
-            PosterBackend::Kitty(b) => {
-                let _ = b.hide(w, area, bg);
-            }
-            PosterBackend::Ueberzug(b) => {
-                let _ = b.hide(w, area, bg);
-            }
-            PosterBackend::Iterm2(b) => {
-                let _ = b.hide(w, area, bg);
-            }
-            PosterBackend::Sixel(b) => {
-                let _ = b.hide(w, area, bg);
-            }
-            PosterBackend::Block(b) => {
-                let _ = b.hide(w, area, bg);
-            }
-            PosterBackend::None => {}
+            PosterBackend::Kitty(b) => b.hide(w, area, bg),
+            PosterBackend::Ueberzug(b) => b.hide(w, area, bg),
+            PosterBackend::Iterm2(b) => b.hide(w, area, bg),
+            PosterBackend::Sixel(b) => b.hide(w, area, bg),
+            PosterBackend::Block(b) => b.hide(w, area, bg),
+            PosterBackend::None => Ok(()),
         }
     }
     pub(super) fn set_bytes(&mut self, item_id: String, bytes: Vec<u8>) {
@@ -209,6 +216,8 @@ impl JfPoster {
         self.img_px = Self::image_dimensions(&bytes);
         self.bytes = Some(std::sync::Arc::new(bytes));
         self.drawn_area = None;
+        self.last_drawn = None;
+        self.prev_cells.clear();
     }
     /// Header-only decode of the artwork's pixel size (no full decode —
     /// cheap enough to run when the bytes arrive). `None` on any failure.
@@ -253,6 +262,8 @@ impl JfPoster {
         }
         self.pending = None;
         self.pending_area = None;
+        self.last_drawn = None;
+        self.prev_cells.clear();
     }
     fn encode(&mut self, area: Rect, ctx: &Ctx) -> Option<EncodeData> {
         let bytes = self.bytes.as_ref()?;
@@ -290,10 +301,9 @@ impl JfPoster {
             }
         }
     }
-    fn display(&mut self, data: EncodeData, ctx: &Ctx) -> bool {
-        let writer = crate::shared::terminal::TERMINAL.writer();
-        let mut w = writer.lock();
-        let w = w.by_ref();
+    /// Display `data` on a caller-supplied writer (the tests replay the escape
+    /// stream instead of drawing on the terminal).
+    fn display_to(&mut self, w: &mut impl Write, data: EncodeData, ctx: &Ctx) -> bool {
         match (&mut self.backend, data) {
             (PosterBackend::Kitty(b), EncodeData::Kitty(d)) => {
                 b.display(w, d, ctx).is_ok()
@@ -311,6 +321,36 @@ impl JfPoster {
                 b.display(w, d, ctx).is_ok()
             }
             _ => false,
+        }
+    }
+    /// Re-place the overlay without re-encoding it: a backend that already
+    /// holds this payload (kitty, by image id) sends the placement and the
+    /// grid only, which is what makes the heal below affordable.
+    fn replace_to(
+        &mut self,
+        w: &mut impl Write,
+        area: Rect,
+        data: EncodeData,
+        ctx: &Ctx,
+    ) -> Result<()> {
+        let bg = ctx.config.theme.background_color.map(|c| c.into_crossterm());
+        match (&mut self.backend, data) {
+            (PosterBackend::Kitty(b), EncodeData::Kitty(d)) => {
+                b.replace(w, area, bg, d, ctx, None)
+            }
+            (PosterBackend::Ueberzug(b), EncodeData::Ueberzug(d)) => {
+                b.replace(w, area, bg, d, ctx, None)
+            }
+            (PosterBackend::Iterm2(b), EncodeData::Iterm2(d)) => {
+                b.replace(w, area, bg, d, ctx, None)
+            }
+            (PosterBackend::Sixel(b), EncodeData::Sixel(d)) => {
+                b.replace(w, area, bg, d, ctx, None)
+            }
+            (PosterBackend::Block(b), EncodeData::Block(d)) => {
+                b.replace(w, area, bg, d, ctx, None)
+            }
+            _ => Ok(()),
         }
     }
     /// Draw the poster into `area`, re-encoding only when the area changed
@@ -342,22 +382,61 @@ impl JfPoster {
         self.pending = Some(data);
         self.pending_area = Some(area);
     }
-    /// Display the queued overlay (called after the frame flush). No-op
-    /// when nothing is queued.
-    pub(super) fn flush_pending(&mut self, ctx: &Ctx) {
-        let Some(data) = self.pending.take() else { return };
-        let area = self.pending_area.take().unwrap_or_default();
-        if let Some(old) = self.drawn_area.take() && old != area {
-            self.hide_at(old, ctx);
+    /// Display the queued overlay (called after the frame flush), then heal a
+    /// placement the frame's diff deleted. No-op when nothing is queued and
+    /// nothing was rewritten.
+    pub(super) fn flush_pending(&mut self, frame: Option<&Buffer>, ctx: &Ctx) {
+        let writer = crate::shared::terminal::TERMINAL.writer();
+        let mut w = writer.lock();
+        if let Err(err) = self.flush_pending_to(w.by_ref(), frame, ctx) {
+            log::debug!(error:? = err; "Failed to display the Jellyfin poster");
         }
-        if self.display(data, ctx) {
-            self.drawn_area = Some(area);
-            // The poster is a terminal-side overlay: record its rect so a
-            // clear (or anything asking what is under a point) finds it.
-            ctx.placements
-                .borrow_mut()
-                .declare(crate::ui::image::placements::Surface::Poster, area);
+    }
+    /// [`Self::flush_pending`] against a caller-supplied writer (tests replay
+    /// the escape stream instead of drawing on the terminal).
+    fn flush_pending_to(
+        &mut self,
+        w: &mut impl Write,
+        frame: Option<&Buffer>,
+        ctx: &Ctx,
+    ) -> Result<()> {
+        let mut just_drawn = false;
+        if let Some(data) = self.pending.take() {
+            let area = self.pending_area.take().unwrap_or_default();
+            if let Some(old) = self.drawn_area.take() && old != area {
+                let _ = self.hide_at_to(w, old, ctx);
+            }
+            if self.display_to(w, data.clone(), ctx) {
+                self.drawn_area = Some(area);
+                self.last_drawn = Some((data, area));
+                just_drawn = true;
+                // The poster is a terminal-side overlay: record its rect so a
+                // clear (or anything asking what is under a point) finds it.
+                ctx.placements
+                    .borrow_mut()
+                    .declare(crate::ui::image::placements::Surface::Poster, area);
+            }
         }
+        let Some(frame) = frame else { return Ok(()) };
+        let Some(area) = self.drawn_area else {
+            self.prev_cells.clear();
+            return Ok(());
+        };
+        // A frame that rewrote the cells under the overlay deleted its
+        // placement — the modal backdrop's fade recolours every cell, so the
+        // detail page's poster vanished the moment a menu closed and the
+        // scrim lifted (2026-11-01, same hole as the Home carousel). Re-place
+        // the encode we already have; the terminal still stores the payload.
+        let rewritten = !just_drawn
+            && crate::ui::image::area_rewritten(frame, area, &self.prev_cells);
+        if rewritten
+            && let Some((data, drawn)) = self.last_drawn.clone()
+            && drawn == area
+        {
+            self.replace_to(w, area, data, ctx)?;
+        }
+        self.prev_cells = crate::ui::image::snapshot_area(frame, area);
+        Ok(())
     }
     /// Force the next render to redraw the overlay (the tab was reopened
     /// and the overlay was hidden on the way out). Re-requests the image
@@ -375,5 +454,121 @@ impl JfPoster {
                     log::error!(error:? = err; "Failed to request jellyfin poster")
                 });
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use crate::config::album_art::ImageMethod;
+    use ratatui::{buffer::Buffer, style::Style};
+
+    fn test_ctx() -> Ctx {
+        crate::tests::fixtures::ctx(
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+        )
+    }
+
+    fn ctx_with_kitty() -> Ctx {
+        let mut ctx = test_ctx();
+        let mut config = ctx.config.as_ref().clone();
+        config.album_art.method = ImageMethod::Kitty;
+        ctx.config = std::sync::Arc::new(config);
+        ctx
+    }
+
+    fn png_bytes(width: u32, height: u32) -> Vec<u8> {
+        let image = image::DynamicImage::new_rgba8(width, height);
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image
+            .write_to(&mut bytes, image::ImageFormat::Png)
+            .expect("encode a test png");
+        bytes.into_inner()
+    }
+
+    /// A frame whose diff rewrote the cells under the poster deleted its
+    /// kitty placement. The modal backdrop's fade recolours every cell, so
+    /// the detail page's poster vanished the moment a menu closed and the
+    /// scrim lifted — the same hole the Home carousel had (2026-11-01). The
+    /// flush re-places the encode it already has: a placement command, not a
+    /// second transfer.
+    #[test]
+    fn a_frame_that_rewrites_the_poster_cells_re_places_it() {
+        let ctx = ctx_with_kitty();
+        let mut poster = JfPoster::new(&ctx);
+        poster.set_bytes("item".to_owned(), png_bytes(64, 96));
+
+        let area = Rect::new(0, 0, 20, 10);
+        poster.draw(area, &ctx);
+        assert!(poster.pending.is_some(), "the draw queues an encode");
+
+        let mut frame = Buffer::empty(Rect::new(0, 0, 40, 20));
+        frame.set_string(0, 0, "info", Style::default());
+        let mut first = Vec::new();
+        poster
+            .flush_pending_to(&mut first, Some(&frame), &ctx)
+            .expect("first flush");
+        let text = String::from_utf8_lossy(&first);
+        assert!(text.contains("a=t"), "the first flush transmits the payload: {text:?}");
+        assert!(text.contains("a=p"), "and places it: {text:?}");
+        assert_eq!(poster.drawn_area, Some(area));
+
+        // The same frame again: nothing was rewritten, so nothing is
+        // re-placed (an unconditional re-place strobes the poster).
+        let mut steady = Vec::new();
+        poster
+            .flush_pending_to(&mut steady, Some(&frame), &ctx)
+            .expect("steady flush");
+        assert!(steady.is_empty(), "an unchanged frame must not re-place the poster");
+
+        // The backdrop's fade recoloured every cell under the overlay.
+        let mut dimmed = frame.clone();
+        dimmed.set_style(area, Style::default().bg(ratatui::style::Color::Rgb(9, 9, 9)));
+        let mut healed = Vec::new();
+        poster
+            .flush_pending_to(&mut healed, Some(&dimmed), &ctx)
+            .expect("heal flush");
+        let text = String::from_utf8_lossy(&healed);
+        assert!(
+            text.contains("a=p"),
+            "the poster must be re-placed from the terminal's copy: {text:?}"
+        );
+        assert!(
+            !text.contains("a=t"),
+            "a re-place sends the placement and the grid, not the payload: {text:?}"
+        );
+    }
+
+    /// Hiding the overlay drops the encode the heal would re-place: after a
+    /// `ModalOpened` there is nothing on the glass to put back.
+    #[test]
+    fn a_hidden_poster_does_not_heal() {
+        let ctx = ctx_with_kitty();
+        let mut poster = JfPoster::new(&ctx);
+        poster.set_bytes("item".to_owned(), png_bytes(64, 96));
+        let area = Rect::new(0, 0, 20, 10);
+        poster.draw(area, &ctx);
+        let frame = Buffer::empty(Rect::new(0, 0, 40, 20));
+        let mut first = Vec::new();
+        poster
+            .flush_pending_to(&mut first, Some(&frame), &ctx)
+            .expect("first flush");
+        // Drop the drawn area first so `hide` has nothing to erase on the
+        // glass (a test must not write to the terminal); the bookkeeping it
+        // clears is what this checks.
+        poster.drawn_area = None;
+        poster.hide(&ctx);
+        assert!(poster.last_drawn.is_none());
+
+        let mut dimmed = frame.clone();
+        dimmed.set_style(area, Style::default().bg(ratatui::style::Color::Rgb(9, 9, 9)));
+        let mut out = Vec::new();
+        poster
+            .flush_pending_to(&mut out, Some(&dimmed), &ctx)
+            .expect("flush after hide");
+        assert!(out.is_empty(), "a hidden overlay has nothing to re-place: {out:?}");
     }
 }
