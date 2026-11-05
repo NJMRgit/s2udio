@@ -143,14 +143,25 @@ pub(crate) enum WorkRequest {
         /// play the entry the user has moved on from.
         play_stamp: Option<u64>,
         /// Round 111: fetch only the display metadata (title, channel,
-        /// duration, thumbnail) with `yt-dlp --print`, skipping the stream
-        /// URL, the chapters and the description — ~1.6 s instead of the full
-        /// resolve's ~2.6 s, and kilobytes instead of megabytes. The
-        /// selection-time warm uses this: a merely-selected row needs its
-        /// description/artwork, not a playable URL. Everything that is about
-        /// to play passes `false` and gets the full resolve.
+        /// duration, thumbnail, chapters) with `yt-dlp --print`, skipping the
+        /// stream URL — ~1.6 s instead of the full resolve's ~2.6 s, and
+        /// kilobytes instead of megabytes. The selection-time warm uses this:
+        /// a merely-selected row needs its description/artwork, not a
+        /// playable URL. 2026-11-04: the **video** actions use it too — their
+        /// entry plays the watch link through mpv, so the stream URL is
+        /// discarded anyway, and the `-J` shape pays the s2u-yt wrapper's
+        /// media-URL probe for it (measured 12.0 s against 2.6 s).
+        /// Everything that plays through MPD passes `false` and gets the full
+        /// resolve.
         meta_only: bool,
     },
+
+    /// 2026-11-04: the **early name** of freshly pasted video links — one
+    /// cheap oEmbed request per link (measured 0.12 s), so the Video list's
+    /// resolving rows show the real title while `yt-dlp` still works. Best
+    /// effort: a link with no oEmbed endpoint, or a failed request, is simply
+    /// absent from the answer.
+    ProbeYtTitles { links: Vec<String> },
 
     /// Fetch the Jellyfin library tree (views of the server).
     FetchJellyfinViews,
@@ -353,6 +364,12 @@ pub(crate) enum WorkDone {
         /// back so the event loop can drop a superseded result and clear the
         /// pending play it belonged to (2026-10-25).
         play_stamp: Option<u64>,
+    },
+    /// 2026-11-04: the early titles the oEmbed probe found for freshly pasted
+    /// video links — the Video list's resolving rows take their name from
+    /// here while `yt-dlp` still works (see [`WorkRequest::ProbeYtTitles`]).
+    YtTitlesProbed {
+        titles: Vec<crate::shared::ytdlp::EarlyTitle>,
     },
     /// Result of a Jellyfin API fetch, routed to the Jellyfin pane.
     JellyfinFetched {

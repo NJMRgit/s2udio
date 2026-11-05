@@ -3,6 +3,7 @@ mod cli;
 mod downloader;
 mod error;
 mod manager;
+mod oembed;
 mod stream;
 mod ytdlp_item;
 
@@ -12,6 +13,7 @@ pub use error::YtDlpDownloadError;
 pub use manager::{
     ChapterSection, DownloadId, DownloadState, ReplaceAction, StreamDownloadSpec, YtDlpManager,
 };
+pub use oembed::{EarlyTitle, probe_titles};
 pub use stream::{YtStreamInfo, resolve_audio_urls, resolve_meta_urls};
 pub use ytdlp_item::{
     StreamIntent, YtDlpContent, YtDlpHost, YtDlpItem, YtDlpPlaylist, YtListMeta,

@@ -133,6 +133,28 @@ pub enum YtAction {
     /// URL and the current track is never cut short.
     ReplaceInPlace(u32),
 }
+
+impl YtAction {
+    /// Whether this action fills the **Video list** (the persistent mpv
+    /// playlist) rather than the MPD queue.
+    ///
+    /// 2026-11-04: a video entry plays the *link* — mpv resolves it itself —
+    /// so the resolved stream URL is discarded for every one of these, and
+    /// their resolves use the metadata shape (`--print`) instead of the full
+    /// `-J` stream resolve (measured on this machine: 2.6 s against 12.0 s,
+    /// the difference being the s2u-yt wrapper's probe of a URL nothing
+    /// plays). The metadata shape still carries the chapters a video row
+    /// shows.
+    pub fn is_video(&self) -> bool {
+        matches!(
+            self,
+            Self::PlayVideo
+                | Self::AddToVideoQueue
+                | Self::AppendVideoQueue
+                | Self::AddToVideoQueueAndPlay
+        )
+    }
+}
 /// A single recognized item of a paste.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum PastedItem {

@@ -57,13 +57,19 @@ impl MpvPlaylistEntry {
             pending: false,
         }
     }
-    /// The placeholder row a paste inserts before its link is resolved. The
-    /// title is the link itself until [`complete_video_playlist`] fills in
-    /// the real one, so the row is recognisable (and playable — mpv resolves
-    /// a watch link itself) even while `yt-dlp` runs.
+    /// The placeholder row a paste inserts before its link is resolved.
+    ///
+    /// 2026-11-04 (user): the row shows **no name until one is known** — the
+    /// Video list paints it as the resolving spinner and nothing else. The
+    /// link it came from is still the entry's URL (that is the identity every
+    /// match and lookup uses), but printing the link as the title is noise the
+    /// user asked to be rid of: it is not the video's name, and it stayed on
+    /// screen for the whole resolve. The name arrives either early (the oEmbed
+    /// probe, [`fill_pending_titles`]) or with the resolve itself
+    /// ([`complete_video_playlist`]).
     pub fn pending_link(link: &str) -> Self {
         Self {
-            title: link.to_owned(),
+            title: String::new(),
             url: link.to_owned(),
             duration: None,
             original_url: Some(link.to_owned()),
@@ -76,6 +82,21 @@ impl MpvPlaylistEntry {
     /// stream URL expires and carries no video ID), else the URL itself.
     pub fn lookup_url(&self) -> &str {
         self.original_url.as_deref().filter(|u| !u.is_empty()).unwrap_or(&self.url)
+    }
+    /// The name the Video list paints for this row (2026-11-04).
+    ///
+    /// A **pending** row with no name yet paints nothing: the resolving
+    /// spinner stands alone until the oEmbed probe (or the resolve itself)
+    /// supplies the title, instead of the raw link sitting there for seconds.
+    /// A row that is *not* pending but carries no title — a placeholder that
+    /// was persisted before its resolve landed and was restored after a
+    /// restart — falls back to the link it was queued from, which is what
+    /// every video row showed before names were filled in.
+    pub fn row_title(&self) -> &str {
+        if !self.title.trim().is_empty() {
+            return &self.title;
+        }
+        if self.pending { "" } else { self.lookup_url() }
     }
 }
 /// The answer to a resume prompt that was asked **before** mpv started.
@@ -1315,6 +1336,58 @@ pub fn complete_video_playlist(
     );
     (resolved, appended)
 }
+/// Give the resolving rows their **early names** (2026-11-04): the titles the
+/// oEmbed probe found for the links a paste just inserted.
+///
+/// The rows stay `pending` — the resolve behind them is still running, so the
+/// Video list keeps their spinner — but they stop showing a nameless row as
+/// soon as the real title is known (measured 0.12 s, against seconds for the
+/// resolve). A row is filled only when it is still pending, still nameless and
+/// still keyed by that link, so a resolve that already landed (or a second
+/// probe of the same link) can never overwrite a better name.
+///
+/// Returns how many rows were named.
+pub fn fill_pending_titles(
+    ctx: &Ctx,
+    titles: &[crate::shared::ytdlp::EarlyTitle],
+) -> usize {
+    if titles.is_empty() {
+        return 0;
+    }
+    let mut filled = 0;
+    // The persistent list and the live mpv mirror are separate: a paste names
+    // its rows in whichever list it inserted them into.
+    {
+        let mut list = ctx.video_playlist.borrow_mut();
+        filled += fill_pending_in(&mut list, titles);
+    }
+    {
+        let mut list = ctx.mpv.playlist.borrow_mut();
+        filled += fill_pending_in(&mut list, titles);
+    }
+    if filled > 0 {
+        // The rows are persisted with the name too, so a restart does not
+        // bring the blank rows back.
+        crate::ui::modals::paste::save_video_playlist(ctx);
+    }
+    filled
+}
+fn fill_pending_in(
+    list: &mut [MpvPlaylistEntry],
+    titles: &[crate::shared::ytdlp::EarlyTitle],
+) -> usize {
+    let mut filled = 0;
+    for early in titles {
+        let Some(slot) = list.iter_mut().find(|entry| {
+            entry.pending && entry.title.trim().is_empty() && entry.lookup_url() == early.link
+        }) else {
+            continue;
+        };
+        slot.title = early.title.clone();
+        filled += 1;
+    }
+    filled
+}
 /// Detach a spawned child from the terminal's session/process group
 /// (`setsid`) and ignore SIGHUP, so closing the TUI cannot kill it: the
 /// terminal driver sends SIGHUP to the foreground process group on window
@@ -1745,11 +1818,99 @@ mod tests {
         assert!(!list[0].pending);
     }
 
+    /// 2026-11-04 (user): the row a paste inserts carries **no name** — the
+    /// Video list paints its spinner alone until a name is known. The link is
+    /// still the entry's identity (`url`/`original_url`), it is just not the
+    /// title any more.
+    #[test]
+    fn the_placeholder_names_nothing() {
+        let link = "https://www.youtube.com/watch?v=AAA";
+        let entry = MpvPlaylistEntry::pending_link(link);
+        assert!(entry.title.is_empty(), "the link is not the name");
+        assert_eq!(entry.url, link, "the link is still what mpv would open");
+        assert_eq!(entry.lookup_url(), link, "and still the identity every lookup uses");
+        assert!(entry.pending, "the row is resolving");
+        assert_eq!(entry.row_title(), "", "so the row paints no title at all");
+    }
+
+    /// A title-less row that is **not** resolving (a placeholder persisted
+    /// before its resolve landed, restored after a restart — `pending` is not
+    /// serialized) names itself by its link instead of reading blank forever.
+    #[test]
+    fn a_settled_row_without_a_name_falls_back_to_its_link() {
+        let link = "https://www.youtube.com/watch?v=BBB";
+        let mut entry = MpvPlaylistEntry::pending_link(link);
+        entry.pending = false;
+        assert_eq!(entry.row_title(), link);
+    }
+
+    /// The early titles (oEmbed) name the resolving rows **in place**: the
+    /// name lands on the row the user is watching, the row keeps its spinner
+    /// (its stream is still resolving) and its position, and a row that
+    /// already carries a name is never touched.
+    #[test]
+    fn the_early_titles_name_the_resolving_rows_in_place() {
+        let ctx = crate::tests::fixtures::ctx(
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+        );
+        let awaited = "https://www.youtube.com/watch?v=AAA";
+        let other = "https://www.youtube.com/watch?v=BBB";
+        let unnamed_after_probe = "https://www.nicovideo.jp/watch/sm9";
+        *ctx.video_playlist.borrow_mut() = vec![
+            MpvPlaylistEntry::pending_link(awaited),
+            MpvPlaylistEntry::new("Already named", "http://cdn/keep", Some(60.0)),
+            MpvPlaylistEntry::pending_link(unnamed_after_probe),
+            MpvPlaylistEntry::pending_link(other),
+        ];
+        let named = super::fill_pending_titles(
+            &ctx,
+            &[crate::shared::ytdlp::EarlyTitle {
+                link: awaited.to_owned(),
+                title: "Real Video Name".to_owned(),
+                channel: Some("A Channel".to_owned()),
+            }],
+        );
+        assert_eq!(named, 1, "only the row waiting for that name is filled");
+        let list = ctx.video_playlist.borrow();
+        assert_eq!(list[0].title, "Real Video Name");
+        assert!(list[0].pending, "the stream is still resolving, so it keeps spinning");
+        assert_eq!(list[0].url, awaited, "the row keeps the link it was queued from");
+        assert_eq!(list[1].title, "Already named", "a resolved row is never renamed");
+        assert!(list[2].title.is_empty(), "a provider with no oEmbed waits for the resolve");
+        assert!(list[3].title.is_empty(), "a different link's row is not touched");
+    }
+
+    /// A repeated (or late) probe cannot rename a row: it is no longer
+    /// waiting, so the answer is spent on nothing.
+    #[test]
+    fn a_repeated_probe_does_not_rename_the_row() {
+        let ctx = crate::tests::fixtures::ctx(
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+        );
+        let link = "https://www.youtube.com/watch?v=CCC";
+        *ctx.video_playlist.borrow_mut() = vec![MpvPlaylistEntry::pending_link(link)];
+        let early = crate::shared::ytdlp::EarlyTitle {
+            link: link.to_owned(),
+            title: "First".to_owned(),
+            channel: None,
+        };
+        assert_eq!(super::fill_pending_titles(&ctx, std::slice::from_ref(&early)), 1);
+        let later = crate::shared::ytdlp::EarlyTitle {
+            title: "Second".to_owned(),
+            ..early
+        };
+        assert_eq!(super::fill_pending_titles(&ctx, &[later]), 0);
+        assert_eq!(ctx.video_playlist.borrow()[0].title, "First");
+    }
+
     /// A `Ctx` for the resume-seek logic: the socket path points nowhere, so
     /// every `mpv_seek` is a fast connect failure and only the state machine
     /// under test is exercised.
-    fn resume_test_ctx() -> crate::ctx::Ctx {
-        let (app_tx, app_rx) = crossbeam::channel::unbounded();
+    fn resume_test_ctx() -> crate::ctx::Ctx {        let (app_tx, app_rx) = crossbeam::channel::unbounded();
         crate::tests::fixtures::ctx(
             (app_tx, app_rx),
             (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),

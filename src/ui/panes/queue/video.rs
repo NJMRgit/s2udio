@@ -68,13 +68,17 @@ impl QueuePane {
                 let max_offset = (playlist.len() + 1).saturating_sub(viewport);
                 *self.video_state.offset_mut() = max_offset;
             }
-            self.request_spinner_frames(ctx);
         } else {
             self.video_import_loading_shown = false;
-            // Nothing in the Video list spins once the import's line is gone
-            // (the audio list's Duration spinners are not drawn in this mode),
-            // so this frame asks the clock for nothing and the tick stops
-            // instead of repainting at the spinner rate forever.
+        }
+        // 2026-11-04: the list spins while the import's line **or** a
+        // resolving row is on screen. A pasted link's row is painted with the
+        // spinner until its name and stream land (see `video_row_prefix`), so
+        // the tick has to keep running for it — the spinner tick stops as soon
+        // as the last of them is filled, instead of repainting forever.
+        let resolving_rows = playlist.iter().any(|entry| entry.pending);
+        if import_loading || resolving_rows {
+            self.request_spinner_frames(ctx);
         }
         self.video_items_len = playlist.len() + usize::from(import_loading);
         // The playlist can change under the marks (session switches,
@@ -165,11 +169,20 @@ impl QueuePane {
                 // probed) falls back to the shared stream metadata, so the row
                 // shows the real length instead of `-` and the column agrees
                 // with the footer total computed from the same lookup.
-                let duration = crate::ui::modals::paste::video_entry_duration(ctx, entry)
-                    .map(|d| fmt.format(d as u64))
-                    .unwrap_or_else(|| "-".to_owned());
+                //
+                // 2026-11-04: a resolving row has nothing to report yet, so
+                // its Duration cell stays **blank** — the row is the spinner
+                // and nothing else, not `-` sitting under a name that has not
+                // arrived.
+                let duration = if entry.pending {
+                    String::new()
+                } else {
+                    crate::ui::modals::paste::video_entry_duration(ctx, entry)
+                        .map(|d| fmt.format(d as u64))
+                        .unwrap_or_else(|| "-".to_owned())
+                };
                 let prefix = video_row_prefix(entry, is_current);
-                let mut title = entry.title.clone();
+                let mut title = entry.row_title().to_owned();
                 truncate_to_width(&mut title, title_field.saturating_sub(2));
                 let title_pad = title_field.saturating_sub(2 + title.width());
                 let dur_pad = duration_w.saturating_sub(duration.width());
@@ -577,6 +590,87 @@ mod tests {
     }
 
     const LINK: &str = "https://www.youtube.com/watch?v=abc123";
+
+    /// Render the Video list headlessly and hand back the text of its rows.
+    fn video_rows(ctx: &crate::ctx::Ctx) -> Vec<String> {
+        ctx.queue_tab.set(crate::ctx::QueueTabMode::Video);
+        let mut pane = crate::ui::panes::queue::QueuePane::new(ctx);
+        let backend = ratatui::backend::TestBackend::new(80, 12);
+        let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| {
+                pane.render(frame, ratatui::prelude::Rect::new(0, 0, 80, 12), ctx)
+                    .expect("the video list renders")
+            })
+            .expect("draw ok");
+        let table = pane.areas[crate::ui::panes::queue::Areas::Table];
+        let buffer = terminal.backend().buffer();
+        (table.y..table.y + table.height.min(4))
+            .map(|y| {
+                (table.x..table.x + table.width)
+                    .map(|x| buffer[(x, y)].symbol().to_owned())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_owned()
+            })
+            .collect()
+    }
+
+    /// 2026-11-04 (user): a row whose video is still resolving shows **the
+    /// spinner by itself** — the pasted link used to sit in the title column
+    /// for the whole resolve, which is not the video's name.
+    #[test]
+    fn a_resolving_row_without_a_name_shows_only_the_spinner() {
+        let ctx = ctx();
+        *ctx.video_playlist.borrow_mut() = vec![MpvPlaylistEntry::pending_link(LINK)];
+        let rows = video_rows(&ctx);
+        let row = rows.first().cloned().unwrap_or_default();
+        let first = row.chars().next().unwrap_or_default().to_string();
+        assert!(
+            crate::ui::panes::queue::SPINNER_FRAMES.contains(&first.as_str()),
+            "the spinner leads the row, got {row:?}"
+        );
+        assert!(
+            !row.contains("youtube.com") && !row.contains("abc123"),
+            "the link must not stand in for the name, got {row:?}"
+        );
+        // Nothing else is known yet: no duration cell either.
+        assert!(!row.contains('-'), "the Duration cell stays blank, got {row:?}");
+    }
+
+    /// The name arrives before the stream does (the oEmbed probe fills it in
+    /// place): the row then reads `name` with the spinner still running, and
+    /// the spinner goes away when the resolve lands.
+    #[test]
+    fn a_named_row_keeps_its_spinner_until_the_stream_lands() {
+        let ctx = ctx();
+        let mut entry = MpvPlaylistEntry::pending_link(LINK);
+        entry.title = "Real Video Name".to_owned();
+        *ctx.video_playlist.borrow_mut() = vec![entry];
+        let row = video_rows(&ctx).first().cloned().unwrap_or_default();
+        let spinner = super::super::render::spinner_frame();
+        assert!(row.contains("Real Video Name"), "the name is on the row, got {row:?}");
+        assert!(row.starts_with(&format!("{spinner} ")), "and the resolve still spins, got {row:?}");
+
+        // The resolve lands: same name, no spinner.
+        ctx.video_playlist.borrow_mut()[0].pending = false;
+        let row = video_rows(&ctx).first().cloned().unwrap_or_default();
+        assert!(row.contains("Real Video Name"), "the name stays, got {row:?}");
+        assert!(!row.starts_with(spinner), "the spinner is gone, got {row:?}");
+    }
+
+    /// A placeholder that was persisted before its resolve landed comes back
+    /// without a name (`pending` is not serialized): the row falls back to the
+    /// link rather than reading blank forever.
+    #[test]
+    fn a_restored_titleless_row_falls_back_to_its_link() {
+        let ctx = ctx();
+        let mut entry = MpvPlaylistEntry::pending_link(LINK);
+        entry.pending = false;
+        *ctx.video_playlist.borrow_mut() = vec![entry];
+        let row = video_rows(&ctx).first().cloned().unwrap_or_default();
+        assert!(row.contains("abc123"), "the restored row names itself by its link, got {row:?}");
+    }
 
     /// A row inserted by a paste before `yt-dlp` answered renders with the
     /// resolving spinner instead of the `❯`/blank marker — the visible half of

@@ -682,7 +682,13 @@ pub fn apply_resolved_streams(
         let mut chapters = ctx.chapters.borrow_mut();
         for (idx, item) in info.iter().enumerate() {
             if !item.title.is_empty() {
-                yt_info.insert(item.url.clone(), item.clone());
+                // 2026-11-04: a **video** resolve is metadata-only, so its
+                // `url` is the empty stream URL — the link is the only name
+                // that entry has, and an empty key here would collect entries
+                // belonging to unrelated videos.
+                if !item.url.is_empty() {
+                    yt_info.insert(item.url.clone(), item.clone());
+                }
                 if !item.original_url.is_empty() && item.original_url != item.url {
                     yt_info.insert(item.original_url.clone(), item.clone());
                 }
@@ -702,7 +708,9 @@ pub fn apply_resolved_streams(
                     url = item.url.as_str(), original = item.original_url.as_str(),
                     chapters = item.chapters.len(); "Stored the resolved chapters"
                 );
-                chapters.insert(item.url.clone(), item.chapters.clone());
+                if !item.url.is_empty() {
+                    chapters.insert(item.url.clone(), item.chapters.clone());
+                }
                 if !item.original_url.is_empty() && item.original_url != item.url {
                     chapters.insert(item.original_url.clone(), item.chapters.clone());
                 }
@@ -718,7 +726,11 @@ pub fn apply_resolved_streams(
     let mut cache = load_yt_cache(cache_dir);
     for (idx, item) in info.iter().enumerate() {
         if !item.title.is_empty() {
-            cache.insert(item.url.clone(), item.clone());
+            // A metadata-only video entry has no stream URL (2026-11-04); the
+            // link keys it.
+            if !item.url.is_empty() {
+                cache.insert(item.url.clone(), item.clone());
+            }
             if !item.original_url.is_empty() && item.original_url != item.url {
                 cache.insert(item.original_url.clone(), item.clone());
             }

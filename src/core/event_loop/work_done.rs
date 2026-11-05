@@ -137,6 +137,18 @@ pub(super) fn handle_work_done(
             crate::ui::modals::paste::on_torrent_scanned(ctx, key, result);
             *render_wanted = true;
         }
+        WorkDone::YtTitlesProbed { titles } => {
+            // 2026-11-04: the early names of freshly pasted video links. The
+            // resolving rows take them **in place** — the spinner stays, since
+            // their stream has not landed yet — so the Video list shows the
+            // real title ~0.1 s after the paste instead of the raw link for
+            // the seconds `yt-dlp` needs.
+            let named = crate::core::mpv::fill_pending_titles(ctx, &titles);
+            log::debug!(found = titles.len(), named; "The early video titles landed");
+            if named > 0 {
+                *render_wanted = true;
+            }
+        }
         WorkDone::DlDaemonStarted { result } => {
             // Round 54: the daemon's spawn failed — abort an
             // open "Preparing downloader…" wait with the error

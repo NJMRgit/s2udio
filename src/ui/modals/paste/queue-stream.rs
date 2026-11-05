@@ -123,6 +123,14 @@ pub(super) fn queue_videos(ctx: &Ctx, vids: &[PastedItem], after_current: bool, 
         }
         return;
     }
+    // 2026-11-04: the rows landed **nameless** on purpose — a resolving row
+    // paints its spinner and nothing else until a name is known. Ask for the
+    // early names now (oEmbed, measured 0.12 s) so the real title is on screen
+    // long before `yt-dlp` finishes; `fill_pending_titles` puts it on the row
+    // in place and the spinner keeps turning underneath it.
+    let _ = ctx
+        .work_sender
+        .send(WorkRequest::ProbeYtTitles { links: links.clone() });
     let action = if play {
         YtAction::AddToVideoQueueAndPlay
     } else if after_current {
@@ -491,6 +499,16 @@ mod tests {
             crate::ctx::QueueTabMode::Video,
             "the tab switches to the list the row went into"
         );
+        // 2026-11-04: the row is nameless until a name is known, so the cheap
+        // title probe is asked for **first** — the video list shows the real
+        // name in ~0.1 s while the resolve is still running.
+        assert!(
+            matches!(
+                work_rx.try_recv(),
+                Ok(WorkRequest::ProbeYtTitles { links }) if links == vec![link.to_owned()]
+            ),
+            "the link is handed to the early-title probe"
+        );
         assert!(
             matches!(
                 work_rx.try_recv(),
@@ -541,7 +559,77 @@ mod tests {
         assert_eq!(playlist[0].url, "/tmp/a.mp4");
         assert!(!playlist[0].pending, "a local file needs no resolve");
         assert!(playlist[1].pending);
+        assert!(
+            playlist[1].title.is_empty(),
+            "the link's row shows no name until one resolves, not the link itself"
+        );
         drop(playlist);
+        assert!(matches!(
+            work_rx.try_recv(),
+            Ok(WorkRequest::ProbeYtTitles { .. })
+        ));
         assert!(matches!(work_rx.try_recv(), Ok(WorkRequest::ResolveYtStreams { .. })));
+    }
+
+    /// 2026-11-04: a **video** row is resolved through the metadata shape, so
+    /// the info it lands with carries no stream URL. The entry must still be
+    /// playable — mpv opens the link — and the metadata must be keyed by that
+    /// link rather than by the empty URL.
+    #[test]
+    fn a_metadata_only_video_resolve_keeps_the_link_as_the_entry_url() {
+        let (ctx, _work_rx) = rig();
+        let link = "https://www.youtube.com/watch?v=DDD";
+        *ctx.video_playlist.borrow_mut() =
+            vec![crate::core::mpv::MpvPlaylistEntry::pending_link(link)];
+        let resolved = crate::shared::ytdlp::YtStreamInfo {
+            // The metadata shape resolves no stream URL.
+            url: String::new(),
+            original_url: link.to_owned(),
+            title: "Real Video Name".to_owned(),
+            duration: Some(90.0),
+            ..Default::default()
+        };
+        crate::ui::modals::paste::apply_resolved_streams(
+            &ctx,
+            vec![resolved],
+            YtAction::AddToVideoQueue,
+            Vec::new(),
+        );
+
+        let playlist = ctx.video_playlist.borrow();
+        assert_eq!(playlist.len(), 1, "the placeholder was filled, not duplicated");
+        assert!(!playlist[0].pending, "the row stops spinning");
+        assert_eq!(playlist[0].title, "Real Video Name");
+        assert_eq!(playlist[0].url, link, "mpv opens the link, never the empty stream URL");
+        drop(playlist);
+        assert!(ctx.yt_info.borrow().get(link).is_some(), "the metadata is keyed by the link");
+        assert!(
+            ctx.yt_info.borrow().get("").is_none(),
+            "nothing is stored under the empty stream URL"
+        );
+    }
+
+    /// Only the actions that fill the Video list take the metadata shape; the
+    /// ones that play through MPD need the resolved stream URL.
+    #[test]
+    fn only_the_video_actions_skip_the_stream_url_resolve() {
+        for action in [
+            YtAction::PlayVideo,
+            YtAction::AddToVideoQueue,
+            YtAction::AppendVideoQueue,
+            YtAction::AddToVideoQueueAndPlay,
+        ] {
+            assert!(action.is_video(), "{action:?} fills the video list");
+        }
+        for action in [
+            YtAction::Play,
+            YtAction::Append,
+            YtAction::AddAfterCurrentAndPlay,
+            YtAction::ReplaceAndPlay(1),
+            YtAction::ReplaceInPlace(1),
+            YtAction::Refresh,
+        ] {
+            assert!(!action.is_video(), "{action:?} plays through MPD and needs a stream URL");
+        }
     }
 }

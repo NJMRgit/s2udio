@@ -104,7 +104,7 @@ pub fn resolve_audio_urls(urls: &[String]) -> (Vec<YtStreamInfo>, Vec<String>) {
 }
 /// Round 111: the **metadata-only** of one link — the fields the info box and
 /// the album-art pane need (title, channel, duration, thumbnail), without the
-/// stream URL or the chapters.
+/// stream URL.
 ///
 /// A full `-J` resolve costs ~2.6 s measured on this machine (it emits every
 /// audio format, the format list, the heatmap and the description, i.e.
@@ -113,6 +113,13 @@ pub fn resolve_audio_urls(urls: &[String]) -> (Vec<YtStreamInfo>, Vec<String>) {
 /// queue row needs its description/artwork, and neither the signed stream URL
 /// nor the chapter list is wanted until the row actually plays (that is when
 /// the full resolve runs).
+///
+/// 2026-11-04: the **Video** list's rows use this shape too. They never play
+/// the resolved stream URL — mpv opens the watch link itself — and the `-J`
+/// shape pays the s2u-yt wrapper's media-URL probe for a URL nobody uses
+/// (measured on the host: 12.0 s for `-J` against 2.6 s for this shape). The
+/// chapter list rides along (`%(chapters)j`, parsed below), so a video row
+/// still gets its markers without a stream resolve.
 ///
 /// Fields yt-dlp does not know print as `NA`; each is mapped to `None` rather
 /// than leaking that sentinel into the UI.
@@ -158,7 +165,7 @@ fn resolve_meta_one(bin: &str, input_url: &str) -> anyhow::Result<YtStreamInfo> 
     let out = Command::new(bin)
         .args([
             "--print",
-            "%(title)s\u{1f}%(channel)s\u{1f}%(duration)s\u{1f}%(thumbnail)s\u{1f}%(channel_follower_count)s\u{1f}%(description)s",
+            "%(title)s\u{1f}%(channel)s\u{1f}%(duration)s\u{1f}%(thumbnail)s\u{1f}%(channel_follower_count)s\u{1f}%(chapters)j\u{1f}%(description)s",
             "--no-playlist",
             "--no-warnings",
             "--",
@@ -185,7 +192,7 @@ fn resolve_meta_one(bin: &str, input_url: &str) -> anyhow::Result<YtStreamInfo> 
     // the description verbatim, newlines and all (`lines()` would truncate it
     // at the first blank line, which is what a YouTube description starts
     // with).
-    const FIELD_COUNT: usize = 6;
+    const FIELD_COUNT: usize = 7;
     let mut fields = stdout.trim_end().splitn(FIELD_COUNT, SEP);
     // yt-dlp prints `NA` for a field the video does not have.
     let field = |value: Option<&str>| {
@@ -196,10 +203,22 @@ fn resolve_meta_one(bin: &str, input_url: &str) -> anyhow::Result<YtStreamInfo> 
     let duration = field(fields.next()).and_then(|d| d.parse::<f64>().ok());
     let thumbnail = field(fields.next());
     let subscribers = field(fields.next()).and_then(|s| s.parse::<u64>().ok());
+    let chapters = parse_printed_chapters(fields.next());
     let description = field(fields.next());
     if title.is_empty() && thumbnail.is_none() {
         anyhow::bail!("yt-dlp produced no metadata");
     }
+    // The embedded chapter list is what a video row's Chapters list shows;
+    // when the video has none, timestamp lines in the description are the
+    // fallback — the same rule the full `-J` resolve applies.
+    let chapters = chapters_from_json(
+        &YtDlpJson {
+            chapters,
+            duration,
+            ..YtDlpJson::default()
+        },
+        description.as_deref(),
+    );
     Ok(YtStreamInfo {
         // The stream URL arrives with the full resolve, when the row plays.
         url: String::new(),
@@ -210,13 +229,20 @@ fn resolve_meta_one(bin: &str, input_url: &str) -> anyhow::Result<YtStreamInfo> 
         thumbnail,
         description,
         duration,
-        chapters: Vec::new(),
+        chapters,
         start_secs: parse_start_offset(input_url),
         resolved_at: None,
     })
 }
+
+/// The chapter list yt-dlp printed as JSON (`%(chapters)j`), or `None` when
+/// the printed field is the `NA` sentinel (the video has no chapters).
+fn parse_printed_chapters(field: Option<&str>) -> Option<Vec<YtDlpChapter>> {
+    let raw = field.map(str::trim).filter(|v| !v.is_empty() && *v != "NA")?;
+    serde_json::from_str(raw).ok()
+}
 /// A subset of yt-dlp's `-J` JSON for the fields the app uses.
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 struct YtDlpJson {
     #[serde(default)]
     title: Option<String>,
@@ -441,7 +467,7 @@ mod tests {
         // unit-separator line instead of a multi-megabyte JSON document.
         let _guard = YTDLP_ENV_LOCK.lock().unwrap();
         let script = format!(
-            "#!/bin/sh\necho 'Rick Astley - Never Gonna Give You Up\u{1f}Rick Astley\u{1f}213\u{1f}https://i.ytimg.com/vi/x/maxresdefault.jpg\u{1f}15200000\u{1f}Never gonna give you up.'\n"
+            "#!/bin/sh\necho 'Rick Astley - Never Gonna Give You Up\u{1f}Rick Astley\u{1f}213\u{1f}https://i.ytimg.com/vi/x/maxresdefault.jpg\u{1f}15200000\u{1f}NA\u{1f}Never gonna give you up.'\n"
         );
         let bin = fake_bin(&script, "meta");
         unsafe {
@@ -463,11 +489,62 @@ mod tests {
         // The description lands with the selection warm: the info box shows it
         // before the row plays.
         assert_eq!(info.description.as_deref(), Some("Never gonna give you up."));
-        // The stream URL and chapters belong to the full resolve, which runs
-        // when the row actually plays.
+        // The stream URL belongs to the full resolve, which runs when the row
+        // actually plays; this video has no chapters of its own.
         assert!(info.url.is_empty());
         assert!(info.chapters.is_empty());
         assert_eq!(info.original_url, "https://youtu.be/x");
+    }
+
+    /// 2026-11-04: a Video-list row resolves through this shape (its stream
+    /// URL is never played — mpv opens the link), so the chapters have to ride
+    /// along or the row's Chapters list would be empty until it played.
+    #[test]
+    fn meta_resolve_carries_the_printed_chapters() {
+        let _guard = YTDLP_ENV_LOCK.lock().unwrap();
+        let chapters = r#"[{"start_time":0.0,"end_time":60.0,"title":"Intro"},{"start_time":60.0,"end_time":213.0,"title":"Main"}]"#;
+        let script = format!(
+            "#!/bin/sh\necho 'Some Video\u{1f}Some Channel\u{1f}213\u{1f}https://i.ytimg.com/vi/x/hqdefault.jpg\u{1f}NA\u{1f}{chapters}\u{1f}no timestamps here'\n"
+        );
+        let bin = fake_bin(&script, "meta-chapters");
+        unsafe {
+            std::env::set_var("S2UDIO_YTDLP_BIN", &bin);
+        }
+        let (entries, failures) = super::resolve_meta_urls(&["https://youtu.be/x".to_owned()]);
+        unsafe {
+            std::env::remove_var("S2UDIO_YTDLP_BIN");
+        }
+
+        assert!(failures.is_empty(), "{failures:?}");
+        let chapters = &entries[0].chapters;
+        assert_eq!(chapters.len(), 2, "{chapters:?}");
+        assert_eq!(chapters[0].title, "Intro");
+        assert_eq!(chapters[1].title, "Main");
+        assert_eq!(chapters[1].end_secs, 213.0);
+        // The description still parses: it is the field after the chapters.
+        assert_eq!(entries[0].description.as_deref(), Some("no timestamps here"));
+    }
+
+    /// A video with no embedded chapters keeps the description-timestamp
+    /// fallback the full resolve already applied.
+    #[test]
+    fn meta_resolve_falls_back_to_description_timestamps() {
+        let _guard = YTDLP_ENV_LOCK.lock().unwrap();
+        let script = "#!/bin/sh\nprintf 'Some Video\u{1f}Some Channel\u{1f}213\u{1f}https://i.ytimg.com/vi/x/hqdefault.jpg\u{1f}NA\u{1f}NA\u{1f}0:00 Intro\n2:34 Second part\n'\n";
+        let bin = fake_bin(&script, "meta-desc-chapters");
+        unsafe {
+            std::env::set_var("S2UDIO_YTDLP_BIN", &bin);
+        }
+        let (entries, failures) = super::resolve_meta_urls(&["https://youtu.be/x".to_owned()]);
+        unsafe {
+            std::env::remove_var("S2UDIO_YTDLP_BIN");
+        }
+
+        assert!(failures.is_empty(), "{failures:?}");
+        let chapters = &entries[0].chapters;
+        assert_eq!(chapters.len(), 2, "{chapters:?}");
+        assert_eq!(chapters[0].title, "Intro");
+        assert_eq!(chapters[1].start_secs, 154.0);
     }
 
     #[test]
@@ -475,7 +552,7 @@ mod tests {
         // yt-dlp prints `NA` for a field the video does not have; it must not
         // reach the UI as a literal "NA" channel or duration.
         let _guard = YTDLP_ENV_LOCK.lock().unwrap();
-        let script = "#!/bin/sh\necho 'Some Video\u{1f}NA\u{1f}NA\u{1f}https://i.ytimg.com/vi/x/hqdefault.jpg\u{1f}NA\u{1f}NA'\n";
+        let script = "#!/bin/sh\necho 'Some Video\u{1f}NA\u{1f}NA\u{1f}https://i.ytimg.com/vi/x/hqdefault.jpg\u{1f}NA\u{1f}NA\u{1f}NA'\n";
         let bin = fake_bin(&script, "meta-na");
         unsafe {
             std::env::set_var("S2UDIO_YTDLP_BIN", &bin);
@@ -491,6 +568,7 @@ mod tests {
         assert_eq!(entries[0].duration, None);
         assert_eq!(entries[0].subscribers, None);
         assert_eq!(entries[0].description, None);
+        assert!(entries[0].chapters.is_empty());
         assert_eq!(entries[0].title, "Some Video");
     }
 
@@ -500,7 +578,7 @@ mod tests {
         // line; the parser must take everything after the last separator
         // verbatim instead of stopping at the first newline.
         let _guard = YTDLP_ENV_LOCK.lock().unwrap();
-        let script = "#!/bin/sh\nprintf 'Some Video\u{1f}Some Channel\u{1f}120\u{1f}https://i.ytimg.com/vi/x/hqdefault.jpg\u{1f}42\u{1f}\nProvided to YouTube by X\n\nLine two\nLine three\n'\n";
+        let script = "#!/bin/sh\nprintf 'Some Video\u{1f}Some Channel\u{1f}120\u{1f}https://i.ytimg.com/vi/x/hqdefault.jpg\u{1f}42\u{1f}NA\u{1f}\nProvided to YouTube by X\n\nLine two\nLine three\n'\n";
         let bin = fake_bin(&script, "meta-multiline");
         unsafe {
             std::env::set_var("S2UDIO_YTDLP_BIN", &bin);

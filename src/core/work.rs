@@ -58,7 +58,18 @@ pub fn init(
                     play_stamp,
                 } = req
                 {
-                    resolves.submit(urls, action, meta_only, play_stamp);
+                    // 2026-11-04: a **video** row never plays the resolved
+                    // stream URL - mpv opens the watch link itself - so the
+                    // full `-J` resolve is pure overhead for it: measured on
+                    // this machine, 12.0 s against 2.6 s for the metadata
+                    // shape, most of the difference being the s2u-yt wrapper's
+                    // media-URL probe of a URL nobody uses. The metadata shape
+                    // still carries the chapters the row's list needs.
+                    let video_meta = action.is_video();
+                    if video_meta && !meta_only {
+                        log::debug!(action:? = action; "A video row resolves through the metadata shape");
+                    }
+                    resolves.submit(urls, action, meta_only || video_meta, play_stamp);
                     continue;
                 }
                 let result = handle_work_request(
@@ -232,7 +243,7 @@ fn handle_work_request(
         // Round 111: reached only if a caller bypasses the pool (the `work`
         // thread intercepts these); kept as the full, synchronous resolve.
         WorkRequest::ResolveYtStreams { urls, action, meta_only, play_stamp } => {
-            let (info, failures) = if meta_only {
+            let (info, failures) = if meta_only || action.is_video() {
                 crate::shared::ytdlp::resolve_meta_urls(&urls)
             } else {
                 crate::shared::ytdlp::resolve_audio_urls(&urls)
@@ -243,6 +254,18 @@ fn handle_work_request(
                 failures,
                 play_stamp,
             })
+        }
+        // 2026-11-04: the early names of freshly pasted video links. One
+        // oEmbed request per link (measured 0.12 s, and only YouTube and
+        // SoundCloud are asked), so this runs inline here: a handful of links
+        // costs less than the round trip a thread of its own would need.
+        WorkRequest::ProbeYtTitles { links } => {
+            let titles = crate::shared::ytdlp::probe_titles(&links);
+            log::debug!(
+                asked = links.len(), found = titles.len();
+                "Probed the early title of the pasted video links"
+            );
+            Ok(WorkDone::YtTitlesProbed { titles })
         }
         WorkRequest::PlayTorrent { item } => {
             let key = item.source_key();
