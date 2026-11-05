@@ -22,6 +22,14 @@ use crate::{
     },
     ui::{StatusMessage, input::InputManager},
 };
+/// How long the UI must be **quiet** before an automatic Queue list follow may
+/// move the list (user, 2026-11-04). Chapters and video follows arrive while
+/// the user is working (a resolve lands, a Jellyfin fetch answers, a song
+/// changes), and flipping the list under their hands is an interruption, not
+/// a convenience. The follow therefore waits for this much inactivity and is
+/// applied by [`Ctx::tick_queue_follow`].
+pub(crate) const AUTO_FOLLOW_IDLE: Duration = Duration::from_secs(15);
+
 /// A pasted playlist import whose items are still being listed.
 ///
 /// Held in [`Ctx::playlist_import`] for the duration of the `yt-dlp
@@ -318,6 +326,17 @@ pub struct Ctx {
     pub(crate) chapters: RefCell<HashMap<String, Vec<crate::shared::chapters::Chapter>>>,
     /// Whether the Queue tab shows the chapter list instead of the queue.
     pub(crate) queue_tab: Cell<QueueTabMode>,
+    /// When the user last touched the UI (a key, a mouse event, a paste). The
+    /// automatic list follows read it: they fire only after
+    /// [`AUTO_FOLLOW_IDLE`] of quiet.
+    ///
+    /// It starts **one idle period in the past**, so a session that opens on
+    /// something already playing (a reattached mpv video, a chaptered song)
+    /// shows the list that belongs to it at once: there has been no
+    /// interaction to protect, and making the user wait fifteen seconds for
+    /// the app to admit what is playing would be the same interruption the
+    /// quiet rule exists to prevent.
+    pub(crate) last_input: Cell<Instant>,
     /// The persistent video playlist (the Queue tab's Video list). Unlike
     /// the mpv session's own playlist it survives mpv closing and audio
     /// playback, and is saved to `<cache_dir>/video-playlist.json` so it
@@ -736,6 +755,11 @@ impl Ctx {
             pending_jf_tree_jump: RefCell::new(None),
             chapters: RefCell::new(HashMap::new()),
             queue_tab: Cell::new(QueueTabMode::Audio),
+            // A fresh session starts **quiet** (see `last_input` below):
+            // the Queue list follows what is already playing on the first
+            // frame instead of waiting fifteen seconds for a user who has not
+            // touched anything yet.
+            last_input: Cell::new(Instant::now() - AUTO_FOLLOW_IDLE),
             playlist_import: RefCell::new(None),
             pending_play: RefCell::new(None),
             video_playlist: RefCell::new(Vec::new()),
@@ -947,7 +971,18 @@ impl Ctx {
         }
     }
     pub(crate) fn finish_frame(&mut self) {
+        // A deferred automatic list switch re-checks here, once per rendered
+        // frame (it asks the clock for its next check itself while it waits).
+        // The render request must come **after** `needs_render` is cleared:
+        // `Ctx::render` is a no-op while it is set, which it is for the whole
+        // time this frame is being finished.
+        let switched = self.tick_queue_follow();
         self.needs_render.replace(false);
+        if switched {
+            // The list just moved: draw it instead of leaving the old one on
+            // screen until the next unrelated event.
+            self.render().ok();
+        }
         self.rendered_frames.add_assign(1);
         // Consume this frame's animation requests and arm (or cancel) the one
         // shared tick. Runs for every rendered frame, so a pane that stops
@@ -1092,29 +1127,99 @@ impl Ctx {
     pub(crate) fn has_current_chapters(&self) -> bool {
         !self.current_playback_chapters().is_empty()
     }
+    /// The Queue list an **automatic follow** wants for the thing that is
+    /// playing right now, or `None` when the app has no opinion.
+    ///
+    /// This is the standing intent behind both follows: the Queue tab's
+    /// Chapters list for a chaptered song (the auto-chapters setting), and the
+    /// Video/Chapters list while an mpv video owns the session
+    /// (`follow_playing_video`). It is derived, never stored: the frame that
+    /// draws the list asks what the app wants, and applies it once the user
+    /// has been quiet for [`AUTO_FOLLOW_IDLE`] (see [`Ctx::tick_queue_follow`]).
+    ///
+    /// A user's own pick is not recorded here: `c` and a click on the list
+    /// switch stay exactly as chosen until the quiet period lets the follow
+    /// win (user, 2026-11-04: "wait for 15 seconds of inactivity").
+    pub(crate) fn auto_queue_mode(&self) -> Option<QueueTabMode> {
+        let chaptered = self.config.ui.auto_show_chapters && self.has_current_chapters();
+        if crate::core::mpv::mpv_is_ui_source(self) {
+            // The video's own session owns the list while it plays: its
+            // chapters when it has markers, else the mpv playlist.
+            return Some(if chaptered { QueueTabMode::Chapters } else { QueueTabMode::Video });
+        }
+        chaptered.then_some(QueueTabMode::Chapters)
+    }
+
     /// Auto-open the Queue tab's Chapters list when the *current* song has
     /// chapter markers and the auto-chapters setting allows it. Only the
-    /// Queue tab's internal list flips — the active tab is never changed,
-    /// so a session on another tab stays put and the Chapters view is
-    /// ready when the user returns to Queue. A no-op while the mpv video
-    /// is the active UI source (the Queue list is then owned by
-    /// `follow_playing_video`); once MPD playback takes over, the current
-    /// song is the music, so its markers apply again.
+    /// Queue tab's internal list flips - the active tab is never changed, so
+    /// a session on another tab stays put and the Chapters view is ready when
+    /// the user returns to Queue.
+    ///
     /// Called wherever the current song's chapters arrive (song change,
-    /// resolved yt info, Jellyfin fetch, ffprobe).
+    /// resolved yt info, Jellyfin fetch, ffprobe): all it does is ask for a
+    /// frame, because [`Ctx::tick_queue_follow`] makes the decision - the
+    /// follow waits for a quiet UI (2026-11-04, user: the list kept flipping
+    /// under their hands).
     pub(crate) fn auto_show_chapters(&self) {
-        if !self.config.ui.auto_show_chapters || crate::core::mpv::mpv_is_ui_source(self)
-        {
+        if self.auto_queue_mode() != Some(QueueTabMode::Chapters) {
             return;
         }
-        if self
-            .find_current_song_in_queue()
-            .is_some_and(|(_, song)| {
-                !self.chapters.borrow().get(&song.file).is_none_or(Vec::is_empty)
-            })
-        {
-            self.queue_tab.set(QueueTabMode::Chapters);
+        // A frame has to be drawn for the follow to be evaluated.
+        self.render().ok();
+    }
+
+    /// How long the UI has been quiet (no key, mouse event or paste).
+    pub(crate) fn idle_for(&self) -> Duration {
+        self.last_input.get().elapsed()
+    }
+
+    /// Whether an automatic follow may move the list **right now**: the UI
+    /// has been quiet for [`AUTO_FOLLOW_IDLE`]. A caller that has list state
+    /// of its own to reset (the Queue pane) asks this before switching, and
+    /// otherwise leaves it to [`Ctx::tick_queue_follow`].
+    pub(crate) fn follow_can_apply_now(&self) -> bool {
+        self.idle_for() >= AUTO_FOLLOW_IDLE
+    }
+
+    /// Note that the user just touched the UI. Called by the event loop for
+    /// every key, mouse event and paste; it is what holds the automatic list
+    /// follow back until the quiet period.
+    pub(crate) fn note_user_input(&self) {
+        self.last_input.set(Instant::now());
+    }
+
+    /// Apply the automatic Queue list follow once the user has been quiet for
+    /// [`AUTO_FOLLOW_IDLE`], and keep one frame armed for exactly that moment.
+    ///
+    /// Called once per rendered frame by [`Ctx::finish_frame`]. While the user
+    /// is still interacting it arms a single wake-up for the rest of the quiet
+    /// period instead of polling, so a busy session costs no extra frames and
+    /// an idle one switches the list about fifteen seconds later. Returns
+    /// whether the list moved, so the caller can draw the new list instead of
+    /// leaving the old one until the next event.
+    pub(crate) fn tick_queue_follow(&self) -> bool {
+        let Some(mode) = self.auto_queue_mode() else {
+            // Nothing to follow (no markers, or nothing playing): the user's
+            // own pick stands.
+            return false;
+        };
+        if self.queue_tab.get() == mode {
+            return false;
         }
+        let idle = self.idle_for();
+        if idle >= AUTO_FOLLOW_IDLE {
+            log::debug!(
+                idle_secs = idle.as_secs(), mode:? = mode;
+                "The Queue list follows the playback after the quiet period"
+            );
+            self.queue_tab.set(mode);
+            return true;
+        }
+        // Still inside the user's session: one wake-up at the deadline, not a
+        // per-second poll (a key press re-arms it from the new input).
+        self.animator.request_every(AUTO_FOLLOW_IDLE - idle);
+        false
     }
     /// Whether a pane should be hidden: the Settings toggles, plus the cava
     /// visualizer is hidden while a video plays in mpv (MPD is paused then,
@@ -1279,6 +1384,153 @@ mod tests {
 
     fn no_yt() -> std::collections::HashSet<String> {
         std::collections::HashSet::new()
+    }
+
+    /// A `Ctx` with a chaptered song playing and no mpv video: the state
+    /// `auto_show_chapters` reacts to.
+    fn chaptered_ctx() -> crate::ctx::Ctx {
+        let (app_tx, app_rx) = crossbeam::channel::unbounded();
+        Box::leak(Box::new(app_rx));
+        let mut ctx = crate::tests::fixtures::ctx(
+            (app_tx, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+            (crossbeam::channel::unbounded().0, crossbeam::channel::unbounded().1),
+        );
+        ctx.status.state = State::Play;
+        ctx.status.songid = Some(1);
+        ctx.queue = vec![song(1, "audio/song.flac")];
+        ctx.chapters.borrow_mut().insert(
+            "audio/song.flac".to_owned(),
+            vec![crate::shared::chapters::Chapter {
+                title: "Intro".into(),
+                start_secs: 0.0,
+                end_secs: 30.0,
+            }],
+        );
+        ctx
+    }
+
+    /// The reported defect (user, 2026-11-04): the Queue tab jumped to the
+    /// Chapters list while the user was interacting with the TUI. The follow
+    /// intent is derived, but it is **not applied** while the user is busy.
+    #[test]
+    fn the_auto_follow_waits_for_a_quiet_ui() {
+        let ctx = chaptered_ctx();
+        ctx.note_user_input();
+        assert_eq!(ctx.auto_queue_mode(), Some(super::QueueTabMode::Chapters));
+        assert!(!ctx.tick_queue_follow(), "a busy UI is not followed");
+        assert_eq!(ctx.queue_tab.get(), super::QueueTabMode::Audio);
+    }
+
+    /// A session that opens on something already playing (a reattached mpv
+    /// video, a chaptered song) shows the list that belongs to it on the
+    /// first frame: `last_input` starts one idle period in the past, so there
+    /// is no interaction to protect (user, 2026-11-04: the TUI "opened to
+    /// audio queue" while a video played).
+    #[test]
+    fn a_fresh_session_shows_what_is_playing_at_once() {
+        let ctx = chaptered_ctx();
+        assert!(ctx.follow_can_apply_now(), "a fresh session has nothing to protect");
+        assert!(ctx.tick_queue_follow(), "so the first frame follows");
+        assert_eq!(ctx.queue_tab.get(), super::QueueTabMode::Chapters);
+    }
+
+    /// Once the UI has been quiet for [`super::AUTO_FOLLOW_IDLE`], the next
+    /// frame moves the list, exactly once.
+    #[test]
+    fn the_follow_lands_after_the_quiet_period() {
+        let ctx = chaptered_ctx();
+        ctx.last_input.set(std::time::Instant::now() - std::time::Duration::from_secs(5));
+        assert!(!ctx.tick_queue_follow(), "five seconds of quiet is not enough");
+        ctx.last_input.set(
+            std::time::Instant::now()
+                - super::AUTO_FOLLOW_IDLE
+                - std::time::Duration::from_secs(1),
+        );
+        assert!(ctx.tick_queue_follow(), "the follow lands after the quiet period");
+        assert_eq!(ctx.queue_tab.get(), super::QueueTabMode::Chapters);
+        assert!(!ctx.tick_queue_follow(), "and it lands exactly once");
+    }
+
+    /// While it waits the follow arms **one** wake-up for the rest of the
+    /// quiet period instead of polling every second.
+    #[test]
+    fn a_waiting_follow_arms_the_deadline() {
+        let ctx = chaptered_ctx();
+        ctx.note_user_input();
+        assert!(!ctx.tick_queue_follow());
+        assert!(ctx.animator.wants_frames(), "the waiting follow asks for a frame");
+        let budget = crate::ui::anim::frame_budget(60);
+        let expected = super::AUTO_FOLLOW_IDLE;
+        let armed = ctx.animator.take_interval(budget, false).expect("a tick is armed");
+        assert!(
+            armed <= expected && armed >= expected - std::time::Duration::from_secs(1),
+            "the wake-up is the rest of the quiet period, got {armed:?}"
+        );
+    }
+
+    /// A user's own pick is honoured immediately and only overridden once the
+    /// UI is quiet: the follow is a standing intent, not a one-shot request.
+    #[test]
+    fn the_standing_follow_wins_only_after_quiet() {
+        let ctx = chaptered_ctx();
+        // The user picks the audio queue.
+        ctx.queue_tab.set(super::QueueTabMode::Audio);
+        ctx.note_user_input();
+        assert!(!ctx.tick_queue_follow(), "their pick stands while they work");
+        assert_eq!(ctx.queue_tab.get(), super::QueueTabMode::Audio);
+        // Fifteen seconds of quiet later the follow wins again.
+        ctx.last_input.set(
+            std::time::Instant::now()
+                - super::AUTO_FOLLOW_IDLE
+                - std::time::Duration::from_secs(1),
+        );
+        assert!(ctx.tick_queue_follow());
+        assert_eq!(ctx.queue_tab.get(), super::QueueTabMode::Chapters);
+    }
+
+    /// Nothing to follow: no markers, or auto-chapters off. The user's pick
+    /// then stands for good, and nothing keeps asking for frames.
+    #[test]
+    fn without_chapters_there_is_no_intent() {
+        let ctx = chaptered_ctx();
+        ctx.chapters.borrow_mut().clear();
+        assert_eq!(ctx.auto_queue_mode(), None);
+        ctx.last_input.set(
+            std::time::Instant::now()
+                - super::AUTO_FOLLOW_IDLE
+                - std::time::Duration::from_secs(1),
+        );
+        assert!(!ctx.tick_queue_follow());
+        assert_eq!(ctx.queue_tab.get(), super::QueueTabMode::Audio);
+        assert!(!ctx.animator.wants_frames(), "an idle app asks for no frames");
+    }
+
+    /// While an mpv video owns the session the intent is its list: chapters
+    /// when it has markers, else the playlist. The video follow takes the same
+    /// quiet rule as the chaptered-song one.
+    #[test]
+    fn a_video_session_follows_its_chapters_or_playlist() {
+        let mut ctx = chaptered_ctx();
+        ctx.mpv.active = true;
+        ctx.mpv.item_id = Some("0123456789abcdef0123456789abcdef".to_owned());
+        // The video has no markers of its own: the playlist is the intent.
+        ctx.chapters.borrow_mut().clear();
+        assert_eq!(ctx.auto_queue_mode(), Some(super::QueueTabMode::Video));
+        // With markers (of the video, keyed by its item id) it is Chapters.
+        ctx.chapters.borrow_mut().insert(
+            "0123456789abcdef0123456789abcdef".to_owned(),
+            vec![crate::shared::chapters::Chapter {
+                title: "Video intro".into(),
+                start_secs: 0.0,
+                end_secs: 60.0,
+            }],
+        );
+        assert_eq!(ctx.auto_queue_mode(), Some(super::QueueTabMode::Chapters));
+        // And the follow obeys the quiet period like everything else.
+        ctx.note_user_input();
+        assert!(!ctx.tick_queue_follow());
+        assert_eq!(ctx.queue_tab.get(), super::QueueTabMode::Audio);
     }
 
     /// The chapters shown follow the *active UI source*: while the mpv

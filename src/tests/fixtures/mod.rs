@@ -120,6 +120,9 @@ pub fn ctx(
         pending_jf_tree_jump: RefCell::new(None),
         chapters: RefCell::new(HashMap::new()),
         queue_tab: Cell::new(QueueTabMode::Audio),
+        last_input: Cell::new(
+            std::time::Instant::now() - crate::ctx::AUTO_FOLLOW_IDLE,
+        ),
         playlist_import: RefCell::new(None),
         pending_play: RefCell::new(None),
         video_playlist: RefCell::new(Vec::new()),

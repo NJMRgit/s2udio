@@ -354,6 +354,9 @@ fn main_task<B: Backend + std::io::Write>(
                     render_wanted = true;
                 }
                 AppEvent::UserKeyInput(key) => {
+                    // 2026-11-04: the user is working - the automatic list
+                    // switches (auto-chapters) wait for the UI to go quiet.
+                    ctx.note_user_input();
                     // Keyboard interaction takes over from the mouse: drop
                     // the hover highlight so it never sits on a stale row
                     // while navigating with keys (it returns on the next
@@ -374,14 +377,19 @@ fn main_task<B: Backend + std::io::Write>(
                     }
                     render_wanted = true;
                 }
-                AppEvent::UserMouseInput(ev) => match ui.handle_mouse_event(ev, &mut ctx) {
-                    Ok(()) => {}
-                    Err(err) => {
-                        status_error!(err:?; "Error: {}", err.to_status());
-                        render_wanted = true;
+                AppEvent::UserMouseInput(ev) => {
+                    // A click, a wheel notch or a hover is interaction too.
+                    ctx.note_user_input();
+                    match ui.handle_mouse_event(ev, &mut ctx) {
+                        Ok(()) => {}
+                        Err(err) => {
+                            status_error!(err:?; "Error: {}", err.to_status());
+                            render_wanted = true;
+                        }
                     }
-                },
+                }
                 AppEvent::UserPaste(text) => {
+                    ctx.note_user_input();
                     // Middle-click pastes / drag&dropped files and links:
                     // offer the play/enqueue popup when audio was recognized.
                     if crate::ui::modals::paste::handle_paste(&ctx, &text) {

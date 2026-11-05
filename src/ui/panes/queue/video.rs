@@ -44,7 +44,16 @@ impl QueuePane {
         // Round 90.3: one line per session start / chapters arrival — the
         // decision that a chaptered video must not lose to a late resolve.
         log::debug!(chapters = Self::chapters_available(ctx), mode:? = mode; "The Queue list follows the playing video");
-        Self::set_tab(self, ctx, mode);
+        if ctx.follow_can_apply_now() {
+            Self::set_tab(self, ctx, mode);
+        } else {
+            // 2026-11-04 (user): the follow must not move the list under a
+            // working user. The frame tick applies it once the UI has been
+            // quiet for the idle period (`Ctx::tick_queue_follow`); until
+            // then a frame is asked for so the deadline gets armed.
+            log::debug!("The video follow waits for the UI to go quiet");
+            ctx.render().ok();
+        }
     }
 
     /// The list shown in the Video view: the Jellyfin session's own
