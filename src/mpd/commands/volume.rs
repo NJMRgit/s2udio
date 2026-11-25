@@ -60,10 +60,28 @@ pub trait Bound<T> {
 impl FromMpd for Volume {
     fn next_internal(&mut self, key: &str, value: String) -> Result<LineHandled, MpdError> {
         if key == "volume" {
-            self.0 = value.parse()?;
+            // -1 = no mixer (see `commands::status`): full volume plays
+            // out, so report 100 instead of failing the parse / showing 0.
+            self.0 = if value == "-1" { 100 } else { value.parse()? };
             Ok(LineHandled::Yes)
         } else {
             Ok(LineHandled::No { value })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Bound as _, Volume};
+    use crate::mpd::FromMpd;
+
+    #[test]
+    fn no_mixer_volume_parses_as_full() {
+        let mut volume = Volume::default();
+        volume.next_internal("volume", "-1".to_owned()).unwrap();
+        assert_eq!(*volume.value(), 100);
+
+        volume.next_internal("volume", "65".to_owned()).unwrap();
+        assert_eq!(*volume.value(), 65);
     }
 }

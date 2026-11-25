@@ -64,11 +64,15 @@ impl FromMpd for Status {
         match key {
             "partition" => self.partition = value,
             "volume" if value == "-1" => {
+                // -1 = MPD has no mixer (an audio output without one, or
+                // nothing played yet). The audio that comes out is full
+                // scale, so record 100 rather than 0: a 0 here made every
+                // mpv launch start silent (`--volume=<this>`).
                 log::warn!(
                     command = "status", key, value = value.as_str();
-                    "Received unsupported value"
+                    "No mixer, reporting full volume"
                 );
-                self.volume = Volume::new(0);
+                self.volume = Volume::new(100);
             }
             "volume" => self.volume = Volume::new(value.parse().logerr(key, &value)?),
             "repeat" => self.repeat = value != "0",
@@ -220,5 +224,23 @@ mod tests {
         assert_eq!(OnOffOneshot::Off.cycle(), OnOffOneshot::Oneshot);
         assert_eq!(OnOffOneshot::Oneshot.cycle(), OnOffOneshot::On);
         assert_eq!(OnOffOneshot::On.cycle(), OnOffOneshot::Off);
+    }
+
+    /// `volume: -1` means "no mixer": full volume comes out of the output,
+    /// so the status must not report 0 (that made every mpv launch silent).
+    #[test]
+    fn no_mixer_volume_is_full_not_zero() {
+        use crate::{
+            mpd::FromMpd,
+            mpd::commands::{Volume, volume::Bound as _},
+        };
+
+        let mut status = super::Status::default();
+        status.next_internal("volume", "-1".to_owned()).unwrap();
+        assert_eq!(*status.volume.value(), 100);
+
+        status.next_internal("volume", "42".to_owned()).unwrap();
+        assert_eq!(*status.volume.value(), 42);
+        assert_eq!(Volume::new(120).value(), &100, "clamped");
     }
 }

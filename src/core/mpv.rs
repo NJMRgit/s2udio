@@ -1734,12 +1734,24 @@ pub fn ui_volume(ctx: &Ctx) -> u32 {
 }
 /// Set the volume: mpv when a video is active, MPD otherwise. The mpv
 /// poll picks the new value up within ~500 ms and the volume bar follows.
+///
+/// A video's volume is also written to MPD: mpv keeps no volume across
+/// sessions and the next launch is started with `--volume=<MPD volume>`
+/// (see [`launch_mpv`]), so without this an adjusted video volume would be
+/// lost the moment mpv exits. MPD may have no mixer at all (`volume: -1`),
+/// in which case the write is only best effort.
 pub fn set_volume(ctx: &Ctx, new_volume: u32) {
     let new_volume = new_volume.clamp(0, 100);
+    use crate::mpd::mpd_client::{MpdClient, ValueChange};
     if mpv_is_ui_source(ctx) && let Some(socket) = ctx.mpv.socket.clone() {
         mpv_exchange_volume(&socket, f64::from(new_volume));
+        ctx.command(move |client| {
+            if let Err(err) = client.volume(ValueChange::Set(new_volume)) {
+                log::debug!(error:? = err; "MPD rejected the video volume (no mixer)");
+            }
+            Ok(())
+        });
     } else {
-        use crate::mpd::mpd_client::{MpdClient, ValueChange};
         ctx.command(move |client| {
             client.volume(ValueChange::Set(new_volume))?;
             Ok(())

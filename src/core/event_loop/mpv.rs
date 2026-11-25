@@ -361,6 +361,20 @@ pub(super) fn session_ended(ctx: &mut Ctx, ui: &mut Ui, state: &mut MpvState) {
     }
     // Drop the mpv state file so mpDris2 falls back to MPD.
     crate::ui::modals::paste::delete_mpv_mpris_state(ctx);
+    // Carry the video's last volume over to MPD. mpv keeps no volume across
+    // sessions and the next launch is started with `--volume=<MPD volume>`,
+    // so this is what makes a volume changed inside mpv's own window (its
+    // 9/0 keys, the KDE media keys on the mpv stream) survive the exit.
+    // Best effort: MPD may have no mixer at all (`volume: -1`).
+    if let Some(volume) = ctx.mpv.volume {
+        ctx.command(move |client| {
+            use crate::mpd::mpd_client::{MpdClient, ValueChange};
+            if let Err(err) = client.volume(ValueChange::Set(u32::from(volume.min(100)))) {
+                log::debug!(error:? = err; "MPD rejected the final video volume (no mixer)");
+            }
+            Ok(())
+        });
+    }
     ctx.mpv = crate::core::mpv::MpvSession::default();
     // R2.5: the daemon may move this job's completed files
     // now ("streams over").
