@@ -601,6 +601,16 @@ fn main_task<B: Backend + std::io::Write>(
                     );
                 }
                 AppEvent::WorkDone(Err(err)) => {
+                    // 2026-11-25: a work error during a pasted-playlist import
+                    // means nothing will ever land, so the import's
+                    // `Loading playlist…` row has to come down here. The
+                    // playlist requests report their own failure as
+                    // `WorkDone::YtDlpPlaylistFailed`; this is the net for
+                    // every other way the request can die (a config error, a
+                    // panic-turned-error), which would otherwise leave the
+                    // queue spinning forever with only a status line to
+                    // explain it.
+                    crate::ui::modals::paste::finish_playlist_import(&ctx);
                     status_error!("{}", err);
                 }
                 AppEvent::Resized { columns, rows } => {

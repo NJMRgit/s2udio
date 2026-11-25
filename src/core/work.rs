@@ -848,8 +848,17 @@ fn handle_work_request(
             })
         }
         WorkRequest::YtDlpResolvePlaylist { playlist, action } => {
+            // 2026-11-25: no `cache_dir` is a *result*, not a work error —
+            // bailing here reached the event loop's generic `WorkDone(Err)`
+            // arm, which only prints the message, so the import's
+            // `Loading playlist…` row was never taken down and the audio
+            // queue spun forever (reported live). Same shape as a listing
+            // that failed.
             let Some(ytdlp) = ytdlp else {
-                anyhow::bail!("Youtube support requires 'cache_dir' to be configured")
+                return Ok(WorkDone::YtDlpPlaylistFailed {
+                    action,
+                    error: "Youtube support requires 'cache_dir' to be configured".to_owned(),
+                });
             };
             // Round 83: listing the playlist is one fast yt-dlp call (it
             // carries each item's title). What happens next is what the

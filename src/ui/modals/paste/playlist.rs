@@ -459,6 +459,11 @@ pub fn queue_playlist_streams(
     autoplay: bool,
 ) {
     if items.is_empty() {
+        // 2026-11-25: nothing will land, so the import's `Loading playlist…`
+        // row has to come down here — this early return runs **before** the
+        // clearing call below, so a listing that came back empty used to
+        // leave the queue spinning forever.
+        finish_playlist_import(ctx);
         status_warn!("The playlist has no tracks to add");
         return;
     }
@@ -666,6 +671,24 @@ mod playlist_import_loading_tests {
             ctx.playlist_import.borrow().clone(),
             None,
             "the loading row goes as its rows land"
+        );
+    }
+
+    /// An **empty** listing lands nothing, so it must clear the marker too:
+    /// this early return ran before the clearing call and left the audio
+    /// queue loading forever (reported 2026-11-25).
+    #[test]
+    fn an_empty_listing_clears_the_loading_row() {
+        let (ctx, _app_rx, _work_rx) = rig();
+        begin_playlist_import(&ctx, false);
+        assert!(ctx.playlist_import.borrow().is_some());
+
+        super::queue_playlist_streams(&ctx, Vec::new(), true, false);
+
+        assert_eq!(
+            ctx.playlist_import.borrow().clone(),
+            None,
+            "nothing landed, so nothing may keep the loading row up"
         );
     }
 
